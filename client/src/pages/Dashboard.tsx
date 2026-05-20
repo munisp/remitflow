@@ -21,7 +21,9 @@ import { useLocation } from 'wouter';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import BeneficiaryOnboarding from "@/components/BeneficiaryOnboarding";
 import { OnboardingTour } from "@/components/OnboardingTour";
+import { OnboardingChecklist } from "@/components/OnboardingChecklist";
 import { useTranslation } from 'react-i18next';
+import { haptics } from "@/lib/haptics";
 
 function QuickSendBeneficiaries() {
   const [, navigate] = useLocation();
@@ -218,6 +220,9 @@ export default function Dashboard() {
             <CheckCircle2 className="h-3 w-3 mr-1" /> All systems operational
           </Badge>
         </div>
+
+        {/* Onboarding Checklist — inline, non-intrusive */}
+        <OnboardingChecklist />
 
         {/* KYC Status Banner */}
         {kycData?.currentTier !== undefined && (

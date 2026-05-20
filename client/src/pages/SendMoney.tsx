@@ -18,6 +18,8 @@ import { useAuth } from "@/hooks/useAuth";
 import { useLocation } from "wouter";
 import RateLockBanner from "@/components/RateLockBanner";
 import { useTranslation } from 'react-i18next';
+import { haptics } from "@/lib/haptics";
+import { SecurityBadge } from "@/components/SecurityBadge";
 
 const CURRENCIES = ["NGN", "USD", "GBP", "EUR", "KES", "GHS", "ZAR", "UGX", "TZS", "XOF"];
 
@@ -194,6 +196,7 @@ export default function SendMoney() {
   };
 
   const handleSend = () => {
+    haptics.medium();
     // Open confirmation dialog before sending
     setConfirmOpen(true);
   };
@@ -240,10 +243,11 @@ export default function SendMoney() {
         <div className="p-4 sm:p-6 max-w-lg mx-auto space-y-4">
           <Card className="text-center">
             <CardContent className="pt-10 pb-6 space-y-4">
-              <div className="w-20 h-20 rounded-full bg-emerald-100 flex items-center justify-center mx-auto">
+              <div className="w-20 h-20 rounded-full bg-emerald-100 flex items-center justify-center mx-auto animate-success-check">
                 <CheckCircle2 className="h-10 w-10 text-emerald-600" />
               </div>
-              <h2 className="text-2xl font-bold text-emerald-700">Transfer Sent!</h2>
+              <h2 className="text-2xl font-bold text-emerald-700 animate-count-up">Transfer Sent!</h2>
+              <SecurityBadge variant="inline" label="Bank-grade encryption" />
               <p className="text-muted-foreground">{amount} {fromCurrency} → {selected?.name}</p>
               <p className="text-sm text-muted-foreground">Recipient receives approximately {quote?.toAmount?.toFixed(2)} {toCurrency}</p>
 
