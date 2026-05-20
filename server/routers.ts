@@ -272,6 +272,16 @@ import {
   smeBulkRouter,
   swiftTxRouter,
 } from "./routers/orphanFeatures";
+import {
+  accountOpeningGateRouter,
+  enhancedKybRouter,
+  kycVerificationScoringRouter,
+  bvnNinRouter,
+  sanctionsBatchRouter,
+  goamlRouter,
+  kycEventConsumerRouter,
+  cbnTierLimitsRouter,
+} from "./routers/kycProductionGate";
 import { logger } from './_core/logger';
 
 
@@ -6458,5 +6468,14 @@ Case: #${input.caseId}`,
   swiftTx: swiftTxRouter,
   // v16 — Compliance Analytics
   complianceAnalytics: complianceAnalyticsRouter,
+  // v230 — KYC/KYB Production Gate (fail-closed account opening, enhanced KYB, BVN/NIN, goAML)
+  accountOpeningGate: accountOpeningGateRouter,
+  enhancedKyb: enhancedKybRouter,
+  kycVerificationScoring: kycVerificationScoringRouter,
+  bvnNin: bvnNinRouter,
+  sanctionsBatch: sanctionsBatchRouter,
+  goaml: goamlRouter,
+  kycEventConsumer: kycEventConsumerRouter,
+  cbnTierLimits: cbnTierLimitsRouter,
 });
 export type AppRouter = typeof appRouter;

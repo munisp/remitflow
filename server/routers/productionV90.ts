@@ -25,6 +25,8 @@ import { router, protectedProcedure, adminProcedure, publicProcedure ,
   auditedProcedure, auditedAdminProcedure, rateLimitedProcedure
 } from "../_core/trpc";
 import { getDb } from "../db";
+import { eq } from "drizzle-orm";
+import { kycLifecycle } from "../../drizzle/schema";
 import { invokeLLM } from "../_core/llm";
 import { notifyOwner } from "../_core/notification";
 
@@ -273,15 +275,65 @@ export const kycWorkflowRouter = router({
   getWorkflowStatus: protectedProcedure
     .input(z.object({ sessionId: z.string() }))
     .query(async ({ input }) => {
+      // Query Temporal for real workflow status
+      const temporalUrl = process.env.TEMPORAL_FRONTEND_URL || "http://localhost:7233";
+      try {
+        const resp = await fetch(
+          `${temporalUrl}/api/v1/namespaces/default/workflows/${encodeURIComponent(input.sessionId)}`,
+          { method: "GET", signal: AbortSignal.timeout(5000) }
+        );
+        if (resp.ok) {
+          const data = await resp.json() as Record<string, unknown>;
+          const execution = data.workflowExecutionInfo as Record<string, unknown> | undefined;
+          const status = (execution?.status as string) || "RUNNING";
+          const isRunning = status === "RUNNING" || status === "WORKFLOW_EXECUTION_STATUS_RUNNING";
+          const isCompleted = status === "COMPLETED" || status === "WORKFLOW_EXECUTION_STATUS_COMPLETED";
+          return {
+            sessionId: input.sessionId,
+            status: isCompleted ? "completed" : isRunning ? "in_progress" : "failed",
+            completedSteps: isCompleted ? 7 : isRunning ? 3 : 0,
+            totalSteps: 7,
+            currentStep: isCompleted ? "done" : isRunning ? "verification_scoring" : "unknown",
+            source: "temporal",
+          };
+        }
+      } catch {
+        // Temporal unavailable — fall back to DB lookup
+      }
+
+      // Fallback: check KYC lifecycle table by user
+      const db = await getDb();
+      if (db) {
+        const [lifecycle] = await db
+          .select()
+          .from(kycLifecycle)
+          .where(eq(kycLifecycle.id, parseInt(input.sessionId, 10) || 0))
+          .limit(1);
+        if (lifecycle) {
+          const stageMap: Record<string, number> = {
+            not_started: 0, documents_submitted: 2, under_review: 3,
+            additional_info_required: 4, approved: 7, rejected: 7,
+            expired: 0, suspended: 0,
+          };
+          return {
+            sessionId: input.sessionId,
+            status: lifecycle.stage,
+            completedSteps: stageMap[lifecycle.stage] ?? 0,
+            totalSteps: 7,
+            currentStep: lifecycle.stage,
+            riskScore: lifecycle.riskScore,
+            source: "database",
+          };
+        }
+      }
+
       return {
         sessionId: input.sessionId,
-        status: "in_progress",
-        completedSteps: 2,
-        totalSteps: 5,
-        currentStep: "selfie_capture",
-        estimatedRemainingMinutes: 3,
-        riskScore: 25,
-        riskLevel: "low",
+        status: "not_found",
+        completedSteps: 0,
+        totalSteps: 7,
+        currentStep: "unknown",
+        source: "none",
       };
     }),
 

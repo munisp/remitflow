@@ -14,6 +14,93 @@ export const KYC_TIER_LIMITS = {
 
 export type KycTier = keyof typeof KYC_TIER_LIMITS;
 
+// ─── CBN Tiered KYC (NGN) — CBN/DIR/GEN/CIR/04/010 ──────────────────────────
+// Nigerian Naira limits per CBN circular
+export const CBN_TIER_LIMITS_NGN = {
+  tier1: {
+    maxBalance: 300_000,
+    dailyLimit: 50_000,
+    label: "Basic (Mobile Money)",
+    requiredDocs: ["phone", "name", "dob"],
+    liveness: false,
+    bvn: false,
+    nin: false,
+    address: false,
+  },
+  tier2: {
+    maxBalance: 500_000,
+    dailyLimit: 200_000,
+    label: "Standard",
+    requiredDocs: ["phone", "name", "dob", "bvn", "id_document"],
+    liveness: true,
+    bvn: true,
+    nin: false,
+    address: false,
+  },
+  tier3: {
+    maxBalance: Infinity,
+    dailyLimit: Infinity,
+    label: "Enhanced (Full Banking)",
+    requiredDocs: ["phone", "name", "dob", "bvn", "nin", "id_document", "utility_bill", "passport_photo", "signature"],
+    liveness: true,
+    bvn: true,
+    nin: true,
+    address: true,
+  },
+} as const;
+
+export type CbnTier = keyof typeof CBN_TIER_LIMITS_NGN;
+
+// ─── Product-Level KYC Requirements ──────────────────────────────────────────
+export const PRODUCT_KYC_REQUIREMENTS = {
+  savings_account:     { kycLevel: "basic",      tier: "tier1" as CbnTier, kybRequired: false },
+  current_account:     { kycLevel: "standard",   tier: "tier2" as CbnTier, kybRequired: false },
+  domiciliary_account: { kycLevel: "enhanced",   tier: "tier3" as CbnTier, kybRequired: false },
+  fixed_deposit:       { kycLevel: "standard",   tier: "tier2" as CbnTier, kybRequired: false },
+  corporate_account:   { kycLevel: "full_edd",   tier: "tier3" as CbnTier, kybRequired: true  },
+  loan_personal:       { kycLevel: "enhanced",   tier: "tier2" as CbnTier, kybRequired: false },
+  loan_sme:            { kycLevel: "enhanced",   tier: "tier3" as CbnTier, kybRequired: true  },
+  loan_mortgage:       { kycLevel: "full_edd",   tier: "tier3" as CbnTier, kybRequired: true  },
+} as const;
+
+export type ProductType = keyof typeof PRODUCT_KYC_REQUIREMENTS;
+
+// ─── KYC Risk Scoring Weights ────────────────────────────────────────────────
+export const KYC_RISK_WEIGHTS = {
+  pep_match: 40,
+  sanctions_match: 40,
+  adverse_media: 20,
+  high_risk_country: 25,
+  cash_intensive_business: 15,
+  base_score_max: 20,
+} as const;
+
+export type RiskCategory = "low" | "medium" | "high" | "critical";
+
+export function computeRiskCategory(score: number): RiskCategory {
+  if (score < 25) return "low";
+  if (score < 50) return "medium";
+  if (score < 75) return "high";
+  return "critical";
+}
+
+// ─── Loan KYC Level Determination ────────────────────────────────────────────
+export function requiredKYCLevelForLoan(loanType: string, amount: number): string {
+  if (loanType === "mortgage" || amount >= 50_000_000) return "full_edd";
+  if (loanType === "sme" || loanType === "corporate" || amount >= 10_000_000) return "enhanced";
+  return "enhanced"; // minimum for all loans
+}
+
+// ─── Account-Opening KYC Level ───────────────────────────────────────────────
+export function kycLevelForTier(tier: CbnTier): string {
+  switch (tier) {
+    case "tier1": return "basic";
+    case "tier2": return "standard";
+    case "tier3": return "enhanced";
+    default: return "standard";
+  }
+}
+
 // ─── Fee Schedule ─────────────────────────────────────────────────────────────
 // Tiered fee structure: lower fees for higher volumes
 export interface FeeBreakdown {
