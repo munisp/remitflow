@@ -1,0 +1,655 @@
+# KEDA 5/5 Bank-Grade Autoscaling Configuration
+# High Availability, Performance, Security, Observability, Disaster Recovery
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keda
+  labels:
+    app.kubernetes.io/name: keda
+    app.kubernetes.io/component: autoscaling
+---
+# KEDA Operator Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keda-config
+  namespace: keda
+data:
+  keda-operator-config.yaml: |
+    # Operator Configuration
+    watchNamespace: ""
+    metricsServerAddress: "0.0.0.0:8080"
+    healthProbeAddress: "0.0.0.0:8081"
+    
+    # Scaling Configuration
+    globalHTTPTimeout: 3000
+    
+    # Logging
+    logLevel: info
+    logEncoder: json
+    logTimeEncoding: rfc3339
+---
+# ScaledObject for Transaction Service (Kafka-based)
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: transaction-service-scaler
+  namespace: core-services
+  labels:
+    app: transaction-service
+spec:
+  scaleTargetRef:
+    name: transaction-service
+  pollingInterval: 30
+  cooldownPeriod: 300
+  minReplicaCount: 3
+  maxReplicaCount: 50
+  fallback:
+    failureThreshold: 3
+    replicas: 5
+  advanced:
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Percent
+              value: 10
+              periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+            - type: Pods
+              value: 4
+              periodSeconds: 15
+          selectPolicy: Max
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: transaction-service
+        topic: transactions.created
+        lagThreshold: "100"
+        activationLagThreshold: "10"
+        offsetResetPolicy: earliest
+      authenticationRef:
+        name: kafka-auth
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "70"
+    - type: memory
+      metricType: Utilization
+      metadata:
+        value: "80"
+---
+# ScaledObject for Payment Service (Kafka-based)
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: payment-service-scaler
+  namespace: core-services
+  labels:
+    app: payment-service
+spec:
+  scaleTargetRef:
+    name: payment-service
+  pollingInterval: 30
+  cooldownPeriod: 300
+  minReplicaCount: 3
+  maxReplicaCount: 50
+  fallback:
+    failureThreshold: 3
+    replicas: 5
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+            - type: Percent
+              value: 10
+              periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: payment-service
+        topic: payments.initiated
+        lagThreshold: "100"
+        activationLagThreshold: "10"
+      authenticationRef:
+        name: kafka-auth
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "70"
+---
+# ScaledObject for KYC Service (Queue-based)
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: kyc-service-scaler
+  namespace: core-services
+  labels:
+    app: kyc-service
+spec:
+  scaleTargetRef:
+    name: kyc-service
+  pollingInterval: 30
+  cooldownPeriod: 300
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  fallback:
+    failureThreshold: 3
+    replicas: 3
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: kyc-service
+        topic: kyc.verification.requested
+        lagThreshold: "50"
+        activationLagThreshold: "5"
+      authenticationRef:
+        name: kafka-auth
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "70"
+---
+# ScaledObject for Notification Service (Queue-based)
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: notification-service-scaler
+  namespace: core-services
+  labels:
+    app: notification-service
+spec:
+  scaleTargetRef:
+    name: notification-service
+  pollingInterval: 30
+  cooldownPeriod: 300
+  minReplicaCount: 2
+  maxReplicaCount: 30
+  fallback:
+    failureThreshold: 3
+    replicas: 3
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: notification-service
+        topic: notifications.email
+        lagThreshold: "200"
+        activationLagThreshold: "20"
+      authenticationRef:
+        name: kafka-auth
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: notification-service
+        topic: notifications.sms
+        lagThreshold: "200"
+        activationLagThreshold: "20"
+      authenticationRef:
+        name: kafka-auth
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: notification-service
+        topic: notifications.push
+        lagThreshold: "200"
+        activationLagThreshold: "20"
+      authenticationRef:
+        name: kafka-auth
+---
+# ScaledObject for Mojaloop Connector (Kafka-based)
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: mojaloop-connector-scaler
+  namespace: core-services
+  labels:
+    app: mojaloop-connector
+spec:
+  scaleTargetRef:
+    name: mojaloop-connector
+  pollingInterval: 30
+  cooldownPeriod: 300
+  minReplicaCount: 3
+  maxReplicaCount: 30
+  fallback:
+    failureThreshold: 3
+    replicas: 5
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: mojaloop-connector
+        topic: mojaloop.transfers
+        lagThreshold: "50"
+        activationLagThreshold: "5"
+      authenticationRef:
+        name: kafka-auth
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: mojaloop-connector
+        topic: mojaloop.callbacks
+        lagThreshold: "50"
+        activationLagThreshold: "5"
+      authenticationRef:
+        name: kafka-auth
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "70"
+---
+# ScaledObject for Reconciliation Service (Cron-based + CPU)
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: reconciliation-service-scaler
+  namespace: core-services
+  labels:
+    app: reconciliation-service
+spec:
+  scaleTargetRef:
+    name: reconciliation-service
+  pollingInterval: 30
+  cooldownPeriod: 600
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+    - type: cron
+      metadata:
+        timezone: Africa/Lagos
+        start: 0 0 * * *
+        end: 0 6 * * *
+        desiredReplicas: "5"
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "70"
+---
+# ScaledObject for ML Service (CPU/Memory-based)
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ml-service-scaler
+  namespace: core-services
+  labels:
+    app: ml-service
+spec:
+  scaleTargetRef:
+    name: ml-service
+  pollingInterval: 30
+  cooldownPeriod: 300
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  triggers:
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "60"
+    - type: memory
+      metricType: Utilization
+      metadata:
+        value: "70"
+---
+# ScaledObject for Risk Service (Kafka + CPU)
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: risk-service-scaler
+  namespace: core-services
+  labels:
+    app: risk-service
+spec:
+  scaleTargetRef:
+    name: risk-service
+  pollingInterval: 30
+  cooldownPeriod: 300
+  minReplicaCount: 3
+  maxReplicaCount: 30
+  fallback:
+    failureThreshold: 3
+    replicas: 5
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: risk-service
+        topic: transactions.created
+        lagThreshold: "50"
+        activationLagThreshold: "5"
+      authenticationRef:
+        name: kafka-auth
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "70"
+---
+# ScaledObject for Wallet Service (Kafka + CPU)
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: wallet-service-scaler
+  namespace: core-services
+  labels:
+    app: wallet-service
+spec:
+  scaleTargetRef:
+    name: wallet-service
+  pollingInterval: 30
+  cooldownPeriod: 300
+  minReplicaCount: 3
+  maxReplicaCount: 30
+  triggers:
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: "70"
+    - type: memory
+      metricType: Utilization
+      metadata:
+        value: "80"
+---
+# Kafka Authentication Secret Reference
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: kafka-auth
+  namespace: core-services
+spec:
+  secretTargetRef:
+    - parameter: sasl
+      name: kafka-credentials
+      key: sasl
+    - parameter: username
+      name: kafka-credentials
+      key: username
+    - parameter: password
+      name: kafka-credentials
+      key: password
+    - parameter: tls
+      name: kafka-credentials
+      key: tls
+    - parameter: ca
+      name: kafka-tls
+      key: ca.crt
+---
+# ScaledJob for Batch Processing
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: batch-processor
+  namespace: core-services
+  labels:
+    app: batch-processor
+spec:
+  jobTargetRef:
+    parallelism: 1
+    completions: 1
+    backoffLimit: 3
+    template:
+      spec:
+        restartPolicy: Never
+        containers:
+          - name: batch-processor
+            image: remittance/batch-processor:1.0.0
+            env:
+              - name: BATCH_SIZE
+                value: "1000"
+            envFrom:
+              - secretRef:
+                  name: batch-processor-secrets
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1"
+  pollingInterval: 30
+  minReplicaCount: 0
+  maxReplicaCount: 10
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka.kafka.svc.cluster.local:9092
+        consumerGroup: batch-processor
+        topic: batch.jobs
+        lagThreshold: "1"
+        activationLagThreshold: "0"
+      authenticationRef:
+        name: kafka-auth
+---
+# KEDA Operator Deployment (HA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keda-operator
+  namespace: keda
+  labels:
+    app: keda-operator
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: keda-operator
+  template:
+    metadata:
+      labels:
+        app: keda-operator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: keda-operator
+                topologyKey: kubernetes.io/hostname
+      serviceAccountName: keda-operator
+      containers:
+        - name: keda-operator
+          image: ghcr.io/kedacore/keda:2.12.0
+          args:
+            - --leader-elect
+            - --zap-log-level=info
+            - --zap-encoder=json
+          ports:
+            - containerPort: 8080
+              name: metrics
+            - containerPort: 8081
+              name: health
+          env:
+            - name: WATCH_NAMESPACE
+              value: ""
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: OPERATOR_NAME
+              value: "keda-operator"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+# KEDA Metrics Server Deployment (HA)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keda-metrics-apiserver
+  namespace: keda
+  labels:
+    app: keda-metrics-apiserver
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: keda-metrics-apiserver
+  template:
+    metadata:
+      labels:
+        app: keda-metrics-apiserver
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: keda-metrics-apiserver
+                topologyKey: kubernetes.io/hostname
+      serviceAccountName: keda-operator
+      containers:
+        - name: keda-metrics-apiserver
+          image: ghcr.io/kedacore/keda-metrics-apiserver:2.12.0
+          args:
+            - /usr/local/bin/keda-adapter
+            - --secure-port=6443
+            - --logtostderr=true
+            - --v=0
+          ports:
+            - containerPort: 6443
+              name: https
+            - containerPort: 8080
+              name: http
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 6443
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 6443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+# Pod Disruption Budget for KEDA Operator
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keda-operator-pdb
+  namespace: keda
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: keda-operator
+---
+# Pod Disruption Budget for KEDA Metrics Server
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keda-metrics-apiserver-pdb
+  namespace: keda
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: keda-metrics-apiserver
+---
+# Prometheus ServiceMonitor
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: keda
+  namespace: keda
+  labels:
+    app: keda
+spec:
+  selector:
+    matchLabels:
+      app: keda-operator
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+---
+# KEDA Alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: keda-alerts
+  namespace: keda
+spec:
+  groups:
+    - name: keda
+      rules:
+        - alert: KEDAScalerErrors
+          expr: rate(keda_scaler_errors_total[5m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KEDA scaler errors detected"
+            description: "KEDA scaler {{ $labels.scaler }} has errors"
+        - alert: KEDAMetricsServerDown
+          expr: up{job="keda-metrics-apiserver"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "KEDA metrics server is down"
+            description: "KEDA metrics server is not responding"
+        - alert: KEDAScaledObjectNotReady
+          expr: keda_scaled_object_ready == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KEDA ScaledObject is not ready"
+            description: "ScaledObject {{ $labels.scaledObject }} in namespace {{ $labels.namespace }} is not ready"

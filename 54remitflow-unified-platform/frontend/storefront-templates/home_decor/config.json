@@ -1,0 +1,34 @@
+{
+  "name": "HomeStyle Decor",
+  "tagline": "Transform Your Space",
+  "description": "Home decor template with room planner, style guide, and interior design consultation",
+  "theme": {
+    "primary": "#0f766e",
+    "secondary": "#f59e0b",
+    "accent": "#1f2937",
+    "background": "#f0fdfa",
+    "text": "#1e293b"
+  },
+  "categories": [
+    "Furniture",
+    "Lighting",
+    "Textiles",
+    "Wall Art",
+    "Kitchen & Dining",
+    "Outdoor"
+  ],
+  "features": [
+    "room_planner",
+    "style_guide",
+    "design_consultation",
+    "custom_orders",
+    "ar_preview"
+  ],
+  "payment_methods": [
+    "qr_code",
+    "mobile_money",
+    "bank_transfer",
+    "card",
+    "installment"
+  ]
+}

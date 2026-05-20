@@ -1,0 +1,176 @@
+{
+  "name": "RemitFlow \u2014 Send Money Home",
+  "short_name": "RemitFlow",
+  "description": "Send money home to family, invest in your roots, save together with your community \u2014 the app built for the diaspora.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#6366f1",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/manus-storage/icon-192_d0405887.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/manus-storage/icon-512_41fa5aeb.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/manus-storage/icon-maskable-512_3fbf000b.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/manus-storage/apple-touch-icon_28be41f0.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "categories": [
+    "finance",
+    "money",
+    "investment",
+    "social"
+  ],
+  "display_override": [
+    "window-controls-overlay",
+    "standalone",
+    "minimal-ui"
+  ],
+  "lang": "en",
+  "shortcuts": [
+    {
+      "name": "Send Money",
+      "short_name": "Send",
+      "description": "Send money home to family",
+      "url": "/send-money",
+      "icons": [
+        {
+          "src": "/manus-storage/icon-192_d0405887.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Invest",
+      "short_name": "Invest",
+      "description": "Invest in your home country",
+      "url": "/beyond-remittance",
+      "icons": [
+        {
+          "src": "/manus-storage/icon-192_d0405887.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Community Savings",
+      "short_name": "Savings",
+      "description": "Save together with your community",
+      "url": "/community",
+      "icons": [
+        {
+          "src": "/manus-storage/icon-192_d0405887.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Family Dashboard",
+      "short_name": "Family",
+      "description": "Manage family budgets and transfers",
+      "url": "/family",
+      "icons": [
+        {
+          "src": "/manus-storage/icon-192_d0405887.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "short_name": "Home",
+      "description": "View your dashboard",
+      "url": "/dashboard",
+      "icons": [
+        {
+          "src": "/manus-storage/icon-192_d0405887.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Agent POS",
+      "short_name": "POS",
+      "description": "Agent cash-in/cash-out terminal",
+      "url": "/agent/pos",
+      "icons": [
+        {
+          "src": "/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "My Transfers",
+      "short_name": "Transfers",
+      "description": "Track all your transfers",
+      "url": "/transfers",
+      "icons": [
+        {
+          "src": "/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Support",
+      "short_name": "Support",
+      "description": "Get help and raise disputes",
+      "url": "/support/tickets",
+      "icons": [
+        {
+          "src": "/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Send Crypto",
+      "short_name": "Crypto",
+      "description": "Send cryptocurrency",
+      "url": "/send-crypto",
+      "icons": [
+        {
+          "src": "/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    }
+  ],
+  "related_applications": [],
+  "prefer_related_applications": false,
+  "protocol_handlers": [
+    {
+      "protocol": "web+remitflow",
+      "url": "/send-money?to=%s"
+    }
+  ],
+  "file_handlers": [
+    {
+      "action": "/import",
+      "accept": {
+        "text/csv": [
+          ".csv"
+        ]
+      }
+    }
+  ]
+}

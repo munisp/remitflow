@@ -1,0 +1,392 @@
+version: '3.8'
+
+services:
+  # Database Services
+  postgres:
+    image: postgres:15-alpine
+    container_name: pix_postgres
+    environment:
+      POSTGRES_DB: pix_integration
+      POSTGRES_USER: pix_user
+      POSTGRES_PASSWORD: secure_pix_password_2024
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pix_user -d pix_integration"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pix-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: pix_redis
+    command: redis-server --appendonly yes --requirepass redis_secure_password_2024
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - pix-network
+
+  # PIX Integration Services
+  pix-gateway:
+    build: ./services/pix-gateway
+    container_name: pix_gateway
+    ports:
+      - "5001:5001"
+    environment:
+      - BCB_API_URL=https://api.bcb.gov.br/pix/v1
+      - BCB_CLIENT_ID=demo_client_id
+      - BCB_CLIENT_SECRET=demo_client_secret
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  brl-liquidity:
+    build: ./services/brl-liquidity
+    container_name: brl_liquidity
+    ports:
+      - "5002:5002"
+    environment:
+      - EXCHANGE_API_KEY=demo_exchange_api_key
+      - EXCHANGE_API_URL=https://api.exchangerate-api.com/v4
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  brazilian-compliance:
+    build: ./services/brazilian-compliance
+    container_name: brazilian_compliance
+    ports:
+      - "5003:5003"
+    environment:
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/2
+      - AML_API_URL=https://api.aml-brazil.com/v1
+      - LGPD_COMPLIANCE_MODE=strict
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  customer-support-pt:
+    build: ./services/customer-support-pt
+    container_name: customer_support_pt
+    ports:
+      - "5004:5004"
+    environment:
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/3
+      - SUPPORT_LANGUAGE=Portuguese
+      - TIMEZONE=America/Sao_Paulo
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  integration-orchestrator:
+    build: ./services/integration-orchestrator
+    container_name: integration_orchestrator
+    ports:
+      - "5005:5005"
+    environment:
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/4
+      - PIX_GATEWAY_URL=http://pix-gateway:5001
+      - BRL_LIQUIDITY_URL=http://brl-liquidity:5002
+      - COMPLIANCE_URL=http://brazilian-compliance:5003
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      pix-gateway:
+        condition: service_healthy
+      brl-liquidity:
+        condition: service_healthy
+      brazilian-compliance:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  data-sync:
+    build: ./services/data-sync
+    container_name: data_sync
+    ports:
+      - "5006:5006"
+    environment:
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/5
+      - SYNC_INTERVAL=30
+      - CONFLICT_RESOLUTION=latest_wins
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  # Enhanced Platform Services
+  enhanced-api-gateway:
+    build: ./services/enhanced-api-gateway
+    container_name: enhanced_api_gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/6
+      - JWT_SECRET=pix_jwt_secret_key_very_secure_2024
+      - CORS_ORIGINS=*
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      integration-orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  enhanced-tigerbeetle:
+    build: ./services/enhanced-tigerbeetle
+    container_name: enhanced_tigerbeetle
+    ports:
+      - "3011:3011"
+    environment:
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/7
+      - SUPPORTED_CURRENCIES=NGN,BRL,USD,USDC
+      - LEDGER_MODE=production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3011/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  enhanced-notifications:
+    build: ./services/enhanced-notifications
+    container_name: enhanced_notifications
+    ports:
+      - "3002:3002"
+    environment:
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/8
+      - SUPPORTED_LANGUAGES=English,Portuguese
+      - EMAIL_PROVIDER=sendgrid
+      - SMS_PROVIDER=twilio
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  enhanced-user-management:
+    build: ./services/enhanced-user-management
+    container_name: enhanced_user_management
+    ports:
+      - "3001:3001"
+    environment:
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/9
+      - SUPPORTED_COUNTRIES=Nigeria,Brazil
+      - KYC_PROVIDERS=Nigerian_BVN,Brazilian_CPF
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  enhanced-stablecoin:
+    build: ./services/enhanced-stablecoin
+    container_name: enhanced_stablecoin
+    ports:
+      - "3003:3003"
+    environment:
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/10
+      - SUPPORTED_STABLECOINS=USDC,USDT,BUSD
+      - LIQUIDITY_POOLS=NGN_USDC,BRL_USDC,USD_USDC
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  enhanced-gnn:
+    build: ./services/enhanced-gnn
+    container_name: enhanced_gnn
+    ports:
+      - "4004:4004"
+    environment:
+      - POSTGRES_URL=postgres://pix_user:secure_pix_password_2024@postgres:5432/pix_integration
+      - REDIS_URL=redis://:redis_secure_password_2024@redis:6379/11
+      - MODEL_PATH=/app/models/brazilian_fraud_model.pkl
+      - FRAUD_THRESHOLD=0.8
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - pix-network
+
+  # Monitoring Services
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pix_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    networks:
+      - monitoring-network
+      - pix-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pix_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=pix_admin_2024
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks:
+      - monitoring-network
+
+  # Load Balancer
+  nginx:
+    image: nginx:alpine
+    container_name: pix_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - enhanced-api-gateway
+    networks:
+      - pix-network
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  pix-network:
+    driver: bridge
+  monitoring-network:
+    driver: bridge

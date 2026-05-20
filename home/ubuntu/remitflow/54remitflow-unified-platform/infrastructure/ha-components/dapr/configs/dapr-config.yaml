@@ -1,0 +1,962 @@
+# Dapr Configuration for Remittance Platform
+# High-Availability Distributed Application Runtime optimized for Nigerian banking microservices
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dapr-system
+  labels:
+    name: dapr-system
+    app.kubernetes.io/name: dapr
+    app.kubernetes.io/component: runtime
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dapr-config
+  namespace: dapr-system
+  labels:
+    app: dapr
+data:
+  config.yaml: |
+    apiVersion: dapr.io/v1alpha1
+    kind: Configuration
+    metadata:
+      name: banking-config
+      namespace: dapr-system
+    spec:
+      # Tracing configuration for banking compliance and monitoring
+      tracing:
+        samplingRate: "1"
+        otel:
+          endpointAddress: "http://jaeger-collector:14268/api/traces"
+        zipkin:
+          endpointAddress: "http://zipkin:9411/api/v2/spans"
+      
+      # Metrics configuration for performance monitoring
+      metrics:
+        enabled: true
+        rules:
+        - name: banking-transactions
+          labels:
+          - name: app_id
+            regex:
+              "transaction-service|payment-service|account-service": "banking-core"
+          - name: operation
+            regex:
+              "transfer|deposit|withdrawal": "financial-operation"
+        - name: fraud-detection
+          labels:
+          - name: app_id
+            regex:
+              "fraud-detection|risk-assessment": "security-service"
+      
+      # mTLS configuration for secure service-to-service communication
+      mtls:
+        enabled: true
+        workloadCertTTL: "24h"
+        allowedClockSkew: "15m"
+        
+      # Access control for banking services
+      accessControl:
+        defaultAction: "deny"
+        trustDomain: "remittance.local"
+        policies:
+        - appId: "transaction-service"
+          defaultAction: "allow"
+          trustDomain: "remittance.local"
+          namespace: "banking-services"
+          operations:
+          - name: "process-transaction"
+            httpVerb: ["POST"]
+            action: "allow"
+          - name: "get-transaction-status"
+            httpVerb: ["GET"]
+            action: "allow"
+        - appId: "fraud-detection"
+          defaultAction: "allow"
+          trustDomain: "remittance.local"
+          namespace: "banking-services"
+          operations:
+          - name: "analyze-transaction"
+            httpVerb: ["POST"]
+            action: "allow"
+          - name: "get-risk-score"
+            httpVerb: ["GET"]
+            action: "allow"
+        - appId: "notification-service"
+          defaultAction: "allow"
+          trustDomain: "remittance.local"
+          namespace: "banking-services"
+          operations:
+          - name: "send-notification"
+            httpVerb: ["POST"]
+            action: "allow"
+        - appId: "customer-service"
+          defaultAction: "allow"
+          trustDomain: "remittance.local"
+          namespace: "banking-services"
+          operations:
+          - name: "get-customer"
+            httpVerb: ["GET"]
+            action: "allow"
+          - name: "update-customer"
+            httpVerb: ["PUT", "PATCH"]
+            action: "allow"
+      
+      # API configuration for Nigerian banking optimizations
+      api:
+        allowed:
+        - name: "state"
+          version: "v1"
+          protocol: "http"
+        - name: "pubsub"
+          version: "v1"
+          protocol: "http"
+        - name: "bindings"
+          version: "v1"
+          protocol: "http"
+        - name: "secrets"
+          version: "v1"
+          protocol: "http"
+        - name: "actors"
+          version: "v1"
+          protocol: "http"
+        - name: "configuration"
+          version: "v1"
+          protocol: "http"
+        - name: "lock"
+          version: "v1"
+          protocol: "http"
+        - name: "workflow"
+          version: "v1beta1"
+          protocol: "http"
+      
+      # Component configuration for banking services
+      components:
+        deny:
+        - "bindings.cron"  # Disable cron bindings for security
+        - "bindings.twitter"  # Disable social media bindings
+      
+      # Middleware configuration for banking security
+      httpPipeline:
+        handlers:
+        - name: "oauth2"
+          type: "middleware.http.oauth2"
+        - name: "ratelimit"
+          type: "middleware.http.ratelimit"
+        - name: "cors"
+          type: "middleware.http.cors"
+      
+      # Resiliency configuration for Nigerian network conditions
+      resiliency:
+        policies:
+          retries:
+            banking-retry:
+              policy: "constant"
+              duration: "5s"
+              maxRetries: 3
+          circuitBreakers:
+            banking-cb:
+              maxRequests: 1
+              interval: "8s"
+              timeout: "45s"
+              trip: "consecutiveFailures >= 5"
+          timeouts:
+            banking-timeout:
+              response: "60s"
+        targets:
+          apps:
+            transaction-service:
+              retry: "banking-retry"
+              circuitBreaker: "banking-cb"
+              timeout: "banking-timeout"
+            fraud-detection:
+              retry: "banking-retry"
+              circuitBreaker: "banking-cb"
+              timeout: "banking-timeout"
+            notification-service:
+              retry: "banking-retry"
+              circuitBreaker: "banking-cb"
+              timeout: "banking-timeout"
+          components:
+            statestore:
+              retry: "banking-retry"
+              circuitBreaker: "banking-cb"
+              timeout: "banking-timeout"
+            pubsub:
+              retry: "banking-retry"
+              circuitBreaker: "banking-cb"
+              timeout: "banking-timeout"
+      
+      # Logging configuration for banking compliance
+      logging:
+        enabled: true
+        obfuscateURLs: true
+        omitHealthChecks: true
+      
+      # Features configuration
+      features:
+      - name: "ServiceInvocation"
+        enabled: true
+      - name: "StateManagement"
+        enabled: true
+      - name: "PubSub"
+        enabled: true
+      - name: "Bindings"
+        enabled: true
+      - name: "SecretStore"
+        enabled: true
+      - name: "Configuration"
+        enabled: true
+      - name: "DistributedLock"
+        enabled: true
+      - name: "Workflow"
+        enabled: true
+      - name: "ActorRuntime"
+        enabled: true
+
+  components.yaml: |
+    # State Store Component - Redis Cluster for banking data
+    apiVersion: dapr.io/v1alpha1
+    kind: Component
+    metadata:
+      name: statestore
+      namespace: dapr-system
+    spec:
+      type: state.redis
+      version: v1
+      metadata:
+      - name: redisHost
+        value: "redis-service.redis-system.svc.cluster.local:6379"
+      - name: redisPassword
+        secretKeyRef:
+          name: dapr-secrets
+          key: redis-password
+      - name: enableTLS
+        value: "true"
+      - name: failover
+        value: "true"
+      - name: sentinelMasterName
+        value: "banking-master"
+      - name: maxRetries
+        value: "3"
+      - name: maxRetryBackoff
+        value: "2s"
+      - name: ttlInSeconds
+        value: "3600"
+      - name: queryIndexes
+        value: |
+          [
+            {
+              "name": "customer_id",
+              "indexes": [{"key": "customer_id", "type": "TEXT"}]
+            },
+            {
+              "name": "transaction_id", 
+              "indexes": [{"key": "transaction_id", "type": "TEXT"}]
+            },
+            {
+              "name": "account_number",
+              "indexes": [{"key": "account_number", "type": "TEXT"}]
+            }
+          ]
+      auth:
+        secretStore: kubernetes
+    ---
+    # Pub/Sub Component - Kafka for banking events
+    apiVersion: dapr.io/v1alpha1
+    kind: Component
+    metadata:
+      name: pubsub
+      namespace: dapr-system
+    spec:
+      type: pubsub.kafka
+      version: v1
+      metadata:
+      - name: brokers
+        value: "kafka-service.kafka-system.svc.cluster.local:9092"
+      - name: authType
+        value: "sasl_ssl"
+      - name: saslUsername
+        value: "banking-app"
+      - name: saslPassword
+        secretKeyRef:
+          name: dapr-secrets
+          key: kafka-password
+      - name: maxMessageBytes
+        value: "1048576"
+      - name: version
+        value: "2.8.0"
+      - name: clientID
+        value: "dapr-banking-client"
+      - name: consumerGroup
+        value: "dapr-banking-group"
+      - name: disableTls
+        value: "false"
+      - name: skipVerify
+        value: "false"
+      - name: caCert
+        secretKeyRef:
+          name: dapr-secrets
+          key: kafka-ca-cert
+      - name: clientCert
+        secretKeyRef:
+          name: dapr-secrets
+          key: kafka-client-cert
+      - name: clientKey
+        secretKeyRef:
+          name: dapr-secrets
+          key: kafka-client-key
+      auth:
+        secretStore: kubernetes
+    ---
+    # Secret Store Component - Kubernetes secrets
+    apiVersion: dapr.io/v1alpha1
+    kind: Component
+    metadata:
+      name: kubernetes
+      namespace: dapr-system
+    spec:
+      type: secretstores.kubernetes
+      version: v1
+      metadata:
+      - name: vaultKubernetesMountPath
+        value: "kubernetes"
+      - name: vaultServerURL
+        value: "https://vault.vault-system.svc.cluster.local:8200"
+      - name: vaultToken
+        secretKeyRef:
+          name: dapr-secrets
+          key: vault-token
+    ---
+    # Configuration Store Component - Redis for app configuration
+    apiVersion: dapr.io/v1alpha1
+    kind: Component
+    metadata:
+      name: configstore
+      namespace: dapr-system
+    spec:
+      type: configuration.redis
+      version: v1
+      metadata:
+      - name: redisHost
+        value: "redis-service.redis-system.svc.cluster.local:6379"
+      - name: redisPassword
+        secretKeyRef:
+          name: dapr-secrets
+          key: redis-password
+      - name: enableTLS
+        value: "true"
+      - name: subscribeKeyPrefix
+        value: "banking-config"
+    ---
+    # Lock Store Component - Redis for distributed locking
+    apiVersion: dapr.io/v1alpha1
+    kind: Component
+    metadata:
+      name: lockstore
+      namespace: dapr-system
+    spec:
+      type: lock.redis
+      version: v1
+      metadata:
+      - name: redisHost
+        value: "redis-service.redis-system.svc.cluster.local:6379"
+      - name: redisPassword
+        secretKeyRef:
+          name: dapr-secrets
+          key: redis-password
+      - name: enableTLS
+        value: "true"
+      - name: keyPrefix
+        value: "banking-lock"
+    ---
+    # Binding Component - PostgreSQL for banking data persistence
+    apiVersion: dapr.io/v1alpha1
+    kind: Component
+    metadata:
+      name: postgres-binding
+      namespace: dapr-system
+    spec:
+      type: bindings.postgresql
+      version: v1
+      metadata:
+      - name: connectionString
+        secretKeyRef:
+          name: dapr-secrets
+          key: postgres-connection-string
+      - name: maxOpenConns
+        value: "20"
+      - name: maxIdleConns
+        value: "10"
+      - name: connMaxLifetime
+        value: "300s"
+    ---
+    # Workflow Component - Temporal for banking workflows
+    apiVersion: dapr.io/v1alpha1
+    kind: Component
+    metadata:
+      name: workflow
+      namespace: dapr-system
+    spec:
+      type: workflow.temporal
+      version: v1
+      metadata:
+      - name: hostPort
+        value: "temporal-frontend.temporal-system.svc.cluster.local:7233"
+      - name: namespace
+        value: "banking-workflows"
+      - name: taskQueue
+        value: "banking-task-queue"
+      - name: clientCert
+        secretKeyRef:
+          name: dapr-secrets
+          key: temporal-client-cert
+      - name: clientKey
+        secretKeyRef:
+          name: dapr-secrets
+          key: temporal-client-key
+
+  middleware.yaml: |
+    # OAuth2 Middleware for banking authentication
+    apiVersion: dapr.io/v1alpha1
+    kind: Component
+    metadata:
+      name: oauth2
+      namespace: dapr-system
+    spec:
+      type: middleware.http.oauth2
+      version: v1
+      metadata:
+      - name: clientId
+        value: "banking-client"
+      - name: clientSecret
+        secretKeyRef:
+          name: dapr-secrets
+          key: oauth2-client-secret
+      - name: scopes
+        value: "banking:read,banking:write,banking:admin"
+      - name: authURL
+        value: "https://keycloak.keycloak-system.svc.cluster.local/auth/realms/banking/protocol/openid-connect/auth"
+      - name: tokenURL
+        value: "https://keycloak.keycloak-system.svc.cluster.local/auth/realms/banking/protocol/openid-connect/token"
+      - name: redirectURL
+        value: "https://banking.agent-network.local/callback"
+      - name: authHeaderName
+        value: "Authorization"
+    ---
+    # Rate Limiting Middleware for banking API protection
+    apiVersion: dapr.io/v1alpha1
+    kind: Component
+    metadata:
+      name: ratelimit
+      namespace: dapr-system
+    spec:
+      type: middleware.http.ratelimit
+      version: v1
+      metadata:
+      - name: maxRequestsPerSecond
+        value: "100"
+      - name: statusCode
+        value: "429"
+      - name: statusMessage
+        value: "Rate limit exceeded for banking API"
+    ---
+    # CORS Middleware for banking web applications
+    apiVersion: dapr.io/v1alpha1
+    kind: Component
+    metadata:
+      name: cors
+      namespace: dapr-system
+    spec:
+      type: middleware.http.cors
+      version: v1
+      metadata:
+      - name: allowOrigins
+        value: "https://banking.agent-network.local,https://admin.agent-network.local,https://agent.agent-network.local"
+      - name: allowMethods
+        value: "GET,POST,PUT,DELETE,OPTIONS"
+      - name: allowHeaders
+        value: "Origin,Content-Type,Accept,Authorization,X-Requested-With"
+      - name: exposeHeaders
+        value: "Content-Length,Content-Range"
+      - name: maxAge
+        value: "86400"
+      - name: allowCredentials
+        value: "true"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dapr-secrets
+  namespace: dapr-system
+type: Opaque
+data:
+  # Base64 encoded secrets for Dapr components
+  redis-password: YmFua2luZy1uZXR3b3JrLXJlZGlzLXBhc3N3b3Jk
+  kafka-password: YmFua2luZy1uZXR3b3JrLWthZmthLXBhc3N3b3Jk
+  kafka-ca-cert: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t
+  kafka-client-cert: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t
+  kafka-client-key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t
+  vault-token: YmFua2luZy1uZXR3b3JrLXZhdWx0LXRva2Vu
+  postgres-connection-string: cG9zdGdyZXNxbDovL2JhbmtpbmdfdXNlcjpiYW5raW5nLXBhc3N3b3JkQHBvc3RncmVzLXNlcnZpY2U6NTQzMi9iYW5raW5nX2Ri
+  oauth2-client-secret: YmFua2luZy1uZXR3b3JrLW9hdXRoMi1zZWNyZXQ=
+  temporal-client-cert: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t
+  temporal-client-key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dapr-operator
+  namespace: dapr-system
+  labels:
+    app: dapr-operator
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dapr-operator
+  template:
+    metadata:
+      labels:
+        app: dapr-operator
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - dapr-operator
+            topologyKey: kubernetes.io/hostname
+      serviceAccountName: dapr-operator
+      containers:
+      - name: dapr-operator
+        image: daprio/dapr:1.12.0
+        command:
+        - "/manager"
+        args:
+        - "--config=banking-config"
+        - "--log-level=info"
+        - "--log-as-json"
+        - "--enable-metrics=true"
+        - "--metrics-port=9090"
+        - "--leader-election"
+        ports:
+        - containerPort: 9090
+          name: metrics
+        - containerPort: 8080
+          name: health
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: DAPR_TRUST_ANCHORS
+          value: "/var/run/secrets/dapr.io/tls/ca.crt"
+        - name: DAPR_CERT_CHAIN
+          value: "/var/run/secrets/dapr.io/tls/tls.crt"
+        - name: DAPR_CERT_KEY
+          value: "/var/run/secrets/dapr.io/tls/tls.key"
+        volumeMounts:
+        - name: dapr-config
+          mountPath: /etc/dapr
+        - name: tls-certs
+          mountPath: /var/run/secrets/dapr.io/tls
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: dapr-config
+        configMap:
+          name: dapr-config
+      - name: tls-certs
+        secret:
+          secretName: dapr-secrets
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dapr-sentry
+  namespace: dapr-system
+  labels:
+    app: dapr-sentry
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dapr-sentry
+  template:
+    metadata:
+      labels:
+        app: dapr-sentry
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - dapr-sentry
+            topologyKey: kubernetes.io/hostname
+      serviceAccountName: dapr-operator
+      containers:
+      - name: dapr-sentry
+        image: daprio/dapr:1.12.0
+        command:
+        - "/sentry"
+        args:
+        - "--config=banking-config"
+        - "--log-level=info"
+        - "--log-as-json"
+        - "--enable-metrics=true"
+        - "--metrics-port=9090"
+        - "--trust-domain=remittance.local"
+        ports:
+        - containerPort: 50001
+          name: grpc
+        - containerPort: 9090
+          name: metrics
+        - containerPort: 8080
+          name: health
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: DAPR_TRUST_ANCHORS
+          value: "/var/run/secrets/dapr.io/tls/ca.crt"
+        - name: DAPR_CERT_CHAIN
+          value: "/var/run/secrets/dapr.io/tls/tls.crt"
+        - name: DAPR_CERT_KEY
+          value: "/var/run/secrets/dapr.io/tls/tls.key"
+        volumeMounts:
+        - name: dapr-config
+          mountPath: /etc/dapr
+        - name: tls-certs
+          mountPath: /var/run/secrets/dapr.io/tls
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /v1.0/healthz
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /v1.0/healthz
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: dapr-config
+        configMap:
+          name: dapr-config
+      - name: tls-certs
+        secret:
+          secretName: dapr-secrets
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dapr-placement
+  namespace: dapr-system
+  labels:
+    app: dapr-placement
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: dapr-placement
+  template:
+    metadata:
+      labels:
+        app: dapr-placement
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - dapr-placement
+            topologyKey: kubernetes.io/hostname
+      serviceAccountName: dapr-operator
+      containers:
+      - name: dapr-placement
+        image: daprio/dapr:1.12.0
+        command:
+        - "/placement"
+        args:
+        - "--log-level=info"
+        - "--log-as-json"
+        - "--enable-metrics=true"
+        - "--metrics-port=9090"
+        - "--port=50005"
+        - "--raft-peers=dapr-placement-0.dapr-placement:50005,dapr-placement-1.dapr-placement:50005,dapr-placement-2.dapr-placement:50005"
+        ports:
+        - containerPort: 50005
+          name: grpc
+        - containerPort: 9090
+          name: metrics
+        - containerPort: 8080
+          name: health
+        env:
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: DAPR_TRUST_ANCHORS
+          value: "/var/run/secrets/dapr.io/tls/ca.crt"
+        - name: DAPR_CERT_CHAIN
+          value: "/var/run/secrets/dapr.io/tls/tls.crt"
+        - name: DAPR_CERT_KEY
+          value: "/var/run/secrets/dapr.io/tls/tls.key"
+        volumeMounts:
+        - name: tls-certs
+          mountPath: /var/run/secrets/dapr.io/tls
+          readOnly: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /v1.0/healthz
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /v1.0/healthz
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: tls-certs
+        secret:
+          secretName: dapr-secrets
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dapr-placement
+  namespace: dapr-system
+  labels:
+    app: dapr-placement
+spec:
+  clusterIP: None
+  ports:
+  - name: grpc
+    port: 50005
+    targetPort: 50005
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  selector:
+    app: dapr-placement
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dapr-sentry
+  namespace: dapr-system
+  labels:
+    app: dapr-sentry
+spec:
+  type: ClusterIP
+  ports:
+  - name: grpc
+    port: 50001
+    targetPort: 50001
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  selector:
+    app: dapr-sentry
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dapr-operator
+  namespace: dapr-system
+  labels:
+    app: dapr-operator
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dapr-operator
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints", "persistentvolumeclaims", "events", "configmaps", "secrets"]
+  verbs: ["*"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "daemonsets", "replicasets", "statefulsets"]
+  verbs: ["*"]
+- apiGroups: ["dapr.io"]
+  resources: ["*"]
+  verbs: ["*"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dapr-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dapr-operator
+subjects:
+- kind: ServiceAccount
+  name: dapr-operator
+  namespace: dapr-system
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dapr-operator-pdb
+  namespace: dapr-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: dapr-operator
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dapr-sentry-pdb
+  namespace: dapr-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: dapr-sentry
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: dapr-placement-pdb
+  namespace: dapr-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: dapr-placement
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dapr-network-policy
+  namespace: dapr-system
+spec:
+  podSelector:
+    matchLabels:
+      app: dapr-operator
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: remittance-system
+    - podSelector:
+        matchLabels:
+          app: dapr-sentry
+    - podSelector:
+        matchLabels:
+          app: dapr-placement
+    ports:
+    - protocol: TCP
+      port: 50001
+    - protocol: TCP
+      port: 50005
+    - protocol: TCP
+      port: 9090
+    - protocol: TCP
+      port: 8080
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: redis-system
+    - namespaceSelector:
+        matchLabels:
+          name: kafka-system
+    - namespaceSelector:
+        matchLabels:
+          name: temporal-system
+    ports:
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 9092
+    - protocol: TCP
+      port: 7233
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+

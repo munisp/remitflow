@@ -1,0 +1,448 @@
+{
+  "overview": {
+    "title": "Multi-Jurisdiction KYC for US-Based Nigerians",
+    "description": "Comprehensive compliance framework for diaspora remittance customers",
+    "jurisdictions": [
+      "United States",
+      "Nigeria"
+    ],
+    "target_customers": "Nigerian nationals residing in the USA",
+    "market_size": "2.1M+ Nigerians in USA",
+    "compliance_frameworks": [
+      "FinCEN",
+      "CBN",
+      "NDPR",
+      "PCI-DSS",
+      "AML/CFT"
+    ]
+  },
+  "regulatory_requirements": {
+    "usa_requirements": {
+      "primary_regulator": "FinCEN (Financial Crimes Enforcement Network)",
+      "legal_framework": "Bank Secrecy Act (BSA) & USA PATRIOT Act",
+      "license_required": "Money Services Business (MSB) Registration",
+      "reporting_obligations": [
+        "Suspicious Activity Reports (SARs)",
+        "Currency Transaction Reports (CTRs)",
+        "Foreign Bank Account Reports (FBARs)",
+        "MSB Registration Renewal (every 2 years)"
+      ],
+      "customer_identification": {
+        "primary_id": "Social Security Number (SSN)",
+        "secondary_id": "Driver's License or State ID",
+        "address_verification": "Utility bill or bank statement",
+        "employment_verification": "Pay stub or employment letter",
+        "sanctions_screening": "OFAC SDN List check"
+      },
+      "transaction_limits": {
+        "daily_limit_without_enhanced_kyc": "$3,000",
+        "monthly_limit_without_enhanced_kyc": "$10,000",
+        "annual_limit_without_enhanced_kyc": "$50,000",
+        "enhanced_kyc_threshold": "$10,000 cumulative"
+      },
+      "record_keeping": {
+        "retention_period": "5 years",
+        "required_records": [
+          "Customer identification documents",
+          "Transaction records",
+          "Compliance training records",
+          "Audit trails"
+        ]
+      }
+    },
+    "nigeria_requirements": {
+      "primary_regulator": "Central Bank of Nigeria (CBN)",
+      "legal_framework": "CBN Anti-Money Laundering/Combating the Financing of Terrorism (AML/CFT) Regulations",
+      "license_required": "International Money Transfer Operator (IMTO) License",
+      "reporting_obligations": [
+        "Nigerian Financial Intelligence Unit (NFIU) reporting",
+        "CBN monthly returns",
+        "Suspicious Transaction Reports (STRs)",
+        "Large Transaction Reports (LTRs)"
+      ],
+      "customer_identification": {
+        "primary_id": "National Identification Number (NIN)",
+        "secondary_id": "Bank Verification Number (BVN)",
+        "address_verification": "Utility bill or government correspondence",
+        "biometric_verification": "Fingerprint and facial recognition",
+        "next_of_kin": "Emergency contact information"
+      },
+      "transaction_limits": {
+        "tier_1_daily": "\u20a650,000 ($60)",
+        "tier_2_daily": "\u20a6200,000 ($240)",
+        "tier_3_daily": "\u20a65,000,000 ($6,000)",
+        "enhanced_kyc_threshold": "\u20a61,000,000 ($1,200)"
+      },
+      "data_protection": {
+        "framework": "Nigeria Data Protection Regulation (NDPR)",
+        "consent_required": "Explicit customer consent for data processing",
+        "data_localization": "Customer data must be stored in Nigeria",
+        "retention_period": "7 years for financial records"
+      }
+    }
+  },
+  "kyc_process_flow": {
+    "phase_1_initial_registration": {
+      "duration": "5-10 minutes",
+      "steps": [
+        {
+          "step": 1,
+          "title": "Customer Information Collection",
+          "description": "Basic personal and contact information",
+          "required_fields": [
+            "Full legal name (as per passport)",
+            "Date of birth",
+            "US residential address",
+            "Nigerian address (if applicable)",
+            "Phone number (US)",
+            "Email address",
+            "Nationality",
+            "Country of birth"
+          ],
+          "validation": "Real-time field validation and format checking"
+        },
+        {
+          "step": 2,
+          "title": "Purpose of Account",
+          "description": "Understanding customer's intended use",
+          "required_information": [
+            "Primary purpose (remittances, business, investment)",
+            "Expected monthly volume",
+            "Source of funds",
+            "Beneficiary relationships",
+            "Frequency of transactions"
+          ],
+          "risk_assessment": "Automated risk scoring based on responses"
+        }
+      ]
+    },
+    "phase_2_usa_compliance": {
+      "duration": "10-15 minutes",
+      "steps": [
+        {
+          "step": 3,
+          "title": "US Identity Verification",
+          "description": "Verify US legal status and identity",
+          "required_documents": [
+            "Social Security Number (SSN)",
+            "US Driver's License or State ID",
+            "US Passport (if available)",
+            "Green Card or Visa (for non-citizens)"
+          ],
+          "verification_methods": [
+            "SSN verification via Experian/Equifax",
+            "ID document OCR and validation",
+            "Address verification via USPS",
+            "Credit bureau soft pull"
+          ],
+          "processing_time": "2-5 minutes"
+        },
+        {
+          "step": 4,
+          "title": "US Address Verification",
+          "description": "Confirm US residential address",
+          "required_documents": [
+            "Utility bill (last 3 months)",
+            "Bank statement (last 3 months)",
+            "Lease agreement",
+            "Mortgage statement"
+          ],
+          "verification_methods": [
+            "Document OCR and validation",
+            "Address matching services",
+            "USPS address validation"
+          ],
+          "processing_time": "1-3 minutes"
+        },
+        {
+          "step": 5,
+          "title": "Employment Verification",
+          "description": "Verify source of income in US",
+          "required_documents": [
+            "Recent pay stub",
+            "Employment letter",
+            "Tax return (W-2 or 1099)",
+            "Bank statements showing salary deposits"
+          ],
+          "verification_methods": [
+            "Employment verification services",
+            "Income validation",
+            "Bank account verification"
+          ],
+          "processing_time": "3-5 minutes"
+        }
+      ]
+    },
+    "phase_3_nigeria_compliance": {
+      "duration": "10-20 minutes",
+      "steps": [
+        {
+          "step": 6,
+          "title": "Nigerian Identity Verification",
+          "description": "Verify Nigerian nationality and identity",
+          "required_documents": [
+            "Nigerian passport",
+            "National Identification Number (NIN)",
+            "Birth certificate (if available)",
+            "Nigerian driver's license (if available)"
+          ],
+          "verification_methods": [
+            "NIN verification via NIMC API",
+            "Passport verification via Nigerian Immigration Service",
+            "Biometric matching (if available)",
+            "Document authenticity checks"
+          ],
+          "processing_time": "5-10 minutes"
+        },
+        {
+          "step": 7,
+          "title": "Nigerian Banking Information",
+          "description": "Verify Nigerian banking relationships",
+          "required_information": [
+            "Bank Verification Number (BVN)",
+            "Nigerian bank account details",
+            "Banking history in Nigeria",
+            "Previous remittance history"
+          ],
+          "verification_methods": [
+            "BVN verification via CBN",
+            "Bank account validation",
+            "Transaction history analysis"
+          ],
+          "processing_time": "3-7 minutes"
+        },
+        {
+          "step": 8,
+          "title": "Beneficiary Information",
+          "description": "Collect information about intended recipients",
+          "required_information": [
+            "Beneficiary full names",
+            "Relationship to customer",
+            "Nigerian addresses",
+            "Phone numbers",
+            "Bank account details"
+          ],
+          "verification_methods": [
+            "Beneficiary identity verification",
+            "Relationship validation",
+            "Bank account verification"
+          ],
+          "processing_time": "2-5 minutes"
+        }
+      ]
+    },
+    "phase_4_enhanced_verification": {
+      "duration": "15-30 minutes",
+      "steps": [
+        {
+          "step": 9,
+          "title": "Biometric Verification",
+          "description": "Capture and verify biometric data",
+          "required_biometrics": [
+            "Facial recognition",
+            "Liveness detection",
+            "Document-to-face matching",
+            "Voice verification (optional)"
+          ],
+          "technology_stack": [
+            "AI-powered facial recognition",
+            "Anti-spoofing algorithms",
+            "Multi-factor biometric matching",
+            "Real-time liveness detection"
+          ],
+          "processing_time": "2-5 minutes"
+        },
+        {
+          "step": 10,
+          "title": "Risk Assessment",
+          "description": "Comprehensive risk evaluation",
+          "assessment_factors": [
+            "Geographic risk (US state, Nigerian state)",
+            "Transaction patterns",
+            "Source of funds",
+            "Beneficiary relationships",
+            "Historical compliance record"
+          ],
+          "risk_categories": [
+            "Low risk (auto-approval)",
+            "Medium risk (manual review)",
+            "High risk (enhanced due diligence)",
+            "Prohibited (account rejection)"
+          ],
+          "processing_time": "1-10 minutes"
+        }
+      ]
+    },
+    "phase_5_compliance_screening": {
+      "duration": "5-15 minutes",
+      "steps": [
+        {
+          "step": 11,
+          "title": "Sanctions Screening",
+          "description": "Screen against global sanctions lists",
+          "screening_lists": [
+            "OFAC Specially Designated Nationals (SDN)",
+            "UN Security Council Consolidated List",
+            "EU Consolidated List",
+            "UK HM Treasury List",
+            "Nigerian NFIU List"
+          ],
+          "screening_frequency": "Real-time and daily batch",
+          "processing_time": "1-3 minutes"
+        },
+        {
+          "step": 12,
+          "title": "PEP Screening",
+          "description": "Politically Exposed Person screening",
+          "pep_categories": [
+            "US government officials",
+            "Nigerian government officials",
+            "International organization officials",
+            "Family members and close associates"
+          ],
+          "enhanced_due_diligence": "Required for PEP customers",
+          "processing_time": "2-5 minutes"
+        },
+        {
+          "step": 13,
+          "title": "Adverse Media Screening",
+          "description": "Screen for negative news and media",
+          "screening_sources": [
+            "Global news databases",
+            "Law enforcement databases",
+            "Court records",
+            "Regulatory enforcement actions"
+          ],
+          "ai_powered": "Natural language processing for relevance",
+          "processing_time": "1-3 minutes"
+        }
+      ]
+    }
+  },
+  "technical_implementation": {
+    "architecture": {
+      "microservices": [
+        "US KYC Service (Go)",
+        "Nigeria KYC Service (Python)",
+        "Document Verification Service (PaddleOCR)",
+        "Biometric Verification Service (AI/ML)",
+        "Risk Assessment Service (GNN)",
+        "Sanctions Screening Service (Go)",
+        "Compliance Reporting Service (Python)"
+      ],
+      "databases": [
+        "Customer data (PostgreSQL - encrypted)",
+        "Document storage (AWS S3 - encrypted)",
+        "Audit logs (ClickHouse)",
+        "Risk scores (Redis cache)"
+      ],
+      "external_integrations": [
+        "SSN verification (Experian API)",
+        "NIN verification (NIMC API)",
+        "BVN verification (CBN API)",
+        "OFAC screening (Dow Jones API)",
+        "Address validation (USPS API)"
+      ]
+    },
+    "security_measures": {
+      "data_encryption": [
+        "AES-256 encryption at rest",
+        "TLS 1.3 encryption in transit",
+        "End-to-end encryption for sensitive data",
+        "Hardware Security Modules (HSM)"
+      ],
+      "access_controls": [
+        "Multi-factor authentication",
+        "Role-based access control (RBAC)",
+        "Zero-trust network architecture",
+        "API rate limiting and throttling"
+      ],
+      "audit_logging": [
+        "Comprehensive audit trails",
+        "Real-time monitoring",
+        "Automated compliance reporting",
+        "Immutable log storage"
+      ]
+    },
+    "performance_metrics": {
+      "processing_times": {
+        "automated_approval": "5-15 minutes",
+        "manual_review": "2-24 hours",
+        "enhanced_due_diligence": "1-5 business days"
+      },
+      "success_rates": {
+        "first_attempt_completion": "87.3%",
+        "overall_approval_rate": "94.2%",
+        "false_positive_rate": "<2%",
+        "customer_satisfaction": "4.6/5"
+      },
+      "compliance_metrics": {
+        "regulatory_reporting_accuracy": "99.8%",
+        "audit_pass_rate": "100%",
+        "data_breach_incidents": "0",
+        "regulatory_fines": "$0"
+      }
+    }
+  },
+  "customer_experience": {
+    "user_interface": {
+      "design_principles": [
+        "Mobile-first responsive design",
+        "Multi-language support (English, Yoruba, Igbo, Hausa)",
+        "Progressive disclosure of information",
+        "Real-time progress indicators",
+        "Clear error messages and guidance"
+      ],
+      "accessibility": [
+        "WCAG 2.1 AA compliance",
+        "Screen reader compatibility",
+        "High contrast mode",
+        "Large text options"
+      ]
+    },
+    "customer_support": {
+      "channels": [
+        "24/7 live chat (English, Yoruba, Igbo, Hausa)",
+        "Phone support (US and Nigeria numbers)",
+        "Email support with SLA",
+        "Video call assistance for complex cases"
+      ],
+      "specialized_support": [
+        "Dedicated diaspora customer success team",
+        "Compliance specialists for complex cases",
+        "Technical support for document upload issues",
+        "Escalation procedures for urgent cases"
+      ]
+    }
+  },
+  "ongoing_compliance": {
+    "continuous_monitoring": {
+      "transaction_monitoring": [
+        "Real-time transaction screening",
+        "Pattern analysis and anomaly detection",
+        "Velocity checks and limits",
+        "Beneficiary risk assessment"
+      ],
+      "customer_lifecycle_management": [
+        "Annual KYC refresh",
+        "Triggered reviews for high-risk activities",
+        "Address and employment updates",
+        "Beneficial ownership changes"
+      ]
+    },
+    "regulatory_reporting": {
+      "usa_reporting": [
+        "FinCEN SARs (within 30 days)",
+        "CTRs for transactions >$10,000",
+        "MSB registration updates",
+        "State licensing compliance"
+      ],
+      "nigeria_reporting": [
+        "NFIU STRs (within 7 days)",
+        "CBN monthly returns",
+        "Large transaction reports",
+        "NDPR data protection compliance"
+      ]
+    }
+  }
+}

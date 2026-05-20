@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Vitamin C Serum",
+    "price": 8500,
+    "category": "Skincare",
+    "description": "Brightening serum for all skin types",
+    "stock": 75
+  },
+  {
+    "name": "Matte Lipstick Set",
+    "price": 5500,
+    "category": "Makeup",
+    "description": "5-piece long-lasting matte lipstick collection",
+    "stock": 90
+  }
+]

@@ -1,0 +1,236 @@
+# Alerting Rules for Nigerian Remittance Platform
+# Critical alerts for payment processing, corridor health, and system reliability
+
+groups:
+  - name: transaction_alerts
+    rules:
+      # High transaction failure rate
+      - alert: HighTransactionFailureRate
+        expr: |
+          (
+            sum(rate(transaction_failures_total[5m])) /
+            sum(rate(transaction_total[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: payments
+        annotations:
+          summary: "High transaction failure rate detected"
+          description: "Transaction failure rate is {{ $value | humanizePercentage }} over the last 5 minutes"
+          runbook_url: "https://docs.internal/runbooks/high-transaction-failure"
+
+      # Transaction processing latency
+      - alert: HighTransactionLatency
+        expr: histogram_quantile(0.95, rate(transaction_duration_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          team: payments
+        annotations:
+          summary: "High transaction processing latency"
+          description: "95th percentile transaction latency is {{ $value }}s"
+
+      # Transaction queue backlog
+      - alert: TransactionQueueBacklog
+        expr: transaction_queue_depth > 1000
+        for: 5m
+        labels:
+          severity: warning
+          team: payments
+        annotations:
+          summary: "Transaction queue backlog growing"
+          description: "Transaction queue has {{ $value }} pending items"
+
+  - name: corridor_alerts
+    rules:
+      # Corridor down
+      - alert: CorridorDown
+        expr: corridor_health_status == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: corridors
+        annotations:
+          summary: "Payment corridor {{ $labels.corridor }} is down"
+          description: "Corridor {{ $labels.corridor }} has been unhealthy for more than 1 minute"
+          runbook_url: "https://docs.internal/runbooks/corridor-down"
+
+      # Corridor high error rate
+      - alert: CorridorHighErrorRate
+        expr: |
+          (
+            sum by (corridor) (rate(corridor_errors_total[5m])) /
+            sum by (corridor) (rate(corridor_requests_total[5m]))
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: corridors
+        annotations:
+          summary: "High error rate on corridor {{ $labels.corridor }}"
+          description: "Error rate is {{ $value | humanizePercentage }}"
+
+      # Corridor latency spike
+      - alert: CorridorLatencySpike
+        expr: histogram_quantile(0.95, rate(corridor_latency_seconds_bucket[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: corridors
+        annotations:
+          summary: "High latency on corridor {{ $labels.corridor }}"
+          description: "95th percentile latency is {{ $value }}s"
+
+  - name: reconciliation_alerts
+    rules:
+      # Reconciliation discrepancy
+      - alert: ReconciliationDiscrepancy
+        expr: reconciliation_discrepancy_count > 10
+        for: 15m
+        labels:
+          severity: warning
+          team: finance
+        annotations:
+          summary: "High reconciliation discrepancy count"
+          description: "{{ $value }} unresolved discrepancies detected"
+
+      # Critical reconciliation discrepancy
+      - alert: CriticalReconciliationDiscrepancy
+        expr: reconciliation_critical_discrepancy_count > 0
+        for: 5m
+        labels:
+          severity: critical
+          team: finance
+        annotations:
+          summary: "Critical reconciliation discrepancy detected"
+          description: "{{ $value }} critical discrepancies require immediate attention"
+          runbook_url: "https://docs.internal/runbooks/critical-reconciliation"
+
+      # Settlement delay
+      - alert: SettlementDelay
+        expr: (time() - settlement_last_completed_timestamp) > 86400
+        for: 1h
+        labels:
+          severity: warning
+          team: finance
+        annotations:
+          summary: "Settlement delay detected for {{ $labels.corridor }}"
+          description: "No settlement completed in the last 24 hours"
+
+  - name: risk_alerts
+    rules:
+      # High fraud score transactions
+      - alert: HighFraudScoreTransactions
+        expr: sum(rate(risk_blocked_transactions_total[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          team: risk
+        annotations:
+          summary: "High volume of blocked transactions"
+          description: "{{ $value }} transactions blocked per second"
+
+      # Risk service degraded
+      - alert: RiskServiceDegraded
+        expr: risk_service_health_status < 1
+        for: 2m
+        labels:
+          severity: critical
+          team: risk
+        annotations:
+          summary: "Risk service is degraded"
+          description: "Risk service health check failing"
+          runbook_url: "https://docs.internal/runbooks/risk-service-degraded"
+
+  - name: infrastructure_alerts
+    rules:
+      # Service down
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "Service {{ $labels.job }} has been down for more than 1 minute"
+
+      # High CPU usage
+      - alert: HighCPUUsage
+        expr: process_cpu_seconds_total > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High CPU usage on {{ $labels.job }}"
+          description: "CPU usage is {{ $value | humanizePercentage }}"
+
+      # High memory usage
+      - alert: HighMemoryUsage
+        expr: process_resident_memory_bytes / process_virtual_memory_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High memory usage on {{ $labels.job }}"
+          description: "Memory usage is {{ $value | humanizePercentage }}"
+
+      # Kafka consumer lag
+      - alert: KafkaConsumerLag
+        expr: kafka_consumer_group_lag > 10000
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High Kafka consumer lag"
+          description: "Consumer group {{ $labels.group }} has lag of {{ $value }}"
+
+      # Redis connection issues
+      - alert: RedisConnectionIssues
+        expr: redis_connected_clients < 1
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Redis connection issues"
+          description: "Redis has {{ $value }} connected clients"
+
+      # Database connection pool exhaustion
+      - alert: DatabaseConnectionPoolExhausted
+        expr: db_connection_pool_available < 5
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Database connection pool nearly exhausted"
+          description: "Only {{ $value }} connections available"
+
+  - name: lakehouse_alerts
+    rules:
+      # Lakehouse ingestion lag
+      - alert: LakehouseIngestionLag
+        expr: lakehouse_ingestion_lag_seconds > 300
+        for: 10m
+        labels:
+          severity: warning
+          team: data
+        annotations:
+          summary: "Lakehouse ingestion lag detected"
+          description: "Ingestion lag is {{ $value }}s"
+
+      # Lakehouse query failures
+      - alert: LakehouseQueryFailures
+        expr: rate(lakehouse_query_failures_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          team: data
+        annotations:
+          summary: "High lakehouse query failure rate"
+          description: "Query failure rate is {{ $value }}/s"

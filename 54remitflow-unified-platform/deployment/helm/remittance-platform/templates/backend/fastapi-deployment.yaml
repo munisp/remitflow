@@ -1,0 +1,71 @@
+{{- if .Values.backend.fastapi.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "remittance-platform.fullname" . }}-fastapi
+  labels:
+    {{- include "remittance-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: fastapi-backend
+spec:
+  {{- if not .Values.backend.fastapi.autoscaling.enabled }}
+  replicas: {{ .Values.backend.fastapi.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "remittance-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: fastapi-backend
+  template:
+    metadata:
+      labels:
+        {{- include "remittance-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: fastapi-backend
+    spec:
+      containers:
+      - name: fastapi
+        image: "{{ .Values.global.imageRegistry }}/{{ .Values.backend.fastapi.image.repository }}:{{ .Values.backend.fastapi.image.tag }}"
+        imagePullPolicy: {{ .Values.backend.fastapi.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "remittance-platform.fullname" . }}-secrets
+              key: database-url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "remittance-platform.fullname" . }}-secrets
+              key: redis-url
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "remittance-platform.fullname" . }}-config
+              key: kafka-bootstrap-servers
+        - name: TEMPORAL_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "remittance-platform.fullname" . }}-config
+              key: temporal-host
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "remittance-platform.fullname" . }}-secrets
+              key: jwt-secret
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          {{- toYaml .Values.backend.fastapi.resources | nindent 12 }}
+{{- end }}

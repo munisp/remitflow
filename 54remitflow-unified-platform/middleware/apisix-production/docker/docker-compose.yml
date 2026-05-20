@@ -1,0 +1,134 @@
+version: "3.8"
+
+services:
+  # etcd - Configuration store for APISIX
+  etcd:
+    image: bitnami/etcd:3.5.11
+    container_name: apisix-etcd
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    volumes:
+      - etcd_data:/bitnami/etcd
+    networks:
+      - apisix-network
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # APISIX - API Gateway
+  apisix:
+    image: apache/apisix:3.7.0-debian
+    container_name: apisix-gateway
+    restart: always
+    volumes:
+      - ./config/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - ./config/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
+      - apisix_logs:/usr/local/apisix/logs
+    ports:
+      - "9080:9080"   # HTTP
+      - "9443:9443"   # HTTPS
+      - "9091:9091"   # Prometheus metrics
+      - "9092:9092"   # Control API
+    networks:
+      - apisix-network
+    depends_on:
+      etcd:
+        condition: service_healthy
+    environment:
+      - APISIX_STAND_ALONE=false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9080/apisix/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # APISIX Dashboard - Web UI for management
+  apisix-dashboard:
+    image: apache/apisix-dashboard:3.0.1-alpine
+    container_name: apisix-dashboard
+    restart: always
+    volumes:
+      - ./config/dashboard-conf.yaml:/usr/local/apisix-dashboard/conf/conf.yaml:ro
+    ports:
+      - "9000:9000"
+    networks:
+      - apisix-network
+    depends_on:
+      - apisix
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:v2.48.1
+    container_name: apisix-prometheus
+    restart: always
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - apisix-network
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+  # Grafana - Metrics visualization
+  grafana:
+    image: grafana/grafana:10.2.3
+    container_name: apisix-grafana
+    restart: always
+    volumes:
+      - ../monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ../monitoring/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - apisix-network
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+
+  # Jaeger - Distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.52
+    container_name: apisix-jaeger
+    restart: always
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"
+      - "14250:14250"
+      - "9411:9411"
+    networks:
+      - apisix-network
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+
+networks:
+  apisix-network:
+    driver: bridge
+
+volumes:
+  etcd_data:
+  apisix_logs:
+  prometheus_data:
+  grafana_data:
+

@@ -1,0 +1,141 @@
+{
+  "dashboard": {
+    "title": "etcd Cluster Monitoring",
+    "tags": ["etcd", "apisix", "infrastructure"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Cluster Health",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"etcd\"}",
+            "legendFormat": "{{ instance }}"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Has Leader",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "etcd_server_has_leader",
+            "legendFormat": "{{ instance }}"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Leader Changes (15m)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "rate(etcd_server_leader_changes_seen_total[15m])",
+            "legendFormat": "{{ instance }}"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+      },
+      {
+        "id": 4,
+        "title": "Database Size",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "etcd_mvcc_db_total_size_in_bytes",
+            "legendFormat": "{{ instance }}"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}
+      },
+      {
+        "id": 5,
+        "title": "RPC Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(grpc_server_handled_total{job=\"etcd\"}[5m])",
+            "legendFormat": "{{ grpc_method }} - {{ grpc_code }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}
+      },
+      {
+        "id": 6,
+        "title": "Disk Sync Duration (99th percentile)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m]))",
+            "legendFormat": "{{ instance }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}
+      },
+      {
+        "id": 7,
+        "title": "Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "process_resident_memory_bytes{job=\"etcd\"}",
+            "legendFormat": "{{ instance }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+      },
+      {
+        "id": 8,
+        "title": "CPU Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(process_cpu_seconds_total{job=\"etcd\"}[5m])",
+            "legendFormat": "{{ instance }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+      },
+      {
+        "id": 9,
+        "title": "Network Traffic",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(etcd_network_client_grpc_received_bytes_total[5m])",
+            "legendFormat": "RX {{ instance }}"
+          },
+          {
+            "expr": "rate(etcd_network_client_grpc_sent_bytes_total[5m])",
+            "legendFormat": "TX {{ instance }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20}
+      },
+      {
+        "id": 10,
+        "title": "Proposal Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(etcd_server_proposals_committed_total[5m])",
+            "legendFormat": "Committed {{ instance }}"
+          },
+          {
+            "expr": "rate(etcd_server_proposals_failed_total[5m])",
+            "legendFormat": "Failed {{ instance }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20}
+      }
+    ]
+  }
+}
+

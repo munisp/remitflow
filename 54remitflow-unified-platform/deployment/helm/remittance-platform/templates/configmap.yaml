@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "remittance-platform.fullname" . }}-config
+  labels:
+    {{- include "remittance-platform.labels" . | nindent 4 }}
+data:
+  kafka-bootstrap-servers: {{ .Values.secrets.kafkaBootstrapServers | quote }}
+  temporal-host: {{ .Values.secrets.temporalHost | quote }}
+  environment: {{ .Values.global.environment | quote }}

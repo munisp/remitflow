@@ -1,0 +1,50 @@
+# Kafka JMX Exporter Configuration
+
+rules:
+  # Broker metrics
+  - pattern: kafka.server<type=(.+), name=(.+)><>Value
+    name: kafka_server_$1_$2
+    type: GAUGE
+
+  # Topic metrics
+  - pattern: kafka.server<type=BrokerTopicMetrics, name=(.+), topic=(.+)><>Count
+    name: kafka_topic_$1_total
+    labels:
+      topic: "$2"
+    type: COUNTER
+
+  # Partition metrics
+  - pattern: kafka.server<type=BrokerTopicMetrics, name=(.+)><>Count
+    name: kafka_broker_$1_total
+    type: COUNTER
+
+  # Consumer group metrics
+  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+)><>(.+)
+    name: kafka_consumer_$2
+    labels:
+      client_id: "$1"
+    type: GAUGE
+
+  # Producer metrics
+  - pattern: kafka.producer<type=producer-metrics, client-id=(.+)><>(.+)
+    name: kafka_producer_$2
+    labels:
+      client_id: "$1"
+    type: GAUGE
+
+  # Network metrics
+  - pattern: kafka.network<type=RequestMetrics, name=RequestsPerSec, request=(.+)><>Count
+    name: kafka_network_requests_total
+    labels:
+      request: "$1"
+    type: COUNTER
+
+  # Log metrics
+  - pattern: kafka.log<type=LogFlushStats, name=LogFlushRateAndTimeMs><>Count
+    name: kafka_log_flush_total
+    type: COUNTER
+
+  # Controller metrics
+  - pattern: kafka.controller<type=KafkaController, name=(.+)><>Value
+    name: kafka_controller_$1
+    type: GAUGE

@@ -1,0 +1,487 @@
+###############################################################################
+# RemitFlow — Kubernetes Manifests for CBN Compliance Services (v187)
+#
+# Deploys:
+# - rust-bmatch-engine (P0)
+# - go-settlement-registry (P1)
+# - python-cbn-lakehouse (P2)
+# - go-temporal-cbn worker (P2)
+#
+# All pods have Dapr sidecars injected via annotations.
+# All services are exposed internally via ClusterIP.
+# APISIX ingress routes external traffic.
+###############################################################################
+
+# ── Namespace ──────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remitflow
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    cbn-compliance: "v187"
+
+---
+# ── ConfigMap — CBN Compliance Config ─────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cbn-compliance-config
+  namespace: remitflow
+data:
+  BMATCH_ENGINE_URL: "http://rust-bmatch-engine:8097"
+  SETTLEMENT_REGISTRY_URL: "http://go-settlement-registry:8098"
+  CBN_LAKEHOUSE_URL: "http://python-cbn-lakehouse:8099"
+  RATE_REFRESH_SECS: "60"
+  KAFKA_BROKERS: "kafka:9092"
+  REDIS_URL: "redis://redis:6379"
+  OPENSEARCH_URL: "http://opensearch:9200"
+  TEMPORAL_HOST: "temporal:7233"
+  KEYCLOAK_URL: "http://keycloak:8080"
+  PERMIFY_URL: "http://permify:3476"
+  TIGERBEETLE_ADDRESS: "tigerbeetle:3000"
+  DAPR_HTTP_PORT: "3500"
+
+---
+# ── Secret — CBN Compliance Keys ──────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cbn-compliance-secrets
+  namespace: remitflow
+type: Opaque
+stringData:
+  CBN_REGISTRY_KEY: "settlement-registry-key-001"
+  CBN_LAKEHOUSE_KEY: "cbn-lakehouse-key-001"
+  BMATCH_CLIENT_SECRET: "bmatch-client-secret-001"
+  SETTLEMENT_CLIENT_SECRET: "settlement-client-secret-001"
+  LAKEHOUSE_CLIENT_SECRET: "lakehouse-client-secret-001"
+
+---
+# ── Deployment — rust-bmatch-engine ───────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rust-bmatch-engine
+  namespace: remitflow
+  labels:
+    app: rust-bmatch-engine
+    cbn-compliance: P0
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rust-bmatch-engine
+  template:
+    metadata:
+      labels:
+        app: rust-bmatch-engine
+        version: v187
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "rust-bmatch-engine"
+        dapr.io/app-port: "8097"
+        dapr.io/log-level: "info"
+    spec:
+      containers:
+        - name: bmatch-engine
+          image: remitflow/rust-bmatch-engine:v187
+          ports:
+            - containerPort: 8097
+          envFrom:
+            - configMapRef:
+                name: cbn-compliance-config
+          env:
+            - name: PORT
+              value: "8097"
+            - name: RUST_LOG
+              value: "info"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-db-secret
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8097
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8097
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rust-bmatch-engine
+  namespace: remitflow
+  labels:
+    app: rust-bmatch-engine
+spec:
+  selector:
+    app: rust-bmatch-engine
+  ports:
+    - name: http
+      port: 8097
+      targetPort: 8097
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: rust-bmatch-engine-hpa
+  namespace: remitflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: rust-bmatch-engine
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+# ── Deployment — go-settlement-registry ───────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-settlement-registry
+  namespace: remitflow
+  labels:
+    app: go-settlement-registry
+    cbn-compliance: P1
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: go-settlement-registry
+  template:
+    metadata:
+      labels:
+        app: go-settlement-registry
+        version: v187
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "go-settlement-registry"
+        dapr.io/app-port: "8098"
+    spec:
+      containers:
+        - name: settlement-registry
+          image: remitflow/go-settlement-registry:v187
+          ports:
+            - containerPort: 8098
+          envFrom:
+            - configMapRef:
+                name: cbn-compliance-config
+          env:
+            - name: PORT
+              value: "8098"
+            - name: GIN_MODE
+              value: "release"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-db-secret
+                  key: DATABASE_URL
+            - name: INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cbn-compliance-secrets
+                  key: CBN_REGISTRY_KEY
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8098
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8098
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-settlement-registry
+  namespace: remitflow
+spec:
+  selector:
+    app: go-settlement-registry
+  ports:
+    - name: http
+      port: 8098
+      targetPort: 8098
+  type: ClusterIP
+
+---
+# ── Deployment — python-cbn-lakehouse ─────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-cbn-lakehouse
+  namespace: remitflow
+  labels:
+    app: python-cbn-lakehouse
+    cbn-compliance: P2
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: python-cbn-lakehouse
+  template:
+    metadata:
+      labels:
+        app: python-cbn-lakehouse
+        version: v187
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "python-cbn-lakehouse"
+        dapr.io/app-port: "8099"
+    spec:
+      containers:
+        - name: cbn-lakehouse
+          image: remitflow/python-cbn-lakehouse:v187
+          ports:
+            - containerPort: 8099
+          envFrom:
+            - configMapRef:
+                name: cbn-compliance-config
+          env:
+            - name: PORT
+              value: "8099"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-db-secret
+                  key: DATABASE_URL
+            - name: CBN_LAKEHOUSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cbn-compliance-secrets
+                  key: CBN_LAKEHOUSE_KEY
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8099
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8099
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-cbn-lakehouse
+  namespace: remitflow
+spec:
+  selector:
+    app: python-cbn-lakehouse
+  ports:
+    - name: http
+      port: 8099
+      targetPort: 8099
+  type: ClusterIP
+
+---
+# ── Deployment — go-temporal-cbn worker ───────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-temporal-cbn
+  namespace: remitflow
+  labels:
+    app: go-temporal-cbn
+    cbn-compliance: P2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: go-temporal-cbn
+  template:
+    metadata:
+      labels:
+        app: go-temporal-cbn
+        version: v187
+    spec:
+      containers:
+        - name: temporal-cbn-worker
+          image: remitflow/go-temporal-cbn:v187
+          envFrom:
+            - configMapRef:
+                name: cbn-compliance-config
+          env:
+            - name: CBN_LAKEHOUSE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cbn-compliance-secrets
+                  key: CBN_LAKEHOUSE_KEY
+            - name: CBN_REGISTRY_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: cbn-compliance-secrets
+                  key: CBN_REGISTRY_KEY
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+
+---
+# ── CronJob — Daily BMATCH Snapshot ───────────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: daily-bmatch-snapshot
+  namespace: remitflow
+  labels:
+    cbn-compliance: P0
+spec:
+  schedule: "0 2 * * *"  # 02:00 UTC daily
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: trigger
+              image: curlimages/curl:8.7.1
+              command:
+                - sh
+                - -c
+                - |
+                  curl -s -X POST http://rust-bmatch-engine:8097/snapshot && \
+                  curl -s -X POST http://python-cbn-lakehouse:8099/ingest-fx-rates \
+                    -H "X-Internal-Key: ${CBN_LAKEHOUSE_KEY}"
+              env:
+                - name: CBN_LAKEHOUSE_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: cbn-compliance-secrets
+                      key: CBN_LAKEHOUSE_KEY
+          restartPolicy: OnFailure
+
+---
+# ── CronJob — Monthly CBN Compliance Report ────────────────────────────────────
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: monthly-cbn-report
+  namespace: remitflow
+  labels:
+    cbn-compliance: P2
+spec:
+  schedule: "0 6 1 * *"  # 06:00 UTC on the 1st of each month
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: trigger
+              image: curlimages/curl:8.7.1
+              command:
+                - sh
+                - -c
+                - |
+                  LAST_MONTH=$(date -d "last month" +%Y-%m)
+                  YEAR=$(echo $LAST_MONTH | cut -d- -f1)
+                  MONTH=$(echo $LAST_MONTH | cut -d- -f2)
+                  curl -s -X POST http://python-cbn-lakehouse:8099/export \
+                    -H "X-Internal-Key: ${CBN_LAKEHOUSE_KEY}" \
+                    -H "Content-Type: application/json" \
+                    -d "{\"export_type\":\"transaction_report\",\"from_date\":\"${YEAR}-${MONTH}-01T00:00:00Z\",\"to_date\":\"${YEAR}-${MONTH}-28T23:59:59Z\",\"format\":\"json\"}"
+              env:
+                - name: CBN_LAKEHOUSE_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: cbn-compliance-secrets
+                      key: CBN_LAKEHOUSE_KEY
+          restartPolicy: OnFailure
+
+---
+# ── NetworkPolicy — CBN Compliance Isolation ──────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cbn-compliance-netpol
+  namespace: remitflow
+spec:
+  podSelector:
+    matchLabels:
+      cbn-compliance: P0
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: remitflow
+      ports:
+        - protocol: TCP
+          port: 8097
+        - protocol: TCP
+          port: 8098
+        - protocol: TCP
+          port: 8099
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: remitflow
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 9092  # Kafka
+        - protocol: TCP
+          port: 6379  # Redis
+        - protocol: TCP
+          port: 9200  # OpenSearch
+        - protocol: TCP
+          port: 5432  # PostgreSQL
+        - protocol: TCP
+          port: 3000  # TigerBeetle
+        - protocol: TCP
+          port: 7233  # Temporal

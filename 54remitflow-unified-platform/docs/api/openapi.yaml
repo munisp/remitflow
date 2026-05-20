@@ -1,0 +1,916 @@
+openapi: 3.1.0
+info:
+  title: Remittance Platform API
+  description: |
+    Comprehensive API for the Remittance Platform supporting:
+    - Agent management and hierarchy
+    - Customer accounts and KYC
+    - Transaction processing (QR payments, P2P, cash in/out)
+    - Multi-bank routing
+    - Float management
+    - Commission settlement
+    - Mojaloop integration
+  version: 2.0.0
+  contact:
+    name: API Support
+    email: api-support@remittance-platform.com
+  license:
+    name: Proprietary
+    url: https://remittance-platform.com/license
+
+servers:
+  - url: https://api.remittance-platform.com/v1
+    description: Production
+  - url: https://staging-api.remittance-platform.com/v1
+    description: Staging
+  - url: http://localhost:8000/v1
+    description: Development
+
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+tags:
+  - name: Authentication
+    description: Authentication and authorization endpoints
+  - name: Agents
+    description: Agent management operations
+  - name: Customers
+    description: Customer account operations
+  - name: Transactions
+    description: Transaction processing
+  - name: Payments
+    description: Payment operations (QR, P2P, bills)
+  - name: Float
+    description: Float management
+  - name: Commissions
+    description: Commission tracking and settlement
+  - name: Routing
+    description: Multi-bank routing
+  - name: Analytics
+    description: Analytics and reporting
+
+paths:
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate user
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  example: agent@example.com
+                password:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: Successful authentication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/refresh:
+    post:
+      tags: [Authentication]
+      summary: Refresh access token
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+
+  /agents:
+    get:
+      tags: [Agents]
+      summary: List agents
+      operationId: listAgents
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, inactive, suspended, pending]
+        - name: tier
+          in: query
+          schema:
+            type: string
+            enum: [master_agent, super_agent, agent, sub_agent, trainee]
+      responses:
+        '200':
+          description: List of agents
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Agent'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+
+    post:
+      tags: [Agents]
+      summary: Create new agent
+      operationId: createAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentRequest'
+      responses:
+        '201':
+          description: Agent created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /agents/{agentId}:
+    get:
+      tags: [Agents]
+      summary: Get agent by ID
+      operationId: getAgent
+      parameters:
+        - $ref: '#/components/parameters/AgentIdParam'
+      responses:
+        '200':
+          description: Agent details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /customers:
+    get:
+      tags: [Customers]
+      summary: List customers
+      operationId: listCustomers
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: List of customers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Customer'
+
+    post:
+      tags: [Customers]
+      summary: Create customer
+      operationId: createCustomer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCustomerRequest'
+      responses:
+        '201':
+          description: Customer created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+
+  /customers/{customerId}:
+    get:
+      tags: [Customers]
+      summary: Get customer by ID
+      operationId: getCustomer
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdParam'
+      responses:
+        '200':
+          description: Customer details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Customer'
+
+  /customers/{customerId}/accounts:
+    get:
+      tags: [Customers]
+      summary: Get customer accounts
+      operationId: getCustomerAccounts
+      parameters:
+        - $ref: '#/components/parameters/CustomerIdParam'
+      responses:
+        '200':
+          description: Customer accounts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Account'
+
+  /transactions:
+    get:
+      tags: [Transactions]
+      summary: List transactions
+      operationId: listTransactions
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, processing, completed, failed, reversed]
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [qr_payment, p2p, cash_in, cash_out, bill_payment, airtime]
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: List of transactions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Transaction'
+
+    post:
+      tags: [Transactions]
+      summary: Create transaction
+      operationId: createTransaction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTransactionRequest'
+      responses:
+        '201':
+          description: Transaction created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Duplicate transaction (idempotency key already used)
+
+  /transactions/{transactionId}:
+    get:
+      tags: [Transactions]
+      summary: Get transaction by ID
+      operationId: getTransaction
+      parameters:
+        - $ref: '#/components/parameters/TransactionIdParam'
+      responses:
+        '200':
+          description: Transaction details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Transaction'
+
+  /payments/qr:
+    post:
+      tags: [Payments]
+      summary: Process QR payment
+      operationId: processQRPayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QRPaymentRequest'
+      responses:
+        '200':
+          description: Payment processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+
+  /payments/p2p:
+    post:
+      tags: [Payments]
+      summary: Process P2P transfer
+      operationId: processP2PTransfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/P2PTransferRequest'
+      responses:
+        '200':
+          description: Transfer processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+
+  /float/balances:
+    get:
+      tags: [Float]
+      summary: Get float balances
+      operationId: getFloatBalances
+      responses:
+        '200':
+          description: Float balances
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FloatBalance'
+
+  /float/allocate:
+    post:
+      tags: [Float]
+      summary: Allocate float
+      operationId: allocateFloat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FloatAllocationRequest'
+      responses:
+        '200':
+          description: Float allocated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FloatAllocation'
+
+  /commissions:
+    get:
+      tags: [Commissions]
+      summary: Get commissions
+      operationId: getCommissions
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: agent_id
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, settled, paid]
+      responses:
+        '200':
+          description: List of commissions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Commission'
+
+  /commissions/summary:
+    get:
+      tags: [Commissions]
+      summary: Get commission summary
+      operationId: getCommissionSummary
+      parameters:
+        - name: agent_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Commission summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommissionSummary'
+
+  /routing/transfer:
+    post:
+      tags: [Routing]
+      summary: Route transfer to optimal bank
+      operationId: routeTransfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RoutingRequest'
+      responses:
+        '200':
+          description: Routing decision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoutingResponse'
+
+  /analytics/dashboard:
+    get:
+      tags: [Analytics]
+      summary: Get dashboard metrics
+      operationId: getDashboardMetrics
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [today, week, month, year]
+            default: today
+      responses:
+        '200':
+          description: Dashboard metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DashboardMetrics'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    AgentIdParam:
+      name: agentId
+      in: path
+      required: true
+      schema:
+        type: string
+    CustomerIdParam:
+      name: customerId
+      in: path
+      required: true
+      schema:
+        type: string
+    TransactionIdParam:
+      name: transactionId
+      in: path
+      required: true
+      schema:
+        type: string
+
+  schemas:
+    AuthResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        token_type:
+          type: string
+          default: Bearer
+        expires_in:
+          type: integer
+
+    Agent:
+      type: object
+      properties:
+        agent_id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        phone_number:
+          type: string
+        tier:
+          type: string
+          enum: [master_agent, super_agent, agent, sub_agent, trainee]
+        status:
+          type: string
+          enum: [active, inactive, suspended, pending]
+        parent_agent_id:
+          type: string
+          nullable: true
+        territory:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    CreateAgentRequest:
+      type: object
+      required: [name, email, phone_number, tier]
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        phone_number:
+          type: string
+        tier:
+          type: string
+          enum: [master_agent, super_agent, agent, sub_agent, trainee]
+        parent_agent_id:
+          type: string
+        territory:
+          type: string
+
+    Customer:
+      type: object
+      properties:
+        customer_id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        phone_number:
+          type: string
+        kyc_level:
+          type: string
+          enum: [unverified, basic, verified, premium]
+        status:
+          type: string
+          enum: [active, inactive, suspended]
+        created_at:
+          type: string
+          format: date-time
+
+    CreateCustomerRequest:
+      type: object
+      required: [name, phone_number]
+      properties:
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        phone_number:
+          type: string
+
+    Account:
+      type: object
+      properties:
+        account_id:
+          type: string
+        account_type:
+          type: string
+          enum: [primary, savings, merchant]
+        balance:
+          type: number
+          format: double
+        currency:
+          type: string
+          default: NGN
+        status:
+          type: string
+
+    Transaction:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+        type:
+          type: string
+          enum: [qr_payment, p2p, cash_in, cash_out, bill_payment, airtime]
+        amount:
+          type: number
+          format: double
+        currency:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, completed, failed, reversed]
+        customer_id:
+          type: string
+        merchant_id:
+          type: string
+          nullable: true
+        agent_id:
+          type: string
+          nullable: true
+        idempotency_key:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    CreateTransactionRequest:
+      type: object
+      required: [type, amount, customer_id, idempotency_key]
+      properties:
+        type:
+          type: string
+          enum: [qr_payment, p2p, cash_in, cash_out, bill_payment, airtime]
+        amount:
+          type: number
+          format: double
+        currency:
+          type: string
+          default: NGN
+        customer_id:
+          type: string
+        recipient_id:
+          type: string
+        merchant_id:
+          type: string
+        agent_id:
+          type: string
+        idempotency_key:
+          type: string
+          description: Unique key to prevent duplicate transactions
+
+    QRPaymentRequest:
+      type: object
+      required: [qr_code_data, customer_id, idempotency_key]
+      properties:
+        qr_code_data:
+          type: string
+        customer_id:
+          type: string
+        amount:
+          type: number
+          format: double
+          description: Required for static QR codes
+        idempotency_key:
+          type: string
+
+    P2PTransferRequest:
+      type: object
+      required: [sender_id, recipient_phone, amount, idempotency_key]
+      properties:
+        sender_id:
+          type: string
+        recipient_phone:
+          type: string
+        amount:
+          type: number
+          format: double
+        note:
+          type: string
+        idempotency_key:
+          type: string
+
+    PaymentResponse:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+        status:
+          type: string
+        amount:
+          type: number
+          format: double
+        fee:
+          type: number
+          format: double
+        receipt_url:
+          type: string
+
+    FloatBalance:
+      type: object
+      properties:
+        pool_id:
+          type: string
+        bank_code:
+          type: string
+        balance:
+          type: number
+          format: double
+        reserved:
+          type: number
+          format: double
+        available:
+          type: number
+          format: double
+        currency:
+          type: string
+
+    FloatAllocationRequest:
+      type: object
+      required: [agent_id, amount]
+      properties:
+        agent_id:
+          type: string
+        amount:
+          type: number
+          format: double
+        pool_id:
+          type: string
+
+    FloatAllocation:
+      type: object
+      properties:
+        allocation_id:
+          type: string
+        agent_id:
+          type: string
+        amount:
+          type: number
+          format: double
+        status:
+          type: string
+
+    Commission:
+      type: object
+      properties:
+        commission_id:
+          type: string
+        agent_id:
+          type: string
+        transaction_id:
+          type: string
+        amount:
+          type: number
+          format: double
+        commission_type:
+          type: string
+        status:
+          type: string
+          enum: [pending, settled, paid]
+        created_at:
+          type: string
+          format: date-time
+
+    CommissionSummary:
+      type: object
+      properties:
+        today:
+          type: number
+          format: double
+        week:
+          type: number
+          format: double
+        month:
+          type: number
+          format: double
+        pending:
+          type: number
+          format: double
+        settled:
+          type: number
+          format: double
+
+    RoutingRequest:
+      type: object
+      required: [source_bank, dest_bank, amount]
+      properties:
+        source_bank:
+          type: string
+        dest_bank:
+          type: string
+        amount:
+          type: number
+          format: double
+        priority:
+          type: string
+          enum: [cost, speed, reliability]
+          default: reliability
+
+    RoutingResponse:
+      type: object
+      properties:
+        transfer_id:
+          type: string
+        selected_rail:
+          type: string
+        predicted_success_rate:
+          type: number
+          format: double
+        predicted_latency_ms:
+          type: integer
+        predicted_cost:
+          type: number
+          format: double
+
+    DashboardMetrics:
+      type: object
+      properties:
+        total_transactions:
+          type: integer
+        total_volume:
+          type: number
+          format: double
+        active_agents:
+          type: integer
+        active_customers:
+          type: integer
+        success_rate:
+          type: number
+          format: double
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+        limit:
+          type: integer
+        total:
+          type: integer
+        total_pages:
+          type: integer
+
+    Error:
+      type: object
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

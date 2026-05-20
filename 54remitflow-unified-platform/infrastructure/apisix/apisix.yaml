@@ -1,0 +1,183 @@
+# RemitFlow APISIX Gateway Configuration
+# Rate limiting, auth, and routing for all API services
+
+apisix:
+  node_listen: 9080
+  enable_ipv6: false
+  enable_admin: true
+  admin_listen:
+    ip: 127.0.0.1
+    port: 9180
+  ssl:
+    enable: true
+    listen_port: 9443
+
+plugin_attr:
+  prometheus:
+    export_uri: /apisix/prometheus/metrics
+    export_addr:
+      ip: "0.0.0.0"
+      port: 9091
+
+plugins:
+  - limit-req
+  - limit-conn
+  - limit-count
+  - key-auth
+  - jwt-auth
+  - cors
+  - ip-restriction
+  - request-id
+  - prometheus
+  - response-rewrite
+  - redirect
+  - proxy-rewrite
+
+routes:
+  # Auth endpoints — strict rate limit (10 req/min per IP)
+  - id: auth-login
+    uri: /api/v1/auth/login
+    methods: [POST]
+    plugins:
+      limit-req:
+        rate: 10
+        burst: 5
+        key: remote_addr
+        rejected_code: 429
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:8000": 1
+
+  - id: auth-register
+    uri: /api/v1/auth/register
+    methods: [POST]
+    plugins:
+      limit-req:
+        rate: 5
+        burst: 2
+        key: remote_addr
+        rejected_code: 429
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:8000": 1
+
+  - id: auth-resend-otp
+    uri: /api/v1/auth/resend-otp
+    methods: [POST]
+    plugins:
+      limit-req:
+        rate: 3
+        burst: 1
+        key: remote_addr
+        rejected_code: 429
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:8000": 1
+
+  # Transaction endpoints — require JWT + idempotency
+  - id: transactions-send
+    uri: /api/v1/transactions/send
+    methods: [POST]
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 30
+        burst: 10
+        key: consumer_name
+        rejected_code: 429
+      request-id:
+        header_name: X-Request-ID
+        include_in_response: true
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:8000": 1
+
+  # Webhook endpoints — no auth (HMAC validated in app), moderate rate limit
+  - id: webhooks-paystack
+    uri: /api/v1/webhooks/paystack
+    methods: [POST]
+    plugins:
+      limit-req:
+        rate: 60
+        burst: 20
+        key: remote_addr
+        rejected_code: 429
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:8000": 1
+
+  - id: webhooks-stripe
+    uri: /api/v1/webhooks/stripe
+    methods: [POST]
+    plugins:
+      limit-req:
+        rate: 60
+        burst: 20
+        key: remote_addr
+        rejected_code: 429
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:8000": 1
+
+  - id: webhooks-flutterwave
+    uri: /api/v1/webhooks/flutterwave
+    methods: [POST]
+    plugins:
+      limit-req:
+        rate: 60
+        burst: 20
+        key: remote_addr
+        rejected_code: 429
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:8000": 1
+
+  - id: webhooks-wise
+    uri: /api/v1/webhooks/wise
+    methods: [POST]
+    plugins:
+      limit-req:
+        rate: 60
+        burst: 20
+        key: remote_addr
+        rejected_code: 429
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:8000": 1
+
+  # General API — JWT required, standard rate limit
+  - id: api-general
+    uri: /api/v1/*
+    methods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 100
+        burst: 20
+        key: consumer_name
+        rejected_code: 429
+      request-id:
+        header_name: X-Request-ID
+        include_in_response: true
+      prometheus: {}
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:8000": 1
+
+  # Health check — no auth, no rate limit
+  - id: health
+    uri: /health
+    methods: [GET]
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:8000": 1

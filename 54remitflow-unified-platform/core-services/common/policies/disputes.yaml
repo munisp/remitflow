@@ -1,0 +1,122 @@
+# Dispute Service Policies
+# Controls who can view, create, and manage disputes with fine-grained data visibility
+
+# Support staff can view disputes but with redacted sensitive fields
+- id: dispute_view_support
+  description: "Support staff can view disputes with redacted KYC and bank details"
+  subjects:
+    roles: ["support"]
+  actions: ["dispute:view", "dispute:list"]
+  resources:
+    type: "dispute"
+  conditions:
+    - type: tenant_match
+      allow_null: true
+  effect: allow
+  priority: 10
+  redactions:
+    - "kyc.full_address"
+    - "kyc.id_number"
+    - "bank_account_number"
+    - "sender.phone"
+    - "beneficiary.phone"
+
+# Compliance can view all dispute details without redaction
+- id: dispute_view_compliance
+  description: "Compliance staff can view full dispute details"
+  subjects:
+    roles: ["compliance", "admin"]
+  actions: ["dispute:view", "dispute:list"]
+  resources:
+    type: "dispute"
+  conditions:
+    - type: tenant_match
+      allow_null: true
+  effect: allow
+  priority: 20
+  redactions: []
+
+# Users can view their own disputes
+- id: dispute_view_owner
+  description: "Users can view their own disputes"
+  subjects:
+    roles: ["user"]
+  actions: ["dispute:view"]
+  resources:
+    type: "dispute"
+  conditions:
+    - type: owner_match
+  effect: allow
+  priority: 5
+  redactions:
+    - "internal_notes"
+    - "compliance_flags"
+
+# Users can create disputes for their own transactions
+- id: dispute_create_user
+  description: "Users can create disputes for their own transactions"
+  subjects:
+    roles: ["user"]
+  actions: ["dispute:create"]
+  resources:
+    type: "dispute"
+  conditions:
+    - type: owner_match
+  effect: allow
+  priority: 5
+
+# Support can update dispute status (except resolve)
+- id: dispute_update_support
+  description: "Support can update dispute status but not resolve"
+  subjects:
+    roles: ["support"]
+  actions: ["dispute:update"]
+  resources:
+    type: "dispute"
+    statuses: ["open", "under_review", "pending_info"]
+  conditions:
+    - type: tenant_match
+      allow_null: true
+  effect: allow
+  priority: 10
+
+# Only compliance can resolve disputes
+- id: dispute_resolve_compliance
+  description: "Only compliance can resolve disputes"
+  subjects:
+    roles: ["compliance", "admin"]
+  actions: ["dispute:resolve", "dispute:close"]
+  resources:
+    type: "dispute"
+  conditions:
+    - type: tenant_match
+      allow_null: true
+  effect: allow
+  priority: 20
+
+# High-value disputes require compliance approval
+- id: dispute_high_value_compliance_only
+  description: "High-value disputes (>1M NGN) require compliance handling"
+  subjects:
+    roles: ["support"]
+  actions: ["dispute:resolve"]
+  resources:
+    type: "dispute"
+  conditions:
+    - type: amount_gte
+      value: 1000000
+  effect: deny
+  priority: 30
+
+# Escalated disputes require admin
+- id: dispute_escalated_admin_only
+  description: "Escalated disputes require admin handling"
+  subjects:
+    roles: ["support", "compliance"]
+    exclude_roles: ["admin"]
+  actions: ["dispute:resolve"]
+  resources:
+    type: "dispute"
+    statuses: ["escalated"]
+  effect: deny
+  priority: 40

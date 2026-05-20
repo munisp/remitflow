@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis-production
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - redis-network
+
+  redis-sentinel:
+    image: redis:7-alpine
+    container_name: redis-sentinel
+    restart: unless-stopped
+    ports:
+      - "26379:26379"
+    command: redis-sentinel /usr/local/etc/redis/sentinel.conf
+    depends_on:
+      - redis
+    networks:
+      - redis-network
+
+volumes:
+  redis-data:
+
+networks:
+  redis-network:
+    driver: bridge

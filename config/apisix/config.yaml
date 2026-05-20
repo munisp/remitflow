@@ -1,0 +1,111 @@
+apisix:
+  node_listen: 9080
+  enable_ipv6: false
+  enable_admin: true
+  admin_listen:
+    ip: 0.0.0.0
+    port: 9180
+  ssl:
+    enable: true
+    listen:
+      - port: 9443
+        enable_http2: true
+
+deployment:
+  role: traditional
+  role_traditional:
+    config_provider: etcd
+  etcd:
+    host:
+      - http://etcd:2379
+    prefix: /apisix
+    timeout: 30
+
+plugin_attr:
+  prometheus:
+    export_uri: /apisix/prometheus/metrics
+    metric_prefix: apisix_
+    enable_export_server: true
+    export_addr:
+      ip: 0.0.0.0
+      port: 9091
+  log-rotate:
+    interval: 3600
+    max_kept: 168
+  server-info:
+    report_ttl: 60
+
+plugins:
+  - real-ip
+  - client-control
+  - proxy-control
+  - request-id
+  - zipkin
+  - ext-plugin-pre-req
+  - fault-injection
+  - mocking
+  - serverless-pre-function
+  - cors
+  - ip-restriction
+  - ua-restriction
+  - referer-restriction
+  - csrf
+  - uri-blocker
+  - request-validation
+  - openid-connect
+  - cas-auth
+  - authz-casbin
+  - authz-casdoor
+  - wolf-rbac
+  - ldap-auth
+  - hmac-auth
+  - basic-auth
+  - jwt-auth
+  - key-auth
+  - consumer-restriction
+  - forward-auth
+  - opa
+  - authz-keycloak
+  - proxy-mirror
+  - proxy-cache
+  - proxy-rewrite
+  - api-breaker
+  - limit-conn
+  - limit-count
+  - limit-req
+  - gzip
+  - degraphql
+  - traffic-split
+  - redirect
+  - response-rewrite
+  - grpc-transcode
+  - grpc-web
+  - public-api
+  - prometheus
+  - datadog
+  - loki-logger
+  - elasticsearch-logger
+  - echo
+  - loggly
+  - http-logger
+  - splunk-hec-logging
+  - skywalking-logger
+  - google-cloud-logging
+  - sls-logger
+  - tcp-logger
+  - kafka-logger
+  - rocketmq-logger
+  - syslog
+  - udp-logger
+  - file-logger
+  - clickhouse-logger
+  - tencent-cloud-cls
+  - inspect
+  - example-plugin
+  - aws-lambda
+  - azure-functions
+  - openwhisk
+  - openfunction
+  - serverless-post-function
+  - ext-plugin-post-req
+  - ext-plugin-post-resp

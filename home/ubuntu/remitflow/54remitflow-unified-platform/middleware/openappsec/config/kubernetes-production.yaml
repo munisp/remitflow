@@ -1,0 +1,419 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openappsec-system
+
+---
+# ConfigMap for policies
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openappsec-policies
+  namespace: openappsec-system
+data:
+  comprehensive-security-policies.yaml: |
+    # Include policy content here or mount from external source
+
+---
+# Secret for credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openappsec-secrets
+  namespace: openappsec-system
+type: Opaque
+stringData:
+  agent-token: "CHANGE_ME"
+  postgres-user: "openappsec"
+  postgres-password: "CHANGE_ME"
+  admin-password: "CHANGE_ME"
+
+---
+# PostgreSQL StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openappsec-postgres
+  namespace: openappsec-system
+spec:
+  serviceName: openappsec-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openappsec-postgres
+  template:
+    metadata:
+      labels:
+        app: openappsec-postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_DB
+          value: "openappsec"
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: openappsec-secrets
+              key: postgres-user
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openappsec-secrets
+              key: postgres-password
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
+        livenessProbe:
+          exec:
+            command: ["pg_isready", "-U", "openappsec"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "openappsec"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: openappsec-postgres
+  namespace: openappsec-system
+spec:
+  selector:
+    app: openappsec-postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+  clusterIP: None
+
+---
+# openappsec Management Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openappsec-management
+  namespace: openappsec-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: openappsec-management
+  template:
+    metadata:
+      labels:
+        app: openappsec-management
+    spec:
+      containers:
+      - name: management
+        image: ghcr.io/openappsec/management:latest
+        ports:
+        - containerPort: 8443
+          name: https
+        env:
+        - name: POSTGRES_HOST
+          value: "openappsec-postgres"
+        - name: POSTGRES_PORT
+          value: "5432"
+        - name: POSTGRES_DB
+          value: "openappsec"
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: openappsec-secrets
+              key: postgres-user
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openappsec-secrets
+              key: postgres-password
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: openappsec-secrets
+              key: admin-password
+        volumeMounts:
+        - name: policies
+          mountPath: /etc/openappsec/policies
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: policies
+        configMap:
+          name: openappsec-policies
+
+---
+# openappsec Management Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: openappsec-management
+  namespace: openappsec-system
+spec:
+  selector:
+    app: openappsec-management
+  ports:
+  - port: 8443
+    targetPort: 8443
+  type: ClusterIP
+
+---
+# openappsec Agent DaemonSet
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: openappsec-agent
+  namespace: openappsec-system
+spec:
+  selector:
+    matchLabels:
+      app: openappsec-agent
+  template:
+    metadata:
+      labels:
+        app: openappsec-agent
+    spec:
+      containers:
+      - name: agent
+        image: ghcr.io/openappsec/agent:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: AGENT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: openappsec-secrets
+              key: agent-token
+        - name: MANAGEMENT_URL
+          value: "https://openappsec-management:8443"
+        - name: LOG_LEVEL
+          value: "info"
+        - name: TLS_ENABLED
+          value: "true"
+        volumeMounts:
+        - name: policies
+          mountPath: /etc/cp/conf/policy
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 40
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 20
+          periodSeconds: 10
+      volumes:
+      - name: policies
+        configMap:
+          name: openappsec-policies
+
+---
+# openappsec Agent Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: openappsec-agent
+  namespace: openappsec-system
+spec:
+  selector:
+    app: openappsec-agent
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP
+
+---
+# openappsec Bridge Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openappsec-bridge
+  namespace: openappsec-system
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: openappsec-bridge
+  template:
+    metadata:
+      labels:
+        app: openappsec-bridge
+    spec:
+      containers:
+      - name: bridge
+        image: openappsec-bridge:latest
+        ports:
+        - containerPort: 9000
+          name: http
+        env:
+        - name: OPENAPPSEC_AGENT_URL
+          value: "http://openappsec-agent:8080"
+        - name: OPENAPPSEC_MANAGEMENT_URL
+          value: "https://openappsec-management:8443"
+        - name: LOG_LEVEL
+          value: "info"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+
+---
+# openappsec Bridge Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: openappsec-bridge
+  namespace: openappsec-system
+spec:
+  selector:
+    app: openappsec-bridge
+  ports:
+  - port: 9000
+    targetPort: 9000
+  type: ClusterIP
+
+---
+# Horizontal Pod Autoscaler for Bridge
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: openappsec-bridge-hpa
+  namespace: openappsec-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: openappsec-bridge
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openappsec-network-policy
+  namespace: openappsec-system
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: apisix-system
+    ports:
+    - protocol: TCP
+      port: 9000
+  egress:
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 53  # DNS
+  - to:
+    - podSelector:
+        matchLabels:
+          app: openappsec-agent
+    ports:
+    - protocol: TCP
+      port: 8080
+  - to:
+    - podSelector:
+        matchLabels:
+          app: openappsec-management
+    ports:
+    - protocol: TCP
+      port: 8443
+  - to:
+    - podSelector:
+        matchLabels:
+          app: openappsec-postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+

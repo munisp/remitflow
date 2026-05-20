@@ -1,0 +1,1144 @@
+# Kubernetes Deployments for Previously Orphan Services
+# Generated to wire orphan services into the main platform flow
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remittance
+  labels:
+    app.kubernetes.io/name: remittance
+    app.kubernetes.io/part-of: remittance-platform
+
+---
+# Commission Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: commission-service
+  namespace: remittance
+  labels:
+    app: commission-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: commission-service
+  template:
+    metadata:
+      labels:
+        app: commission-service
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "commission-service"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: commission-service
+        image: remittance/commission-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: redis-config
+              key: url
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: commission-service
+  namespace: remittance
+spec:
+  selector:
+    app: commission-service
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# Float Management Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: float-management
+  namespace: remittance
+  labels:
+    app: float-management
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: float-management
+  template:
+    metadata:
+      labels:
+        app: float-management
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "float-management"
+        dapr.io/app-port: "8080"
+    spec:
+      containers:
+      - name: float-management
+        image: remittance/float-management:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        - name: TIGERBEETLE_ADDRESS
+          valueFrom:
+            configMapKeyRef:
+              name: tigerbeetle-config
+              key: address
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: float-management
+  namespace: remittance
+spec:
+  selector:
+    app: float-management
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP
+
+---
+# Settlement Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: settlement-service
+  namespace: remittance
+  labels:
+    app: settlement-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: settlement-service
+  template:
+    metadata:
+      labels:
+        app: settlement-service
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "settlement-service"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: settlement-service
+        image: remittance/settlement-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: settlement-service
+  namespace: remittance
+spec:
+  selector:
+    app: settlement-service
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# Reconciliation Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reconciliation-service
+  namespace: remittance
+  labels:
+    app: reconciliation-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: reconciliation-service
+  template:
+    metadata:
+      labels:
+        app: reconciliation-service
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "reconciliation-service"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: reconciliation-service
+        image: remittance/reconciliation-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reconciliation-service
+  namespace: remittance
+spec:
+  selector:
+    app: reconciliation-service
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# POS Management Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pos-management
+  namespace: remittance
+  labels:
+    app: pos-management
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pos-management
+  template:
+    metadata:
+      labels:
+        app: pos-management
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "pos-management"
+        dapr.io/app-port: "8080"
+    spec:
+      containers:
+      - name: pos-management
+        image: remittance/pos-management:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        - name: FLUVIO_MQTT_BROKER
+          valueFrom:
+            configMapKeyRef:
+              name: fluvio-config
+              key: mqtt-broker
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pos-management
+  namespace: remittance
+spec:
+  selector:
+    app: pos-management
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP
+
+---
+# QR Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qr-service
+  namespace: remittance
+  labels:
+    app: qr-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: qr-service
+  template:
+    metadata:
+      labels:
+        app: qr-service
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "qr-service"
+        dapr.io/app-port: "8080"
+    spec:
+      containers:
+      - name: qr-service
+        image: remittance/qr-service:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qr-service
+  namespace: remittance
+spec:
+  selector:
+    app: qr-service
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: ClusterIP
+
+---
+# KYC Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kyc-service
+  namespace: remittance
+  labels:
+    app: kyc-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kyc-service
+  template:
+    metadata:
+      labels:
+        app: kyc-service
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "kyc-service"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: kyc-service
+        image: remittance/kyc-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        - name: TEMPORAL_API_URL
+          valueFrom:
+            configMapKeyRef:
+              name: kyc-config
+              key: temporal-url
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kyc-service
+  namespace: remittance
+spec:
+  selector:
+    app: kyc-service
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# KYB Verification Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kyb-verification
+  namespace: remittance
+  labels:
+    app: kyb-verification
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kyb-verification
+  template:
+    metadata:
+      labels:
+        app: kyb-verification
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "kyb-verification"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: kyb-verification
+        image: remittance/kyb-verification:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kyb-verification
+  namespace: remittance
+spec:
+  selector:
+    app: kyb-verification
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# USSD Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ussd-service
+  namespace: remittance
+  labels:
+    app: ussd-service
+    tier: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ussd-service
+  template:
+    metadata:
+      labels:
+        app: ussd-service
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "ussd-service"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: ussd-service
+        image: remittance/ussd-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: redis-config
+              key: url
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ussd-service
+  namespace: remittance
+spec:
+  selector:
+    app: ussd-service
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# SMS Gateway Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sms-gateway
+  namespace: remittance
+  labels:
+    app: sms-gateway
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sms-gateway
+  template:
+    metadata:
+      labels:
+        app: sms-gateway
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "sms-gateway"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: sms-gateway
+        image: remittance/sms-gateway:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        - name: SMS_PROVIDER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: sms-credentials
+              key: api-key
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sms-gateway
+  namespace: remittance
+spec:
+  selector:
+    app: sms-gateway
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# Loyalty Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loyalty-service
+  namespace: remittance
+  labels:
+    app: loyalty-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: loyalty-service
+  template:
+    metadata:
+      labels:
+        app: loyalty-service
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "loyalty-service"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: loyalty-service
+        image: remittance/loyalty-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: loyalty-service
+  namespace: remittance
+spec:
+  selector:
+    app: loyalty-service
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# Inventory Management Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-management
+  namespace: remittance
+  labels:
+    app: inventory-management
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: inventory-management
+  template:
+    metadata:
+      labels:
+        app: inventory-management
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "inventory-management"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: inventory-management
+        image: remittance/inventory-management:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-management
+  namespace: remittance
+spec:
+  selector:
+    app: inventory-management
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# Payment Gateway Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-gateway
+  namespace: remittance
+  labels:
+    app: payment-gateway
+    tier: backend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: payment-gateway
+  template:
+    metadata:
+      labels:
+        app: payment-gateway
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "payment-gateway"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: payment-gateway
+        image: remittance/payment-gateway:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        - name: TIGERBEETLE_ADDRESS
+          valueFrom:
+            configMapKeyRef:
+              name: tigerbeetle-config
+              key: address
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment-gateway
+  namespace: remittance
+spec:
+  selector:
+    app: payment-gateway
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# Risk Assessment Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: risk-assessment
+  namespace: remittance
+  labels:
+    app: risk-assessment
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: risk-assessment
+  template:
+    metadata:
+      labels:
+        app: risk-assessment
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "risk-assessment"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: risk-assessment
+        image: remittance/risk-assessment:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: risk-assessment
+  namespace: remittance
+spec:
+  selector:
+    app: risk-assessment
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# Credit Scoring Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: credit-scoring
+  namespace: remittance
+  labels:
+    app: credit-scoring
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: credit-scoring
+  template:
+    metadata:
+      labels:
+        app: credit-scoring
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "credit-scoring"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: credit-scoring
+        image: remittance/credit-scoring:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: credit-scoring
+  namespace: remittance
+spec:
+  selector:
+    app: credit-scoring
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# Onboarding Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: onboarding-service
+  namespace: remittance
+  labels:
+    app: onboarding-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: onboarding-service
+  template:
+    metadata:
+      labels:
+        app: onboarding-service
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "onboarding-service"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: onboarding-service
+        image: remittance/onboarding-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: onboarding-service
+  namespace: remittance
+spec:
+  selector:
+    app: onboarding-service
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+# Reporting Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reporting-service
+  namespace: remittance
+  labels:
+    app: reporting-service
+    tier: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: reporting-service
+  template:
+    metadata:
+      labels:
+        app: reporting-service
+        tier: backend
+      annotations:
+        dapr.io/enabled: "true"
+        dapr.io/app-id: "reporting-service"
+        dapr.io/app-port: "8000"
+    spec:
+      containers:
+      - name: reporting-service
+        image: remittance/reporting-service:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: connection-string
+        - name: LAKEHOUSE_URL
+          valueFrom:
+            configMapKeyRef:
+              name: lakehouse-config
+              key: url
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reporting-service
+  namespace: remittance
+spec:
+  selector:
+    app: reporting-service
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP

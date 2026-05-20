@@ -1,0 +1,403 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tigerbeetle-system
+  labels:
+    name: tigerbeetle-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tigerbeetle
+  namespace: tigerbeetle-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tigerbeetle-config
+  namespace: tigerbeetle-system
+data:
+  tigerbeetle.conf: |
+    # TigerBeetle Configuration
+    cluster_id: 1
+    replica_count: 3
+    cache_size_mb: 1024
+    journal_size_mb: 10240
+    standby_size_mb: 2048
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle
+spec:
+  type: ClusterIP
+  clusterIP: None  # Headless service for StatefulSet
+  ports:
+    - name: client
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+    - name: peer
+      port: 3001
+      targetPort: 3001
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+      protocol: TCP
+  selector:
+    app: tigerbeetle
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle-public
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle
+spec:
+  type: LoadBalancer
+  ports:
+    - name: client
+      port: 3000
+      targetPort: 3000
+      protocol: TCP
+  selector:
+    app: tigerbeetle
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tigerbeetle-data-template
+  namespace: tigerbeetle-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: fast-ssd
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tigerbeetle
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle
+spec:
+  serviceName: tigerbeetle
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: tigerbeetle
+  template:
+    metadata:
+      labels:
+        app: tigerbeetle
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: tigerbeetle
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - tigerbeetle
+              topologyKey: kubernetes.io/hostname
+      initContainers:
+        - name: init-tigerbeetle
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Initializing TigerBeetle data directory..."
+              mkdir -p /var/lib/tigerbeetle/data
+              chmod 755 /var/lib/tigerbeetle/data
+              echo "Initialization complete"
+          volumeMounts:
+            - name: tigerbeetle-data
+              mountPath: /var/lib/tigerbeetle
+      containers:
+        - name: tigerbeetle
+          image: ghcr.io/tigerbeetle/tigerbeetle:latest
+          imagePullPolicy: Always
+          command:
+            - /bin/sh
+            - -c
+            - |
+              REPLICA_ID=$(echo $HOSTNAME | sed 's/.*-//')
+              CLUSTER_ID=1
+              DATA_FILE="/var/lib/tigerbeetle/data/cluster_${CLUSTER_ID}_replica_${REPLICA_ID}.tigerbeetle"
+              
+              # Format data file if it doesn't exist
+              if [ ! -f "$DATA_FILE" ]; then
+                echo "Formatting TigerBeetle data file: $DATA_FILE"
+                tigerbeetle format \
+                  --cluster=$CLUSTER_ID \
+                  --replica=$REPLICA_ID \
+                  --replica-count=3 \
+                  $DATA_FILE
+              fi
+              
+              # Build addresses for all replicas
+              ADDRESSES=""
+              for i in 0 1 2; do
+                if [ $i -eq 0 ]; then
+                  ADDRESSES="tigerbeetle-$i.tigerbeetle.tigerbeetle-system.svc.cluster.local:3000"
+                else
+                  ADDRESSES="$ADDRESSES,tigerbeetle-$i.tigerbeetle.tigerbeetle-system.svc.cluster.local:3000"
+                fi
+              done
+              
+              echo "Starting TigerBeetle replica $REPLICA_ID"
+              echo "Cluster ID: $CLUSTER_ID"
+              echo "Addresses: $ADDRESSES"
+              
+              exec tigerbeetle start \
+                --addresses=$ADDRESSES \
+                --cache-grid-size=1GB \
+                $DATA_FILE
+          ports:
+            - name: client
+              containerPort: 3000
+              protocol: TCP
+            - name: peer
+              containerPort: 3001
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          env:
+            - name: TIGERBEETLE_CLUSTER_ID
+              value: "1"
+            - name: TIGERBEETLE_REPLICA_COUNT
+              value: "3"
+            - name: TIGERBEETLE_CACHE_SIZE_MB
+              value: "1024"
+            - name: RUST_LOG
+              value: "info"
+            - name: RUST_BACKTRACE
+              value: "1"
+          volumeMounts:
+            - name: tigerbeetle-data
+              mountPath: /var/lib/tigerbeetle
+            - name: config
+              mountPath: /etc/tigerbeetle
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1000m"
+            limits:
+              memory: "8Gi"
+              cpu: "4000m"
+          livenessProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+      volumes:
+        - name: config
+          configMap:
+            name: tigerbeetle-config
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsNonRoot: true
+  volumeClaimTemplates:
+    - metadata:
+        name: tigerbeetle-data
+        labels:
+          app: tigerbeetle
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 100Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle-service
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle-service
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+      protocol: TCP
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+      protocol: TCP
+  selector:
+    app: tigerbeetle-service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tigerbeetle-service
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tigerbeetle-service
+  template:
+    metadata:
+      labels:
+        app: tigerbeetle-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: tigerbeetle
+      containers:
+        - name: tigerbeetle-service
+          image: nigerian-remittance/tigerbeetle-service:latest
+          imagePullPolicy: Always
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
+          env:
+            - name: TIGERBEETLE_ADDRESSES
+              value: "tigerbeetle-0.tigerbeetle.tigerbeetle-system.svc.cluster.local:3000,tigerbeetle-1.tigerbeetle.tigerbeetle-system.svc.cluster.local:3000,tigerbeetle-2.tigerbeetle.tigerbeetle-system.svc.cluster.local:3000"
+            - name: TIGERBEETLE_CLUSTER_ID
+              value: "1"
+            - name: SERVICE_PORT
+              value: "50051"
+            - name: HTTP_PORT
+              value: "8080"
+            - name: METRICS_PORT
+              value: "9091"
+            - name: LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tigerbeetle-pdb
+  namespace: tigerbeetle-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: tigerbeetle
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tigerbeetle-service-pdb
+  namespace: tigerbeetle-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: tigerbeetle-service
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tigerbeetle-service-hpa
+  namespace: tigerbeetle-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tigerbeetle-service
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: fast-ssd
+provisioner: kubernetes.io/aws-ebs  # Change based on cloud provider
+parameters:
+  type: gp3
+  iops: "16000"
+  throughput: "1000"
+  fsType: ext4
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain

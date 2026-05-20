@@ -1,0 +1,468 @@
+# APISIX Routes for AI/ML Services
+# Production-ready routing configuration for ML services
+
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  name: ml-routing-service
+  namespace: remittance
+spec:
+  http:
+  # ML Routing Service - Predictions
+  - name: ml-routing-predict
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/routing/predict
+        - /api/v1/ml/routing/predict/*
+    backends:
+      - serviceName: ml-routing-service
+        servicePort: 8080
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: limit-req
+        enable: true
+        config:
+          rate: 1000
+          burst: 500
+          key: remote_addr
+      - name: prometheus
+        enable: true
+      - name: proxy-rewrite
+        enable: true
+        config:
+          regex_uri: ["^/api/v1/ml/routing/(.*)", "/api/v1/$1"]
+
+  # ML Routing Service - Outcomes (Online Learning)
+  - name: ml-routing-outcome
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/routing/outcome
+    backends:
+      - serviceName: ml-routing-service
+        servicePort: 8080
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: limit-req
+        enable: true
+        config:
+          rate: 5000
+          burst: 2000
+          key: remote_addr
+      - name: prometheus
+        enable: true
+
+  # ML Routing Service - Liquidity Forecasting
+  - name: ml-routing-forecast
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/routing/forecast
+    backends:
+      - serviceName: ml-routing-service
+        servicePort: 8080
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: limit-req
+        enable: true
+        config:
+          rate: 100
+          burst: 50
+          key: remote_addr
+      - name: prometheus
+        enable: true
+
+  # ML Routing Service - Model Training (Admin only)
+  - name: ml-routing-train
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/routing/train
+    backends:
+      - serviceName: ml-routing-service
+        servicePort: 8080
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: consumer-restriction
+        enable: true
+        config:
+          type: consumer_name
+          whitelist:
+            - admin
+            - ml-operator
+      - name: limit-req
+        enable: true
+        config:
+          rate: 10
+          burst: 5
+          key: remote_addr
+      - name: prometheus
+        enable: true
+
+  # ML Routing Service - Metrics
+  - name: ml-routing-metrics
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/routing/metrics
+    backends:
+      - serviceName: ml-routing-service
+        servicePort: 8080
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: prometheus
+        enable: true
+
+  # ML Routing Service - Features
+  - name: ml-routing-features
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/routing/features/*
+    backends:
+      - serviceName: ml-routing-service
+        servicePort: 8080
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: proxy-cache
+        enable: true
+        config:
+          cache_ttl: 60
+      - name: prometheus
+        enable: true
+
+  # ML Routing Service - Bandit
+  - name: ml-routing-bandit
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/routing/bandit/*
+    backends:
+      - serviceName: ml-routing-service
+        servicePort: 8080
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: prometheus
+        enable: true
+
+  # ML Routing Service - Health Check (No auth)
+  - name: ml-routing-health
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/routing/health
+    backends:
+      - serviceName: ml-routing-service
+        servicePort: 8080
+    plugins:
+      - name: prometheus
+        enable: true
+
+---
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  name: fraud-detection-service
+  namespace: remittance
+spec:
+  http:
+  # Fraud Detection - Real-time Detection
+  - name: fraud-detect
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/fraud/detect
+    backends:
+      - serviceName: fraud-detection-service
+        servicePort: 8000
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: limit-req
+        enable: true
+        config:
+          rate: 5000
+          burst: 2000
+          key: remote_addr
+      - name: prometheus
+        enable: true
+      - name: response-rewrite
+        enable: true
+        config:
+          headers:
+            X-Fraud-Service-Version: "1.0"
+
+  # Fraud Detection - Batch Detection
+  - name: fraud-batch-detect
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/fraud/batch
+    backends:
+      - serviceName: fraud-detection-service
+        servicePort: 8000
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: limit-req
+        enable: true
+        config:
+          rate: 100
+          burst: 50
+          key: remote_addr
+      - name: prometheus
+        enable: true
+
+  # Fraud Detection - Model Training (Admin only)
+  - name: fraud-train
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/fraud/train
+    backends:
+      - serviceName: fraud-detection-service
+        servicePort: 8000
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: consumer-restriction
+        enable: true
+        config:
+          type: consumer_name
+          whitelist:
+            - admin
+            - ml-operator
+      - name: prometheus
+        enable: true
+
+  # Fraud Detection - Model Info
+  - name: fraud-model-info
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/fraud/model
+    backends:
+      - serviceName: fraud-detection-service
+        servicePort: 8000
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: prometheus
+        enable: true
+
+  # Fraud Detection - Health Check (No auth)
+  - name: fraud-health
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/fraud/health
+    backends:
+      - serviceName: fraud-detection-service
+        servicePort: 8000
+    plugins:
+      - name: prometheus
+        enable: true
+
+---
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  name: credit-scoring-service
+  namespace: remittance
+spec:
+  http:
+  # Credit Scoring - Score Calculation
+  - name: credit-score
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/credit/score
+    backends:
+      - serviceName: credit-scoring-service
+        servicePort: 8000
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: limit-req
+        enable: true
+        config:
+          rate: 500
+          burst: 200
+          key: remote_addr
+      - name: prometheus
+        enable: true
+
+  # Credit Scoring - Explainability
+  - name: credit-explain
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/credit/explain
+    backends:
+      - serviceName: credit-scoring-service
+        servicePort: 8000
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: limit-req
+        enable: true
+        config:
+          rate: 100
+          burst: 50
+          key: remote_addr
+      - name: prometheus
+        enable: true
+
+  # Credit Scoring - Health Check (No auth)
+  - name: credit-health
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/credit/health
+    backends:
+      - serviceName: credit-scoring-service
+        servicePort: 8000
+    plugins:
+      - name: prometheus
+        enable: true
+
+---
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  name: ai-ml-coordinator
+  namespace: remittance
+spec:
+  http:
+  # AI/ML Coordinator - Main API
+  - name: aiml-api
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/*
+    backends:
+      - serviceName: ai-ml-services
+        servicePort: 8150
+    plugins:
+      - name: jwt-auth
+        enable: true
+      - name: limit-req
+        enable: true
+        config:
+          rate: 1000
+          burst: 500
+          key: remote_addr
+      - name: prometheus
+        enable: true
+
+  # AI/ML Coordinator - Health Check (No auth)
+  - name: aiml-health
+    match:
+      hosts:
+        - api.remittance.local
+      paths:
+        - /api/v1/ml/health
+    backends:
+      - serviceName: ai-ml-services
+        servicePort: 8150
+    plugins:
+      - name: prometheus
+        enable: true
+
+---
+# Kubernetes Services for ML components
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-routing-service
+  namespace: remittance
+  labels:
+    app: ml-routing-service
+    component: ml
+spec:
+  selector:
+    app: ml-routing-service
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fraud-detection-service
+  namespace: remittance
+  labels:
+    app: fraud-detection-service
+    component: ml
+spec:
+  selector:
+    app: fraud-detection-service
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: credit-scoring-service
+  namespace: remittance
+  labels:
+    app: credit-scoring-service
+    component: ml
+spec:
+  selector:
+    app: credit-scoring-service
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-ml-services
+  namespace: remittance
+  labels:
+    app: ai-ml-services
+    component: ml
+spec:
+  selector:
+    app: ai-ml-services
+  ports:
+  - name: http
+    port: 8150
+    targetPort: 8150
+  type: ClusterIP

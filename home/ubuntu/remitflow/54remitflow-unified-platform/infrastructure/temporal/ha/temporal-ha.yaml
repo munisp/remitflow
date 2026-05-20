@@ -1,0 +1,41 @@
+apiVersion: temporal.io/v1beta1
+kind: TemporalCluster
+metadata:
+  name: remitflow-temporal-cluster
+  namespace: temporal
+spec:
+  numHistoryShards: 1
+  jobTTL: 3600s
+  persistence:
+    defaultStore:
+      sql:
+        user: "temporal"
+        pluginName: "postgres"
+        databaseName: "temporal"
+        connectAddr: "postgres.temporal.svc.cluster.local:5432"
+        connectProtocol: "tcp"
+      passwordSecretRef:
+        name: "temporal-postgres-password"
+        key: "password"
+    visibilityStore:
+      sql:
+        user: "temporal"
+        pluginName: "postgres"
+        databaseName: "temporal_visibility"
+        connectAddr: "postgres.temporal.svc.cluster.local:5432"
+        connectProtocol: "tcp"
+      passwordSecretRef:
+        name: "temporal-postgres-password"
+        key: "password"
+  ui:
+    enabled: true
+  admintools:
+    enabled: true
+  history:
+    replicas: 3
+  matching:
+    replicas: 3
+  frontend:
+    replicas: 3
+  worker:
+    replicas: 3

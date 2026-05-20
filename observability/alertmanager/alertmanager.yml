@@ -1,0 +1,205 @@
+global:
+  # ── SMTP (fallback email alerts) ────────────────────────────────────────────
+  smtp_smarthost: "smtp.gmail.com:587"
+  smtp_from: "alerts@remitflow.io"
+  smtp_require_tls: true
+  resolve_timeout: 5m
+
+  # ── Slack global defaults ────────────────────────────────────────────────────
+  slack_api_url: "${SLACK_WEBHOOK_URL}"
+
+# ── Routing tree ──────────────────────────────────────────────────────────────
+route:
+  group_by: ["alertname", "service", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+  receiver: "slack-ops"
+
+  routes:
+    # Critical alerts → #remitflow-critical with 1h repeat
+    - match:
+        severity: critical
+      receiver: "slack-critical"
+      repeat_interval: 1h
+      continue: true
+
+    # Fraud / AML alerts → dedicated #remitflow-fraud channel
+    - match_re:
+        alertname: "FraudDetection.*|AML.*|ComplianceEngine.*"
+      receiver: "slack-fraud"
+      repeat_interval: 30m
+      continue: false
+
+    # Warning alerts → #remitflow-ops with 4h repeat
+    - match:
+        severity: warning
+      receiver: "slack-ops"
+      repeat_interval: 4h
+
+    # Info / resolved → #remitflow-monitoring
+    - match:
+        severity: info
+      receiver: "slack-monitoring"
+      repeat_interval: 24h
+
+    # CSP violation + WAF block alerts → #remitflow-security
+    - match_re:
+        alertname: "CSPViolation.*|WAFBlock.*|SecurityEvent.*|OpenAppsec.*"
+      receiver: "slack-security"
+      repeat_interval: 15m
+      continue: false
+
+    # APISIX rate-limit exceeded → security channel
+    - match:
+        service: apisix
+      receiver: "slack-security"
+      repeat_interval: 30m
+      continue: false
+
+# ── Receivers ─────────────────────────────────────────────────────────────────
+receivers:
+  # ── General Ops ─────────────────────────────────────────────────────────────
+  - name: "slack-ops"
+    slack_configs:
+      - channel: "#remitflow-ops"
+        send_resolved: true
+        icon_url: "https://avatars.githubusercontent.com/u/3380462"
+        title: |-
+          [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] {{ .CommonLabels.alertname }}
+        text: >-
+          {{ range .Alerts }}
+          *Service:* {{ .Labels.service | default "unknown" }}
+          *Severity:* {{ .Labels.severity | default "unknown" }}
+          *Summary:* {{ .Annotations.summary | default "No summary" }}
+          *Description:* {{ .Annotations.description | default "No description" }}
+          *Started:* {{ .StartsAt | since }}
+          {{ if .Labels.runbook_url }}*Runbook:* <{{ .Labels.runbook_url }}|View Runbook>{{ end }}
+          {{ end }}
+        actions:
+          - type: button
+            text: "🔕 Silence 1h"
+            url: "{{ .ExternalURL }}/#/silences/new?filter=%7Balertname%3D%22{{ .CommonLabels.alertname }}%22%7D"
+          - type: button
+            text: "📊 Grafana"
+            url: "http://localhost:3001/dashboards"
+
+  # ── Critical Alerts ──────────────────────────────────────────────────────────
+  - name: "slack-critical"
+    slack_configs:
+      - channel: "#remitflow-critical"
+        send_resolved: true
+        icon_emoji: ":rotating_light:"
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        title: |-
+          🚨 CRITICAL [{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}
+        text: >-
+          {{ range .Alerts }}
+          *Service:* `{{ .Labels.service | default "unknown" }}`
+          *Severity:* `{{ .Labels.severity }}`
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Started:* {{ .StartsAt | since }}
+          *Affected Instances:* {{ .Labels.instance | default "N/A" }}
+          {{ end }}
+        actions:
+          - type: button
+            text: "🔕 Silence 4h"
+            url: "{{ .ExternalURL }}/#/silences/new?filter=%7Balertname%3D%22{{ .CommonLabels.alertname }}%22%7D"
+          - type: button
+            text: "📈 View Metrics"
+            url: "http://localhost:3001/d/platform-overview"
+          - type: button
+            text: "🚨 Grafana IRM"
+            url: "http://localhost:3001/a/grafana-irm-app/incidents"
+
+  # ── Fraud / AML Alerts ───────────────────────────────────────────────────────
+  - name: "slack-fraud"
+    slack_configs:
+      - channel: "#remitflow-fraud"
+        send_resolved: true
+        icon_emoji: ":shield:"
+        color: '{{ if eq .Status "firing" }}warning{{ else }}good{{ end }}'
+        title: |-
+          🛡️ FRAUD/AML ALERT [{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}
+        text: >-
+          {{ range .Alerts }}
+          *Service:* `{{ .Labels.service | default "fraud-detection" }}`
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Risk Score:* {{ .Labels.risk_score | default "unknown" }}
+          *Corridor:* {{ .Labels.corridor | default "N/A" }}
+          {{ end }}
+        actions:
+          - type: button
+            text: "🔍 Review in Admin"
+            url: "http://localhost:3000/fraud-monitor"
+          - type: button
+            text: "📊 Python Dashboard"
+            url: "http://localhost:3001/d/python-services"
+
+  # ── Monitoring / Info ────────────────────────────────────────────────────────
+  - name: "slack-monitoring"
+    slack_configs:
+      - channel: "#remitflow-monitoring"
+        send_resolved: true
+        icon_emoji: ":bar_chart:"
+        title: |-
+          ℹ️ [{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}
+        text: >-
+          {{ range .Alerts }}
+          *Summary:* {{ .Annotations.summary }}
+          {{ end }}
+
+  # ── Security / WAF Alerts ─────────────────────────────────────────────────
+  - name: "slack-security"
+    slack_configs:
+      - channel: "#remitflow-security"
+        send_resolved: true
+        icon_emoji: ":lock:"
+        color: '{{ if eq .Status "firing" }}danger{{ else }}good{{ end }}'
+        title: |-
+          🔒 SECURITY [{{ .Status | toUpper }}] {{ .CommonLabels.alertname }}
+        text: >-
+          {{ range .Alerts }}
+          *Service:* `{{ .Labels.service | default "waf" }}`
+          *Severity:* `{{ .Labels.severity | default "warning" }}`
+          *Summary:* {{ .Annotations.summary | default "Security event detected" }}
+          *Description:* {{ .Annotations.description | default "No description" }}
+          *Blocked URI:* {{ .Labels.blocked_uri | default "N/A" }}
+          *Violated Directive:* {{ .Labels.violated_directive | default "N/A" }}
+          *Source IP:* {{ .Labels.source_ip | default "unknown" }}
+          *Started:* {{ .StartsAt | since }}
+          {{ end }}
+        actions:
+          - type: button
+            text: "🔍 View in Grafana"
+            url: "http://localhost:3001/d/security-overview"
+          - type: button
+            text: "🚨 Grafana IRM"
+            url: "http://localhost:3001/a/grafana-irm-app/incidents"
+          - type: button
+            text: "🛡️ APISIX Dashboard"
+            url: "http://localhost:9000"
+    # Webhook fallback — posts to RemitFlow /api/csp-report for internal logging
+    webhook_configs:
+      - url: "http://app:3000/api/security-alert"
+        send_resolved: true
+        http_config:
+          bearer_token: "${ALERTMANAGER_WEBHOOK_TOKEN}"
+
+# ── Inhibition rules ──────────────────────────────────────────────────────────
+inhibit_rules:
+  # Suppress warnings when a critical alert fires for the same service
+  - source_match:
+      severity: "critical"
+    target_match:
+      severity: "warning"
+    equal: ["alertname", "service"]
+
+  # Suppress all alerts when the entire platform is down
+  - source_match:
+      alertname: "PlatformDown"
+    target_match_re:
+      severity: "critical|warning|info"
+    equal: []

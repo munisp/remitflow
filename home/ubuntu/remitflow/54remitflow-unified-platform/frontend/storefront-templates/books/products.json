@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Things Fall Apart by Chinua Achebe",
+    "price": 3500,
+    "category": "African Literature",
+    "description": "Classic African novel",
+    "stock": 120
+  },
+  {
+    "name": "Atomic Habits by James Clear",
+    "price": 5500,
+    "category": "Non-Fiction",
+    "description": "Bestselling self-improvement book",
+    "stock": 85
+  }
+]

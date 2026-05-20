@@ -1,0 +1,27 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: remitflow-statestore
+  namespace: remitflow
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: "redis:6379"
+    - name: redisPassword
+      secretKeyRef:
+        name: remitflow-secrets
+        key: redis-password
+    - name: enableTLS
+      value: "false"
+    - name: maxRetries
+      value: "3"
+    - name: maxRetryBackoff
+      value: "2s"
+    - name: ttlInSeconds
+      value: "3600"
+    - name: keyPrefix
+      value: "remitflow"
+auth:
+  secretStore: kubernetes

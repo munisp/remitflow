@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  paystack-integration:
+    build: .
+    container_name: paystack-integration
+    ports:
+      - "8003:8000"
+    environment:
+      - PAYSTACK_SECRET_KEY=${PAYSTACK_SECRET_KEY}
+      - PAYSTACK_PUBLIC_KEY=${PAYSTACK_PUBLIC_KEY}
+      - APP_ENV=${APP_ENV:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+    networks:
+      - remittance-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  remittance-network:
+    external: true

@@ -1,0 +1,790 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: temporal-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: temporal-config
+  namespace: temporal-system
+data:
+  development-sql.yaml: "system.forceSearchAttributesCacheRefreshOnRead:\n  - value:\
+    \ true\n    constraints: {}\nhistory.maxAutoResetPoints:\n  - value: 20\n    constraints:\
+    \ {}\nfrontend.defaultWorkflowTaskTimeout:\n  - value: \"10s\"\n    constraints:\
+    \ {}\nfrontend.defaultWorkflowExecutionTimeout:\n  - value: \"24h\"\n    constraints:\
+    \ {}\nsystem.defaultWorkflowRetentionPeriod:\n  - value: \"7d\"\n    constraints:\
+    \ {}\nsystem.enableMetrics:\n  - value: true\n    constraints: {}\n"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-postgresql-secret
+  namespace: temporal-system
+type: Opaque
+stringData:
+  POSTGRES_USER: temporal
+  POSTGRES_PASSWORD: temporal_prod_password_change_me
+  POSTGRES_DB: temporal
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-postgresql
+  namespace: temporal-system
+spec:
+  selector:
+    app: temporal-postgresql
+  ports:
+  - port: 5432
+    targetPort: 5432
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: temporal-postgresql
+  namespace: temporal-system
+spec:
+  serviceName: temporal-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal-postgresql
+  template:
+    metadata:
+      labels:
+        app: temporal-postgresql
+    spec:
+      containers:
+      - name: postgresql
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        envFrom:
+        - secretRef:
+            name: temporal-postgresql-secret
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 500m
+          limits:
+            memory: 2Gi
+            cpu: 2000m
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - temporal
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - temporal
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-frontend
+  namespace: temporal-system
+spec:
+  selector:
+    app: temporal-server
+    component: frontend
+  ports:
+  - name: grpc
+    port: 7233
+    targetPort: 7233
+  - name: membership
+    port: 6933
+    targetPort: 6933
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-history
+  namespace: temporal-system
+spec:
+  selector:
+    app: temporal-server
+    component: history
+  ports:
+  - name: grpc
+    port: 7234
+    targetPort: 7234
+  - name: membership
+    port: 6934
+    targetPort: 6934
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-matching
+  namespace: temporal-system
+spec:
+  selector:
+    app: temporal-server
+    component: matching
+  ports:
+  - name: grpc
+    port: 7235
+    targetPort: 7235
+  - name: membership
+    port: 6935
+    targetPort: 6935
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-worker
+  namespace: temporal-system
+spec:
+  selector:
+    app: temporal-server
+    component: worker
+  ports:
+  - name: grpc
+    port: 7239
+    targetPort: 7239
+  - name: membership
+    port: 6939
+    targetPort: 6939
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-frontend
+  namespace: temporal-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: temporal-server
+      component: frontend
+  template:
+    metadata:
+      labels:
+        app: temporal-server
+        component: frontend
+    spec:
+      containers:
+      - name: temporal-frontend
+        image: temporalio/server:1.22.4
+        args:
+        - start
+        - --service
+        - frontend
+        env:
+        - name: DB
+          value: postgresql12
+        - name: DB_PORT
+          value: '5432'
+        - name: POSTGRES_SEEDS
+          value: temporal-postgresql
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-secret
+              key: POSTGRES_USER
+        - name: POSTGRES_PWD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-secret
+              key: POSTGRES_PASSWORD
+        - name: DYNAMIC_CONFIG_FILE_PATH
+          value: /etc/temporal/config/dynamicconfig/development-sql.yaml
+        - name: SERVICES
+          value: frontend
+        - name: PROMETHEUS_ENDPOINT
+          value: 0.0.0.0:9090
+        ports:
+        - containerPort: 7233
+          name: grpc
+        - containerPort: 6933
+          name: membership
+        - name: metrics
+          containerPort: 9090
+        volumeMounts:
+        - name: config
+          mountPath: /etc/temporal/config/dynamicconfig
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 500m
+          limits:
+            memory: 2Gi
+            cpu: 2000m
+        livenessProbe:
+          tcpSocket:
+            port: 7233
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 7233
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: temporal-config
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-history
+  namespace: temporal-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: temporal-server
+      component: history
+  template:
+    metadata:
+      labels:
+        app: temporal-server
+        component: history
+    spec:
+      containers:
+      - name: temporal-history
+        image: temporalio/server:1.22.4
+        args:
+        - start
+        - --service
+        - history
+        env:
+        - name: DB
+          value: postgresql12
+        - name: DB_PORT
+          value: '5432'
+        - name: POSTGRES_SEEDS
+          value: temporal-postgresql
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-secret
+              key: POSTGRES_USER
+        - name: POSTGRES_PWD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-secret
+              key: POSTGRES_PASSWORD
+        - name: DYNAMIC_CONFIG_FILE_PATH
+          value: /etc/temporal/config/dynamicconfig/development-sql.yaml
+        - name: SERVICES
+          value: history
+        - name: PROMETHEUS_ENDPOINT
+          value: 0.0.0.0:9090
+        ports:
+        - containerPort: 7234
+          name: grpc
+        - containerPort: 6934
+          name: membership
+        - name: metrics
+          containerPort: 9090
+        volumeMounts:
+        - name: config
+          mountPath: /etc/temporal/config/dynamicconfig
+        resources:
+          requests:
+            memory: 1Gi
+            cpu: 1000m
+          limits:
+            memory: 4Gi
+            cpu: 4000m
+        livenessProbe:
+          tcpSocket:
+            port: 7234
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 7234
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: temporal-config
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-matching
+  namespace: temporal-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: temporal-server
+      component: matching
+  template:
+    metadata:
+      labels:
+        app: temporal-server
+        component: matching
+    spec:
+      containers:
+      - name: temporal-matching
+        image: temporalio/server:1.22.4
+        args:
+        - start
+        - --service
+        - matching
+        env:
+        - name: DB
+          value: postgresql12
+        - name: DB_PORT
+          value: '5432'
+        - name: POSTGRES_SEEDS
+          value: temporal-postgresql
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-secret
+              key: POSTGRES_USER
+        - name: POSTGRES_PWD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-secret
+              key: POSTGRES_PASSWORD
+        - name: DYNAMIC_CONFIG_FILE_PATH
+          value: /etc/temporal/config/dynamicconfig/development-sql.yaml
+        - name: SERVICES
+          value: matching
+        - name: PROMETHEUS_ENDPOINT
+          value: 0.0.0.0:9090
+        ports:
+        - containerPort: 7235
+          name: grpc
+        - containerPort: 6935
+          name: membership
+        - name: metrics
+          containerPort: 9090
+        volumeMounts:
+        - name: config
+          mountPath: /etc/temporal/config/dynamicconfig
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 500m
+          limits:
+            memory: 2Gi
+            cpu: 2000m
+        livenessProbe:
+          tcpSocket:
+            port: 7235
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 7235
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: temporal-config
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-worker
+  namespace: temporal-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: temporal-server
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: temporal-server
+        component: worker
+    spec:
+      containers:
+      - name: temporal-worker
+        image: temporalio/server:1.22.4
+        args:
+        - start
+        - --service
+        - worker
+        env:
+        - name: DB
+          value: postgresql12
+        - name: DB_PORT
+          value: '5432'
+        - name: POSTGRES_SEEDS
+          value: temporal-postgresql
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-secret
+              key: POSTGRES_USER
+        - name: POSTGRES_PWD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-postgresql-secret
+              key: POSTGRES_PASSWORD
+        - name: DYNAMIC_CONFIG_FILE_PATH
+          value: /etc/temporal/config/dynamicconfig/development-sql.yaml
+        - name: SERVICES
+          value: worker
+        - name: PROMETHEUS_ENDPOINT
+          value: 0.0.0.0:9090
+        ports:
+        - containerPort: 7239
+          name: grpc
+        - containerPort: 6939
+          name: membership
+        - name: metrics
+          containerPort: 9090
+        volumeMounts:
+        - name: config
+          mountPath: /etc/temporal/config/dynamicconfig
+        resources:
+          requests:
+            memory: 512Mi
+            cpu: 500m
+          limits:
+            memory: 2Gi
+            cpu: 2000m
+        livenessProbe:
+          tcpSocket:
+            port: 7239
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 7239
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: temporal-config
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-ui
+  namespace: temporal-system
+spec:
+  selector:
+    app: temporal-ui
+  ports:
+  - port: 8080
+    targetPort: 8080
+  type: LoadBalancer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-ui
+  namespace: temporal-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal-ui
+  template:
+    metadata:
+      labels:
+        app: temporal-ui
+    spec:
+      containers:
+      - name: temporal-ui
+        image: temporalio/ui:2.21.3
+        env:
+        - name: TEMPORAL_ADDRESS
+          value: temporal-frontend:7233
+        - name: TEMPORAL_CORS_ORIGINS
+          value: '*'
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 250m
+          limits:
+            memory: 512Mi
+            cpu: 500m
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-postgresql-pdb
+  labels:
+    app: temporal-postgresql
+    component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: temporal-postgresql
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: temporal-frontend-hpa
+  labels:
+    app: temporal-frontend
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: temporal-frontend
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-frontend-pdb
+  labels:
+    app: temporal-frontend
+    component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: temporal-frontend
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: temporal-history-hpa
+  labels:
+    app: temporal-history
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: temporal-history
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-history-pdb
+  labels:
+    app: temporal-history
+    component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: temporal-history
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: temporal-matching-hpa
+  labels:
+    app: temporal-matching
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: temporal-matching
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-matching-pdb
+  labels:
+    app: temporal-matching
+    component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: temporal-matching
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: temporal-worker-hpa
+  labels:
+    app: temporal-worker
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: temporal-worker
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-worker-pdb
+  labels:
+    app: temporal-worker
+    component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: temporal-worker
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: temporal-ui-hpa
+  labels:
+    app: temporal-ui
+    component: autoscaling
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: temporal-ui
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-ui-pdb
+  labels:
+    app: temporal-ui
+    component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: temporal-ui

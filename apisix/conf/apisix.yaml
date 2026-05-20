@@ -1,0 +1,136 @@
+# ============================================================
+# APISIX Standalone Routes — RemitFlow
+# Declarative route definitions (no etcd required in standalone mode)
+# ============================================================
+
+routes:
+  # ── Main application — all traffic proxied to RemitFlow app ──────────────
+  - id: "remitflow-app"
+    uri: "/*"
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+    upstream:
+      type: roundrobin
+      nodes:
+        "app:3000": 1
+      pass_host: pass
+      scheme: http
+    plugins:
+      # open-appsec ML-based WAF — blocks SQLi, XSS, OWASP Top 10
+      open-appsec:
+        _meta:
+          disable: false
+      # CORS — allow frontend origin
+      cors:
+        allow_origins: "https://remitflow.manus.space,http://localhost:3000"
+        allow_methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+        allow_headers: "Authorization,Content-Type,X-CSRF-Token,X-Request-ID"
+        expose_headers: "X-Request-ID"
+        max_age: 3600
+        allow_credential: true
+      # Rate limiting — global 1000 req/min per IP
+      limit-count:
+        count: 1000
+        time_window: 60
+        key: "remote_addr"
+        rejected_code: 429
+        rejected_msg: '{"error":"rate_limit_exceeded","message":"Too many requests"}'
+      # Prometheus metrics collection
+      prometheus:
+        prefer_name: true
+
+  # ── Auth endpoints — stricter rate limiting ──────────────────────────────
+  - id: "remitflow-auth"
+    uri: "/api/trpc/auth.*"
+    methods: ["POST"]
+    upstream:
+      type: roundrobin
+      nodes:
+        "app:3000": 1
+    plugins:
+      open-appsec:
+        _meta:
+          disable: false
+      limit-count:
+        count: 20
+        time_window: 60
+        key: "remote_addr"
+        rejected_code: 429
+        rejected_msg: '{"error":"auth_rate_limit","message":"Too many authentication attempts"}'
+
+  # ── Transfer/payment endpoints — strict rate limiting ────────────────────
+  - id: "remitflow-transfers"
+    uri: "/api/trpc/transfer.*"
+    methods: ["POST"]
+    upstream:
+      type: roundrobin
+      nodes:
+        "app:3000": 1
+    plugins:
+      open-appsec:
+        _meta:
+          disable: false
+      limit-count:
+        count: 10
+        time_window: 60
+        key: "remote_addr"
+        rejected_code: 429
+        rejected_msg: '{"error":"transfer_rate_limit","message":"Transfer rate limit exceeded"}'
+
+  # ── Stripe webhook — bypass WAF body inspection (HMAC verified internally) ─
+  - id: "remitflow-stripe-webhook"
+    uri: "/api/stripe/webhook"
+    methods: ["POST"]
+    upstream:
+      type: roundrobin
+      nodes:
+        "app:3000": 1
+    plugins:
+      # IP restriction — Stripe's published IP ranges only
+      ip-restriction:
+        whitelist:
+          - "3.18.12.63"
+          - "3.130.192.231"
+          - "13.235.14.237"
+          - "13.235.122.149"
+          - "18.211.135.69"
+          - "35.154.171.200"
+          - "52.15.183.38"
+          - "54.88.130.119"
+          - "54.88.130.237"
+          - "54.187.174.169"
+          - "54.187.205.235"
+          - "54.187.216.72"
+          # Allow localhost for testing
+          - "127.0.0.1"
+          - "::1"
+          - "172.16.0.0/12"
+        message: "Forbidden: Not a Stripe IP"
+
+  # ── CSP report endpoint — open to all (no auth required) ─────────────────
+  - id: "remitflow-csp-report"
+    uri: "/api/csp-report"
+    methods: ["POST"]
+    upstream:
+      type: roundrobin
+      nodes:
+        "app:3000": 1
+    plugins:
+      limit-count:
+        count: 100
+        time_window: 60
+        key: "remote_addr"
+        rejected_code: 429
+
+  # ── Health check — no rate limiting ──────────────────────────────────────
+  - id: "remitflow-health"
+    uri: "/api/health"
+    methods: ["GET"]
+    upstream:
+      type: roundrobin
+      nodes:
+        "app:3000": 1
+
+upstreams: []
+services: []
+
+#END

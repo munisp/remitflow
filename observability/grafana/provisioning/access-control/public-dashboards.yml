@@ -1,0 +1,34 @@
+apiVersion: 1
+
+# Public dashboards — enable read-only shareable URLs for key dashboards.
+# After starting Grafana, navigate to each dashboard → Share → Public Dashboard
+# to generate the unique public URL. These settings pre-configure the feature.
+
+publicDashboards:
+  - name: "Platform Overview"
+    uid: "platform-overview-public"
+    dashboardUid: "platform-overview"
+    isEnabled: true
+    annotationsEnabled: false
+    timeSelectionEnabled: false
+
+  - name: "Go Services"
+    uid: "go-services-public"
+    dashboardUid: "go-services"
+    isEnabled: true
+    annotationsEnabled: false
+    timeSelectionEnabled: false
+
+  - name: "Rust Services"
+    uid: "rust-services-public"
+    dashboardUid: "rust-services"
+    isEnabled: true
+    annotationsEnabled: false
+    timeSelectionEnabled: false
+
+  - name: "Python Services"
+    uid: "python-services-public"
+    dashboardUid: "python-services"
+    isEnabled: true
+    annotationsEnabled: false
+    timeSelectionEnabled: false

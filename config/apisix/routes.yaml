@@ -1,0 +1,158 @@
+---
+# RemitFlow APISIX Route Definitions
+# Applied via Admin API on startup
+
+routes:
+  # ── Main Application ───────────────────────────────────────────────────────
+  - id: remitflow-api
+    uri: /api/*
+    host: remitflow.local
+    methods: [GET, POST, PUT, DELETE, PATCH, OPTIONS]
+    upstream:
+      type: roundrobin
+      nodes:
+        app:3000: 1
+    plugins:
+      limit-count:
+        count: 1000
+        time_window: 60
+        rejected_code: 429
+      cors:
+        allow_origins: "https://remitflow.manus.space"
+        allow_methods: "GET,POST,PUT,DELETE,PATCH,OPTIONS"
+        allow_headers: "Authorization,Content-Type,X-Request-ID"
+        max_age: 3600
+      prometheus: {}
+      request-id:
+        header_name: X-Request-ID
+        include_in_response: true
+
+  # ── FX Engine ──────────────────────────────────────────────────────────────
+  - id: fx-engine
+    uri: /internal/fx/*
+    host: remitflow.local
+    methods: [GET, POST]
+    upstream:
+      type: roundrobin
+      nodes:
+        fx-engine:8085: 1
+    plugins:
+      key-auth: {}
+      limit-count:
+        count: 500
+        time_window: 60
+        rejected_code: 429
+      prometheus: {}
+
+  # ── Risk Engine ────────────────────────────────────────────────────────────
+  - id: risk-engine
+    uri: /internal/risk/*
+    host: remitflow.local
+    methods: [GET, POST]
+    upstream:
+      type: roundrobin
+      nodes:
+        risk-engine:8091: 1
+    plugins:
+      key-auth: {}
+      limit-count:
+        count: 2000
+        time_window: 60
+        rejected_code: 429
+      prometheus: {}
+
+  # ── Mojaloop Connector ─────────────────────────────────────────────────────
+  - id: mojaloop-connector
+    uri: /internal/mojaloop/*
+    host: remitflow.local
+    methods: [GET, POST, PUT]
+    upstream:
+      type: roundrobin
+      nodes:
+        mojaloop-connector:8086: 1
+    plugins:
+      key-auth: {}
+      limit-count:
+        count: 200
+        time_window: 60
+        rejected_code: 429
+      prometheus: {}
+
+  # ── Ledger Service ─────────────────────────────────────────────────────────
+  - id: ledger-service
+    uri: /internal/ledger/*
+    host: remitflow.local
+    methods: [GET, POST]
+    upstream:
+      type: roundrobin
+      nodes:
+        ledger-service:8087: 1
+    plugins:
+      key-auth: {}
+      limit-count:
+        count: 500
+        time_window: 60
+        rejected_code: 429
+      prometheus: {}
+
+  # ── Temporal Workflows ─────────────────────────────────────────────────────
+  - id: temporal-workflows
+    uri: /internal/workflows/*
+    host: remitflow.local
+    methods: [GET, POST, DELETE]
+    upstream:
+      type: roundrobin
+      nodes:
+        temporal-workflows:8090: 1
+    plugins:
+      key-auth: {}
+      prometheus: {}
+
+  # ── Search Indexer ─────────────────────────────────────────────────────────
+  - id: search-indexer
+    uri: /internal/search/*
+    host: remitflow.local
+    methods: [GET, POST]
+    upstream:
+      type: roundrobin
+      nodes:
+        search-indexer:8088: 1
+    plugins:
+      key-auth: {}
+      prometheus: {}
+
+  # ── Lakehouse ETL ──────────────────────────────────────────────────────────
+  - id: lakehouse-etl
+    uri: /internal/etl/*
+    host: remitflow.local
+    methods: [GET, POST]
+    upstream:
+      type: roundrobin
+      nodes:
+        lakehouse-etl:8089: 1
+    plugins:
+      key-auth: {}
+      prometheus: {}
+
+  # ── Health Aggregator ──────────────────────────────────────────────────────
+  - id: health-check
+    uri: /health
+    host: remitflow.local
+    methods: [GET]
+    upstream:
+      type: roundrobin
+      nodes:
+        app:3000: 1
+    plugins:
+      public-api: {}
+
+consumers:
+  - username: internal-services
+    plugins:
+      key-auth:
+        key: "remitflow-internal-api-key-change-in-production"
+
+  - username: monitoring
+    plugins:
+      key-auth:
+        key: "remitflow-monitoring-key-change-in-production"

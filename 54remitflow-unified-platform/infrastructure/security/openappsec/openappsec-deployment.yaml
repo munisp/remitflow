@@ -1,0 +1,330 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openappsec
+  labels:
+    name: openappsec
+    component: security
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openappsec-config
+  namespace: openappsec
+data:
+  policy.yaml: |
+    security:
+      waf:
+        enabled: true
+        mode: "blocking"
+        sensitivity: "high"
+        custom_rules:
+          - name: "remittance-rules"
+            description: "Custom rules for remittance platform"
+            rules:
+              - id: 1001
+                description: "Block SQL injection attempts"
+                pattern: "(?i)(union|select|insert|update|delete|drop|create|alter|exec|execute)"
+                action: "block"
+              - id: 1002
+                description: "Block XSS attempts"
+                pattern: "(?i)(<script|javascript:|vbscript:|onload=|onerror=)"
+                action: "block"
+              - id: 1003
+                description: "Block command injection"
+                pattern: "(?i)(;|&&|\\||`|\\$\\(|\\${)"
+                action: "block"
+      api_protection:
+        enabled: true
+        rate_limiting:
+          enabled: true
+          requests_per_minute: 1000
+          burst_size: 100
+        schema_validation:
+          enabled: true
+          strict_mode: true
+        authentication:
+          required: true
+          methods: ["jwt", "oauth2"]
+      threat_intelligence:
+        enabled: true
+        feeds:
+          - name: "commercial_feed"
+            url: "https://threat-intel.example.com/feed"
+            update_interval: "1h"
+          - name: "open_source_feed"
+            url: "https://openphish.com/feed.txt"
+            update_interval: "6h"
+      logging:
+        enabled: true
+        level: "info"
+        destinations:
+          - type: "syslog"
+            host: "wazuh-manager"
+            port: 514
+          - type: "opensearch"
+            host: "opensearch-cluster"
+            port: 9200
+            index: "openappsec-logs"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openappsec-controller
+  namespace: openappsec
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: openappsec-controller
+  template:
+    metadata:
+      labels:
+        app: openappsec-controller
+    spec:
+      serviceAccountName: openappsec-service-account
+      containers:
+      - name: openappsec
+        image: openappsec/openappsec:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 8443
+          name: https
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: OPENAPPSEC_MODE
+          value: "controller"
+        - name: OPENAPPSEC_CONFIG_PATH
+          value: "/etc/openappsec/policy.yaml"
+        - name: OPENAPPSEC_LOG_LEVEL
+          value: "info"
+        - name: OPENAPPSEC_METRICS_ENABLED
+          value: "true"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/openappsec
+        - name: certs
+          mountPath: /etc/ssl/certs
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config
+        configMap:
+          name: openappsec-config
+      - name: certs
+        secret:
+          secretName: openappsec-certs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openappsec-controller
+  namespace: openappsec
+spec:
+  selector:
+    app: openappsec-controller
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: https
+    port: 8443
+    targetPort: 8443
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openappsec-service-account
+  namespace: openappsec
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openappsec-cluster-role
+rules:
+- apiGroups: [""]
+  resources: ["services", "endpoints", "pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: ["extensions"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openappsec-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openappsec-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: openappsec-service-account
+  namespace: openappsec
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: openappsec
+  annotations:
+    ingressclass.kubernetes.io/is-default-class: "false"
+spec:
+  controller: openappsec.io/ingress-controller
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: remittance-ingress
+  namespace: remittance
+  annotations:
+    kubernetes.io/ingress.class: "openappsec"
+    openappsec.io/waf-enabled: "true"
+    openappsec.io/api-protection: "true"
+    openappsec.io/rate-limit: "1000/min"
+    openappsec.io/threat-intelligence: "true"
+spec:
+  tls:
+  - hosts:
+    - api.remittance.com
+    secretName: remittance-tls
+  rules:
+  - host: api.remittance.com
+    http:
+      paths:
+      - path: /api/v1/agents
+        pathType: Prefix
+        backend:
+          service:
+            name: agent-management
+            port:
+              number: 8080
+      - path: /api/v1/transactions
+        pathType: Prefix
+        backend:
+          service:
+            name: transaction-processing
+            port:
+              number: 8080
+      - path: /api/v1/commissions
+        pathType: Prefix
+        backend:
+          service:
+            name: commission-settlement
+            port:
+              number: 8080
+      - path: /api/v1/cash
+        pathType: Prefix
+        backend:
+          service:
+            name: cash-management
+            port:
+              number: 8080
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openappsec-certs
+  namespace: openappsec
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t  # Base64 encoded certificate
+  tls.key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t  # Base64 encoded private key
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: openappsec-metrics
+  namespace: openappsec
+spec:
+  selector:
+    matchLabels:
+      app: openappsec-controller
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openappsec-dashboard
+  namespace: openappsec
+data:
+  dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "Openappsec Security Dashboard",
+        "tags": ["security", "waf"],
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Blocked Requests",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "sum(rate(openappsec_blocked_requests_total[5m]))",
+                "legendFormat": "Blocked Requests/sec"
+              }
+            ]
+          },
+          {
+            "id": 2,
+            "title": "Attack Types",
+            "type": "piechart",
+            "targets": [
+              {
+                "expr": "sum by (attack_type) (openappsec_attacks_total)",
+                "legendFormat": "{{attack_type}}"
+              }
+            ]
+          },
+          {
+            "id": 3,
+            "title": "Response Times",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(openappsec_request_duration_seconds_bucket[5m]))",
+                "legendFormat": "95th percentile"
+              }
+            ]
+          }
+        ]
+      }
+    }
+

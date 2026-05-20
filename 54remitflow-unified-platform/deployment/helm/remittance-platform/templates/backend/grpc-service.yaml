@@ -1,0 +1,19 @@
+{{- if .Values.backend.grpc.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "remittance-platform.fullname" . }}-grpc
+  labels:
+    {{- include "remittance-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grpc-backend
+spec:
+  type: ClusterIP
+  ports:
+  - port: 50051
+    targetPort: grpc
+    protocol: TCP
+    name: grpc
+  selector:
+    {{- include "remittance-platform.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: grpc-backend
+{{- end }}

@@ -1,0 +1,81 @@
+# ============================================================
+# APISIX Configuration — RemitFlow API Gateway
+# Integrates with open-appsec WAF for ML-based threat prevention
+# ============================================================
+
+apisix:
+  node_listen: 9080          # HTTP listener
+  ssl:
+    listen_port: 9443        # HTTPS listener
+  enable_ipv6: false
+  enable_control: true
+  control:
+    ip: "0.0.0.0"
+    port: 9092
+
+  # open-appsec WAF plugin — ML-based, zero-signature threat prevention
+  extra_lua_path: "/open-appsec/lib/?.lua"
+  extra_lua_cpath: "/open-appsec/lib/?.so"
+
+deployment:
+  role: traditional
+  role_traditional:
+    config_provider: etcd
+
+etcd:
+  host:
+    - "http://etcd:2379"
+  prefix: "/apisix"
+  timeout: 30
+
+plugin_attr:
+  # open-appsec WAF plugin configuration
+  open-appsec:
+    policy_file: "/open-appsec/policy/policy.json"
+    log_level: "warning"
+
+plugins:
+  # Core traffic management
+  - limit-req
+  - limit-count
+  - limit-conn
+  - key-auth
+  - jwt-auth
+  - basic-auth
+  - ip-restriction
+  # Security
+  - cors
+  - csrf
+  - ua-restriction
+  - referer-restriction
+  - uri-blocker
+  - request-validation
+  - openid-connect
+  # Observability
+  - prometheus
+  - zipkin
+  - skywalking
+  - http-logger
+  - file-logger
+  # Transformation
+  - proxy-rewrite
+  - response-rewrite
+  - redirect
+  # open-appsec WAF (ML-based)
+  - open-appsec
+
+# Prometheus metrics
+plugin_attr:
+  prometheus:
+    export_uri: /apisix/prometheus/metrics
+    enable_export_server: true
+    export_addr:
+      ip: "0.0.0.0"
+      port: 9091
+
+# Logging
+nginx_config:
+  error_log_level: warn
+  http:
+    access_log: /usr/local/apisix/logs/access.log
+    error_log: /usr/local/apisix/logs/error.log

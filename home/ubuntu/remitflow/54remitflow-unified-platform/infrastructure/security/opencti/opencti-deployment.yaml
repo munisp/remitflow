@@ -1,0 +1,503 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opencti
+  labels:
+    name: opencti
+    component: threat-intelligence
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opencti-config
+  namespace: opencti
+data:
+  production.json: |
+    {
+      "app": {
+        "port": 4000,
+        "base_path": "",
+        "base_url": "http://opencti:4000",
+        "request_timeout": 1200000,
+        "session_timeout": 1200000,
+        "session_cookie": false,
+        "session_secret": "ChangeMe"
+      },
+      "rule_engine": {
+        "enabled": true,
+        "lock_key": "rule_engine_lock"
+      },
+      "history_manager": {
+        "enabled": true,
+        "lock_key": "history_manager_lock"
+      },
+      "task_scheduler": {
+        "enabled": true,
+        "lock_key": "task_manager_lock"
+      },
+      "expiration_scheduler": {
+        "enabled": true,
+        "lock_key": "expiration_manager_lock"
+      },
+      "retention_manager": {
+        "enabled": true,
+        "lock_key": "retention_manager_lock"
+      },
+      "notification_manager": {
+        "enabled": true,
+        "lock_key": "notification_manager_lock"
+      },
+      "ingestion_manager": {
+        "enabled": true,
+        "lock_key": "ingestion_manager_lock"
+      },
+      "redis": {
+        "hostname": "redis-master",
+        "port": 6379,
+        "use_ssl": false,
+        "password": "remittance-redis",
+        "database": 1
+      },
+      "opensearch": {
+        "engine": "opensearch",
+        "url": "http://opensearch-cluster:9200",
+        "index_prefix": "opencti",
+        "username": "",
+        "password": "",
+        "ssl": {
+          "reject_unauthorized": false
+        }
+      },
+      "s3": {
+        "bucket_name": "opencti-bucket",
+        "bucket_region": "us-east-1",
+        "access_key_id": "",
+        "secret_access_key": "",
+        "endpoint": ""
+      },
+      "rabbitmq": {
+        "hostname": "rabbitmq",
+        "port": 5672,
+        "port_management": 15672,
+        "management_ssl": false,
+        "username": "guest",
+        "password": "guest",
+        "queue_type": "classic"
+      },
+      "smtp": {
+        "hostname": "localhost",
+        "port": 25,
+        "use_ssl": false,
+        "username": "",
+        "password": ""
+      },
+      "providers": {
+        "local": {
+          "strategy": "LocalStrategy"
+        }
+      },
+      "map_tile_server_dark": "https://map.opencti.io/styles/luatix-dark/{z}/{x}/{y}.png",
+      "map_tile_server_light": "https://map.opencti.io/styles/luatix-light/{z}/{x}/{y}.png"
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opencti-platform
+  namespace: opencti
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: opencti-platform
+  template:
+    metadata:
+      labels:
+        app: opencti-platform
+    spec:
+      containers:
+      - name: opencti
+        image: opencti/platform:5.12.17
+        ports:
+        - containerPort: 4000
+          name: http
+        env:
+        - name: NODE_OPTIONS
+          value: "--max-old-space-size=8096"
+        - name: APP__PORT
+          value: "4000"
+        - name: APP__BASE_URL
+          value: "http://opencti.remittance.local"
+        - name: APP__ADMIN__EMAIL
+          value: "admin@remittance.com"
+        - name: APP__ADMIN__PASSWORD
+          value: "ChangeMe123!"
+        - name: APP__ADMIN__TOKEN
+          value: "ChangeMe-Token-123"
+        - name: APP__APP_LOGS__LOGS_LEVEL
+          value: "info"
+        volumeMounts:
+        - name: config
+          mountPath: /opt/opencti/config
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "1"
+          limits:
+            memory: "8Gi"
+            cpu: "2"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 4000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 4000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: opencti-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opencti-platform
+  namespace: opencti
+spec:
+  selector:
+    app: opencti-platform
+  ports:
+  - name: http
+    port: 4000
+    targetPort: 4000
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opencti-worker
+  namespace: opencti
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: opencti-worker
+  template:
+    metadata:
+      labels:
+        app: opencti-worker
+    spec:
+      containers:
+      - name: worker
+        image: opencti/worker:5.12.17
+        env:
+        - name: OPENCTI_URL
+          value: "http://opencti-platform:4000"
+        - name: OPENCTI_TOKEN
+          value: "ChangeMe-Token-123"
+        - name: WORKER_LOG_LEVEL
+          value: "info"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opencti-connector-misp
+  namespace: opencti
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opencti-connector-misp
+  template:
+    metadata:
+      labels:
+        app: opencti-connector-misp
+    spec:
+      containers:
+      - name: connector-misp
+        image: opencti/connector-misp:5.12.17
+        env:
+        - name: OPENCTI_URL
+          value: "http://opencti-platform:4000"
+        - name: OPENCTI_TOKEN
+          value: "ChangeMe-Token-123"
+        - name: CONNECTOR_ID
+          value: "misp-connector"
+        - name: CONNECTOR_TYPE
+          value: "EXTERNAL_IMPORT"
+        - name: CONNECTOR_NAME
+          value: "MISP"
+        - name: CONNECTOR_SCOPE
+          value: "misp"
+        - name: CONNECTOR_LOG_LEVEL
+          value: "info"
+        - name: MISP_URL
+          value: "https://misp.example.com"
+        - name: MISP_KEY
+          value: "your-misp-api-key"
+        - name: MISP_SSL_VERIFY
+          value: "false"
+        - name: MISP_CREATE_REPORTS
+          value: "true"
+        - name: MISP_REPORT_TYPE
+          value: "misp-event"
+        - name: MISP_INTERVAL
+          value: "60"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opencti-connector-alienvault
+  namespace: opencti
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opencti-connector-alienvault
+  template:
+    metadata:
+      labels:
+        app: opencti-connector-alienvault
+    spec:
+      containers:
+      - name: connector-alienvault
+        image: opencti/connector-alienvault:5.12.17
+        env:
+        - name: OPENCTI_URL
+          value: "http://opencti-platform:4000"
+        - name: OPENCTI_TOKEN
+          value: "ChangeMe-Token-123"
+        - name: CONNECTOR_ID
+          value: "alienvault-connector"
+        - name: CONNECTOR_TYPE
+          value: "EXTERNAL_IMPORT"
+        - name: CONNECTOR_NAME
+          value: "AlienVault"
+        - name: CONNECTOR_SCOPE
+          value: "alienvault"
+        - name: CONNECTOR_LOG_LEVEL
+          value: "info"
+        - name: ALIENVAULT_API_KEY
+          value: "your-alienvault-api-key"
+        - name: ALIENVAULT_TLP
+          value: "White"
+        - name: ALIENVAULT_CREATE_OBSERVABLES
+          value: "true"
+        - name: ALIENVAULT_CREATE_INDICATORS
+          value: "true"
+        - name: ALIENVAULT_PULSE_START_TIMESTAMP
+          value: "2023-01-01T00:00:00.000Z"
+        - name: ALIENVAULT_INTERVAL_SEC
+          value: "1800"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opencti-connector-cve
+  namespace: opencti
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opencti-connector-cve
+  template:
+    metadata:
+      labels:
+        app: opencti-connector-cve
+    spec:
+      containers:
+      - name: connector-cve
+        image: opencti/connector-cve:5.12.17
+        env:
+        - name: OPENCTI_URL
+          value: "http://opencti-platform:4000"
+        - name: OPENCTI_TOKEN
+          value: "ChangeMe-Token-123"
+        - name: CONNECTOR_ID
+          value: "cve-connector"
+        - name: CONNECTOR_TYPE
+          value: "EXTERNAL_IMPORT"
+        - name: CONNECTOR_NAME
+          value: "Common Vulnerabilities and Exposures"
+        - name: CONNECTOR_SCOPE
+          value: "identity,vulnerability"
+        - name: CONNECTOR_LOG_LEVEL
+          value: "info"
+        - name: CVE_IMPORT_HISTORY
+          value: "true"
+        - name: CVE_NVD_DATA_FEED
+          value: "https://nvd.nist.gov/feeds/json/cve/1.1/nvdcve-1.1-recent.json.gz"
+        - name: CVE_HISTORY_DATA_FEED
+          value: "https://nvd.nist.gov/feeds/json/cve/1.1/"
+        - name: CVE_INTERVAL
+          value: "7"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: opencti
+spec:
+  serviceName: rabbitmq
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:3.12-management
+        ports:
+        - containerPort: 5672
+          name: amqp
+        - containerPort: 15672
+          name: management
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          value: "opencti"
+        - name: RABBITMQ_DEFAULT_PASS
+          value: "opencti123"
+        - name: RABBITMQ_NODENAME
+          value: "rabbit@localhost"
+        - name: RABBITMQ_DEFAULT_VHOST
+          value: "/"
+        volumeMounts:
+        - name: rabbitmq-data
+          mountPath: /var/lib/rabbitmq
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - rabbitmq-diagnostics
+            - status
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 15
+        readinessProbe:
+          exec:
+            command:
+            - rabbitmq-diagnostics
+            - ping
+          initialDelaySeconds: 20
+          periodSeconds: 60
+          timeoutSeconds: 10
+  volumeClaimTemplates:
+  - metadata:
+      name: rabbitmq-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: opencti
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+  - name: amqp
+    port: 5672
+    targetPort: 5672
+  - name: management
+    port: 15672
+    targetPort: 15672
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: opencti-ingress
+  namespace: opencti
+  annotations:
+    kubernetes.io/ingress.class: "openappsec"
+    openappsec.io/waf-enabled: "true"
+    openappsec.io/api-protection: "false"
+spec:
+  tls:
+  - hosts:
+    - opencti.remittance.local
+    secretName: opencti-tls
+  rules:
+  - host: opencti.remittance.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: opencti-platform
+            port:
+              number: 4000
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: opencti-tls
+  namespace: opencti
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t  # Base64 encoded certificate
+  tls.key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t  # Base64 encoded private key
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: opencti-metrics
+  namespace: opencti
+spec:
+  selector:
+    matchLabels:
+      app: opencti-platform
+  endpoints:
+  - port: http
+    interval: 30s
+    path: /metrics
+

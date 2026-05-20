@@ -1,0 +1,70 @@
+{
+  "smoke": {
+    "native": {
+      "passed": 6,
+      "total": 6,
+      "percentage": 100.0
+    },
+    "pwa": {
+      "passed": 6,
+      "total": 6,
+      "percentage": 100.0
+    },
+    "hybrid": {
+      "passed": 6,
+      "total": 6,
+      "percentage": 100.0
+    }
+  },
+  "regression": {
+    "native": {
+      "passed": 30,
+      "total": 34,
+      "percentage": 88.23529411764706
+    },
+    "pwa": {
+      "passed": 30,
+      "total": 34,
+      "percentage": 88.23529411764706
+    },
+    "hybrid": {
+      "passed": 30,
+      "total": 34,
+      "percentage": 88.23529411764706
+    }
+  },
+  "integration": {
+    "native": {
+      "passed": 5,
+      "total": 5,
+      "percentage": 100.0
+    },
+    "pwa": {
+      "passed": 5,
+      "total": 5,
+      "percentage": 100.0
+    },
+    "hybrid": {
+      "passed": 5,
+      "total": 5,
+      "percentage": 100.0
+    }
+  },
+  "summary": {
+    "native": {
+      "passed": 41,
+      "total": 45,
+      "percentage": 91.11111111111111
+    },
+    "pwa": {
+      "passed": 41,
+      "total": 45,
+      "percentage": 91.11111111111111
+    },
+    "hybrid": {
+      "passed": 41,
+      "total": 45,
+      "percentage": 91.11111111111111
+    }
+  }
+}

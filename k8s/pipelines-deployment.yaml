@@ -1,0 +1,306 @@
+# RemitFlow v89 — Data Pipeline Services Kubernetes Manifests
+# Includes: Apache NiFi, Apache Airflow, dbt Docs Server
+#
+# Deploy: kubectl apply -f k8s/pipelines-deployment.yaml
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remitflow-pipelines
+  labels:
+    app.kubernetes.io/part-of: remitflow
+
+---
+# ─── NiFi Deployment ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nifi
+  namespace: remitflow-pipelines
+  labels:
+    app: nifi
+    version: "1.25.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nifi
+  template:
+    metadata:
+      labels:
+        app: nifi
+    spec:
+      containers:
+        - name: nifi
+          image: apache/nifi:1.25.0
+          ports:
+            - containerPort: 8443
+              name: https
+          env:
+            - name: NIFI_WEB_HTTPS_PORT
+              value: "8443"
+            - name: SINGLE_USER_CREDENTIALS_USERNAME
+              value: admin
+            - name: SINGLE_USER_CREDENTIALS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nifi-credentials
+                  key: password
+            - name: NIFI_JVM_HEAP_MAX
+              value: 2g
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+          livenessProbe:
+            httpGet:
+              path: /nifi
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 90
+            periodSeconds: 30
+          volumeMounts:
+            - name: nifi-conf
+              mountPath: /opt/nifi/nifi-current/conf
+      volumes:
+        - name: nifi-conf
+          persistentVolumeClaim:
+            claimName: nifi-conf-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nifi
+  namespace: remitflow-pipelines
+spec:
+  selector:
+    app: nifi
+  ports:
+    - port: 8443
+      targetPort: 8443
+      name: https
+  type: ClusterIP
+
+---
+# ─── Airflow Webserver ────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-webserver
+  namespace: remitflow-pipelines
+  labels:
+    app: airflow-webserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-webserver
+  template:
+    metadata:
+      labels:
+        app: airflow-webserver
+    spec:
+      initContainers:
+        - name: airflow-init
+          image: apache/airflow:2.8.1
+          command:
+            - /bin/bash
+            - -c
+            - |
+              airflow db migrate &&
+              airflow users create --username admin --firstname RemitFlow --lastname Admin
+                --role Admin --email admin@remitflow.io --password remitflow_airflow_admin_2024 || true
+          env:
+            - name: AIRFLOW__CORE__EXECUTOR
+              value: LocalExecutor
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-secrets
+                  key: db-conn
+            - name: AIRFLOW__CORE__FERNET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-secrets
+                  key: fernet-key
+      containers:
+        - name: airflow-webserver
+          image: apache/airflow:2.8.1
+          command: ["airflow", "webserver"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AIRFLOW__CORE__EXECUTOR
+              value: LocalExecutor
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-secrets
+                  key: db-conn
+            - name: AIRFLOW__CORE__FERNET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-secrets
+                  key: fernet-key
+            - name: AIRFLOW__CORE__LOAD_EXAMPLES
+              value: "false"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts:
+            - name: airflow-dags
+              mountPath: /opt/airflow/dags
+      volumes:
+        - name: airflow-dags
+          configMap:
+            name: airflow-dags-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-webserver
+  namespace: remitflow-pipelines
+spec:
+  selector:
+    app: airflow-webserver
+  ports:
+    - port: 8080
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# ─── Airflow Scheduler ────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-scheduler
+  namespace: remitflow-pipelines
+  labels:
+    app: airflow-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: airflow-scheduler
+  template:
+    metadata:
+      labels:
+        app: airflow-scheduler
+    spec:
+      containers:
+        - name: airflow-scheduler
+          image: apache/airflow:2.8.1
+          command: ["airflow", "scheduler"]
+          env:
+            - name: AIRFLOW__CORE__EXECUTOR
+              value: LocalExecutor
+            - name: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-secrets
+                  key: db-conn
+            - name: AIRFLOW__CORE__FERNET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: airflow-secrets
+                  key: fernet-key
+            - name: AIRFLOW__CORE__LOAD_EXAMPLES
+              value: "false"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          volumeMounts:
+            - name: airflow-dags
+              mountPath: /opt/airflow/dags
+      volumes:
+        - name: airflow-dags
+          configMap:
+            name: airflow-dags-config
+
+---
+# ─── Ingress ─────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pipelines-ingress
+  namespace: remitflow-pipelines
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  rules:
+    - host: nifi.remitflow.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nifi
+                port:
+                  number: 8443
+    - host: airflow.remitflow.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: airflow-webserver
+                port:
+                  number: 8080
+
+---
+# ─── Secrets ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nifi-credentials
+  namespace: remitflow-pipelines
+type: Opaque
+stringData:
+  password: "remitflow_nifi_admin_2024"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: airflow-secrets
+  namespace: remitflow-pipelines
+type: Opaque
+stringData:
+  db-conn: "postgresql+psycopg2://airflow:remitflow_airflow_pg_2024@airflow-postgres/airflow"
+  fernet-key: "remitflow_airflow_fernet_key_base64_2024=="
+
+---
+# ─── PVCs ────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nifi-conf-pvc
+  namespace: remitflow-pipelines
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

@@ -1,0 +1,86 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: mojaloop-cron-reconciliation
+  namespace: mojaloop
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    - name: schedule
+      value: "@every 1m"
+    - name: direction
+      value: "input"
+scopes:
+  - reconciliation-service
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: mojaloop-cron-settlement
+  namespace: mojaloop
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    - name: schedule
+      value: "@every 5m"
+    - name: direction
+      value: "input"
+scopes:
+  - settlement-service
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: mojaloop-cron-position-sync
+  namespace: mojaloop
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    - name: schedule
+      value: "@every 30s"
+    - name: direction
+      value: "input"
+scopes:
+  - central-ledger
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: mojaloop-postgres-binding
+  namespace: mojaloop
+spec:
+  type: bindings.postgresql
+  version: v1
+  metadata:
+    - name: url
+      secretKeyRef:
+        name: mojaloop-db-secret
+        key: connection-string
+    - name: direction
+      value: "output"
+scopes:
+  - central-ledger
+  - transfer-service
+  - settlement-service
+  - participant-registry
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: mojaloop-tigerbeetle-binding
+  namespace: mojaloop
+spec:
+  type: bindings.http
+  version: v1
+  metadata:
+    - name: url
+      value: "http://tigerbeetle-api.mojaloop.svc.cluster.local:8160"
+    - name: direction
+      value: "output"
+scopes:
+  - central-ledger
+  - transfer-service
+  - reconciliation-service

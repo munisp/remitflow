@@ -1,0 +1,526 @@
+---
+# RemitFlow v97 Kubernetes Deployment
+# Includes all v97 new microservices: velocity-check, kyc-lifecycle, webhook-retry,
+# api-key-rotation, batch-payment-processor, feature-flag-engine
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remitflow-v97
+  labels:
+    app.kubernetes.io/version: v97
+    app.kubernetes.io/managed-by: kubectl
+
+---
+# ─── ConfigMap ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: remitflow-v97-config
+  namespace: remitflow-v97
+data:
+  NODE_ENV: "production"
+  KAFKA_BROKERS: "kafka-service:9092"
+  QDRANT_URL: "http://qdrant-service:6333"
+  FALKORDB_URL: "redis://falkordb-service:6379"
+  OLLAMA_URL: "http://ollama-service:11434"
+  TEMPORAL_ADDRESS: "temporal-service:7233"
+  GO_RATE_LIMIT_URL: "http://go-rate-limit-service:8081"
+  RUST_AUDIT_URL: "http://rust-audit-service:8082"
+  PYTHON_COMPLIANCE_URL: "http://python-compliance-service:8083"
+  VELOCITY_CHECK_URL: "http://velocity-check-service:8084"
+  KYC_LIFECYCLE_URL: "http://kyc-lifecycle-service:8085"
+  WEBHOOK_RETRY_URL: "http://webhook-retry-service:8086"
+  WEBHOOK_MAX_RETRIES: "5"
+  WEBHOOK_INITIAL_BACKOFF_MS: "1000"
+  BATCH_PAYMENT_CHUNK_SIZE: "50"
+  DOCUMENT_RENEWAL_WARNING_DAYS: "30"
+
+---
+# ─── Main App Deployment ────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remitflow-app
+  namespace: remitflow-v97
+  labels:
+    app: remitflow-app
+    version: v97
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: remitflow-app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: remitflow-app
+        version: v97
+    spec:
+      containers:
+        - name: remitflow-app
+          image: remitflow-app:v97
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: remitflow-v97-config
+            - secretRef:
+                name: remitflow-v97-secrets
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: remitflow-app-service
+  namespace: remitflow-v97
+spec:
+  selector:
+    app: remitflow-app
+  ports:
+    - protocol: TCP
+      port: 3000
+      targetPort: 3000
+  type: ClusterIP
+
+---
+# ─── Velocity Check Service (v97 new) ───────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: velocity-check
+  namespace: remitflow-v97
+  labels:
+    app: velocity-check
+    version: v97
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: velocity-check
+  template:
+    metadata:
+      labels:
+        app: velocity-check
+        version: v97
+    spec:
+      containers:
+        - name: velocity-check
+          image: remitflow-velocity-check:v97
+          ports:
+            - containerPort: 8084
+          envFrom:
+            - configMapRef:
+                name: remitflow-v97-config
+            - secretRef:
+                name: remitflow-v97-secrets
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8084
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: velocity-check-service
+  namespace: remitflow-v97
+spec:
+  selector:
+    app: velocity-check
+  ports:
+    - protocol: TCP
+      port: 8084
+      targetPort: 8084
+  type: ClusterIP
+
+---
+# ─── KYC Lifecycle Service (v97 new) ────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kyc-lifecycle
+  namespace: remitflow-v97
+  labels:
+    app: kyc-lifecycle
+    version: v97
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: kyc-lifecycle
+  template:
+    metadata:
+      labels:
+        app: kyc-lifecycle
+        version: v97
+    spec:
+      containers:
+        - name: kyc-lifecycle
+          image: remitflow-kyc-lifecycle:v97
+          ports:
+            - containerPort: 8085
+          envFrom:
+            - configMapRef:
+                name: remitflow-v97-config
+            - secretRef:
+                name: remitflow-v97-secrets
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8085
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kyc-lifecycle-service
+  namespace: remitflow-v97
+spec:
+  selector:
+    app: kyc-lifecycle
+  ports:
+    - protocol: TCP
+      port: 8085
+      targetPort: 8085
+  type: ClusterIP
+
+---
+# ─── Webhook Retry Worker (v97 new) ─────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webhook-retry
+  namespace: remitflow-v97
+  labels:
+    app: webhook-retry
+    version: v97
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: webhook-retry
+  template:
+    metadata:
+      labels:
+        app: webhook-retry
+        version: v97
+    spec:
+      containers:
+        - name: webhook-retry
+          image: remitflow-webhook-retry:v97
+          ports:
+            - containerPort: 8086
+          envFrom:
+            - configMapRef:
+                name: remitflow-v97-config
+            - secretRef:
+                name: remitflow-v97-secrets
+          env:
+            - name: MAX_RETRIES
+              value: "5"
+            - name: INITIAL_BACKOFF_MS
+              value: "1000"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8086
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: webhook-retry-service
+  namespace: remitflow-v97
+spec:
+  selector:
+    app: webhook-retry
+  ports:
+    - protocol: TCP
+      port: 8086
+      targetPort: 8086
+  type: ClusterIP
+
+---
+# ─── Go Rate Limit Sidecar ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-rate-limit
+  namespace: remitflow-v97
+  labels:
+    app: go-rate-limit
+    version: v97
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: go-rate-limit
+  template:
+    metadata:
+      labels:
+        app: go-rate-limit
+        version: v97
+    spec:
+      containers:
+        - name: go-rate-limit
+          image: remitflow-go-rate-limit:v97
+          ports:
+            - containerPort: 8081
+          envFrom:
+            - configMapRef:
+                name: remitflow-v97-config
+            - secretRef:
+                name: remitflow-v97-secrets
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-rate-limit-service
+  namespace: remitflow-v97
+spec:
+  selector:
+    app: go-rate-limit
+  ports:
+    - protocol: TCP
+      port: 8081
+      targetPort: 8081
+  type: ClusterIP
+
+---
+# ─── Rust Audit Service ─────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rust-audit
+  namespace: remitflow-v97
+  labels:
+    app: rust-audit
+    version: v97
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rust-audit
+  template:
+    metadata:
+      labels:
+        app: rust-audit
+        version: v97
+    spec:
+      containers:
+        - name: rust-audit
+          image: remitflow-rust-audit:v97
+          ports:
+            - containerPort: 8082
+          envFrom:
+            - configMapRef:
+                name: remitflow-v97-config
+            - secretRef:
+                name: remitflow-v97-secrets
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rust-audit-service
+  namespace: remitflow-v97
+spec:
+  selector:
+    app: rust-audit
+  ports:
+    - protocol: TCP
+      port: 8082
+      targetPort: 8082
+  type: ClusterIP
+
+---
+# ─── Python Compliance Service ──────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-compliance
+  namespace: remitflow-v97
+  labels:
+    app: python-compliance
+    version: v97
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: python-compliance
+  template:
+    metadata:
+      labels:
+        app: python-compliance
+        version: v97
+    spec:
+      containers:
+        - name: python-compliance
+          image: remitflow-python-compliance:v97
+          ports:
+            - containerPort: 8083
+          envFrom:
+            - configMapRef:
+                name: remitflow-v97-config
+            - secretRef:
+                name: remitflow-v97-secrets
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "200m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-compliance-service
+  namespace: remitflow-v97
+spec:
+  selector:
+    app: python-compliance
+  ports:
+    - protocol: TCP
+      port: 8083
+      targetPort: 8083
+  type: ClusterIP
+
+---
+# ─── Horizontal Pod Autoscaler ──────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: remitflow-app-hpa
+  namespace: remitflow-v97
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: remitflow-app
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+# ─── Ingress ────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: remitflow-v97-ingress
+  namespace: remitflow-v97
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - remitflow.app
+        - api.remitflow.app
+      secretName: remitflow-v97-tls
+  rules:
+    - host: remitflow.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: remitflow-app-service
+                port:
+                  number: 3000
+    - host: api.remitflow.app
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: remitflow-app-service
+                port:
+                  number: 3000

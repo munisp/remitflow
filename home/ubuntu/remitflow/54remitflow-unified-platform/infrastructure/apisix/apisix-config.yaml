@@ -1,0 +1,520 @@
+# APISIX API Gateway Configuration
+# Production-grade API gateway for Mojaloop and TigerBeetle APIs
+# Reference: https://apisix.apache.org/docs/apisix/getting-started/
+
+apisix:
+  node_listen: 9080
+  enable_ipv6: false
+  enable_admin: true
+  admin_key:
+    - name: admin
+      key: ${APISIX_ADMIN_KEY}
+      role: admin
+  
+  ssl:
+    enable: true
+    listen_port: 9443
+    ssl_protocols: "TLSv1.2 TLSv1.3"
+    ssl_ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"
+
+  # Enable real IP detection behind load balancer
+  real_ip_header: X-Forwarded-For
+  real_ip_recursive: "on"
+  real_ip_from:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+
+nginx_config:
+  error_log: /var/log/apisix/error.log
+  error_log_level: warn
+  
+  http:
+    access_log: /var/log/apisix/access.log
+    access_log_format: '{"time": "$time_iso8601", "remote_addr": "$remote_addr", "request": "$request", "status": $status, "body_bytes_sent": $body_bytes_sent, "request_time": $request_time, "upstream_response_time": "$upstream_response_time"}'
+    
+    # Connection limits
+    keepalive_timeout: 60s
+    client_max_body_size: 10m
+    
+    # Gzip compression
+    gzip: on
+    gzip_min_length: 1024
+    gzip_types: application/json application/xml text/plain
+
+etcd:
+  host:
+    - ${ETCD_HOST}:2379
+  prefix: /apisix
+  timeout: 30
+
+plugins:
+  - jwt-auth
+  - key-auth
+  - basic-auth
+  - openid-connect
+  - limit-req
+  - limit-count
+  - limit-conn
+  - ip-restriction
+  - cors
+  - request-validation
+  - response-rewrite
+  - proxy-rewrite
+  - grpc-transcode
+  - prometheus
+  - zipkin
+  - skywalking
+  - opentelemetry
+  - fault-injection
+  - traffic-split
+  - consumer-restriction
+  - forward-auth
+  - opa
+  - csrf
+  - public-api
+
+plugin_attr:
+  prometheus:
+    export_uri: /apisix/prometheus/metrics
+    export_addr:
+      ip: 0.0.0.0
+      port: 9091
+  
+  opentelemetry:
+    trace_id_source: x-request-id
+    resource:
+      service.name: apisix-gateway
+    collector:
+      address: ${OTEL_COLLECTOR_HOST}:4318
+      request_timeout: 3
+  
+  zipkin:
+    endpoint: ${ZIPKIN_ENDPOINT}
+    sample_ratio: 0.1
+    service_name: apisix-gateway
+
+---
+# Routes Configuration
+
+# Mojaloop ML-API-Adapter Routes
+routes:
+  # Party Lookup
+  - id: mojaloop-parties
+    uri: /parties/*
+    name: Mojaloop Party Lookup
+    methods: ["GET", "PUT", "POST"]
+    upstream:
+      type: roundrobin
+      nodes:
+        ml-api-adapter:4000: 1
+      timeout:
+        connect: 5
+        send: 30
+        read: 30
+      retries: 2
+    plugins:
+      jwt-auth:
+        header: Authorization
+        query: token
+      limit-req:
+        rate: 100
+        burst: 50
+        key: remote_addr
+        rejected_code: 429
+      cors:
+        allow_origins: "*"
+        allow_methods: "GET,PUT,POST,OPTIONS"
+        allow_headers: "Authorization,Content-Type,FSPIOP-Source,FSPIOP-Destination,Date"
+        expose_headers: "X-Request-Id"
+        max_age: 3600
+      prometheus:
+        prefer_name: true
+
+  # Quotes
+  - id: mojaloop-quotes
+    uri: /quotes/*
+    name: Mojaloop Quotes
+    methods: ["GET", "PUT", "POST"]
+    upstream:
+      type: roundrobin
+      nodes:
+        ml-api-adapter:4000: 1
+      timeout:
+        connect: 5
+        send: 60
+        read: 60
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 50
+        burst: 25
+        key: remote_addr
+      request-validation:
+        header_schema:
+          type: object
+          required:
+            - FSPIOP-Source
+          properties:
+            FSPIOP-Source:
+              type: string
+              minLength: 1
+
+  # Transfers
+  - id: mojaloop-transfers
+    uri: /transfers/*
+    name: Mojaloop Transfers
+    methods: ["GET", "PUT", "POST", "PATCH"]
+    upstream:
+      type: roundrobin
+      nodes:
+        ml-api-adapter:4000: 1
+      timeout:
+        connect: 5
+        send: 120
+        read: 120
+      retries: 0  # No retries for transfers (idempotency handled by Mojaloop)
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 100
+        burst: 50
+        key: consumer_name
+      limit-count:
+        count: 10000
+        time_window: 3600
+        key: consumer_name
+        rejected_code: 429
+        policy: redis
+        redis_host: ${REDIS_HOST}
+        redis_port: 6379
+
+  # Transaction Requests
+  - id: mojaloop-transaction-requests
+    uri: /transactionRequests/*
+    name: Mojaloop Transaction Requests
+    methods: ["GET", "PUT", "POST"]
+    upstream:
+      type: roundrobin
+      nodes:
+        ml-api-adapter:4000: 1
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 50
+        burst: 25
+
+  # Authorizations
+  - id: mojaloop-authorizations
+    uri: /authorizations/*
+    name: Mojaloop Authorizations
+    methods: ["GET", "PUT", "POST"]
+    upstream:
+      type: roundrobin
+      nodes:
+        ml-api-adapter:4000: 1
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 100
+        burst: 50
+
+  # Bulk Transfers
+  - id: mojaloop-bulk-transfers
+    uri: /bulkTransfers/*
+    name: Mojaloop Bulk Transfers
+    methods: ["GET", "PUT", "POST"]
+    upstream:
+      type: roundrobin
+      nodes:
+        ml-api-adapter:4000: 1
+      timeout:
+        connect: 5
+        send: 300
+        read: 300
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 10
+        burst: 5
+
+  # TigerBeetle Account Operations
+  - id: tigerbeetle-accounts
+    uri: /api/v1/accounts/*
+    name: TigerBeetle Accounts
+    methods: ["GET", "POST", "PUT"]
+    upstream:
+      type: roundrobin
+      nodes:
+        transaction-service:8000: 1
+      timeout:
+        connect: 5
+        send: 30
+        read: 30
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 200
+        burst: 100
+        key: consumer_name
+      consumer-restriction:
+        whitelist:
+          - internal-services
+          - admin-users
+
+  # TigerBeetle Transfer Operations
+  - id: tigerbeetle-transfers
+    uri: /api/v1/transfers/*
+    name: TigerBeetle Transfers
+    methods: ["GET", "POST", "PUT"]
+    upstream:
+      type: roundrobin
+      nodes:
+        transaction-service:8000: 1
+      timeout:
+        connect: 5
+        send: 60
+        read: 60
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 500
+        burst: 250
+        key: consumer_name
+      opa:
+        host: http://opa:8181
+        policy: data.remittance.transfer.allow
+
+  # TigerBeetle Balance Queries
+  - id: tigerbeetle-balances
+    uri: /api/v1/balances/*
+    name: TigerBeetle Balances
+    methods: ["GET"]
+    upstream:
+      type: roundrobin
+      nodes:
+        transaction-service:8000: 1
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 1000
+        burst: 500
+
+  # Wallet Service
+  - id: wallet-service
+    uri: /api/v1/wallets/*
+    name: Wallet Service
+    methods: ["GET", "POST", "PUT", "DELETE"]
+    upstream:
+      type: roundrobin
+      nodes:
+        wallet-service:8000: 1
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 200
+        burst: 100
+
+  # Payment Service
+  - id: payment-service
+    uri: /api/v1/payments/*
+    name: Payment Service
+    methods: ["GET", "POST", "PUT"]
+    upstream:
+      type: roundrobin
+      nodes:
+        payment-service:8000: 1
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 100
+        burst: 50
+
+  # KYC Service
+  - id: kyc-service
+    uri: /api/v1/kyc/*
+    name: KYC Service
+    methods: ["GET", "POST", "PUT"]
+    upstream:
+      type: roundrobin
+      nodes:
+        kyc-service:8000: 1
+    plugins:
+      jwt-auth: {}
+      limit-req:
+        rate: 50
+        burst: 25
+      ip-restriction:
+        whitelist:
+          - 10.0.0.0/8
+
+  # Health Checks (no auth required)
+  - id: health-checks
+    uri: /health
+    name: Health Checks
+    methods: ["GET"]
+    upstream:
+      type: roundrobin
+      nodes:
+        transaction-service:8000: 1
+    plugins:
+      public-api: {}
+
+  # Prometheus Metrics (internal only)
+  - id: metrics
+    uri: /metrics
+    name: Prometheus Metrics
+    methods: ["GET"]
+    upstream:
+      type: roundrobin
+      nodes:
+        transaction-service:8000: 1
+    plugins:
+      ip-restriction:
+        whitelist:
+          - 10.0.0.0/8
+          - 172.16.0.0/12
+
+---
+# Consumers Configuration
+
+consumers:
+  - username: internal-services
+    plugins:
+      jwt-auth:
+        key: internal-services
+        secret: ${JWT_SECRET}
+        algorithm: HS256
+      key-auth:
+        key: ${INTERNAL_API_KEY}
+
+  - username: admin-users
+    plugins:
+      jwt-auth:
+        key: admin-users
+        secret: ${JWT_SECRET}
+        algorithm: HS256
+
+  - username: dfsp-partner
+    plugins:
+      jwt-auth:
+        key: dfsp-partner
+        secret: ${DFSP_JWT_SECRET}
+        algorithm: HS256
+      limit-count:
+        count: 100000
+        time_window: 86400
+        key: consumer_name
+
+  - username: mobile-app
+    plugins:
+      jwt-auth:
+        key: mobile-app
+        secret: ${MOBILE_JWT_SECRET}
+        algorithm: HS256
+      limit-count:
+        count: 10000
+        time_window: 3600
+        key: consumer_name
+
+---
+# Global Rules
+
+global_rules:
+  - id: 1
+    plugins:
+      prometheus:
+        prefer_name: true
+      zipkin:
+        endpoint: ${ZIPKIN_ENDPOINT}
+        sample_ratio: 0.1
+      cors:
+        allow_origins: "*"
+        allow_methods: "*"
+        allow_headers: "*"
+        max_age: 3600
+
+---
+# Upstreams Configuration
+
+upstreams:
+  - id: mojaloop-ml-api-adapter
+    name: Mojaloop ML API Adapter
+    type: roundrobin
+    hash_on: vars
+    nodes:
+      - host: ml-api-adapter
+        port: 4000
+        weight: 1
+    checks:
+      active:
+        type: http
+        http_path: /health
+        healthy:
+          interval: 5
+          successes: 2
+        unhealthy:
+          interval: 5
+          http_failures: 3
+      passive:
+        healthy:
+          http_statuses: [200, 201, 202]
+          successes: 3
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          http_failures: 3
+          tcp_failures: 3
+
+  - id: transaction-service
+    name: Transaction Service
+    type: roundrobin
+    nodes:
+      - host: transaction-service
+        port: 8000
+        weight: 1
+    checks:
+      active:
+        type: http
+        http_path: /health
+        healthy:
+          interval: 5
+          successes: 2
+        unhealthy:
+          interval: 5
+          http_failures: 3
+
+  - id: wallet-service
+    name: Wallet Service
+    type: roundrobin
+    nodes:
+      - host: wallet-service
+        port: 8000
+        weight: 1
+    checks:
+      active:
+        type: http
+        http_path: /health
+
+  - id: payment-service
+    name: Payment Service
+    type: roundrobin
+    nodes:
+      - host: payment-service
+        port: 8000
+        weight: 1
+    checks:
+      active:
+        type: http
+        http_path: /health
+
+  - id: kyc-service
+    name: KYC Service
+    type: roundrobin
+    nodes:
+      - host: kyc-service
+        port: 8000
+        weight: 1
+    checks:
+      active:
+        type: http
+        http_path: /health

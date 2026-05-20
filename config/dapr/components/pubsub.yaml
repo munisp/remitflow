@@ -1,0 +1,23 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: remitflow-pubsub
+  namespace: remitflow
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: "kafka:9092"
+    - name: consumerGroup
+      value: "remitflow-dapr"
+    - name: clientID
+      value: "remitflow-dapr-client"
+    - name: authRequired
+      value: "false"
+    - name: initialOffset
+      value: "newest"
+    - name: maxMessageBytes
+      value: "1048576"
+    - name: consumeRetryInterval
+      value: "200ms"

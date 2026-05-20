@@ -1,0 +1,432 @@
+---
+# TigerBeetle Cluster StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tigerbeetle
+  namespace: remittance
+  labels:
+    app: tigerbeetle
+    component: database
+spec:
+  serviceName: tigerbeetle
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tigerbeetle
+  template:
+    metadata:
+      labels:
+        app: tigerbeetle
+        component: database
+    spec:
+      containers:
+      - name: tigerbeetle
+        image: ghcr.io/tigerbeetle/tigerbeetle:latest
+        command:
+          - tigerbeetle
+          - start
+          - --addresses=tigerbeetle-0.tigerbeetle:3001,tigerbeetle-1.tigerbeetle:3001,tigerbeetle-2.tigerbeetle:3001
+          - /data/$(POD_NAME).tigerbeetle
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        ports:
+        - containerPort: 3001
+          name: tigerbeetle
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          tcpSocket:
+            port: 3001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 3001
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 100Gi
+
+---
+# TigerBeetle Headless Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle
+  namespace: remittance
+  labels:
+    app: tigerbeetle
+spec:
+  clusterIP: None
+  ports:
+  - port: 3001
+    name: tigerbeetle
+  selector:
+    app: tigerbeetle
+
+---
+# TigerBeetle Native Zig Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tigerbeetle-native
+  namespace: remittance
+  labels:
+    app: tigerbeetle-native
+    component: api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tigerbeetle-native
+  template:
+    metadata:
+      labels:
+        app: tigerbeetle-native
+        component: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8094"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: tigerbeetle-native
+        image: remittance/tigerbeetle-native:latest
+        ports:
+        - containerPort: 8094
+          name: http
+        env:
+        - name: TIGERBEETLE_ADDRESSES
+          value: "tigerbeetle-0.tigerbeetle:3001,tigerbeetle-1.tigerbeetle:3001,tigerbeetle-2.tigerbeetle:3001"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8094
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8094
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+# TigerBeetle Native Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle-native
+  namespace: remittance
+  labels:
+    app: tigerbeetle-native
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8094
+    targetPort: 8094
+    name: http
+  selector:
+    app: tigerbeetle-native
+
+---
+# TigerBeetle Primary Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tigerbeetle-primary
+  namespace: remittance
+  labels:
+    app: tigerbeetle-primary
+    component: api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tigerbeetle-primary
+  template:
+    metadata:
+      labels:
+        app: tigerbeetle-primary
+        component: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8091"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: tigerbeetle-primary
+        image: remittance/tigerbeetle-primary:latest
+        ports:
+        - containerPort: 8091
+          name: http
+        env:
+        - name: TIGERBEETLE_ADDRESSES
+          value: "tigerbeetle-0.tigerbeetle:3001,tigerbeetle-1.tigerbeetle:3001,tigerbeetle-2.tigerbeetle:3001"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: tigerbeetle-secrets
+              key: database-url
+        - name: REDIS_URL
+          value: "redis://redis:6379"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8091
+          initialDelaySeconds: 15
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8091
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+# TigerBeetle Primary Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle-primary
+  namespace: remittance
+  labels:
+    app: tigerbeetle-primary
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8091
+    targetPort: 8091
+    name: http
+  selector:
+    app: tigerbeetle-primary
+
+---
+# TigerBeetle Edge Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tigerbeetle-edge
+  namespace: remittance
+  labels:
+    app: tigerbeetle-edge
+    component: api
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: tigerbeetle-edge
+  template:
+    metadata:
+      labels:
+        app: tigerbeetle-edge
+        component: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8092"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+      - name: tigerbeetle-edge
+        image: remittance/tigerbeetle-edge:latest
+        ports:
+        - containerPort: 8092
+          name: http
+        env:
+        - name: TIGERBEETLE_ADDRESSES
+          value: "tigerbeetle-0.tigerbeetle:3001,tigerbeetle-1.tigerbeetle:3001,tigerbeetle-2.tigerbeetle:3001"
+        - name: REDIS_URL
+          value: "redis://redis:6379"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8092
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8092
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+# TigerBeetle Edge Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle-edge
+  namespace: remittance
+  labels:
+    app: tigerbeetle-edge
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8092
+    name: http
+  selector:
+    app: tigerbeetle-edge
+
+---
+# Horizontal Pod Autoscaler for Native Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tigerbeetle-native-hpa
+  namespace: remittance
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tigerbeetle-native
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# Horizontal Pod Autoscaler for Primary Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tigerbeetle-primary-hpa
+  namespace: remittance
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tigerbeetle-primary
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+
+---
+# Horizontal Pod Autoscaler for Edge Service
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tigerbeetle-edge-hpa
+  namespace: remittance
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tigerbeetle-edge
+  minReplicas: 5
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+
+---
+# Pod Disruption Budget for TigerBeetle Cluster
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tigerbeetle-pdb
+  namespace: remittance
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: tigerbeetle
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tigerbeetle-network-policy
+  namespace: remittance
+spec:
+  podSelector:
+    matchLabels:
+      app: tigerbeetle
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          component: api
+    ports:
+    - protocol: TCP
+      port: 3001
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: tigerbeetle
+    ports:
+    - protocol: TCP
+      port: 3001
+

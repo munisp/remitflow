@@ -1,0 +1,9 @@
+apiVersion: openappsec.io/v1alpha1
+kind: OpenAppSec
+metadata:
+  name: openappsec-ha
+  namespace: openappsec
+spec:
+  replicas: 3
+  logLevel: "info"
+  image: "openappsec/agent:latest"

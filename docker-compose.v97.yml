@@ -1,0 +1,388 @@
+version: "3.9"
+# RemitFlow v97 — Full Production Stack
+# Includes: Node app, Go rate-limit sidecar, Rust audit service, Python compliance service,
+#           Nginx gateway, PostgreSQL, Redis, Kafka, Zookeeper, Prometheus, Grafana,
+#           Qdrant vector DB, FalkorDB graph DB, Ollama LLM,
+#           Temporal workflow engine, Airflow pipeline orchestrator,
+#           v97 new services: velocity-check-engine, kyc-lifecycle-service,
+#           webhook-retry-worker, api-key-rotation-service, batch-payment-processor
+
+networks:
+  remitflow-v97:
+    driver: bridge
+
+volumes:
+  postgres_v97_data:
+  redis_v97_data:
+  kafka_v97_data:
+  prometheus_v97_data:
+  grafana_v97_data:
+  qdrant_v97_data:
+  falkordb_v97_data:
+  temporal_v97_data:
+
+services:
+  # ─── Core Application ───────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: remitflow-app:v97
+    container_name: remitflow-app-v97
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      VITE_APP_ID: ${VITE_APP_ID}
+      OAUTH_SERVER_URL: ${OAUTH_SERVER_URL}
+      VITE_OAUTH_PORTAL_URL: ${VITE_OAUTH_PORTAL_URL}
+      OWNER_OPEN_ID: ${OWNER_OPEN_ID}
+      OWNER_NAME: ${OWNER_NAME}
+      BUILT_IN_FORGE_API_URL: ${BUILT_IN_FORGE_API_URL}
+      BUILT_IN_FORGE_API_KEY: ${BUILT_IN_FORGE_API_KEY}
+      VITE_FRONTEND_FORGE_API_KEY: ${VITE_FRONTEND_FORGE_API_KEY}
+      VITE_FRONTEND_FORGE_API_URL: ${VITE_FRONTEND_FORGE_API_URL}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      VITE_STRIPE_PUBLISHABLE_KEY: ${VITE_STRIPE_PUBLISHABLE_KEY}
+      REDIS_URL: redis://redis-v97:6379
+      KAFKA_BROKERS: kafka-v97:9092
+      QDRANT_URL: http://qdrant-v97:6333
+      FALKORDB_URL: redis://falkordb-v97:6379
+      OLLAMA_URL: http://ollama-v97:11434
+      TEMPORAL_ADDRESS: temporal-v97:7233
+      GO_RATE_LIMIT_URL: http://go-rate-limit-v97:8081
+      RUST_AUDIT_URL: http://rust-audit-v97:8082
+      PYTHON_COMPLIANCE_URL: http://python-compliance-v97:8083
+      VELOCITY_CHECK_URL: http://velocity-check-v97:8084
+      KYC_LIFECYCLE_URL: http://kyc-lifecycle-v97:8085
+      WEBHOOK_RETRY_URL: http://webhook-retry-v97:8086
+    depends_on:
+      - postgres-v97
+      - redis-v97
+      - kafka-v97
+      - qdrant-v97
+      - falkordb-v97
+      - go-rate-limit-v97
+      - rust-audit-v97
+      - python-compliance-v97
+      - velocity-check-v97
+      - kyc-lifecycle-v97
+      - webhook-retry-v97
+    networks:
+      - remitflow-v97
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Database ───────────────────────────────────────────────────────────────
+  postgres-v97:
+    image: postgres:16-alpine
+    container_name: remitflow-postgres-v97
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: remitflow_v97
+      POSTGRES_USER: remitflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-remitflow_secure_2026}
+    volumes:
+      - postgres_v97_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - remitflow-v97
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U remitflow -d remitflow_v97"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Cache & Message Broker ─────────────────────────────────────────────────
+  redis-v97:
+    image: redis:7-alpine
+    container_name: remitflow-redis-v97
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-remitflow_redis_2026}
+    volumes:
+      - redis_v97_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - remitflow-v97
+
+  zookeeper-v97:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: remitflow-zookeeper-v97
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - remitflow-v97
+
+  kafka-v97:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: remitflow-kafka-v97
+    restart: unless-stopped
+    depends_on:
+      - zookeeper-v97
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper-v97:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-v97:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_v97_data:/var/lib/kafka/data
+    ports:
+      - "9092:9092"
+    networks:
+      - remitflow-v97
+
+  # ─── AI/ML Services ─────────────────────────────────────────────────────────
+  qdrant-v97:
+    image: qdrant/qdrant:latest
+    container_name: remitflow-qdrant-v97
+    restart: unless-stopped
+    volumes:
+      - qdrant_v97_data:/qdrant/storage
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    networks:
+      - remitflow-v97
+
+  falkordb-v97:
+    image: falkordb/falkordb:latest
+    container_name: remitflow-falkordb-v97
+    restart: unless-stopped
+    volumes:
+      - falkordb_v97_data:/data
+    ports:
+      - "6380:6379"
+    networks:
+      - remitflow-v97
+
+  ollama-v97:
+    image: ollama/ollama:latest
+    container_name: remitflow-ollama-v97
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - /tmp/ollama_models:/root/.ollama
+    networks:
+      - remitflow-v97
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ─── Polyglot Middleware Sidecars ────────────────────────────────────────────
+  go-rate-limit-v97:
+    build:
+      context: ./middleware/go-rate-limit
+      dockerfile: Dockerfile
+    image: remitflow-go-rate-limit:v97
+    container_name: remitflow-go-rate-limit-v97
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis-v97:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-remitflow_redis_2026}
+      PORT: "8081"
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis-v97
+    networks:
+      - remitflow-v97
+
+  rust-audit-v97:
+    build:
+      context: ./middleware/rust-audit
+      dockerfile: Dockerfile
+    image: remitflow-rust-audit:v97
+    container_name: remitflow-rust-audit-v97
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_secure_2026}@postgres-v97:5432/remitflow_v97
+      PORT: "8082"
+    ports:
+      - "8082:8082"
+    depends_on:
+      - postgres-v97
+    networks:
+      - remitflow-v97
+
+  python-compliance-v97:
+    build:
+      context: ./middleware/python-compliance
+      dockerfile: Dockerfile
+    image: remitflow-python-compliance:v97
+    container_name: remitflow-python-compliance-v97
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_secure_2026}@postgres-v97:5432/remitflow_v97
+      PORT: "8083"
+      KAFKA_BROKERS: kafka-v97:9092
+    ports:
+      - "8083:8083"
+    depends_on:
+      - postgres-v97
+      - kafka-v97
+    networks:
+      - remitflow-v97
+
+  # ─── v97 New Microservices ───────────────────────────────────────────────────
+  velocity-check-v97:
+    build:
+      context: ./middleware/velocity-check
+      dockerfile: Dockerfile
+    image: remitflow-velocity-check:v97
+    container_name: remitflow-velocity-check-v97
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_secure_2026}@postgres-v97:5432/remitflow_v97
+      REDIS_URL: redis://redis-v97:6379
+      PORT: "8084"
+    ports:
+      - "8084:8084"
+    depends_on:
+      - postgres-v97
+      - redis-v97
+    networks:
+      - remitflow-v97
+
+  kyc-lifecycle-v97:
+    build:
+      context: ./middleware/kyc-lifecycle
+      dockerfile: Dockerfile
+    image: remitflow-kyc-lifecycle:v97
+    container_name: remitflow-kyc-lifecycle-v97
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_secure_2026}@postgres-v97:5432/remitflow_v97
+      KAFKA_BROKERS: kafka-v97:9092
+      PORT: "8085"
+    ports:
+      - "8085:8085"
+    depends_on:
+      - postgres-v97
+      - kafka-v97
+    networks:
+      - remitflow-v97
+
+  webhook-retry-v97:
+    build:
+      context: ./middleware/webhook-retry
+      dockerfile: Dockerfile
+    image: remitflow-webhook-retry:v97
+    container_name: remitflow-webhook-retry-v97
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_secure_2026}@postgres-v97:5432/remitflow_v97
+      REDIS_URL: redis://redis-v97:6379
+      PORT: "8086"
+      MAX_RETRIES: "5"
+      INITIAL_BACKOFF_MS: "1000"
+    ports:
+      - "8086:8086"
+    depends_on:
+      - postgres-v97
+      - redis-v97
+    networks:
+      - remitflow-v97
+
+  # ─── Temporal Workflow Engine ────────────────────────────────────────────────
+  temporal-v97:
+    image: temporalio/auto-setup:1.22.0
+    container_name: remitflow-temporal-v97
+    restart: unless-stopped
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_USER: remitflow
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-remitflow_secure_2026}
+      POSTGRES_SEEDS: postgres-v97
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233"
+    depends_on:
+      - postgres-v97
+    networks:
+      - remitflow-v97
+    volumes:
+      - temporal_v97_data:/etc/temporal
+
+  temporal-ui-v97:
+    image: temporalio/ui:2.21.0
+    container_name: remitflow-temporal-ui-v97
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal-v97:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8088:8080"
+    depends_on:
+      - temporal-v97
+    networks:
+      - remitflow-v97
+
+  # ─── Observability ──────────────────────────────────────────────────────────
+  prometheus-v97:
+    image: prom/prometheus:latest
+    container_name: remitflow-prometheus-v97
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_v97_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - remitflow-v97
+
+  grafana-v97:
+    image: grafana/grafana:latest
+    container_name: remitflow-grafana-v97
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-remitflow_grafana_2026}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_v97_data:/var/lib/grafana
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus-v97
+    networks:
+      - remitflow-v97
+
+  # ─── Nginx Gateway ──────────────────────────────────────────────────────────
+  nginx-v97:
+    image: nginx:alpine
+    container_name: remitflow-nginx-v97
+    restart: unless-stopped
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./scripts/certs:/etc/nginx/certs:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - app
+    networks:
+      - remitflow-v97

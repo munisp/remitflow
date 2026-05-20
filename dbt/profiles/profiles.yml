@@ -1,0 +1,22 @@
+remitflow:
+  target: prod
+  outputs:
+    prod:
+      type: postgres
+      host: "{{ env_var('REMITFLOW_DB_HOST', 'localhost') }}"
+      port: "{{ env_var('REMITFLOW_DB_PORT', '5432') | int }}"
+      dbname: "{{ env_var('REMITFLOW_DB_NAME', 'remitflow') }}"
+      user: "{{ env_var('REMITFLOW_DB_USER', 'remitflow') }}"
+      password: "{{ env_var('REMITFLOW_DB_PASS', 'remitflow_db_2024') }}"
+      schema: "{{ env_var('REMITFLOW_DB_SCHEMA', 'public') }}"
+      threads: 4
+      connect_timeout: 10
+    dev:
+      type: postgres
+      host: localhost
+      port: 5432
+      dbname: remitflow
+      user: remitflow
+      password: remitflow_db_2024
+      schema: dbt_dev
+      threads: 2

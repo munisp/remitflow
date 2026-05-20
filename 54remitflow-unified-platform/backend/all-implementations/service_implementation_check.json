@@ -1,0 +1,47 @@
+{
+    "enhanced_tigerbeetle": {
+        "expected_files": [
+            "tigerbeetle_service.go",
+            "main.go"
+        ],
+        "expected_patterns": [
+            "CreateTransfers",
+            "CreateAccounts",
+            "PRIMARY_FINANCIAL_LEDGER"
+        ],
+        "status": "missing"
+    },
+    "pix_gateway": {
+        "expected_files": [
+            "main.go",
+            "pix_gateway.go"
+        ],
+        "expected_patterns": [
+            "tigerbeetle",
+            "account_id"
+        ],
+        "status": "partial"
+    },
+    "brl_liquidity": {
+        "expected_files": [
+            "main.py",
+            "liquidity_manager.py"
+        ],
+        "expected_patterns": [
+            "tigerbeetle_account_id",
+            "balance"
+        ],
+        "status": "partial"
+    },
+    "integration_orchestrator": {
+        "expected_files": [
+            "main.go",
+            "orchestrator.go"
+        ],
+        "expected_patterns": [
+            "tigerbeetle",
+            "CreateTransfers"
+        ],
+        "status": "partial"
+    }
+}

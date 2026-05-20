@@ -1,0 +1,79 @@
+entity user {}
+
+entity organization {
+    relation admin @user
+    relation member @user
+    relation viewer @user
+    
+    permission view = viewer or member or admin
+    permission edit = member or admin
+    permission delete = admin
+}
+
+entity policy {
+    relation owner @user
+    relation editor @user @organization#member
+    relation viewer @user @organization#viewer
+    relation approver @user @organization#admin
+    
+    permission view = viewer or editor or owner or approver
+    permission edit = editor or owner
+    permission approve = approver
+    permission delete = owner
+    permission deploy = approver
+}
+
+entity document {
+    relation owner @user
+    relation editor @user @organization#member
+    relation viewer @user @organization#viewer
+    relation policy @policy
+    
+    permission view = viewer or editor or owner or policy.view
+    permission edit = editor or owner or policy.edit
+    permission delete = owner or policy.delete
+    permission upload = editor or owner
+}
+
+entity test {
+    relation owner @user
+    relation policy @policy
+    relation organization @organization
+    
+    permission view = owner or policy.view or organization.view
+    permission create = policy.edit or organization.edit
+    permission execute = policy.approve or organization.admin
+    permission stop = owner or policy.approve or organization.admin
+}
+
+entity rollout {
+    relation owner @user
+    relation policy @policy
+    relation organization @organization
+    
+    permission view = owner or policy.view or organization.view
+    permission create = policy.approve or organization.admin
+    permission execute = policy.deploy or organization.admin
+    permission rollback = owner or policy.deploy or organization.admin
+}
+
+entity analytics {
+    relation organization @organization
+    relation policy @policy
+    
+    permission view = organization.view or policy.view
+    permission export = organization.member or policy.edit
+    permission configure = organization.admin
+}
+
+entity system {
+    relation admin @user
+    relation operator @user
+    
+    permission manage_users = admin
+    permission manage_organizations = admin
+    permission system_config = admin
+    permission monitor = operator or admin
+    permission backup = admin
+}
+

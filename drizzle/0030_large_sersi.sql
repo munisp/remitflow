@@ -1,0 +1,1 @@
+ALTER TABLE "user_lockouts" ADD COLUMN "notification_sent_at" timestamp;

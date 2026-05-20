@@ -1,0 +1,36 @@
+{
+  "name": "TechHub Store",
+  "tagline": "Latest Tech, Best Prices",
+  "description": "Electronics store template with product comparison, installment plans, and warranty management",
+  "theme": {
+    "primary": "#1e40af",
+    "secondary": "#06b6d4",
+    "accent": "#3b82f6",
+    "background": "#1f2937",
+    "text": "#f9fafb"
+  },
+  "categories": [
+    "Smartphones",
+    "Laptops",
+    "Tablets",
+    "Accessories",
+    "Smart Home",
+    "Gaming",
+    "Audio",
+    "Cameras"
+  ],
+  "features": [
+    "installments",
+    "trade_in",
+    "warranty",
+    "product_comparison",
+    "tech_support"
+  ],
+  "payment_methods": [
+    "qr_code",
+    "mobile_money",
+    "bank_transfer",
+    "card",
+    "installment"
+  ]
+}

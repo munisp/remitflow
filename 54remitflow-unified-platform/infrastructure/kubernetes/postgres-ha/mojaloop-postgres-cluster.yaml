@@ -1,0 +1,316 @@
+# Mojaloop PostgreSQL HA Cluster
+# Uses Zalando Postgres Operator with Patroni for automatic failover
+apiVersion: acid.zalan.do/v1
+kind: postgresql
+metadata:
+  name: mojaloop-postgres
+  namespace: remittance
+  labels:
+    application: mojaloop
+    team: remittance
+spec:
+  # Team ID for operator
+  teamId: "remittance"
+  
+  # PostgreSQL version
+  postgresql:
+    version: "15"
+    parameters:
+      # Performance tuning
+      shared_buffers: "256MB"
+      effective_cache_size: "768MB"
+      maintenance_work_mem: "128MB"
+      checkpoint_completion_target: "0.9"
+      wal_buffers: "16MB"
+      default_statistics_target: "100"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+      work_mem: "16MB"
+      min_wal_size: "1GB"
+      max_wal_size: "4GB"
+      max_worker_processes: "4"
+      max_parallel_workers_per_gather: "2"
+      max_parallel_workers: "4"
+      max_parallel_maintenance_workers: "2"
+      
+      # Replication settings for HA
+      wal_level: "replica"
+      max_wal_senders: "10"
+      max_replication_slots: "10"
+      hot_standby: "on"
+      hot_standby_feedback: "on"
+      
+      # Connection settings
+      max_connections: "200"
+      
+      # Logging
+      log_statement: "ddl"
+      log_min_duration_statement: "1000"
+      log_checkpoints: "on"
+      log_connections: "on"
+      log_disconnections: "on"
+      log_lock_waits: "on"
+      log_temp_files: "0"
+      
+      # Security
+      ssl: "on"
+      password_encryption: "scram-sha-256"
+  
+  # Number of instances (1 primary + 2 replicas)
+  numberOfInstances: 3
+  
+  # Volume configuration
+  volume:
+    size: 50Gi
+    storageClass: standard
+  
+  # Resource limits
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 2
+      memory: 4Gi
+  
+  # Users and databases
+  users:
+    mojaloop:
+      - superuser
+      - createdb
+    central_ledger:
+      - login
+    settlement_service:
+      - login
+    participant_registry:
+      - login
+    transfer_service:
+      - login
+    quote_service:
+      - login
+    app_readonly:
+      - login
+  
+  databases:
+    mojaloop: mojaloop
+    central_ledger: central_ledger
+    settlement: settlement_service
+    participant_registry: participant_registry
+    transfers: transfer_service
+    quotes: quote_service
+  
+  # Prepared databases with extensions
+  preparedDatabases:
+    mojaloop:
+      defaultUsers: true
+      extensions:
+        pg_stat_statements: public
+        uuid-ossp: public
+        pgcrypto: public
+      schemas:
+        central_ledger:
+          defaultRoles: true
+          defaultUsers: true
+        settlement:
+          defaultRoles: true
+          defaultUsers: true
+        participant_registry:
+          defaultRoles: true
+          defaultUsers: true
+        transfers:
+          defaultRoles: true
+          defaultUsers: true
+        quotes:
+          defaultRoles: true
+          defaultUsers: true
+  
+  # Enable connection pooler (PgBouncer)
+  enableConnectionPooler: true
+  connectionPooler:
+    numberOfInstances: 2
+    mode: "transaction"
+    dockerImage: "registry.opensource.zalan.do/acid/pgbouncer:master-27"
+    maxDBConnections: 100
+    resources:
+      requests:
+        cpu: 100m
+        memory: 100Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+  
+  # Enable replica connection pooler for read replicas
+  enableReplicaConnectionPooler: true
+  
+  # Patroni configuration
+  patroni:
+    initdb:
+      encoding: "UTF8"
+      locale: "en_US.UTF-8"
+      data-checksums: "true"
+    pg_hba:
+      - local   all             all                                   trust
+      - hostssl all             +zalandos    127.0.0.1/32             pam
+      - host    all             all          127.0.0.1/32             scram-sha-256
+      - hostssl all             +zalandos    ::1/128                  pam
+      - host    all             all          ::1/128                  scram-sha-256
+      - hostssl replication     standby      all                      scram-sha-256
+      - hostnossl all           all          all                      reject
+      - hostssl all             +zalandos    all                      pam
+      - hostssl all             all          all                      scram-sha-256
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 33554432
+    slots:
+      permanent_physical_1:
+        type: physical
+      permanent_physical_2:
+        type: physical
+    synchronous_mode: false
+    synchronous_mode_strict: false
+  
+  # Pod anti-affinity for HA
+  podAntiAffinity: true
+  podAntiAffinityTopologyKey: "kubernetes.io/hostname"
+  
+  # Tolerations for dedicated nodes
+  tolerations:
+    - key: "database"
+      operator: "Equal"
+      value: "postgres"
+      effect: "NoSchedule"
+  
+  # Node affinity for database nodes
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+            - key: node-type
+              operator: In
+              values:
+                - database
+  
+  # Sidecars for monitoring
+  sidecars:
+    - name: exporter
+      image: quay.io/prometheuscommunity/postgres-exporter:v0.15.0
+      ports:
+        - name: exporter
+          containerPort: 9187
+          protocol: TCP
+      resources:
+        limits:
+          cpu: 500m
+          memory: 256Mi
+        requests:
+          cpu: 100m
+          memory: 128Mi
+      env:
+        - name: DATA_SOURCE_URI
+          value: "127.0.0.1:5432/postgres?sslmode=disable"
+        - name: DATA_SOURCE_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres.mojaloop-postgres.credentials.postgresql.acid.zalan.do
+              key: username
+        - name: DATA_SOURCE_PASS
+          valueFrom:
+            secretKeyRef:
+              name: postgres.mojaloop-postgres.credentials.postgresql.acid.zalan.do
+              key: password
+  
+  # Logical backup configuration
+  enableLogicalBackup: true
+  logicalBackupSchedule: "0 3 * * *"
+  
+  # Clone from existing cluster (for disaster recovery)
+  # clone:
+  #   cluster: "mojaloop-postgres-backup"
+  #   timestamp: "2025-12-22T00:00:00+00:00"
+  
+  # Additional volumes for WAL archiving
+  additionalVolumes:
+    - name: wal-archive
+      mountPath: /home/postgres/wal-archive
+      targetContainers:
+        - postgres
+      volumeSource:
+        emptyDir: {}
+---
+# Service for primary (read-write)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mojaloop-postgres-primary
+  namespace: remittance
+  labels:
+    application: mojaloop
+    spilo-role: master
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+    - name: pooler
+      port: 5433
+      targetPort: 5433
+  selector:
+    application: spilo
+    cluster-name: mojaloop-postgres
+    spilo-role: master
+---
+# Service for replicas (read-only)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mojaloop-postgres-replica
+  namespace: remittance
+  labels:
+    application: mojaloop
+    spilo-role: replica
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+    - name: pooler
+      port: 5433
+      targetPort: 5433
+  selector:
+    application: spilo
+    cluster-name: mojaloop-postgres
+    spilo-role: replica
+---
+# PodDisruptionBudget for HA
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mojaloop-postgres-pdb
+  namespace: remittance
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      application: spilo
+      cluster-name: mojaloop-postgres
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mojaloop-postgres
+  namespace: remittance
+  labels:
+    app: mojaloop-postgres
+spec:
+  selector:
+    matchLabels:
+      application: mojaloop
+  endpoints:
+    - port: exporter
+      interval: 30s
+      path: /metrics

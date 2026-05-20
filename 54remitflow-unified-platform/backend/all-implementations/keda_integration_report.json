@@ -1,0 +1,29 @@
+{
+    "integration_type": "keda_autoscaling_tigerbeetle_fix",
+    "keda_features": {
+        "event_driven_autoscaling": true,
+        "multiple_triggers": [
+            "redis",
+            "prometheus",
+            "cpu",
+            "memory"
+        ],
+        "custom_metrics": true,
+        "horizontal_pod_autoscaler": true
+    },
+    "tigerbeetle_role": "PRIMARY_FINANCIAL_LEDGER",
+    "postgresql_role": "METADATA_ONLY_STORAGE",
+    "performance_benefits": {
+        "tigerbeetle_tps": "1M+",
+        "postgresql_optimization": "Metadata queries only",
+        "keda_scaling": "Event-driven autoscaling",
+        "cost_efficiency": "Pay for usage only"
+    },
+    "scalers_created": [
+        "PIX Gateway (2-20 replicas)",
+        "TigerBeetle (3-50 replicas)",
+        "BRL Liquidity (2-15 replicas)",
+        "Integration Orchestrator (3-25 replicas)",
+        "Enhanced GNN (2-10 replicas)"
+    ]
+}

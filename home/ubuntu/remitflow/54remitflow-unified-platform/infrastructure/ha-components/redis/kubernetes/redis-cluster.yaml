@@ -1,0 +1,717 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-system
+  labels:
+    name: redis-system
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: cache
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: redis-system
+  labels:
+    app: redis
+data:
+  redis.conf: |
+    # Redis Cluster Configuration for Remittance Platform
+    port 6379
+    tls-port 6380
+    tcp-backlog 511
+    timeout 300
+    tcp-keepalive 300
+    
+    # TLS/SSL Configuration
+    tls-cert-file /etc/redis/tls/redis.crt
+    tls-key-file /etc/redis/tls/redis.key
+    tls-ca-cert-file /etc/redis/tls/ca.crt
+    tls-protocols "TLSv1.2 TLSv1.3"
+    tls-auth-clients yes
+    tls-session-caching no
+    
+    # General Configuration
+    daemonize no
+    supervised no
+    pidfile /var/run/redis_6379.pid
+    loglevel notice
+    logfile /var/log/redis/redis-server.log
+    databases 16
+    always-show-logo yes
+    
+    # Snapshotting for banking data durability
+    save 900 1
+    save 300 10
+    save 60 10000
+    stop-writes-on-bgsave-error yes
+    rdbcompression yes
+    rdbchecksum yes
+    dbfilename dump.rdb
+    rdb-del-sync-files no
+    dir /var/lib/redis
+    
+    # Replication for HA
+    replica-serve-stale-data yes
+    replica-read-only yes
+    repl-diskless-sync no
+    repl-diskless-sync-delay 5
+    repl-disable-tcp-nodelay no
+    repl-backlog-size 64mb
+    repl-backlog-ttl 3600
+    replica-priority 100
+    min-replicas-to-write 1
+    min-replicas-max-lag 10
+    
+    # Security
+    aclfile /etc/redis/users.acl
+    
+    # Client Management
+    maxclients 10000
+    
+    # Memory Management
+    maxmemory 4gb
+    maxmemory-policy allkeys-lru
+    maxmemory-samples 5
+    
+    # Lazy Freeing
+    lazyfree-lazy-eviction no
+    lazyfree-lazy-expire no
+    lazyfree-lazy-server-del no
+    replica-lazy-flush no
+    
+    # Kernel Settings
+    oom-score-adj no
+    disable-thp yes
+    
+    # Append Only File for durability
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appendfsync everysec
+    no-appendfsync-on-rewrite no
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    aof-load-truncated yes
+    aof-use-rdb-preamble yes
+    
+    # Lua Scripting
+    lua-time-limit 5000
+    
+    # Redis Cluster
+    cluster-enabled yes
+    cluster-config-file nodes-6379.conf
+    cluster-node-timeout 15000
+    cluster-replica-validity-factor 10
+    cluster-migration-barrier 1
+    cluster-require-full-coverage yes
+    cluster-replica-no-failover no
+    
+    # Slow Log
+    slowlog-log-slower-than 10000
+    slowlog-max-len 128
+    
+    # Latency Monitor
+    latency-monitor-threshold 100
+    
+    # Event Notification
+    notify-keyspace-events ""
+    
+    # Advanced Config
+    hash-max-ziplist-entries 512
+    hash-max-ziplist-value 64
+    list-max-ziplist-size -2
+    list-compress-depth 0
+    set-max-intset-entries 512
+    zset-max-ziplist-entries 128
+    zset-max-ziplist-value 64
+    hll-sparse-max-bytes 3000
+    stream-node-max-bytes 4096
+    stream-node-max-entries 100
+    activerehashing yes
+    
+    # Client Output Buffer Limits
+    client-output-buffer-limit normal 0 0 0
+    client-output-buffer-limit replica 256mb 64mb 60
+    client-output-buffer-limit pubsub 32mb 8mb 60
+    client-query-buffer-limit 1gb
+    proto-max-bulk-len 512mb
+    
+    # Background Tasks
+    hz 10
+    dynamic-hz yes
+    aof-rewrite-incremental-fsync yes
+    rdb-save-incremental-fsync yes
+    
+    # LFU Configuration
+    lfu-log-factor 10
+    lfu-decay-time 1
+    
+    # Active Defragmentation
+    activedefrag yes
+    active-defrag-ignore-bytes 100mb
+    active-defrag-threshold-lower 10
+    active-defrag-threshold-upper 100
+    active-defrag-cycle-min 1
+    active-defrag-cycle-max 25
+    active-defrag-max-scan-fields 1000
+    jemalloc-bg-thread yes
+
+  users.acl: |
+    # Redis ACL configuration for banking security
+    user default off
+    user admin on >banking-network-admin-password ~* &* +@all
+    user banking-app on >banking-network-app-password ~banking:* ~session:* ~cache:* +@read +@write +@stream +@hash +@list +@set +@sortedset +@geo +@bitmap +@hyperloglog -@dangerous
+    user monitoring on >banking-network-monitor-password ~* +@read +info +ping +client +config|get +slowlog +latency +memory +@stream -@write -@admin -@dangerous
+    user replication on >banking-network-repl-password +psync +replconf +ping
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-secrets
+  namespace: redis-system
+type: Opaque
+data:
+  # Base64 encoded passwords and certificates
+  admin-password: YmFua2luZy1uZXR3b3JrLWFkbWluLXBhc3N3b3Jk
+  app-password: YmFua2luZy1uZXR3b3JrLWFwcC1wYXNzd29yZA==
+  monitor-password: YmFua2luZy1uZXR3b3JrLW1vbml0b3ItcGFzc3dvcmQ=
+  replication-password: YmFua2luZy1uZXR3b3JrLXJlcGwtcGFzc3dvcmQ=
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster
+  namespace: redis-system
+  labels:
+    app: redis
+spec:
+  clusterIP: None
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+  - name: redis-tls
+    port: 6380
+    targetPort: 6380
+  - name: cluster-bus
+    port: 16379
+    targetPort: 16379
+  selector:
+    app: redis
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: redis-system
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+  - name: redis-tls
+    port: 6380
+    targetPort: 6380
+  selector:
+    app: redis
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: redis-system
+  labels:
+    app: redis
+spec:
+  serviceName: redis-cluster
+  replicas: 6
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - redis
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: redis
+        image: redis:7.2-alpine
+        ports:
+        - containerPort: 6379
+          name: redis
+        - containerPort: 6380
+          name: redis-tls
+        - containerPort: 16379
+          name: cluster-bus
+        env:
+        - name: REDIS_CLUSTER_ANNOUNCE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: REDIS_NODES
+          value: "redis-0.redis-cluster:6379,redis-1.redis-cluster:6379,redis-2.redis-cluster:6379,redis-3.redis-cluster:6379,redis-4.redis-cluster:6379,redis-5.redis-cluster:6379"
+        command:
+        - redis-server
+        - /etc/redis/redis.conf
+        - --cluster-announce-ip
+        - $(REDIS_CLUSTER_ANNOUNCE_IP)
+        volumeMounts:
+        - name: redis-config
+          mountPath: /etc/redis/redis.conf
+          subPath: redis.conf
+        - name: redis-config
+          mountPath: /etc/redis/users.acl
+          subPath: users.acl
+        - name: redis-data
+          mountPath: /var/lib/redis
+        - name: redis-logs
+          mountPath: /var/log/redis
+        - name: tls-certs
+          mountPath: /etc/redis/tls
+          readOnly: true
+        resources:
+          requests:
+            memory: "6Gi"
+            cpu: "1"
+          limits:
+            memory: "8Gi"
+            cpu: "2"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - --tls
+            - --cert
+            - /etc/redis/tls/redis.crt
+            - --key
+            - /etc/redis/tls/redis.key
+            - --cacert
+            - /etc/redis/tls/ca.crt
+            - -p
+            - "6380"
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - --tls
+            - --cert
+            - /etc/redis/tls/redis.crt
+            - --key
+            - /etc/redis/tls/redis.key
+            - --cacert
+            - /etc/redis/tls/ca.crt
+            - -p
+            - "6380"
+            - ping
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - redis-cli
+              - --tls
+              - --cert
+              - /etc/redis/tls/redis.crt
+              - --key
+              - /etc/redis/tls/redis.key
+              - --cacert
+              - /etc/redis/tls/ca.crt
+              - -p
+              - "6380"
+              - shutdown
+              - save
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-config
+      - name: tls-certs
+        secret:
+          secretName: redis-secrets
+      - name: redis-logs
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 50Gi
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: redis-cluster-init
+  namespace: redis-system
+  labels:
+    app: redis-cluster-init
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: redis-cluster-init
+        image: redis:7.2-alpine
+        command:
+        - sh
+        - -c
+        - |
+          # Wait for all Redis pods to be ready
+          echo "Waiting for Redis pods to be ready..."
+          for i in $(seq 0 5); do
+            while ! redis-cli -h redis-$i.redis-cluster -p 6379 ping; do
+              echo "Waiting for redis-$i to be ready..."
+              sleep 5
+            done
+          done
+          
+          # Create Redis cluster
+          echo "Creating Redis cluster..."
+          redis-cli --cluster create \
+            redis-0.redis-cluster:6379 \
+            redis-1.redis-cluster:6379 \
+            redis-2.redis-cluster:6379 \
+            redis-3.redis-cluster:6379 \
+            redis-4.redis-cluster:6379 \
+            redis-5.redis-cluster:6379 \
+            --cluster-replicas 1 \
+            --cluster-yes
+          
+          # Verify cluster status
+          echo "Verifying cluster status..."
+          redis-cli -h redis-0.redis-cluster -p 6379 cluster info
+          redis-cli -h redis-0.redis-cluster -p 6379 cluster nodes
+          
+          echo "Redis cluster initialization completed successfully!"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel
+  namespace: redis-system
+  labels:
+    app: redis-sentinel
+spec:
+  clusterIP: None
+  ports:
+  - name: sentinel
+    port: 26379
+    targetPort: 26379
+  selector:
+    app: redis-sentinel
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-sentinel
+  namespace: redis-system
+  labels:
+    app: redis-sentinel
+spec:
+  serviceName: redis-sentinel
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis-sentinel
+  template:
+    metadata:
+      labels:
+        app: redis-sentinel
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - redis-sentinel
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: redis-sentinel
+        image: redis:7.2-alpine
+        ports:
+        - containerPort: 26379
+          name: sentinel
+        command:
+        - redis-sentinel
+        - /etc/redis-sentinel/sentinel.conf
+        volumeMounts:
+        - name: sentinel-config
+          mountPath: /etc/redis-sentinel
+        - name: sentinel-data
+          mountPath: /var/lib/redis-sentinel
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - -p
+            - "26379"
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - -p
+            - "26379"
+            - ping
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: sentinel-config
+        configMap:
+          name: redis-sentinel-config
+  volumeClaimTemplates:
+  - metadata:
+      name: sentinel-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 1Gi
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-sentinel-config
+  namespace: redis-system
+  labels:
+    app: redis-sentinel
+data:
+  sentinel.conf: |
+    # Redis Sentinel Configuration for Remittance Platform HA
+    port 26379
+    dir /var/lib/redis-sentinel
+    
+    # Monitor Redis masters
+    sentinel monitor banking-master redis-0.redis-cluster 6379 2
+    sentinel auth-pass banking-master banking-network-app-password
+    sentinel down-after-milliseconds banking-master 30000
+    sentinel parallel-syncs banking-master 1
+    sentinel failover-timeout banking-master 180000
+    
+    # Sentinel authentication
+    requirepass banking-network-sentinel-password
+    
+    # Logging
+    logfile /var/log/redis-sentinel/sentinel.log
+    loglevel notice
+    
+    # Security
+    protected-mode yes
+    
+    # Performance
+    tcp-keepalive 60
+    
+    # Notification scripts (optional)
+    # sentinel notification-script banking-master /etc/redis-sentinel/notify.sh
+    # sentinel client-reconfig-script banking-master /etc/redis-sentinel/reconfig.sh
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  namespace: redis-system
+spec:
+  minAvailable: 4
+  selector:
+    matchLabels:
+      app: redis
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-sentinel-pdb
+  namespace: redis-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: redis-sentinel
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-network-policy
+  namespace: redis-system
+spec:
+  podSelector:
+    matchLabels:
+      app: redis
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: remittance-system
+    - podSelector:
+        matchLabels:
+          app: redis
+    - podSelector:
+        matchLabels:
+          app: redis-sentinel
+    ports:
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 6380
+    - protocol: TCP
+      port: 16379
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+    - protocol: TCP
+      port: 6380
+    - protocol: TCP
+      port: 16379
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+
+---
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: redis-metrics
+  namespace: redis-system
+  labels:
+    app: redis
+spec:
+  selector:
+    matchLabels:
+      app: redis
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-exporter
+  namespace: redis-system
+  labels:
+    app: redis-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-exporter
+  template:
+    metadata:
+      labels:
+        app: redis-exporter
+    spec:
+      containers:
+      - name: redis-exporter
+        image: oliver006/redis_exporter:v1.55.0
+        ports:
+        - containerPort: 9121
+          name: metrics
+        env:
+        - name: REDIS_ADDR
+          value: "redis://redis-service:6379"
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-secrets
+              key: app-password
+        - name: REDIS_EXPORTER_INCL_SYSTEM_METRICS
+          value: "true"
+        - name: REDIS_EXPORTER_CHECK_KEYS
+          value: "banking:*,session:*,cache:*"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: 9121
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: 9121
+          initialDelaySeconds: 10
+          periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-exporter
+  namespace: redis-system
+  labels:
+    app: redis-exporter
+spec:
+  ports:
+  - name: metrics
+    port: 9121
+    targetPort: 9121
+  selector:
+    app: redis-exporter
+

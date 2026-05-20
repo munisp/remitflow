@@ -1,0 +1,633 @@
+{
+  "verification_summary": {
+    "start_time": "2025-08-29T22:44:44.371040",
+    "total_checks": 11,
+    "passed_checks": 4,
+    "failed_checks": 7,
+    "critical_failures": 3,
+    "success_rate": "36.4%",
+    "end_time": "2025-08-29T22:44:44.717797"
+  },
+  "infrastructure_verification": {
+    "step_1_docker_containers": {
+      "title": "Verify Docker Containers",
+      "priority": "CRITICAL",
+      "estimated_time": "5 minutes",
+      "commands": [
+        {
+          "description": "Check all containers are running",
+          "command": "docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'",
+          "expected_output": "All containers in 'Up' status",
+          "validation_criteria": "No containers in 'Exited' or 'Restarting' state"
+        },
+        {
+          "description": "Verify container resource usage",
+          "command": "docker stats --no-stream --format 'table {{.Name}}\\t{{.CPUPerc}}\\t{{.MemUsage}}'",
+          "expected_output": "CPU < 80%, Memory usage reasonable",
+          "validation_criteria": "No containers using >80% CPU or >90% memory"
+        },
+        {
+          "description": "Check container logs for errors",
+          "command": "docker logs --tail=50 nigerian-remittance-platform",
+          "expected_output": "No ERROR or FATAL messages",
+          "validation_criteria": "Application started successfully"
+        }
+      ],
+      "troubleshooting": {
+        "container_not_running": "Run: docker-compose up -d",
+        "high_resource_usage": "Check application configuration and scaling",
+        "error_logs": "Review application logs and configuration"
+      }
+    },
+    "step_2_kubernetes_deployment": {
+      "title": "Verify Kubernetes Deployment (if applicable)",
+      "priority": "HIGH",
+      "estimated_time": "10 minutes",
+      "commands": [
+        {
+          "description": "Check pod status",
+          "command": "kubectl get pods -n nigerian-remittance",
+          "expected_output": "All pods in 'Running' status",
+          "validation_criteria": "Ready column shows X/X for all pods"
+        },
+        {
+          "description": "Verify services are exposed",
+          "command": "kubectl get services -n nigerian-remittance",
+          "expected_output": "Services have external IPs or LoadBalancer",
+          "validation_criteria": "All required services are accessible"
+        },
+        {
+          "description": "Check ingress configuration",
+          "command": "kubectl get ingress -n nigerian-remittance",
+          "expected_output": "Ingress rules configured correctly",
+          "validation_criteria": "External access configured"
+        }
+      ]
+    },
+    "step_3_database_connectivity": {
+      "title": "Verify Database Connectivity",
+      "priority": "CRITICAL",
+      "estimated_time": "5 minutes",
+      "commands": [
+        {
+          "description": "Test PostgreSQL connection",
+          "command": "docker exec -it postgres-db psql -U postgres -d nigerian_remittance -c '\\l'",
+          "expected_output": "Database list displayed",
+          "validation_criteria": "nigerian_remittance database exists"
+        },
+        {
+          "description": "Verify Redis connection",
+          "command": "docker exec -it redis-cache redis-cli ping",
+          "expected_output": "PONG",
+          "validation_criteria": "Redis responds to ping"
+        },
+        {
+          "description": "Check TigerBeetle ledger",
+          "command": "curl -X GET http://localhost:3001/health",
+          "expected_output": "HTTP 200 OK",
+          "validation_criteria": "TigerBeetle service is healthy"
+        }
+      ]
+    }
+  },
+  "health_check_results": {
+    "unified_api_gateway": {
+      "service": "unified_api_gateway",
+      "status": "PASS",
+      "response_time": 0.127471,
+      "status_code": 200,
+      "timestamp": "2025-08-29T22:44:44.500735"
+    },
+    "tigerbeetle_ledger": {
+      "service": "tigerbeetle_ledger",
+      "status": "FAIL",
+      "response_time": 0.192307,
+      "status_code": 404,
+      "timestamp": "2025-08-29T22:44:44.693974",
+      "error": "JSON parsing error: Expecting value: line 1 column 1 (char 0)"
+    },
+    "rafiki_gateway": {
+      "service": "rafiki_gateway",
+      "status": "FAIL",
+      "response_time": 0.001852,
+      "status_code": 404,
+      "timestamp": "2025-08-29T22:44:44.696637",
+      "error": "JSON parsing error: Expecting value: line 1 column 1 (char 0)"
+    },
+    "stablecoin_service": {
+      "service": "stablecoin_service",
+      "status": "FAIL",
+      "error": "HTTPConnectionPool(host='localhost', port=3003): Max retries exceeded with url: /health (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f0cb4591bd0>: Failed to establish a new connection: [Errno 111] Connection refused'))",
+      "timestamp": "2025-08-29T22:44:44.697801"
+    },
+    "cocoindex_service": {
+      "service": "cocoindex_service",
+      "status": "FAIL",
+      "error": "HTTPConnectionPool(host='localhost', port=4001): Max retries exceeded with url: /health (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f0cb459de90>: Failed to establish a new connection: [Errno 111] Connection refused'))",
+      "timestamp": "2025-08-29T22:44:44.698792"
+    },
+    "epr_kgqa_service": {
+      "service": "epr_kgqa_service",
+      "status": "FAIL",
+      "error": "HTTPConnectionPool(host='localhost', port=4002): Max retries exceeded with url: /health (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f0cb45ac150>: Failed to establish a new connection: [Errno 111] Connection refused'))",
+      "timestamp": "2025-08-29T22:44:44.699753"
+    },
+    "falkordb_service": {
+      "service": "falkordb_service",
+      "status": "FAIL",
+      "error": "HTTPConnectionPool(host='localhost', port=4003): Max retries exceeded with url: /health (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f0cb45ae490>: Failed to establish a new connection: [Errno 111] Connection refused'))",
+      "timestamp": "2025-08-29T22:44:44.700693"
+    },
+    "gnn_service": {
+      "service": "gnn_service",
+      "status": "FAIL",
+      "error": "HTTPConnectionPool(host='localhost', port=4004): Max retries exceeded with url: /health (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f0cb45bc7d0>: Failed to establish a new connection: [Errno 111] Connection refused'))",
+      "timestamp": "2025-08-29T22:44:44.701906"
+    },
+    "customer_portal": {
+      "service": "customer_portal",
+      "status": "PASS",
+      "response_time": 0.00192,
+      "status_code": 200,
+      "timestamp": "2025-08-29T22:44:44.704398"
+    },
+    "admin_dashboard": {
+      "service": "admin_dashboard",
+      "status": "PASS",
+      "response_time": 0.005821,
+      "status_code": 200,
+      "timestamp": "2025-08-29T22:44:44.710817"
+    },
+    "mobile_pwa": {
+      "service": "mobile_pwa",
+      "status": "PASS",
+      "response_time": 0.006316,
+      "status_code": 200,
+      "timestamp": "2025-08-29T22:44:44.717735"
+    }
+  },
+  "functional_test_results": {
+    "user_registration_flow": {
+      "test_name": "Complete User Registration",
+      "priority": "CRITICAL",
+      "estimated_time": "10 minutes",
+      "steps": [
+        {
+          "step": 1,
+          "action": "Navigate to registration page",
+          "endpoint": "POST /api/v1/auth/register",
+          "payload": {
+            "email": "test@example.com",
+            "phone": "+1234567890",
+            "first_name": "Test",
+            "last_name": "User"
+          },
+          "expected_response": {
+            "status": "success",
+            "user_id": "string"
+          },
+          "validation": "User created successfully"
+        },
+        {
+          "step": 2,
+          "action": "Verify phone number",
+          "endpoint": "POST /api/v1/auth/verify-phone",
+          "payload": {
+            "user_id": "from_step_1",
+            "verification_code": "123456"
+          },
+          "expected_response": {
+            "status": "verified"
+          },
+          "validation": "Phone verification successful"
+        },
+        {
+          "step": 3,
+          "action": "Complete KYC verification",
+          "endpoint": "POST /api/v1/kyc/submit",
+          "payload": {
+            "user_id": "from_step_1",
+            "document_type": "passport",
+            "document_number": "A12345678"
+          },
+          "expected_response": {
+            "status": "pending_review"
+          },
+          "validation": "KYC submission accepted"
+        }
+      ],
+      "cleanup": "Delete test user after verification"
+    },
+    "money_transfer_flow": {
+      "test_name": "Complete Money Transfer",
+      "priority": "CRITICAL",
+      "estimated_time": "15 minutes",
+      "prerequisites": [
+        "Verified user account",
+        "Sufficient balance"
+      ],
+      "steps": [
+        {
+          "step": 1,
+          "action": "Initiate transfer",
+          "endpoint": "POST /api/v1/transfers/initiate",
+          "payload": {
+            "sender_id": "test_user_id",
+            "recipient_phone": "+2348012345678",
+            "amount": 100.0,
+            "currency": "USD",
+            "destination_currency": "NGN"
+          },
+          "expected_response": {
+            "transfer_id": "string",
+            "status": "initiated"
+          },
+          "validation": "Transfer created successfully"
+        },
+        {
+          "step": 2,
+          "action": "Process payment",
+          "endpoint": "POST /api/v1/payments/process",
+          "payload": {
+            "transfer_id": "from_step_1",
+            "payment_method": "card",
+            "card_token": "test_card_token"
+          },
+          "expected_response": {
+            "status": "processing"
+          },
+          "validation": "Payment processing started"
+        },
+        {
+          "step": 3,
+          "action": "Check transfer status",
+          "endpoint": "GET /api/v1/transfers/{transfer_id}/status",
+          "expected_response": {
+            "status": "completed"
+          },
+          "validation": "Transfer completed successfully",
+          "retry_logic": "Poll every 30 seconds for up to 5 minutes"
+        }
+      ]
+    },
+    "stablecoin_conversion_flow": {
+      "test_name": "USD to USDC Conversion",
+      "priority": "HIGH",
+      "estimated_time": "10 minutes",
+      "steps": [
+        {
+          "step": 1,
+          "action": "Get conversion rate",
+          "endpoint": "GET /api/v1/stablecoin/rate?from=USD&to=USDC&amount=100",
+          "expected_response": {
+            "rate": "number",
+            "fee": "number"
+          },
+          "validation": "Rate retrieved successfully"
+        },
+        {
+          "step": 2,
+          "action": "Initiate conversion",
+          "endpoint": "POST /api/v1/stablecoin/convert",
+          "payload": {
+            "user_id": "test_user_id",
+            "from_currency": "USD",
+            "to_currency": "USDC",
+            "amount": 100.0
+          },
+          "expected_response": {
+            "conversion_id": "string",
+            "status": "pending"
+          },
+          "validation": "Conversion initiated"
+        },
+        {
+          "step": 3,
+          "action": "Check blockchain transaction",
+          "endpoint": "GET /api/v1/stablecoin/transaction/{conversion_id}",
+          "expected_response": {
+            "tx_hash": "string",
+            "status": "confirmed"
+          },
+          "validation": "Blockchain transaction confirmed"
+        }
+      ]
+    }
+  },
+  "performance_test_results": {
+    "load_testing": {
+      "api_gateway_load_test": {
+        "test_name": "API Gateway Load Test",
+        "target_endpoint": "http://localhost:8000/api/v1/health",
+        "test_parameters": {
+          "concurrent_users": 1000,
+          "duration": "5 minutes",
+          "ramp_up_time": "1 minute"
+        },
+        "success_criteria": {
+          "response_time_p95": "<500ms",
+          "response_time_p99": "<1000ms",
+          "error_rate": "<1%",
+          "throughput": ">2000 RPS"
+        },
+        "command": "ab -n 10000 -c 100 http://localhost:8000/api/v1/health"
+      },
+      "transfer_endpoint_load_test": {
+        "test_name": "Transfer Endpoint Load Test",
+        "target_endpoint": "http://localhost:8000/api/v1/transfers/simulate",
+        "test_parameters": {
+          "concurrent_users": 500,
+          "duration": "3 minutes",
+          "ramp_up_time": "30 seconds"
+        },
+        "success_criteria": {
+          "response_time_p95": "<2000ms",
+          "response_time_p99": "<5000ms",
+          "error_rate": "<2%",
+          "throughput": ">100 TPS"
+        }
+      }
+    },
+    "database_performance": {
+      "postgresql_performance": {
+        "test_name": "PostgreSQL Performance Test",
+        "queries": [
+          {
+            "description": "User lookup query",
+            "query": "SELECT * FROM users WHERE email = 'test@example.com'",
+            "expected_time": "<10ms",
+            "index_usage": "Should use email index"
+          },
+          {
+            "description": "Transaction history query",
+            "query": "SELECT * FROM transactions WHERE user_id = 'test_id' ORDER BY created_at DESC LIMIT 50",
+            "expected_time": "<50ms",
+            "index_usage": "Should use user_id and created_at indexes"
+          }
+        ]
+      },
+      "tigerbeetle_performance": {
+        "test_name": "TigerBeetle Ledger Performance",
+        "operations": [
+          {
+            "operation": "Account creation",
+            "target_tps": "10,000+",
+            "expected_latency": "<1ms"
+          },
+          {
+            "operation": "Transfer processing",
+            "target_tps": "50,000+",
+            "expected_latency": "<2ms"
+          }
+        ]
+      }
+    },
+    "ai_ml_performance": {
+      "gnn_service_performance": {
+        "test_name": "GNN Service Performance Test",
+        "test_cases": [
+          {
+            "input_size": "Small graph (100 nodes)",
+            "expected_time": "<100ms",
+            "memory_usage": "<500MB"
+          },
+          {
+            "input_size": "Large graph (10,000 nodes)",
+            "expected_time": "<2000ms",
+            "memory_usage": "<2GB"
+          }
+        ]
+      }
+    }
+  },
+  "security_test_results": {
+    "authentication_security": {
+      "jwt_token_validation": {
+        "test_name": "JWT Token Security",
+        "tests": [
+          {
+            "description": "Test expired token rejection",
+            "endpoint": "GET /api/v1/user/profile",
+            "headers": {
+              "Authorization": "Bearer expired_token"
+            },
+            "expected_status": 401,
+            "expected_response": {
+              "error": "Token expired"
+            }
+          },
+          {
+            "description": "Test invalid token rejection",
+            "endpoint": "GET /api/v1/user/profile",
+            "headers": {
+              "Authorization": "Bearer invalid_token"
+            },
+            "expected_status": 401,
+            "expected_response": {
+              "error": "Invalid token"
+            }
+          }
+        ]
+      },
+      "rate_limiting": {
+        "test_name": "Rate Limiting Verification",
+        "endpoint": "POST /api/v1/auth/login",
+        "test_scenario": "Send 100 requests in 1 minute",
+        "expected_behavior": "Requests >20/minute should be rate limited",
+        "expected_status": 429,
+        "expected_response": {
+          "error": "Rate limit exceeded"
+        }
+      }
+    },
+    "data_protection": {
+      "pii_encryption": {
+        "test_name": "PII Encryption Verification",
+        "checks": [
+          {
+            "description": "Verify SSN encryption in database",
+            "query": "SELECT ssn FROM users WHERE id = 'test_id'",
+            "validation": "SSN should be encrypted, not plaintext"
+          },
+          {
+            "description": "Verify phone number masking in logs",
+            "log_check": "grep -r '+1234567890' /var/log/",
+            "validation": "Phone numbers should be masked in logs"
+          }
+        ]
+      },
+      "https_enforcement": {
+        "test_name": "HTTPS Enforcement",
+        "tests": [
+          {
+            "description": "Test HTTP to HTTPS redirect",
+            "request": "curl -I http://localhost:8000",
+            "expected_status": 301,
+            "expected_header": "Location: https://localhost:8000"
+          }
+        ]
+      }
+    },
+    "compliance_verification": {
+      "kyc_aml_checks": {
+        "test_name": "KYC/AML Compliance",
+        "scenarios": [
+          {
+            "description": "Test sanctions screening",
+            "user_data": {
+              "name": "Test Sanctioned User"
+            },
+            "expected_result": "User flagged for manual review"
+          },
+          {
+            "description": "Test PEP screening",
+            "user_data": {
+              "name": "Test Political Person"
+            },
+            "expected_result": "Enhanced due diligence triggered"
+          }
+        ]
+      }
+    }
+  },
+  "integration_test_results": {
+    "payment_gateway_integrations": {
+      "stripe_integration": {
+        "test_name": "Stripe Payment Integration",
+        "tests": [
+          {
+            "description": "Test successful payment",
+            "card_number": "4242424242424242",
+            "expected_result": "Payment successful"
+          },
+          {
+            "description": "Test declined payment",
+            "card_number": "4000000000000002",
+            "expected_result": "Payment declined"
+          }
+        ]
+      },
+      "wise_integration": {
+        "test_name": "Wise Transfer Integration",
+        "tests": [
+          {
+            "description": "Test rate quote",
+            "request": "GET /api/v1/wise/quote?from=USD&to=NGN&amount=100",
+            "expected_response": {
+              "rate": "number",
+              "fee": "number"
+            }
+          }
+        ]
+      }
+    },
+    "blockchain_integrations": {
+      "ethereum_integration": {
+        "test_name": "Ethereum Blockchain Integration",
+        "tests": [
+          {
+            "description": "Test USDC balance check",
+            "wallet_address": "0x742d35Cc6634C0532925a3b8D4C9db96C4b4d8b",
+            "expected_result": "Balance retrieved successfully"
+          },
+          {
+            "description": "Test transaction submission",
+            "transaction_type": "USDC transfer",
+            "expected_result": "Transaction hash returned"
+          }
+        ]
+      }
+    },
+    "external_api_integrations": {
+      "papss_integration": {
+        "test_name": "PAPSS Payment Integration",
+        "tests": [
+          {
+            "description": "Test payment initiation",
+            "amount": 100,
+            "currency": "NGN",
+            "expected_result": "Payment initiated successfully"
+          }
+        ]
+      },
+      "mojaloop_integration": {
+        "test_name": "Mojaloop Integration",
+        "tests": [
+          {
+            "description": "Test participant lookup",
+            "participant_id": "test_participant",
+            "expected_result": "Participant found"
+          }
+        ]
+      }
+    }
+  },
+  "monitoring_verification": {
+    "prometheus_metrics": {
+      "step_name": "Verify Prometheus Metrics Collection",
+      "checks": [
+        {
+          "description": "Check Prometheus is scraping metrics",
+          "endpoint": "http://localhost:9090/api/v1/targets",
+          "validation": "All targets should be 'up'"
+        },
+        {
+          "description": "Verify custom metrics are available",
+          "metrics": [
+            "nigerian_remittance_transfers_total",
+            "nigerian_remittance_api_requests_total",
+            "nigerian_remittance_errors_total"
+          ],
+          "endpoint": "http://localhost:9090/api/v1/query?query={metric_name}",
+          "validation": "Metrics should return data"
+        }
+      ]
+    },
+    "grafana_dashboards": {
+      "step_name": "Verify Grafana Dashboards",
+      "checks": [
+        {
+          "description": "Check Grafana accessibility",
+          "endpoint": "http://localhost:3000",
+          "expected_status": 200
+        },
+        {
+          "description": "Verify dashboard data",
+          "dashboards": [
+            "Nigerian Remittance Platform Overview",
+            "API Performance Dashboard",
+            "Transaction Monitoring Dashboard"
+          ],
+          "validation": "Dashboards should display live data"
+        }
+      ]
+    },
+    "alerting_rules": {
+      "step_name": "Verify Alerting Configuration",
+      "alerts": [
+        {
+          "alert_name": "HighErrorRate",
+          "condition": "Error rate > 5%",
+          "test_method": "Generate errors and verify alert fires"
+        },
+        {
+          "alert_name": "HighLatency",
+          "condition": "P99 latency > 2000ms",
+          "test_method": "Simulate high latency and verify alert"
+        }
+      ]
+    }
+  },
+  "recommendations": [
+    {
+      "priority": "CRITICAL",
+      "issue": "Critical services are failing",
+      "action": "Investigate and fix critical service failures before proceeding"
+    },
+    {
+      "priority": "HIGH",
+      "issue": "Some services are not responding correctly",
+      "action": "Review service configurations and dependencies"
+    }
+  ]
+}

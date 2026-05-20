@@ -1,0 +1,17 @@
+Flask
+Flask-Cors
+redis
+
+
+
+Flask-SQLAlchemy
+SQLAlchemy
+
+
+
+numpy
+pandas
+scikit-learn
+joblib
+
+

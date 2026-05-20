@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Jollof Rice with Chicken",
+    "price": 2500,
+    "category": "Main Dishes",
+    "description": "Classic Nigerian jollof rice with grilled chicken",
+    "stock": 50
+  },
+  {
+    "name": "Egusi Soup with Pounded Yam",
+    "price": 3000,
+    "category": "Soups",
+    "description": "Traditional egusi soup with fresh pounded yam",
+    "stock": 40
+  }
+]

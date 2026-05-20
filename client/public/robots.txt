@@ -1,0 +1,19 @@
+# RemitFlow — Cross-Border Remittance Platform
+User-agent: *
+Allow: /
+Allow: /pricing
+Allow: /partners
+Disallow: /dashboard
+Disallow: /wallet
+Disallow: /transactions
+Disallow: /send
+Disallow: /exchange
+Disallow: /cards
+Disallow: /savings
+Disallow: /kyc
+Disallow: /profile
+Disallow: /settings
+Disallow: /admin
+Disallow: /api/
+
+Sitemap: https://remitflow.app/sitemap.xml

@@ -1,0 +1,197 @@
+---
+# Production Namespace Resource Quota
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: production-quota
+  namespace: production
+  labels:
+    component: resource-management
+spec:
+  hard:
+    # Compute resources
+    requests.cpu: "100"
+    requests.memory: "200Gi"
+    limits.cpu: "200"
+    limits.memory: "400Gi"
+    
+    # Storage resources
+    requests.storage: "2Ti"
+    persistentvolumeclaims: "50"
+    
+    # Object counts
+    pods: "200"
+    services: "50"
+    configmaps: "100"
+    secrets: "100"
+    
+    # Load balancers
+    services.loadbalancers: "10"
+    services.nodeports: "20"
+
+---
+# LimitRange for Production Namespace
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: production-limit-range
+  namespace: production
+  labels:
+    component: resource-management
+spec:
+  limits:
+  # Container limits
+  - type: Container
+    default:
+      cpu: "1000m"
+      memory: "1Gi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    min:
+      cpu: "50m"
+      memory: "64Mi"
+    max:
+      cpu: "8000m"
+      memory: "16Gi"
+  
+  # Pod limits
+  - type: Pod
+    min:
+      cpu: "50m"
+      memory: "64Mi"
+    max:
+      cpu: "16000m"
+      memory: "32Gi"
+  
+  # PVC limits
+  - type: PersistentVolumeClaim
+    min:
+      storage: "1Gi"
+    max:
+      storage: "500Gi"
+
+---
+# Database Resource Quota
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: database-quota
+  namespace: production
+  labels:
+    component: database
+spec:
+  hard:
+    requests.cpu: "30"
+    requests.memory: "60Gi"
+    limits.cpu: "60"
+    limits.memory: "120Gi"
+  scopeSelector:
+    matchExpressions:
+    - operator: In
+      scopeName: PriorityClass
+      values: ["database-priority"]
+
+---
+# Application Resource Quota
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: application-quota
+  namespace: production
+  labels:
+    component: application
+spec:
+  hard:
+    requests.cpu: "50"
+    requests.memory: "100Gi"
+    limits.cpu: "100"
+    limits.memory: "200Gi"
+  scopeSelector:
+    matchExpressions:
+    - operator: In
+      scopeName: PriorityClass
+      values: ["application-priority"]
+
+---
+# Monitoring Resource Quota
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: monitoring-quota
+  namespace: production
+  labels:
+    component: monitoring
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: "40Gi"
+    limits.cpu: "40"
+    limits.memory: "80Gi"
+  scopeSelector:
+    matchExpressions:
+    - operator: In
+      scopeName: PriorityClass
+      values: ["monitoring-priority"]
+
+---
+# Priority Classes
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: database-priority
+value: 1000000
+globalDefault: false
+description: "Priority class for database workloads"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: application-priority
+value: 100000
+globalDefault: true
+description: "Priority class for application workloads"
+
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: monitoring-priority
+value: 50000
+globalDefault: false
+description: "Priority class for monitoring workloads"
+
+---
+# Resource Quota Monitoring ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quota-monitoring
+  namespace: production
+  labels:
+    component: monitoring
+data:
+  check-quotas.sh: |
+    #!/bin/bash
+    # Check resource quota usage
+    
+    echo "=== Production Namespace Resource Quotas ==="
+    kubectl get resourcequota -n production
+    
+    echo ""
+    echo "=== Detailed Quota Usage ==="
+    kubectl describe resourcequota production-quota -n production
+    
+    echo ""
+    echo "=== LimitRange Configuration ==="
+    kubectl describe limitrange production-limit-range -n production
+    
+    echo ""
+    echo "=== Top Resource Consumers (Pods) ==="
+    kubectl top pods -n production --sort-by=memory | head -20
+    
+    echo ""
+    echo "=== Top Resource Consumers (Nodes) ==="
+    kubectl top nodes
+

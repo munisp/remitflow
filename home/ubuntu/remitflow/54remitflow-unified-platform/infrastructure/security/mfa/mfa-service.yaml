@@ -1,0 +1,626 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mfa
+  labels:
+    name: mfa
+    component: multi-factor-auth
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mfa-config
+  namespace: mfa
+data:
+  config.yaml: |
+    server:
+      port: 8080
+      host: "0.0.0.0"
+      cors:
+        enabled: true
+        origins: ["*"]
+        methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+        headers: ["*"]
+    
+    database:
+      type: "postgres"
+      host: "postgresql"
+      port: 5432
+      username: "mfa"
+      password: "mfa123"
+      database: "mfa"
+      ssl_mode: "disable"
+      max_connections: 20
+      max_idle_connections: 5
+      connection_lifetime: "1h"
+    
+    redis:
+      host: "redis-master"
+      port: 6379
+      password: "remittance-redis"
+      database: 3
+      pool_size: 10
+      timeout: "5s"
+    
+    auth:
+      jwt:
+        secret: "mfa-jwt-secret-key-123"
+        expiry: "15m"
+        refresh_expiry: "24h"
+      
+      keycloak:
+        realm: "remittance"
+        auth_server_url: "http://keycloak:8080"
+        client_id: "mfa-service"
+        client_secret: "mfa-client-secret-123"
+    
+    mfa:
+      providers:
+        sms:
+          enabled: true
+          provider: "twilio"
+          account_sid: "twilio-account-sid"
+          auth_token: "twilio-auth-token"
+          from_number: "+1234567890"
+          template: "Your Remittance Platform verification code is: {code}"
+          code_length: 6
+          code_expiry: "5m"
+          max_attempts: 3
+          rate_limit: "3/min"
+        
+        email:
+          enabled: true
+          provider: "smtp"
+          host: "smtp.remittance.com"
+          port: 587
+          username: "mfa@remittance.com"
+          password: "smtp-password"
+          from_email: "mfa@remittance.com"
+          from_name: "Remittance Platform"
+          template: |
+            Subject: Remittance Platform Verification Code
+            
+            Your verification code is: {code}
+            
+            This code will expire in 5 minutes.
+            
+            If you did not request this code, please ignore this email.
+          code_length: 6
+          code_expiry: "5m"
+          max_attempts: 3
+          rate_limit: "3/min"
+        
+        totp:
+          enabled: true
+          issuer: "Remittance Platform"
+          algorithm: "SHA1"
+          digits: 6
+          period: 30
+          skew: 1
+          qr_code_size: 256
+        
+        webauthn:
+          enabled: true
+          rp_id: "remittance.local"
+          rp_name: "Remittance Platform"
+          rp_icon: "https://remittance.local/icon.png"
+          origin: "https://remittance.local"
+          timeout: 60000
+          user_verification: "preferred"
+          attestation: "none"
+          algorithms: ["ES256", "RS256"]
+        
+        push:
+          enabled: true
+          provider: "firebase"
+          server_key: "firebase-server-key"
+          timeout: "30s"
+          max_attempts: 3
+    
+    security:
+      rate_limiting:
+        enabled: true
+        requests_per_minute: 60
+        burst_size: 10
+      
+      encryption:
+        algorithm: "AES-256-GCM"
+        key: "mfa-encryption-key-32-characters"
+      
+      audit:
+        enabled: true
+        log_level: "info"
+        destinations: ["database", "syslog"]
+    
+    monitoring:
+      metrics:
+        enabled: true
+        port: 9090
+        path: "/metrics"
+      
+      health:
+        enabled: true
+        path: "/health"
+      
+      logging:
+        level: "info"
+        format: "json"
+        output: "stdout"
+    
+    features:
+      adaptive_auth:
+        enabled: true
+        risk_factors:
+          - "device_fingerprint"
+          - "geolocation"
+          - "time_of_day"
+          - "user_behavior"
+          - "network_reputation"
+        
+        risk_thresholds:
+          low: 30
+          medium: 60
+          high: 80
+        
+        actions:
+          low_risk: "allow"
+          medium_risk: "require_mfa"
+          high_risk: "require_strong_mfa"
+      
+      device_management:
+        enabled: true
+        remember_device: true
+        device_expiry: "30d"
+        max_devices_per_user: 5
+      
+      backup_codes:
+        enabled: true
+        count: 10
+        length: 8
+        one_time_use: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mfa-service
+  namespace: mfa
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mfa-service
+  template:
+    metadata:
+      labels:
+        app: mfa-service
+    spec:
+      containers:
+      - name: mfa-service
+        image: remittance/mfa-service:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: CONFIG_PATH
+          value: "/etc/mfa/config.yaml"
+        - name: DATABASE_URL
+          value: "postgres://mfa:mfa123@postgresql:5432/mfa?sslmode=disable"
+        - name: REDIS_URL
+          value: "redis://:remittance-redis@redis-master:6379/3"
+        - name: JWT_SECRET
+          value: "mfa-jwt-secret-key-123"
+        - name: ENCRYPTION_KEY
+          value: "mfa-encryption-key-32-characters"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/mfa
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: mfa-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mfa-service
+  namespace: mfa
+spec:
+  selector:
+    app: mfa-service
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mfa-ingress
+  namespace: mfa
+  annotations:
+    kubernetes.io/ingress.class: "openappsec"
+    openappsec.io/waf-enabled: "true"
+    openappsec.io/api-protection: "true"
+    openappsec.io/rate-limit: "100/min"
+spec:
+  tls:
+  - hosts:
+    - mfa.remittance.local
+    secretName: mfa-tls
+  rules:
+  - host: mfa.remittance.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mfa-service
+            port:
+              number: 8080
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mfa-tls
+  namespace: mfa
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t  # Base64 encoded certificate
+  tls.key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t  # Base64 encoded private key
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mfa-metrics
+  namespace: mfa
+spec:
+  selector:
+    matchLabels:
+      app: mfa-service
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mfa-database-setup
+  namespace: mfa
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: database-setup
+        image: postgres:15
+        command:
+        - /bin/bash
+        - -c
+        - |
+          # Wait for PostgreSQL to be ready
+          until pg_isready -h postgresql -p 5432; do
+            echo "Waiting for PostgreSQL to be ready..."
+            sleep 5
+          done
+          
+          # Create MFA database and user
+          PGPASSWORD=remittance-postgres psql -h postgresql -U postgres -c "CREATE DATABASE mfa;"
+          PGPASSWORD=remittance-postgres psql -h postgresql -U postgres -c "CREATE USER mfa WITH PASSWORD 'mfa123';"
+          PGPASSWORD=remittance-postgres psql -h postgresql -U postgres -c "GRANT ALL PRIVILEGES ON DATABASE mfa TO mfa;"
+          
+          # Create MFA tables
+          PGPASSWORD=mfa123 psql -h postgresql -U mfa -d mfa << 'EOF'
+          CREATE TABLE IF NOT EXISTS users (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id VARCHAR(255) UNIQUE NOT NULL,
+              email VARCHAR(255),
+              phone VARCHAR(50),
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          
+          CREATE TABLE IF NOT EXISTS mfa_methods (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+              method_type VARCHAR(50) NOT NULL,
+              method_data JSONB NOT NULL,
+              is_primary BOOLEAN DEFAULT FALSE,
+              is_verified BOOLEAN DEFAULT FALSE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          
+          CREATE TABLE IF NOT EXISTS verification_codes (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+              code VARCHAR(10) NOT NULL,
+              method_type VARCHAR(50) NOT NULL,
+              method_target VARCHAR(255) NOT NULL,
+              expires_at TIMESTAMP NOT NULL,
+              attempts INTEGER DEFAULT 0,
+              max_attempts INTEGER DEFAULT 3,
+              verified BOOLEAN DEFAULT FALSE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          
+          CREATE TABLE IF NOT EXISTS trusted_devices (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+              device_fingerprint VARCHAR(255) NOT NULL,
+              device_name VARCHAR(255),
+              device_type VARCHAR(50),
+              ip_address INET,
+              user_agent TEXT,
+              expires_at TIMESTAMP NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          
+          CREATE TABLE IF NOT EXISTS backup_codes (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+              code VARCHAR(20) NOT NULL,
+              used BOOLEAN DEFAULT FALSE,
+              used_at TIMESTAMP,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          
+          CREATE TABLE IF NOT EXISTS mfa_sessions (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+              session_token VARCHAR(255) UNIQUE NOT NULL,
+              method_type VARCHAR(50) NOT NULL,
+              ip_address INET,
+              user_agent TEXT,
+              expires_at TIMESTAMP NOT NULL,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          
+          CREATE TABLE IF NOT EXISTS audit_logs (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+              action VARCHAR(100) NOT NULL,
+              method_type VARCHAR(50),
+              ip_address INET,
+              user_agent TEXT,
+              success BOOLEAN NOT NULL,
+              error_message TEXT,
+              metadata JSONB,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          
+          -- Create indexes
+          CREATE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id);
+          CREATE INDEX IF NOT EXISTS idx_mfa_methods_user_id ON mfa_methods(user_id);
+          CREATE INDEX IF NOT EXISTS idx_verification_codes_user_id ON verification_codes(user_id);
+          CREATE INDEX IF NOT EXISTS idx_verification_codes_expires_at ON verification_codes(expires_at);
+          CREATE INDEX IF NOT EXISTS idx_trusted_devices_user_id ON trusted_devices(user_id);
+          CREATE INDEX IF NOT EXISTS idx_trusted_devices_fingerprint ON trusted_devices(device_fingerprint);
+          CREATE INDEX IF NOT EXISTS idx_backup_codes_user_id ON backup_codes(user_id);
+          CREATE INDEX IF NOT EXISTS idx_mfa_sessions_user_id ON mfa_sessions(user_id);
+          CREATE INDEX IF NOT EXISTS idx_mfa_sessions_token ON mfa_sessions(session_token);
+          CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
+          CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+          EOF
+          
+          echo "MFA database setup completed successfully"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mfa-api-docs
+  namespace: mfa
+data:
+  openapi.yaml: |
+    openapi: 3.0.3
+    info:
+      title: Remittance Platform MFA Service API
+      description: Multi-Factor Authentication service for Remittance Platform
+      version: 1.0.0
+      contact:
+        name: Remittance Platform Team
+        email: support@remittance.com
+    
+    servers:
+      - url: https://mfa.remittance.local
+        description: Production server
+    
+    security:
+      - BearerAuth: []
+    
+    paths:
+      /api/v1/users/{userId}/mfa/methods:
+        get:
+          summary: Get user's MFA methods
+          parameters:
+            - name: userId
+              in: path
+              required: true
+              schema:
+                type: string
+          responses:
+            '200':
+              description: List of MFA methods
+              content:
+                application/json:
+                  schema:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MFAMethod'
+        
+        post:
+          summary: Add new MFA method
+          parameters:
+            - name: userId
+              in: path
+              required: true
+              schema:
+                type: string
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/AddMFAMethodRequest'
+          responses:
+            '201':
+              description: MFA method added successfully
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/MFAMethod'
+      
+      /api/v1/users/{userId}/mfa/verify:
+        post:
+          summary: Verify MFA code
+          parameters:
+            - name: userId
+              in: path
+              required: true
+              schema:
+                type: string
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/VerifyMFARequest'
+          responses:
+            '200':
+              description: MFA verification successful
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/VerifyMFAResponse'
+      
+      /api/v1/users/{userId}/mfa/challenge:
+        post:
+          summary: Initiate MFA challenge
+          parameters:
+            - name: userId
+              in: path
+              required: true
+              schema:
+                type: string
+          requestBody:
+            required: true
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/MFAChallengeRequest'
+          responses:
+            '200':
+              description: MFA challenge initiated
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/MFAChallengeResponse'
+    
+    components:
+      securitySchemes:
+        BearerAuth:
+          type: http
+          scheme: bearer
+          bearerFormat: JWT
+      
+      schemas:
+        MFAMethod:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            method_type:
+              type: string
+              enum: [sms, email, totp, webauthn, push]
+            is_primary:
+              type: boolean
+            is_verified:
+              type: boolean
+            created_at:
+              type: string
+              format: date-time
+        
+        AddMFAMethodRequest:
+          type: object
+          required:
+            - method_type
+          properties:
+            method_type:
+              type: string
+              enum: [sms, email, totp, webauthn, push]
+            method_data:
+              type: object
+        
+        VerifyMFARequest:
+          type: object
+          required:
+            - method_type
+            - code
+          properties:
+            method_type:
+              type: string
+              enum: [sms, email, totp, webauthn, push]
+            code:
+              type: string
+            remember_device:
+              type: boolean
+              default: false
+        
+        VerifyMFAResponse:
+          type: object
+          properties:
+            success:
+              type: boolean
+            session_token:
+              type: string
+            expires_at:
+              type: string
+              format: date-time
+        
+        MFAChallengeRequest:
+          type: object
+          required:
+            - method_type
+          properties:
+            method_type:
+              type: string
+              enum: [sms, email, totp, webauthn, push]
+        
+        MFAChallengeResponse:
+          type: object
+          properties:
+            challenge_id:
+              type: string
+            method_type:
+              type: string
+            expires_at:
+              type: string
+              format: date-time
+

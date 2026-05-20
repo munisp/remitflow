@@ -1,0 +1,62 @@
+# RemitFlow Kafka Consumer Group Registry
+consumer_groups:
+  - id: remitflow-transfer-processor
+    topics:
+      - remitflow.transfers.created
+    service: go-outbound-swift
+    description: "Processes outbound SWIFT transfers"
+
+  - id: remitflow-xof-processor
+    topics:
+      - remitflow.xof.transfers.created
+    service: go-xof-adapter
+    description: "Processes West African XOF corridor transfers"
+
+  - id: remitflow-aml-engine
+    topics:
+      - remitflow.transfers.created
+      - remitflow.xof.transfers.created
+      - remitflow.hnw.transfer.initiated
+    service: rust-aml-engine
+    description: "AML screening for all transfer types"
+
+  - id: remitflow-kyc-processor
+    topics:
+      - remitflow.kyc.verified
+      - remitflow.kyc.rejected
+    service: rust-immigrant-worker-kyc
+    description: "KYC tier upgrade/downgrade processor"
+
+  - id: remitflow-notification-sender
+    topics:
+      - remitflow.notifications.push
+      - remitflow.transfers.completed
+      - remitflow.transfers.failed
+    service: python-notification-service
+    description: "Push notification dispatcher"
+
+  - id: remitflow-lakehouse-ingestor
+    topics:
+      - remitflow.lakehouse.ingest
+      - remitflow.audit.events
+      - remitflow.transfers.completed
+    service: python-lakehouse-corridors
+    description: "Lakehouse/Iceberg data ingestion"
+
+  - id: remitflow-sme-batch-processor
+    topics:
+      - remitflow.sme.batch.submitted
+    service: rust-sme-bulk-processor
+    description: "SME bulk trade payment batch processor"
+
+  - id: remitflow-hnw-router
+    topics:
+      - remitflow.hnw.transfer.initiated
+    service: go-hnw-routing
+    description: "HNW transfer routing to priority SWIFT rails"
+
+  - id: remitflow-correspondent-settler
+    topics:
+      - remitflow.correspondent.settled
+    service: go-correspondent-manager
+    description: "Correspondent bank settlement reconciliation"

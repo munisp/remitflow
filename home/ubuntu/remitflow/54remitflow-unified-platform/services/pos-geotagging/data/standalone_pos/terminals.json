@@ -1,0 +1,18 @@
+{
+  "VALIDATION_TERM_001": {
+    "id": "term_1756575125397707527",
+    "terminal_id": "VALIDATION_TERM_001",
+    "business_name": "Validation Test Business",
+    "latitude": 6.5244,
+    "longitude": 3.3792,
+    "accuracy": 5,
+    "business_radius": 15,
+    "registered_at": "2025-08-30T13:32:05.397712856-04:00",
+    "last_location_update": "2025-08-30T13:32:05.397712928-04:00",
+    "is_active": true,
+    "compliance_status": "COMPLIANT",
+    "ptsa_registered": true,
+    "data_source": "",
+    "last_sync_time": "2025-08-30T13:32:05.397712998-04:00"
+  }
+}

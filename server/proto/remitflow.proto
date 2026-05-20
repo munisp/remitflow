@@ -1,0 +1,858 @@
+syntax = "proto3";
+package remitflow.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+option go_package = "github.com/remitflow/platform/proto/remitflow/v1";
+option java_package = "com.remitflow.platform.proto.v1";
+
+// ============================================================================
+// LEDGER SERVICE — TigerBeetle-backed double-entry accounting
+// ============================================================================
+service LedgerService {
+  // Create a new account in the ledger
+  rpc CreateAccount(CreateAccountRequest) returns (AccountResponse);
+  // Get account balance (cached via Redis, sourced from TigerBeetle)
+  rpc GetBalance(GetBalanceRequest) returns (BalanceResponse);
+  // Execute an atomic double-entry transfer
+  rpc Transfer(TransferRequest) returns (TransferResponse);
+  // Batch transfer (up to 8,191 transfers atomically)
+  rpc BatchTransfer(BatchTransferRequest) returns (BatchTransferResponse);
+  // Get transfer by idempotency key (idempotent reads)
+  rpc GetTransfer(GetTransferRequest) returns (TransferResponse);
+  // Stream real-time balance updates
+  rpc SubscribeBalanceUpdates(SubscribeRequest) returns (stream BalanceUpdate);
+  // Two-phase commit: reserve funds
+  rpc ReserveFunds(ReserveFundsRequest) returns (ReserveFundsResponse);
+  // Two-phase commit: commit reserved funds
+  rpc CommitReservation(CommitReservationRequest) returns (TransferResponse);
+  // Two-phase commit: rollback reservation
+  rpc RollbackReservation(RollbackReservationRequest) returns (google.protobuf.Empty);
+  // Reconcile: compare TigerBeetle vs PostgreSQL snapshots
+  rpc Reconcile(ReconcileRequest) returns (ReconcileResponse);
+}
+
+message CreateAccountRequest {
+  string account_id = 1;       // UUID
+  string user_id = 2;
+  string currency = 3;         // ISO 4217
+  AccountType account_type = 4;
+  uint64 initial_balance = 5;  // In minor units (cents/kobo)
+  map<string, string> metadata = 6;
+}
+
+enum AccountType {
+  ACCOUNT_TYPE_UNSPECIFIED = 0;
+  ACCOUNT_TYPE_WALLET = 1;
+  ACCOUNT_TYPE_ESCROW = 2;
+  ACCOUNT_TYPE_FEE_POOL = 3;
+  ACCOUNT_TYPE_SETTLEMENT = 4;
+  ACCOUNT_TYPE_FLOAT = 5;
+}
+
+message AccountResponse {
+  string account_id = 1;
+  string user_id = 2;
+  string currency = 3;
+  AccountType account_type = 4;
+  uint64 debits_posted = 5;
+  uint64 credits_posted = 6;
+  uint64 debits_pending = 7;
+  uint64 credits_pending = 8;
+  google.protobuf.Timestamp created_at = 9;
+}
+
+message GetBalanceRequest {
+  string account_id = 1;
+  bool bypass_cache = 2;  // Force TigerBeetle read
+}
+
+message BalanceResponse {
+  string account_id = 1;
+  string currency = 2;
+  uint64 available_balance = 3;  // credits_posted - debits_posted - debits_pending
+  uint64 pending_balance = 4;    // debits_pending
+  uint64 total_balance = 5;      // credits_posted - debits_posted
+  bool from_cache = 6;
+  google.protobuf.Timestamp snapshot_at = 7;
+}
+
+message TransferRequest {
+  string idempotency_key = 1;   // UUID — REQUIRED for exactly-once semantics
+  string debit_account_id = 2;
+  string credit_account_id = 3;
+  uint64 amount = 4;            // In minor units
+  string currency = 5;
+  TransferType transfer_type = 6;
+  string description = 7;
+  map<string, string> metadata = 8;
+  uint32 timeout_seconds = 9;   // 0 = no timeout (two-phase)
+}
+
+enum TransferType {
+  TRANSFER_TYPE_UNSPECIFIED = 0;
+  TRANSFER_TYPE_REMITTANCE = 1;
+  TRANSFER_TYPE_WALLET_TOPUP = 2;
+  TRANSFER_TYPE_WALLET_WITHDRAWAL = 3;
+  TRANSFER_TYPE_FEE = 4;
+  TRANSFER_TYPE_REFUND = 5;
+  TRANSFER_TYPE_SETTLEMENT = 6;
+  TRANSFER_TYPE_ESCROW_LOCK = 7;
+  TRANSFER_TYPE_ESCROW_RELEASE = 8;
+}
+
+message TransferResponse {
+  string transfer_id = 1;
+  string idempotency_key = 2;
+  TransferStatus status = 3;
+  uint64 amount = 4;
+  string currency = 5;
+  uint64 processing_time_us = 6;  // Microseconds
+  google.protobuf.Timestamp created_at = 7;
+  bool idempotent_replay = 8;     // True if this was a duplicate request
+}
+
+enum TransferStatus {
+  TRANSFER_STATUS_UNSPECIFIED = 0;
+  TRANSFER_STATUS_PENDING = 1;
+  TRANSFER_STATUS_POSTED = 2;
+  TRANSFER_STATUS_VOIDED = 3;
+  TRANSFER_STATUS_RESERVED = 4;
+}
+
+message BatchTransferRequest {
+  repeated TransferRequest transfers = 1;
+  bool all_or_nothing = 2;  // If true, all fail if any fail
+}
+
+message BatchTransferResponse {
+  repeated TransferResponse results = 1;
+  uint32 succeeded = 2;
+  uint32 failed = 3;
+  uint64 total_processing_time_us = 4;
+}
+
+message GetTransferRequest {
+  string idempotency_key = 1;
+}
+
+message SubscribeRequest {
+  string account_id = 1;
+}
+
+message BalanceUpdate {
+  string account_id = 1;
+  BalanceResponse balance = 2;
+  string trigger_transfer_id = 3;
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+message ReserveFundsRequest {
+  string idempotency_key = 1;
+  string debit_account_id = 2;
+  uint64 amount = 3;
+  string currency = 4;
+  uint32 timeout_seconds = 5;
+}
+
+message ReserveFundsResponse {
+  string reservation_id = 1;
+  string idempotency_key = 2;
+  uint64 reserved_amount = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message CommitReservationRequest {
+  string reservation_id = 1;
+  string credit_account_id = 2;
+  TransferType transfer_type = 3;
+  map<string, string> metadata = 4;
+}
+
+message RollbackReservationRequest {
+  string reservation_id = 1;
+  string reason = 2;
+}
+
+message ReconcileRequest {
+  string currency = 1;
+  google.protobuf.Timestamp from = 2;
+  google.protobuf.Timestamp to = 3;
+}
+
+message ReconcileResponse {
+  uint32 accounts_checked = 1;
+  uint32 discrepancies_found = 2;
+  repeated ReconcileDiscrepancy discrepancies = 3;
+  bool is_balanced = 4;
+}
+
+message ReconcileDiscrepancy {
+  string account_id = 1;
+  int64 tigerbeetle_balance = 2;
+  int64 postgres_balance = 3;
+  int64 delta = 4;
+}
+
+// ============================================================================
+// FRAUD SERVICE — Real-time ML fraud detection
+// ============================================================================
+service FraudService {
+  // Synchronous fraud check (< 10ms p99)
+  rpc CheckTransaction(FraudCheckRequest) returns (FraudCheckResponse);
+  // Async batch scoring
+  rpc BatchScore(BatchFraudRequest) returns (stream FraudCheckResponse);
+  // Report confirmed fraud (feedback loop)
+  rpc ReportFraud(ReportFraudRequest) returns (google.protobuf.Empty);
+  // Get fraud case details
+  rpc GetFraudCase(GetFraudCaseRequest) returns (FraudCase);
+  // Admin: list open cases
+  rpc ListFraudCases(ListFraudCasesRequest) returns (ListFraudCasesResponse);
+  // Admin: take action on case
+  rpc TakeAction(FraudActionRequest) returns (FraudActionResponse);
+  // Stream real-time fraud alerts
+  rpc StreamAlerts(StreamAlertsRequest) returns (stream FraudAlert);
+}
+
+message FraudCheckRequest {
+  string transaction_id = 1;
+  string idempotency_key = 2;
+  string user_id = 3;
+  double amount_usd = 4;
+  string source_currency = 5;
+  string destination_currency = 6;
+  string destination_country = 7;
+  string ip_address = 8;
+  string device_fingerprint = 9;
+  string user_agent = 10;
+  map<string, string> context = 11;
+  bool is_first_transaction = 12;
+  uint32 transactions_last_24h = 13;
+  double total_amount_last_24h_usd = 14;
+}
+
+message FraudCheckResponse {
+  string transaction_id = 1;
+  FraudDecision decision = 2;
+  double risk_score = 3;          // 0.0 - 1.0
+  RiskLevel risk_level = 4;
+  repeated string triggered_rules = 5;
+  repeated string risk_signals = 6;
+  string reason = 7;
+  uint64 processing_time_us = 8;
+  bool requires_2fa = 9;
+  bool requires_manual_review = 10;
+}
+
+enum FraudDecision {
+  FRAUD_DECISION_UNSPECIFIED = 0;
+  FRAUD_DECISION_ALLOW = 1;
+  FRAUD_DECISION_CHALLENGE = 2;  // Require 2FA
+  FRAUD_DECISION_REVIEW = 3;     // Manual review queue
+  FRAUD_DECISION_BLOCK = 4;
+}
+
+enum RiskLevel {
+  RISK_LEVEL_UNSPECIFIED = 0;
+  RISK_LEVEL_LOW = 1;
+  RISK_LEVEL_MEDIUM = 2;
+  RISK_LEVEL_HIGH = 3;
+  RISK_LEVEL_CRITICAL = 4;
+}
+
+message BatchFraudRequest {
+  repeated FraudCheckRequest requests = 1;
+}
+
+message ReportFraudRequest {
+  string transaction_id = 1;
+  string reported_by = 2;
+  string fraud_type = 3;
+  string description = 4;
+}
+
+message GetFraudCaseRequest {
+  string case_id = 1;
+}
+
+message FraudCase {
+  string case_id = 1;
+  string transaction_id = 2;
+  string user_id = 3;
+  double risk_score = 4;
+  RiskLevel risk_level = 5;
+  FraudCaseStatus status = 6;
+  repeated string triggered_rules = 7;
+  string analyst_notes = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+enum FraudCaseStatus {
+  FRAUD_CASE_STATUS_UNSPECIFIED = 0;
+  FRAUD_CASE_STATUS_OPEN = 1;
+  FRAUD_CASE_STATUS_UNDER_REVIEW = 2;
+  FRAUD_CASE_STATUS_APPROVED = 3;
+  FRAUD_CASE_STATUS_BLOCKED = 4;
+  FRAUD_CASE_STATUS_ESCALATED = 5;
+}
+
+message ListFraudCasesRequest {
+  FraudCaseStatus status = 1;
+  uint32 page = 2;
+  uint32 page_size = 3;
+}
+
+message ListFraudCasesResponse {
+  repeated FraudCase cases = 1;
+  uint32 total = 2;
+}
+
+message FraudActionRequest {
+  string case_id = 1;
+  FraudDecision action = 2;
+  string analyst_id = 3;
+  string notes = 4;
+}
+
+message FraudActionResponse {
+  string case_id = 1;
+  FraudCaseStatus new_status = 2;
+  google.protobuf.Timestamp updated_at = 3;
+}
+
+message StreamAlertsRequest {
+  RiskLevel min_risk_level = 1;
+}
+
+message FraudAlert {
+  string alert_id = 1;
+  string transaction_id = 2;
+  string user_id = 3;
+  double risk_score = 4;
+  RiskLevel risk_level = 5;
+  repeated string signals = 6;
+  google.protobuf.Timestamp occurred_at = 7;
+}
+
+// ============================================================================
+// FX SERVICE — Real-time exchange rates and rate alerts
+// ============================================================================
+service FXService {
+  // Get current rate for a pair
+  rpc GetRate(GetRateRequest) returns (RateResponse);
+  // Get rates for multiple pairs
+  rpc GetRates(GetRatesRequest) returns (GetRatesResponse);
+  // Calculate conversion with fees
+  rpc Calculate(CalculateRequest) returns (CalculateResponse);
+  // Lock a rate for a window (rate guarantee)
+  rpc LockRate(LockRateRequest) returns (LockRateResponse);
+  // Create a rate alert
+  rpc CreateAlert(CreateAlertRequest) returns (AlertResponse);
+  // Delete a rate alert
+  rpc DeleteAlert(DeleteAlertRequest) returns (google.protobuf.Empty);
+  // List user alerts
+  rpc ListAlerts(ListAlertsRequest) returns (ListAlertsResponse);
+  // Stream live rate updates
+  rpc StreamRates(StreamRatesRequest) returns (stream RateUpdate);
+  // Check all alerts against current rates (cron trigger)
+  rpc CheckAlerts(google.protobuf.Empty) returns (CheckAlertsResponse);
+}
+
+message GetRateRequest {
+  string from_currency = 1;
+  string to_currency = 2;
+  bool include_fees = 3;
+}
+
+message RateResponse {
+  string from_currency = 1;
+  string to_currency = 2;
+  double mid_rate = 3;
+  double buy_rate = 4;
+  double sell_rate = 5;
+  double spread_percent = 6;
+  string source = 7;
+  google.protobuf.Timestamp fetched_at = 8;
+  uint32 ttl_seconds = 9;
+}
+
+message GetRatesRequest {
+  repeated string currency_pairs = 1;  // e.g. ["USD/NGN", "GBP/EUR"]
+}
+
+message GetRatesResponse {
+  map<string, RateResponse> rates = 1;
+}
+
+message CalculateRequest {
+  string from_currency = 1;
+  string to_currency = 2;
+  double send_amount = 3;
+  string user_id = 4;
+  string corridor = 5;
+}
+
+message CalculateResponse {
+  double send_amount = 1;
+  double receive_amount = 2;
+  double exchange_rate = 3;
+  double fee = 4;
+  double fee_percent = 5;
+  string from_currency = 6;
+  string to_currency = 7;
+  google.protobuf.Timestamp rate_valid_until = 8;
+}
+
+message LockRateRequest {
+  string user_id = 1;
+  string from_currency = 2;
+  string to_currency = 3;
+  double amount = 4;
+  uint32 lock_duration_seconds = 5;
+}
+
+message LockRateResponse {
+  string lock_id = 1;
+  double locked_rate = 2;
+  double locked_amount = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message CreateAlertRequest {
+  string user_id = 1;
+  string from_currency = 2;
+  string to_currency = 3;
+  double target_rate = 4;
+  AlertDirection direction = 5;  // ABOVE or BELOW
+  repeated AlertChannel channels = 6;
+}
+
+enum AlertDirection {
+  ALERT_DIRECTION_UNSPECIFIED = 0;
+  ALERT_DIRECTION_ABOVE = 1;
+  ALERT_DIRECTION_BELOW = 2;
+}
+
+enum AlertChannel {
+  ALERT_CHANNEL_UNSPECIFIED = 0;
+  ALERT_CHANNEL_EMAIL = 1;
+  ALERT_CHANNEL_SMS = 2;
+  ALERT_CHANNEL_PUSH = 3;
+  ALERT_CHANNEL_WEBHOOK = 4;
+}
+
+message AlertResponse {
+  string alert_id = 1;
+  string user_id = 2;
+  string from_currency = 3;
+  string to_currency = 4;
+  double target_rate = 5;
+  AlertDirection direction = 6;
+  bool is_active = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message DeleteAlertRequest {
+  string alert_id = 1;
+  string user_id = 2;
+}
+
+message ListAlertsRequest {
+  string user_id = 1;
+  bool active_only = 2;
+}
+
+message ListAlertsResponse {
+  repeated AlertResponse alerts = 1;
+}
+
+message StreamRatesRequest {
+  repeated string currency_pairs = 1;
+  uint32 interval_seconds = 2;
+}
+
+message RateUpdate {
+  string pair = 1;
+  double rate = 2;
+  double change_percent = 3;
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+message CheckAlertsResponse {
+  uint32 alerts_checked = 1;
+  uint32 alerts_triggered = 2;
+  repeated string triggered_alert_ids = 3;
+}
+
+// ============================================================================
+// SCHEDULER SERVICE — Recurring payment orchestration
+// ============================================================================
+service SchedulerService {
+  // Create a recurring payment schedule
+  rpc CreateSchedule(CreateScheduleRequest) returns (ScheduleResponse);
+  // Update schedule
+  rpc UpdateSchedule(UpdateScheduleRequest) returns (ScheduleResponse);
+  // Pause schedule
+  rpc PauseSchedule(ScheduleIdRequest) returns (ScheduleResponse);
+  // Resume schedule
+  rpc ResumeSchedule(ScheduleIdRequest) returns (ScheduleResponse);
+  // Cancel schedule
+  rpc CancelSchedule(ScheduleIdRequest) returns (google.protobuf.Empty);
+  // Get schedule
+  rpc GetSchedule(ScheduleIdRequest) returns (ScheduleResponse);
+  // List user schedules
+  rpc ListSchedules(ListSchedulesRequest) returns (ListSchedulesResponse);
+  // Get execution history
+  rpc GetExecutionHistory(ExecutionHistoryRequest) returns (ExecutionHistoryResponse);
+  // Trigger immediate execution (manual run)
+  rpc TriggerNow(ScheduleIdRequest) returns (ExecutionResult);
+  // Internal: process due schedules (called by cron)
+  rpc ProcessDueSchedules(google.protobuf.Empty) returns (ProcessDueResponse);
+}
+
+message CreateScheduleRequest {
+  string user_id = 1;
+  string from_account_id = 2;
+  string to_account_id = 3;
+  string beneficiary_id = 4;
+  double amount = 5;
+  string currency = 6;
+  Frequency frequency = 7;
+  DayOfWeek day_of_week = 8;    // For weekly
+  uint32 day_of_month = 9;      // For monthly (1-31)
+  google.protobuf.Timestamp start_date = 10;
+  google.protobuf.Timestamp end_date = 11;  // Optional
+  uint32 max_executions = 12;   // 0 = unlimited
+  string description = 13;
+  map<string, string> metadata = 14;
+}
+
+enum Frequency {
+  FREQUENCY_UNSPECIFIED = 0;
+  FREQUENCY_DAILY = 1;
+  FREQUENCY_WEEKLY = 2;
+  FREQUENCY_BIWEEKLY = 3;
+  FREQUENCY_MONTHLY = 4;
+  FREQUENCY_QUARTERLY = 5;
+  FREQUENCY_ANNUALLY = 6;
+}
+
+enum DayOfWeek {
+  DAY_OF_WEEK_UNSPECIFIED = 0;
+  DAY_OF_WEEK_MONDAY = 1;
+  DAY_OF_WEEK_TUESDAY = 2;
+  DAY_OF_WEEK_WEDNESDAY = 3;
+  DAY_OF_WEEK_THURSDAY = 4;
+  DAY_OF_WEEK_FRIDAY = 5;
+  DAY_OF_WEEK_SATURDAY = 6;
+  DAY_OF_WEEK_SUNDAY = 7;
+}
+
+message ScheduleResponse {
+  string schedule_id = 1;
+  string user_id = 2;
+  ScheduleStatus status = 3;
+  Frequency frequency = 4;
+  double amount = 5;
+  string currency = 6;
+  google.protobuf.Timestamp next_run_at = 7;
+  uint32 executions_completed = 8;
+  uint32 executions_failed = 9;
+  google.protobuf.Timestamp created_at = 10;
+}
+
+enum ScheduleStatus {
+  SCHEDULE_STATUS_UNSPECIFIED = 0;
+  SCHEDULE_STATUS_ACTIVE = 1;
+  SCHEDULE_STATUS_PAUSED = 2;
+  SCHEDULE_STATUS_CANCELLED = 3;
+  SCHEDULE_STATUS_COMPLETED = 4;  // Max executions reached
+  SCHEDULE_STATUS_FAILED = 5;     // Too many consecutive failures
+}
+
+message ScheduleIdRequest {
+  string schedule_id = 1;
+  string user_id = 2;
+}
+
+message UpdateScheduleRequest {
+  string schedule_id = 1;
+  string user_id = 2;
+  double amount = 3;
+  google.protobuf.Timestamp end_date = 4;
+  uint32 max_executions = 5;
+  DayOfWeek day_of_week = 6;
+  uint32 day_of_month = 7;
+}
+
+message ListSchedulesRequest {
+  string user_id = 1;
+  ScheduleStatus status = 2;
+  uint32 page = 3;
+  uint32 page_size = 4;
+}
+
+message ListSchedulesResponse {
+  repeated ScheduleResponse schedules = 1;
+  uint32 total = 2;
+}
+
+message ExecutionHistoryRequest {
+  string schedule_id = 1;
+  uint32 limit = 2;
+}
+
+message ExecutionHistoryResponse {
+  repeated ExecutionResult executions = 1;
+}
+
+message ExecutionResult {
+  string execution_id = 1;
+  string schedule_id = 2;
+  ExecutionStatus status = 3;
+  string transfer_id = 4;
+  double amount = 5;
+  string currency = 6;
+  string error_message = 7;
+  google.protobuf.Timestamp executed_at = 8;
+  uint64 processing_time_ms = 9;
+}
+
+enum ExecutionStatus {
+  EXECUTION_STATUS_UNSPECIFIED = 0;
+  EXECUTION_STATUS_SUCCESS = 1;
+  EXECUTION_STATUS_FAILED = 2;
+  EXECUTION_STATUS_SKIPPED = 3;  // Insufficient funds
+  EXECUTION_STATUS_RETRYING = 4;
+}
+
+message ProcessDueResponse {
+  uint32 schedules_processed = 1;
+  uint32 succeeded = 2;
+  uint32 failed = 3;
+  uint32 skipped = 4;
+  uint64 processing_time_ms = 5;
+}
+
+// ============================================================================
+// KYC OCR SERVICE — PaddleOCR + Rust + VLM document processing
+// ============================================================================
+service KYCOCRService {
+  // Process document with multi-engine OCR pipeline
+  rpc ProcessDocument(ProcessDocumentRequest) returns (ProcessDocumentResponse);
+  // Verify liveness (active challenge)
+  rpc VerifyLiveness(LivenessRequest) returns (LivenessResponse);
+  // Match face against document photo
+  rpc MatchFace(FaceMatchRequest) returns (FaceMatchResponse);
+  // Detect document tampering
+  rpc DetectTampering(TamperingRequest) returns (TamperingResponse);
+  // Full KYC pipeline (OCR + liveness + face match + AML)
+  rpc RunKYCPipeline(KYCPipelineRequest) returns (stream KYCPipelineEvent);
+  // Classify document type
+  rpc ClassifyDocument(ClassifyDocumentRequest) returns (ClassifyDocumentResponse);
+}
+
+message ProcessDocumentRequest {
+  string session_id = 1;
+  string user_id = 2;
+  bytes image_data = 3;
+  bytes back_image_data = 4;
+  DocumentType document_type = 5;
+  OCREngine preferred_engine = 6;
+  bool run_all_engines = 7;  // Ensemble mode
+}
+
+enum DocumentType {
+  DOCUMENT_TYPE_UNSPECIFIED = 0;
+  DOCUMENT_TYPE_PASSPORT = 1;
+  DOCUMENT_TYPE_NATIONAL_ID = 2;
+  DOCUMENT_TYPE_DRIVERS_LICENSE = 3;
+  DOCUMENT_TYPE_RESIDENCE_PERMIT = 4;
+  DOCUMENT_TYPE_UTILITY_BILL = 5;
+  DOCUMENT_TYPE_BANK_STATEMENT = 6;
+  DOCUMENT_TYPE_BUSINESS_REGISTRATION = 7;
+  DOCUMENT_TYPE_TAX_CERTIFICATE = 8;
+}
+
+enum OCREngine {
+  OCR_ENGINE_UNSPECIFIED = 0;
+  OCR_ENGINE_PADDLEOCR = 1;
+  OCR_ENGINE_RUST_NATIVE = 2;
+  OCR_ENGINE_VLM = 3;          // Vision Language Model
+  OCR_ENGINE_DOCLING = 4;      // IBM Docling
+  OCR_ENGINE_ENSEMBLE = 5;     // All engines, majority vote
+}
+
+message ProcessDocumentResponse {
+  string document_id = 1;
+  DocumentType document_type = 2;
+  ExtractedFields fields = 3;
+  MRZData mrz_data = 4;
+  double confidence_score = 5;
+  double authenticity_score = 6;
+  bool is_expired = 7;
+  repeated string warnings = 8;
+  repeated EngineResult engine_results = 9;
+  uint64 processing_time_ms = 10;
+}
+
+message ExtractedFields {
+  string full_name = 1;
+  string first_name = 2;
+  string last_name = 3;
+  string date_of_birth = 4;
+  string document_number = 5;
+  string expiry_date = 6;
+  string issue_date = 7;
+  string nationality = 8;
+  string country_of_issue = 9;
+  string gender = 10;
+  string address = 11;
+  string personal_number = 12;
+  map<string, string> additional_fields = 13;
+}
+
+message MRZData {
+  string line1 = 1;
+  string line2 = 2;
+  string document_code = 3;
+  string issuing_state = 4;
+  string surname = 5;
+  string given_names = 6;
+  string document_number = 7;
+  string nationality = 8;
+  string date_of_birth = 9;
+  string sex = 10;
+  string expiry_date = 11;
+  string personal_number = 12;
+  bool check_digits_valid = 13;
+}
+
+message EngineResult {
+  OCREngine engine = 1;
+  double confidence = 2;
+  ExtractedFields fields = 3;
+  uint64 processing_time_ms = 4;
+  string error = 5;
+}
+
+message LivenessRequest {
+  string session_id = 1;
+  string user_id = 2;
+  repeated bytes video_frames = 3;  // 3-5 frames
+  LivenessChallenge challenge = 4;
+  bool passive_mode = 5;
+}
+
+enum LivenessChallenge {
+  LIVENESS_CHALLENGE_UNSPECIFIED = 0;
+  LIVENESS_CHALLENGE_BLINK = 1;
+  LIVENESS_CHALLENGE_SMILE = 2;
+  LIVENESS_CHALLENGE_TURN_LEFT = 3;
+  LIVENESS_CHALLENGE_TURN_RIGHT = 4;
+  LIVENESS_CHALLENGE_NOD = 5;
+  LIVENESS_CHALLENGE_RANDOM = 6;  // Server-chosen
+}
+
+message LivenessResponse {
+  string session_id = 1;
+  bool is_live = 2;
+  double confidence = 3;
+  repeated string signals = 4;
+  SpoofType spoof_type = 5;
+  uint64 processing_time_ms = 6;
+}
+
+enum SpoofType {
+  SPOOF_TYPE_NONE = 0;
+  SPOOF_TYPE_PRINT_ATTACK = 1;
+  SPOOF_TYPE_REPLAY_ATTACK = 2;
+  SPOOF_TYPE_3D_MASK = 3;
+  SPOOF_TYPE_DEEPFAKE = 4;
+}
+
+message FaceMatchRequest {
+  string session_id = 1;
+  bytes selfie_image = 2;
+  bytes document_image = 3;
+  double min_confidence = 4;  // Default 0.85
+}
+
+message FaceMatchResponse {
+  bool is_match = 1;
+  double similarity_score = 2;
+  double confidence = 3;
+  string model_used = 4;
+  uint64 processing_time_ms = 5;
+}
+
+message TamperingRequest {
+  string document_id = 1;
+  bytes image_data = 2;
+}
+
+message TamperingResponse {
+  bool is_tampered = 1;
+  double tampering_score = 2;
+  repeated TamperingSignal signals = 3;
+}
+
+message TamperingSignal {
+  string signal_type = 1;  // ELA, clone detection, metadata
+  double confidence = 2;
+  string description = 3;
+}
+
+message KYCPipelineRequest {
+  string session_id = 1;
+  string user_id = 2;
+  bytes document_front = 3;
+  bytes document_back = 4;
+  bytes selfie_image = 5;
+  repeated bytes liveness_frames = 6;
+  DocumentType document_type = 7;
+  bool run_aml_check = 8;
+}
+
+message KYCPipelineEvent {
+  string session_id = 1;
+  PipelineStage stage = 2;
+  float progress = 3;
+  string message = 4;
+  oneof result {
+    ProcessDocumentResponse document_result = 5;
+    LivenessResponse liveness_result = 6;
+    FaceMatchResponse face_match_result = 7;
+    KYCPipelineResult final_result = 8;
+  }
+}
+
+enum PipelineStage {
+  PIPELINE_STAGE_UNSPECIFIED = 0;
+  PIPELINE_STAGE_DOCUMENT_OCR = 1;
+  PIPELINE_STAGE_LIVENESS_CHECK = 2;
+  PIPELINE_STAGE_FACE_MATCH = 3;
+  PIPELINE_STAGE_AML_SCREEN = 4;
+  PIPELINE_STAGE_COMPLETE = 5;
+  PIPELINE_STAGE_FAILED = 6;
+}
+
+message KYCPipelineResult {
+  bool passed = 1;
+  string kyc_tier = 2;
+  double overall_confidence = 3;
+  repeated string failure_reasons = 4;
+  string verification_id = 5;
+}
+
+message ClassifyDocumentRequest {
+  bytes image_data = 1;
+}
+
+message ClassifyDocumentResponse {
+  DocumentType document_type = 1;
+  double confidence = 2;
+  string country_of_issue = 3;
+}

@@ -1,0 +1,184 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: fraud-detection-scaler
+  namespace: remittance
+  labels:
+    app: fraud-detection-service
+    component: autoscaler
+spec:
+  scaleTargetRef:
+    name: fraud-detection-service
+  pollingInterval: 10
+  cooldownPeriod: 120
+  idleReplicaCount: 3
+  minReplicaCount: 3
+  maxReplicaCount: 100
+  fallback:
+    failureThreshold: 3
+    replicas: 8
+  advanced:
+    restoreToOriginalReplicaCount: true
+    horizontalPodAutoscalerConfig:
+      name: fraud-detection-hpa
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+          policies:
+          - type: Percent
+            value: 15
+            periodSeconds: 60
+        scaleUp:
+          stabilizationWindowSeconds: 30
+          policies:
+          - type: Percent
+            value: 100
+            periodSeconds: 15
+          - type: Pods
+            value: 10
+            periodSeconds: 15
+          selectPolicy: Max
+  triggers:
+  # Redis transaction queue trigger
+  - type: redis
+    metadata:
+      address: redis.remittance.svc.cluster.local:6379
+      listName: fraud_analysis_queue
+      listLength: "5"
+      enableTLS: "false"
+    authenticationRef:
+      name: redis-auth
+  
+  # Redis stream trigger for real-time transactions
+  - type: redis-streams
+    metadata:
+      address: redis.remittance.svc.cluster.local:6379
+      stream: transaction_stream
+      consumerGroup: fraud_detection_group
+      pendingEntriesCount: "10"
+      enableTLS: "false"
+    authenticationRef:
+      name: redis-auth
+  
+  # Prometheus CPU usage trigger
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+      metricName: fraud_cpu_usage
+      threshold: "60"
+      query: avg(rate(container_cpu_usage_seconds_total{pod=~"fraud-detection-.*"}[1m])) * 100
+    authenticationRef:
+      name: prometheus-auth
+  
+  # Prometheus memory usage trigger
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+      metricName: fraud_memory_usage
+      threshold: "75"
+      query: avg(container_memory_working_set_bytes{pod=~"fraud-detection-.*"} / container_spec_memory_limit_bytes{pod=~"fraud-detection-.*"}) * 100
+    authenticationRef:
+      name: prometheus-auth
+  
+  # Prometheus request rate trigger
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+      metricName: fraud_request_rate
+      threshold: "500"
+      query: sum(rate(http_requests_total{service="fraud-detection"}[1m]))
+    authenticationRef:
+      name: prometheus-auth
+  
+  # Prometheus response time trigger
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+      metricName: fraud_response_time_p95
+      threshold: "50"
+      query: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{service="fraud-detection"}[1m])) by (le)) * 1000
+    authenticationRef:
+      name: prometheus-auth
+  
+  # PostgreSQL active connections trigger
+  - type: postgresql
+    metadata:
+      connection: postgresql://kyb_user:kyb_secure_password_2024@postgres.remittance.svc.cluster.local:5432/kyb_db?sslmode=disable
+      query: "SELECT COUNT(*) FROM pg_stat_activity WHERE state = 'active' AND application_name LIKE 'fraud-detection%'"
+      targetQueryValue: "50"
+    authenticationRef:
+      name: postgres-auth
+  
+  # Custom metrics trigger for fraud detection accuracy
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+      metricName: fraud_detection_load
+      threshold: "80"
+      query: (sum(rate(fraud_transactions_processed_total[2m])) / sum(rate(fraud_transactions_received_total[2m]))) * 100
+    authenticationRef:
+      name: prometheus-auth
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: fraud-batch-processor
+  namespace: remittance
+  labels:
+    app: fraud-batch-processor
+    component: batch-autoscaler
+spec:
+  jobTargetRef:
+    template:
+      metadata:
+        labels:
+          app: fraud-batch-processor
+      spec:
+        containers:
+        - name: fraud-batch-processor
+          image: remittance/fraud-detection:latest
+          command: ["python", "/app/batch_processor.py"]
+          env:
+          - name: BATCH_SIZE
+            value: "1000"
+          - name: DB_HOST
+            value: postgres.remittance.svc.cluster.local
+          - name: REDIS_HOST
+            value: redis.remittance.svc.cluster.local
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+        restartPolicy: Never
+        backoffLimit: 3
+  pollingInterval: 30
+  successfulJobsHistoryLimit: 5
+  failedJobsHistoryLimit: 5
+  maxReplicaCount: 20
+  scalingStrategy:
+    strategy: "default"
+  triggers:
+  # Redis list trigger for batch processing
+  - type: redis
+    metadata:
+      address: redis.remittance.svc.cluster.local:6379
+      listName: fraud_batch_queue
+      listLength: "100"
+      enableTLS: "false"
+    authenticationRef:
+      name: redis-auth
+  
+  # Prometheus trigger for pending batch jobs
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+      metricName: fraud_batch_pending
+      threshold: "50"
+      query: sum(fraud_batch_jobs_pending)
+    authenticationRef:
+      name: prometheus-auth
+

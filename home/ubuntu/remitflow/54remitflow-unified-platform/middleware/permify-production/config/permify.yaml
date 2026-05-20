@@ -1,0 +1,40 @@
+# Permify Server Configuration
+
+server:
+  http:
+    enabled: true
+    port: 3476
+  grpc:
+    enabled: true
+    port: 3478
+
+database:
+  engine: postgres
+  uri: ${DATABASE_URL}
+  auto_migrate: true
+  max_open_connections: 20
+  max_idle_connections: 10
+  max_connection_lifetime: 300s
+
+service:
+  circuit_breaker: true
+  schema_cache_enabled: true
+  permission_cache_enabled: true
+  cache_ttl: 300s
+
+log:
+  level: info
+  format: json
+
+profiler:
+  enabled: true
+  port: 6060
+
+authn:
+  enabled: true
+  method: preshared
+  keys:
+    - ${PERMIFY_API_KEY}
+
+distributed:
+  enabled: false

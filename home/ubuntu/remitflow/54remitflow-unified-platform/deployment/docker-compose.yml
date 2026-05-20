@@ -1,0 +1,142 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgresql:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: remittance
+      POSTGRES_PASSWORD: changeme123
+      POSTGRES_DB: remittance_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U remittance"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass changeme123
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  # Temporal
+  temporal:
+    image: temporalio/auto-setup:1.22.0
+    depends_on:
+      - postgresql
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_USER: remittance
+      POSTGRES_PWD: changeme123
+      POSTGRES_SEEDS: postgresql
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+
+  # FastAPI Backend
+  fastapi-backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.fastapi
+    depends_on:
+      - postgresql
+      - redis
+      - kafka
+      - temporal
+    environment:
+      DATABASE_URL: postgresql://remittance:changeme123@postgresql:5432/remittance_db
+      REDIS_URL: redis://:changeme123@redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      TEMPORAL_HOST: temporal:7233
+      JWT_SECRET: dev-jwt-secret
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # gRPC Backend
+  grpc-backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.grpc
+    depends_on:
+      - postgresql
+      - temporal
+    environment:
+      DATABASE_URL: postgresql://remittance:changeme123@postgresql:5432/remittance_db
+      TEMPORAL_HOST: temporal:7233
+    ports:
+      - "50051:50051"
+    volumes:
+      - ../backend:/app
+
+  # Temporal Workers
+  temporal-workers:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.workers
+    depends_on:
+      - temporal
+      - postgresql
+    environment:
+      TEMPORAL_HOST: temporal:7233
+      DATABASE_URL: postgresql://remittance:changeme123@postgresql:5432/remittance_db
+    volumes:
+      - ../backend:/app
+
+  # Web Frontend
+  web-frontend:
+    build:
+      context: ../mobile/pwa
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+    volumes:
+      - ../mobile/pwa:/app
+      - /app/node_modules
+    command: npm start
+
+volumes:
+  postgres_data:
+  redis_data:
+  kafka_data:

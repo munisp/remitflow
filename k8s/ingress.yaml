@@ -1,0 +1,108 @@
+# RemitFlow — NGINX Ingress with TLS and rate limiting
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: remitflow-ingress
+  namespace: remitflow
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # Rate limiting: 100 req/min per IP on API routes
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    # HSTS
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+      add_header X-Content-Type-Options "nosniff" always;
+      add_header X-Frame-Options "DENY" always;
+    # TLS certificate (cert-manager)
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Proxy settings
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    # WebSocket support for SSE
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/proxy-set-headers: "remitflow/custom-headers"
+spec:
+  tls:
+    - hosts:
+        - remitflow.app
+        - www.remitflow.app
+        - api.remitflow.app
+      secretName: remitflow-tls
+  rules:
+    - host: remitflow.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: remitflow-api
+                port:
+                  number: 3000
+    - host: www.remitflow.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: remitflow-api
+                port:
+                  number: 3000
+    - host: api.remitflow.app
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: remitflow-api
+                port:
+                  number: 3000
+---
+# Stricter rate limiting on auth and payment endpoints
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: remitflow-ingress-sensitive
+  namespace: remitflow
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/limit-rps: "10"
+    nginx.ingress.kubernetes.io/limit-connections: "5"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts:
+        - remitflow.app
+      secretName: remitflow-tls
+  rules:
+    - host: remitflow.app
+      http:
+        paths:
+          - path: /api/oauth
+            pathType: Prefix
+            backend:
+              service:
+                name: remitflow-api
+                port:
+                  number: 3000
+          - path: /api/trpc/transfer.send
+            pathType: Prefix
+            backend:
+              service:
+                name: remitflow-api
+                port:
+                  number: 3000
+          - path: /api/trpc/kyc.uploadDocument
+            pathType: Prefix
+            backend:
+              service:
+                name: remitflow-api
+                port:
+                  number: 3000

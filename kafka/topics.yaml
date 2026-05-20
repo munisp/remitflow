@@ -1,0 +1,98 @@
+# RemitFlow Kafka Topic Registry
+# All topics use 6 partitions for high-throughput corridors, 3 for others.
+topics:
+  - name: remitflow.transfers.created
+    partitions: 6
+    replication: 1
+    retention_ms: 604800000  # 7 days
+    description: "Fired when a new transfer is initiated"
+
+  - name: remitflow.transfers.completed
+    partitions: 6
+    replication: 1
+    retention_ms: 2592000000  # 30 days
+    description: "Fired when a transfer reaches terminal COMPLETED state"
+
+  - name: remitflow.transfers.failed
+    partitions: 6
+    replication: 1
+    retention_ms: 2592000000
+    description: "Fired when a transfer reaches terminal FAILED state"
+
+  - name: remitflow.kyc.verified
+    partitions: 3
+    replication: 1
+    retention_ms: 2592000000
+    description: "KYC verification passed — triggers account upgrade"
+
+  - name: remitflow.kyc.rejected
+    partitions: 3
+    replication: 1
+    retention_ms: 2592000000
+    description: "KYC verification failed — triggers user notification"
+
+  - name: remitflow.aml.flagged
+    partitions: 3
+    replication: 1
+    retention_ms: 7776000000  # 90 days
+    description: "AML engine flagged a transaction for review"
+
+  - name: remitflow.aml.cleared
+    partitions: 3
+    replication: 1
+    retention_ms: 7776000000
+    description: "AML engine cleared a previously flagged transaction"
+
+  - name: remitflow.fx.rates.updated
+    partitions: 3
+    replication: 1
+    retention_ms: 86400000  # 1 day
+    description: "Live FX rate update from BMATCH or XOF adapter"
+
+  - name: remitflow.xof.transfers.created
+    partitions: 3
+    replication: 1
+    retention_ms: 604800000
+    description: "West African XOF corridor transfer initiated"
+
+  - name: remitflow.sme.batch.submitted
+    partitions: 3
+    replication: 1
+    retention_ms: 604800000
+    description: "SME bulk trade payment batch submitted"
+
+  - name: remitflow.hnw.transfer.initiated
+    partitions: 3
+    replication: 1
+    retention_ms: 2592000000
+    description: "HNW/UHNW private banking transfer initiated"
+
+  - name: remitflow.correspondent.settled
+    partitions: 3
+    replication: 1
+    retention_ms: 2592000000
+    description: "Correspondent bank settlement confirmed"
+
+  - name: remitflow.agent.cash_in
+    partitions: 3
+    replication: 1
+    retention_ms: 604800000
+    description: "Agent network cash-in transaction"
+
+  - name: remitflow.notifications.push
+    partitions: 3
+    replication: 1
+    retention_ms: 86400000
+    description: "Push notification events for mobile apps"
+
+  - name: remitflow.audit.events
+    partitions: 3
+    replication: 1
+    retention_ms: 31536000000  # 1 year
+    description: "Immutable audit trail for all financial events"
+
+  - name: remitflow.lakehouse.ingest
+    partitions: 3
+    replication: 1
+    retention_ms: 604800000
+    description: "Events destined for Lakehouse/Iceberg ingestion"

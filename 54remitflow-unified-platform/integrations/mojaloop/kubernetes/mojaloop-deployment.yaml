@@ -1,0 +1,467 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mojaloop-system
+
+---
+# ConfigMap for Mojaloop Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mojaloop-config
+  namespace: mojaloop-system
+data:
+  LOG_LEVEL: "info"
+  METRICS_ENABLED: "true"
+  METRICS_PORT: "9090"
+
+---
+# Secret for Database Credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mojaloop-secrets
+  namespace: mojaloop-system
+type: Opaque
+stringData:
+  POSTGRES_USER: mojaloop
+  POSTGRES_PASSWORD: mojaloop_secure_password_change_me
+  POSTGRES_DB: mojaloop
+  DATABASE_URL: postgresql://mojaloop:mojaloop_secure_password_change_me@mojaloop-postgres:5432/mojaloop
+
+---
+# PostgreSQL StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mojaloop-postgres
+  namespace: mojaloop-system
+spec:
+  serviceName: mojaloop-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mojaloop-postgres
+  template:
+    metadata:
+      labels:
+        app: mojaloop-postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: mojaloop-secrets
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mojaloop-secrets
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: mojaloop-secrets
+              key: POSTGRES_DB
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - mojaloop
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - mojaloop
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mojaloop-postgres
+  namespace: mojaloop-system
+spec:
+  selector:
+    app: mojaloop-postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  clusterIP: None
+
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mojaloop-redis
+  namespace: mojaloop-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mojaloop-redis
+  template:
+    metadata:
+      labels:
+        app: mojaloop-redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        command:
+        - redis-server
+        - --appendonly
+        - "yes"
+        - --maxmemory
+        - "512mb"
+        - --maxmemory-policy
+        - allkeys-lru
+        ports:
+        - containerPort: 6379
+          name: redis
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mojaloop-redis
+  namespace: mojaloop-system
+spec:
+  selector:
+    app: mojaloop-redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+    name: redis
+
+---
+# Mojaloop Central Switch Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mojaloop-switch
+  namespace: mojaloop-system
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mojaloop-switch
+  template:
+    metadata:
+      labels:
+        app: mojaloop-switch
+    spec:
+      containers:
+      - name: mojaloop-switch
+        image: mojaloop/central-ledger:latest
+        ports:
+        - containerPort: 3000
+          name: http
+        - containerPort: 3001
+          name: admin
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: mojaloop-secrets
+              key: DATABASE_URL
+        - name: KAFKA_BROKER
+          value: "mojaloop-kafka:9092"
+        - name: REDIS_HOST
+          value: "mojaloop-redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: mojaloop-config
+              key: LOG_LEVEL
+        - name: METRICS_ENABLED
+          valueFrom:
+            configMapKeyRef:
+              name: mojaloop-config
+              key: METRICS_ENABLED
+        - name: METRICS_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: mojaloop-config
+              key: METRICS_PORT
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+# Mojaloop Switch Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mojaloop-switch
+  namespace: mojaloop-system
+spec:
+  selector:
+    app: mojaloop-switch
+  ports:
+  - port: 3000
+    targetPort: 3000
+    name: http
+  - port: 3001
+    targetPort: 3001
+    name: admin
+  - port: 9090
+    targetPort: 9090
+    name: metrics
+  type: ClusterIP
+
+---
+# Account Lookup Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mojaloop-als
+  namespace: mojaloop-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mojaloop-als
+  template:
+    metadata:
+      labels:
+        app: mojaloop-als
+    spec:
+      containers:
+      - name: mojaloop-als
+        image: mojaloop/account-lookup-service:latest
+        ports:
+        - containerPort: 4001
+          name: http
+        - containerPort: 4002
+          name: admin
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: mojaloop-secrets
+              key: DATABASE_URL
+        - name: CENTRAL_LEDGER_ENDPOINT
+          value: "http://mojaloop-switch:3000"
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: mojaloop-config
+              key: LOG_LEVEL
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 4001
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 4001
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+# Account Lookup Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mojaloop-als
+  namespace: mojaloop-system
+spec:
+  selector:
+    app: mojaloop-als
+  ports:
+  - port: 4001
+    targetPort: 4001
+    name: http
+  - port: 4002
+    targetPort: 4002
+    name: admin
+  type: ClusterIP
+
+---
+# Quoting Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mojaloop-quoting
+  namespace: mojaloop-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mojaloop-quoting
+  template:
+    metadata:
+      labels:
+        app: mojaloop-quoting
+    spec:
+      containers:
+      - name: mojaloop-quoting
+        image: mojaloop/quoting-service:latest
+        ports:
+        - containerPort: 3002
+          name: http
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: mojaloop-secrets
+              key: DATABASE_URL
+        - name: KAFKA_BROKER
+          value: "mojaloop-kafka:9092"
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: mojaloop-config
+              key: LOG_LEVEL
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3002
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3002
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+# Quoting Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mojaloop-quoting
+  namespace: mojaloop-system
+spec:
+  selector:
+    app: mojaloop-quoting
+  ports:
+  - port: 3002
+    targetPort: 3002
+    name: http
+  type: ClusterIP
+
+---
+# Horizontal Pod Autoscaler for Switch
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mojaloop-switch-hpa
+  namespace: mojaloop-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mojaloop-switch
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+

@@ -1,0 +1,818 @@
+# OpenSearch 5/5 Bank-Grade Cluster Configuration
+# High Availability, Performance, Security, Observability, Disaster Recovery
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opensearch
+  labels:
+    app.kubernetes.io/name: opensearch
+    app.kubernetes.io/component: search
+---
+# OpenSearch Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensearch-config
+  namespace: opensearch
+data:
+  opensearch.yml: |
+    cluster.name: remittance-search
+    node.name: ${HOSTNAME}
+    
+    # Discovery
+    discovery.seed_hosts:
+      - opensearch-master-0.opensearch-master-headless.opensearch.svc.cluster.local
+      - opensearch-master-1.opensearch-master-headless.opensearch.svc.cluster.local
+      - opensearch-master-2.opensearch-master-headless.opensearch.svc.cluster.local
+    cluster.initial_master_nodes:
+      - opensearch-master-0
+      - opensearch-master-1
+      - opensearch-master-2
+    
+    # Network
+    network.host: 0.0.0.0
+    http.port: 9200
+    transport.port: 9300
+    
+    # Memory
+    bootstrap.memory_lock: true
+    
+    # Shard Allocation Awareness
+    cluster.routing.allocation.awareness.attributes: zone
+    cluster.routing.allocation.awareness.force.zone.values: zone-a,zone-b,zone-c
+    
+    # Security Plugin
+    plugins.security.ssl.transport.pemcert_filepath: /certs/node.pem
+    plugins.security.ssl.transport.pemkey_filepath: /certs/node-key.pem
+    plugins.security.ssl.transport.pemtrustedcas_filepath: /certs/root-ca.pem
+    plugins.security.ssl.transport.enforce_hostname_verification: false
+    plugins.security.ssl.http.enabled: true
+    plugins.security.ssl.http.pemcert_filepath: /certs/node.pem
+    plugins.security.ssl.http.pemkey_filepath: /certs/node-key.pem
+    plugins.security.ssl.http.pemtrustedcas_filepath: /certs/root-ca.pem
+    plugins.security.allow_default_init_securityindex: true
+    plugins.security.authcz.admin_dn:
+      - CN=admin,OU=remittance,O=platform,C=NG
+    plugins.security.nodes_dn:
+      - CN=node*,OU=remittance,O=platform,C=NG
+    plugins.security.audit.type: internal_opensearch
+    plugins.security.enable_snapshot_restore_privilege: true
+    plugins.security.check_snapshot_restore_write_privileges: true
+    plugins.security.restapi.roles_enabled: ["all_access", "security_rest_api_access"]
+    
+    # Performance
+    indices.memory.index_buffer_size: 20%
+    indices.queries.cache.size: 15%
+    thread_pool.write.queue_size: 1000
+    thread_pool.search.queue_size: 1000
+    
+    # Circuit Breakers
+    indices.breaker.total.limit: 70%
+    indices.breaker.fielddata.limit: 40%
+    indices.breaker.request.limit: 40%
+    
+    # Snapshot Repository
+    path.repo:
+      - /snapshots
+    
+  jvm.options: |
+    -Xms16g
+    -Xmx16g
+    -XX:+UseG1GC
+    -XX:G1ReservePercent=25
+    -XX:InitiatingHeapOccupancyPercent=30
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:HeapDumpPath=/data/heapdump.hprof
+    -XX:ErrorFile=/data/hs_err_pid%p.log
+    -Xlog:gc*,gc+age=trace,safepoint:file=/data/gc.log:utctime,pid,tags:filecount=32,filesize=64m
+    
+  log4j2.properties: |
+    status = error
+    appender.console.type = Console
+    appender.console.name = console
+    appender.console.layout.type = PatternLayout
+    appender.console.layout.pattern = [%d{ISO8601}][%-5p][%-25c{1.}] [%node_name]%marker %m%n
+    rootLogger.level = info
+    rootLogger.appenderRef.console.ref = console
+    logger.action.name = org.opensearch.action
+    logger.action.level = info
+---
+# Master Node StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: opensearch-master
+  namespace: opensearch
+  labels:
+    app: opensearch
+    role: master
+spec:
+  serviceName: opensearch-master-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: opensearch
+      role: master
+  template:
+    metadata:
+      labels:
+        app: opensearch
+        role: master
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9600"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: opensearch
+                  role: master
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: init-sysctl
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              sysctl -w vm.max_map_count=262144
+              sysctl -w fs.file-max=65536
+          securityContext:
+            privileged: true
+        - name: init-permissions
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              chown -R 1000:1000 /data
+              chown -R 1000:1000 /snapshots
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: snapshots
+              mountPath: /snapshots
+          securityContext:
+            runAsUser: 0
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.11.0
+          ports:
+            - containerPort: 9200
+              name: http
+            - containerPort: 9300
+              name: transport
+            - containerPort: 9600
+              name: metrics
+          env:
+            - name: node.roles
+              value: "master"
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms4g -Xmx4g"
+            - name: DISABLE_INSTALL_DEMO_CONFIG
+              value: "true"
+          envFrom:
+            - secretRef:
+                name: opensearch-secrets
+          resources:
+            requests:
+              memory: "6Gi"
+              cpu: "1"
+            limits:
+              memory: "8Gi"
+              cpu: "2"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /usr/share/opensearch/config/opensearch.yml
+              subPath: opensearch.yml
+            - name: config
+              mountPath: /usr/share/opensearch/config/jvm.options
+              subPath: jvm.options
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+            - name: snapshots
+              mountPath: /snapshots
+          livenessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+              scheme: HTTPS
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?local=true
+              port: 9200
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: opensearch-config
+        - name: certs
+          secret:
+            secretName: opensearch-tls
+        - name: snapshots
+          persistentVolumeClaim:
+            claimName: opensearch-snapshots
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 100Gi
+---
+# Data Node StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: opensearch-data
+  namespace: opensearch
+  labels:
+    app: opensearch
+    role: data
+spec:
+  serviceName: opensearch-data-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: opensearch
+      role: data
+  template:
+    metadata:
+      labels:
+        app: opensearch
+        role: data
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9600"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: opensearch
+                  role: data
+              topologyKey: kubernetes.io/hostname
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: init-sysctl
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              sysctl -w vm.max_map_count=262144
+              sysctl -w fs.file-max=65536
+          securityContext:
+            privileged: true
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.11.0
+          ports:
+            - containerPort: 9200
+              name: http
+            - containerPort: 9300
+              name: transport
+            - containerPort: 9600
+              name: metrics
+          env:
+            - name: node.roles
+              value: "data,ingest"
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms16g -Xmx16g"
+            - name: DISABLE_INSTALL_DEMO_CONFIG
+              value: "true"
+          envFrom:
+            - secretRef:
+                name: opensearch-secrets
+          resources:
+            requests:
+              memory: "24Gi"
+              cpu: "4"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /usr/share/opensearch/config/opensearch.yml
+              subPath: opensearch.yml
+            - name: config
+              mountPath: /usr/share/opensearch/config/jvm.options
+              subPath: jvm.options
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+            - name: snapshots
+              mountPath: /snapshots
+          livenessProbe:
+            httpGet:
+              path: /_cluster/health
+              port: 9200
+              scheme: HTTPS
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?local=true
+              port: 9200
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: opensearch-config
+        - name: certs
+          secret:
+            secretName: opensearch-tls
+        - name: snapshots
+          persistentVolumeClaim:
+            claimName: opensearch-snapshots
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: fast-ssd
+        resources:
+          requests:
+            storage: 500Gi
+---
+# Headless Services
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch-master-headless
+  namespace: opensearch
+spec:
+  clusterIP: None
+  selector:
+    app: opensearch
+    role: master
+  ports:
+    - name: http
+      port: 9200
+    - name: transport
+      port: 9300
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch-data-headless
+  namespace: opensearch
+spec:
+  clusterIP: None
+  selector:
+    app: opensearch
+    role: data
+  ports:
+    - name: http
+      port: 9200
+    - name: transport
+      port: 9300
+---
+# Client Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch
+  namespace: opensearch
+spec:
+  type: ClusterIP
+  selector:
+    app: opensearch
+  ports:
+    - name: http
+      port: 9200
+      targetPort: 9200
+---
+# Snapshots PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: opensearch-snapshots
+  namespace: opensearch
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs
+  resources:
+    requests:
+      storage: 1Ti
+---
+# Index Lifecycle Management Policy
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensearch-ilm-policies
+  namespace: opensearch
+data:
+  transactions-policy.json: |
+    {
+      "policy": {
+        "description": "ILM policy for transaction indices",
+        "default_state": "hot",
+        "states": [
+          {
+            "name": "hot",
+            "actions": [
+              {
+                "rollover": {
+                  "min_size": "50gb",
+                  "min_index_age": "7d"
+                }
+              }
+            ],
+            "transitions": [
+              {
+                "state_name": "warm",
+                "conditions": {
+                  "min_index_age": "7d"
+                }
+              }
+            ]
+          },
+          {
+            "name": "warm",
+            "actions": [
+              {
+                "replica_count": {
+                  "number_of_replicas": 1
+                }
+              },
+              {
+                "force_merge": {
+                  "max_num_segments": 1
+                }
+              }
+            ],
+            "transitions": [
+              {
+                "state_name": "cold",
+                "conditions": {
+                  "min_index_age": "30d"
+                }
+              }
+            ]
+          },
+          {
+            "name": "cold",
+            "actions": [
+              {
+                "read_only": {}
+              }
+            ],
+            "transitions": [
+              {
+                "state_name": "delete",
+                "conditions": {
+                  "min_index_age": "365d"
+                }
+              }
+            ]
+          },
+          {
+            "name": "delete",
+            "actions": [
+              {
+                "delete": {}
+              }
+            ],
+            "transitions": []
+          }
+        ],
+        "ism_template": {
+          "index_patterns": ["transactions-*"],
+          "priority": 100
+        }
+      }
+    }
+  
+  audit-policy.json: |
+    {
+      "policy": {
+        "description": "ILM policy for audit indices - longer retention",
+        "default_state": "hot",
+        "states": [
+          {
+            "name": "hot",
+            "actions": [
+              {
+                "rollover": {
+                  "min_size": "50gb",
+                  "min_index_age": "30d"
+                }
+              }
+            ],
+            "transitions": [
+              {
+                "state_name": "warm",
+                "conditions": {
+                  "min_index_age": "30d"
+                }
+              }
+            ]
+          },
+          {
+            "name": "warm",
+            "actions": [
+              {
+                "replica_count": {
+                  "number_of_replicas": 1
+                }
+              }
+            ],
+            "transitions": [
+              {
+                "state_name": "cold",
+                "conditions": {
+                  "min_index_age": "90d"
+                }
+              }
+            ]
+          },
+          {
+            "name": "cold",
+            "actions": [
+              {
+                "read_only": {}
+              }
+            ],
+            "transitions": [
+              {
+                "state_name": "delete",
+                "conditions": {
+                  "min_index_age": "2555d"
+                }
+              }
+            ]
+          },
+          {
+            "name": "delete",
+            "actions": [
+              {
+                "delete": {}
+              }
+            ],
+            "transitions": []
+          }
+        ],
+        "ism_template": {
+          "index_patterns": ["audit-*"],
+          "priority": 100
+        }
+      }
+    }
+---
+# Index Templates
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opensearch-index-templates
+  namespace: opensearch
+data:
+  transactions-template.json: |
+    {
+      "index_patterns": ["transactions-*"],
+      "template": {
+        "settings": {
+          "number_of_shards": 3,
+          "number_of_replicas": 1,
+          "refresh_interval": "1s",
+          "index.mapping.total_fields.limit": 2000
+        },
+        "mappings": {
+          "properties": {
+            "transaction_id": { "type": "keyword" },
+            "user_id": { "type": "keyword" },
+            "sender_account": { "type": "keyword" },
+            "receiver_account": { "type": "keyword" },
+            "amount": { "type": "long" },
+            "currency": { "type": "keyword" },
+            "status": { "type": "keyword" },
+            "type": { "type": "keyword" },
+            "corridor": { "type": "keyword" },
+            "created_at": { "type": "date" },
+            "completed_at": { "type": "date" },
+            "metadata": { "type": "object", "enabled": false }
+          }
+        }
+      },
+      "priority": 100
+    }
+  
+  kyc-template.json: |
+    {
+      "index_patterns": ["kyc-*"],
+      "template": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 1,
+          "refresh_interval": "5s"
+        },
+        "mappings": {
+          "properties": {
+            "user_id": { "type": "keyword" },
+            "verification_id": { "type": "keyword" },
+            "status": { "type": "keyword" },
+            "level": { "type": "keyword" },
+            "provider": { "type": "keyword" },
+            "country": { "type": "keyword" },
+            "created_at": { "type": "date" },
+            "verified_at": { "type": "date" }
+          }
+        }
+      },
+      "priority": 100
+    }
+---
+# Pod Disruption Budgets
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: opensearch-master-pdb
+  namespace: opensearch
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: opensearch
+      role: master
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: opensearch-data-pdb
+  namespace: opensearch
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: opensearch
+      role: data
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opensearch-network-policy
+  namespace: opensearch
+spec:
+  podSelector:
+    matchLabels:
+      app: opensearch
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              opensearch-access: "true"
+        - podSelector:
+            matchLabels:
+              app: opensearch
+      ports:
+        - protocol: TCP
+          port: 9200
+        - protocol: TCP
+          port: 9300
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: opensearch
+      ports:
+        - protocol: TCP
+          port: 9200
+        - protocol: TCP
+          port: 9300
+---
+# Snapshot CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: opensearch-snapshot
+  namespace: opensearch
+spec:
+  schedule: "0 0 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: snapshot
+              image: curlimages/curl:8.4.0
+              command:
+                - sh
+                - -c
+                - |
+                  SNAPSHOT_NAME="snapshot-$(date +%Y%m%d-%H%M%S)"
+                  curl -k -u admin:$ADMIN_PASSWORD -X PUT \
+                    "https://opensearch:9200/_snapshot/s3_repository/$SNAPSHOT_NAME?wait_for_completion=false" \
+                    -H 'Content-Type: application/json' \
+                    -d '{
+                      "indices": "*",
+                      "ignore_unavailable": true,
+                      "include_global_state": true
+                    }'
+                  echo "Snapshot $SNAPSHOT_NAME initiated"
+              envFrom:
+                - secretRef:
+                    name: opensearch-secrets
+---
+# Prometheus ServiceMonitor
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: opensearch
+  namespace: opensearch
+  labels:
+    app: opensearch
+spec:
+  selector:
+    matchLabels:
+      app: opensearch
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /_prometheus/metrics
+---
+# OpenSearch Alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: opensearch-alerts
+  namespace: opensearch
+spec:
+  groups:
+    - name: opensearch
+      rules:
+        - alert: OpenSearchClusterRed
+          expr: opensearch_cluster_status{color="red"} == 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "OpenSearch cluster is red"
+            description: "OpenSearch cluster {{ $labels.cluster }} is in red status"
+        - alert: OpenSearchClusterYellow
+          expr: opensearch_cluster_status{color="yellow"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "OpenSearch cluster is yellow"
+            description: "OpenSearch cluster {{ $labels.cluster }} is in yellow status"
+        - alert: OpenSearchHeapUsageHigh
+          expr: opensearch_jvm_mem_heap_used_percent > 85
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "OpenSearch heap usage is high"
+            description: "OpenSearch node {{ $labels.node }} heap usage is {{ $value }}%"
+        - alert: OpenSearchDiskSpaceLow
+          expr: opensearch_fs_total_available_bytes / opensearch_fs_total_total_bytes < 0.15
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "OpenSearch disk space is low"
+            description: "OpenSearch node {{ $labels.node }} has less than 15% disk space available"

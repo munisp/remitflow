@@ -1,0 +1,202 @@
+{
+  "indices": [
+    {
+      "name": "west-africa-transfers",
+      "description": "XOF corridor transfer analytics — Togo, Niger, Mali, Benin, Ghana",
+      "settings": {
+        "number_of_shards": 3,
+        "number_of_replicas": 1,
+        "index.refresh_interval": "5s",
+        "index.lifecycle.name": "remitflow-hot-warm-cold"
+      },
+      "mappings": {
+        "properties": {
+          "transfer_id": { "type": "keyword" },
+          "user_id": { "type": "long" },
+          "corridor_code": { "type": "keyword" },
+          "destination_country": { "type": "keyword" },
+          "amount_ngn": { "type": "double" },
+          "amount_xof": { "type": "double" },
+          "fx_rate": { "type": "double" },
+          "fee_ngn": { "type": "double" },
+          "recipient_name": { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+          "recipient_mobile_money": { "type": "keyword" },
+          "mojaloop_txn_id": { "type": "keyword" },
+          "status": { "type": "keyword" },
+          "settlement_rail": { "type": "keyword" },
+          "created_at": { "type": "date" },
+          "settled_at": { "type": "date" },
+          "processing_time_ms": { "type": "long" }
+        }
+      }
+    },
+    {
+      "name": "hnw-profiles",
+      "description": "HNW client profiles and portfolio data for private banking dashboard",
+      "settings": {
+        "number_of_shards": 2,
+        "number_of_replicas": 1,
+        "index.refresh_interval": "30s"
+      },
+      "mappings": {
+        "properties": {
+          "user_id": { "type": "long" },
+          "aum_ngn": { "type": "double" },
+          "aum_tier": { "type": "keyword" },
+          "rm_id": { "type": "long" },
+          "preferred_corridors": { "type": "keyword" },
+          "negotiated_spread_bps": { "type": "double" },
+          "total_transferred_ytd_ngn": { "type": "double" },
+          "total_transfers_ytd": { "type": "integer" },
+          "active_rate_locks": { "type": "integer" },
+          "last_transfer_at": { "type": "date" },
+          "onboarded_at": { "type": "date" },
+          "risk_profile": { "type": "keyword" }
+        }
+      }
+    },
+    {
+      "name": "correspondent-banks",
+      "description": "Correspondent bank registry with nostro/vostro balance tracking",
+      "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 1,
+        "index.refresh_interval": "60s"
+      },
+      "mappings": {
+        "properties": {
+          "bank_id": { "type": "keyword" },
+          "bank_name": { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+          "swift_code": { "type": "keyword" },
+          "country_code": { "type": "keyword" },
+          "currency": { "type": "keyword" },
+          "nostro_balance_usd": { "type": "double" },
+          "vostro_balance_usd": { "type": "double" },
+          "clearing_line_usd": { "type": "double" },
+          "utilization_pct": { "type": "double" },
+          "avg_settlement_hours": { "type": "double" },
+          "fee_bps": { "type": "double" },
+          "status": { "type": "keyword" },
+          "last_settlement_at": { "type": "date" },
+          "created_at": { "type": "date" }
+        }
+      }
+    },
+    {
+      "name": "sme-trade-batches",
+      "description": "SME bulk payment batch analytics — China, UAE, India, UK, USA trade corridors",
+      "settings": {
+        "number_of_shards": 2,
+        "number_of_replicas": 1,
+        "index.refresh_interval": "10s"
+      },
+      "mappings": {
+        "properties": {
+          "batch_id": { "type": "keyword" },
+          "user_id": { "type": "long" },
+          "corridor_code": { "type": "keyword" },
+          "total_payments": { "type": "integer" },
+          "succeeded": { "type": "integer" },
+          "failed": { "type": "integer" },
+          "duplicates": { "type": "integer" },
+          "total_amount_ngn": { "type": "double" },
+          "total_amount_usd": { "type": "double" },
+          "fee_ngn": { "type": "double" },
+          "form_m_number": { "type": "keyword" },
+          "compliance_status": { "type": "keyword" },
+          "risk_score": { "type": "double" },
+          "created_at": { "type": "date" },
+          "completed_at": { "type": "date" },
+          "processing_time_ms": { "type": "long" }
+        }
+      }
+    },
+    {
+      "name": "diaspora-profiles",
+      "description": "Diaspora user profiles for USA, EU (Italy, Germany, France), Canada acquisition campaigns",
+      "settings": {
+        "number_of_shards": 2,
+        "number_of_replicas": 1,
+        "index.refresh_interval": "60s"
+      },
+      "mappings": {
+        "properties": {
+          "user_id": { "type": "long" },
+          "diaspora_region": { "type": "keyword" },
+          "country_of_residence": { "type": "keyword" },
+          "home_corridor": { "type": "keyword" },
+          "preferred_payment_rail": { "type": "keyword" },
+          "avg_transfer_amount_usd": { "type": "double" },
+          "transfer_frequency_per_year": { "type": "double" },
+          "total_transferred_ytd_usd": { "type": "double" },
+          "cross_sell_score": { "type": "double" },
+          "acquisition_channel": { "type": "keyword" },
+          "referral_code": { "type": "keyword" },
+          "onboarded_at": { "type": "date" },
+          "last_transfer_at": { "type": "date" }
+        }
+      }
+    },
+    {
+      "name": "immigrant-worker-kyc",
+      "description": "Tiered KYC records for immigrant workers — NIN + selfie simplified onboarding",
+      "settings": {
+        "number_of_shards": 2,
+        "number_of_replicas": 1,
+        "index.refresh_interval": "30s"
+      },
+      "mappings": {
+        "properties": {
+          "user_id": { "type": "long" },
+          "kyc_tier": { "type": "keyword" },
+          "nin": { "type": "keyword" },
+          "bvn": { "type": "keyword" },
+          "selfie_verified": { "type": "boolean" },
+          "document_type": { "type": "keyword" },
+          "document_verified": { "type": "boolean" },
+          "monthly_limit_usd": { "type": "double" },
+          "monthly_used_usd": { "type": "double" },
+          "annual_limit_usd": { "type": "double" },
+          "annual_used_usd": { "type": "double" },
+          "risk_score": { "type": "double" },
+          "verification_provider": { "type": "keyword" },
+          "verified_at": { "type": "date" },
+          "expires_at": { "type": "date" }
+        }
+      }
+    }
+  ],
+  "index_lifecycle_policies": {
+    "remitflow-hot-warm-cold": {
+      "phases": {
+        "hot": {
+          "actions": {
+            "rollover": {
+              "max_size": "10gb",
+              "max_age": "30d"
+            }
+          }
+        },
+        "warm": {
+          "min_age": "30d",
+          "actions": {
+            "shrink": { "number_of_shards": 1 },
+            "forcemerge": { "max_num_segments": 1 }
+          }
+        },
+        "cold": {
+          "min_age": "90d",
+          "actions": {
+            "freeze": {}
+          }
+        },
+        "delete": {
+          "min_age": "365d",
+          "actions": {
+            "delete": {}
+          }
+        }
+      }
+    }
+  }
+}

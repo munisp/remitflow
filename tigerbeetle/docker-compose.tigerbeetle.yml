@@ -1,0 +1,41 @@
+version: '3.8'
+services:
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.16.11
+    container_name: remitflow-tigerbeetle
+    command: >
+      start
+      --addresses=0.0.0.0:3001
+      /data/0_0.tigerbeetle
+    ports:
+      - "3001:3001"
+    volumes:
+      - tigerbeetle-data:/data
+    networks:
+      - remitflow-net
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'ping' | nc -w 1 localhost 3001 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  tigerbeetle-init:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.16.11
+    container_name: remitflow-tigerbeetle-init
+    command: >
+      format
+      --cluster=0
+      --replica=0
+      --replica-count=1
+      /data/0_0.tigerbeetle
+    volumes:
+      - tigerbeetle-data:/data
+    networks:
+      - remitflow-net
+
+volumes:
+  tigerbeetle-data:
+
+networks:
+  remitflow-net:
+    external: true

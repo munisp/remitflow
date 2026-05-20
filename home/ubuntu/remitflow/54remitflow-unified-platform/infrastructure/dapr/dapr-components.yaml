@@ -1,0 +1,336 @@
+# Dapr Components Configuration
+# Production-grade Dapr components for the remittance platform
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dapr-system
+  labels:
+    app.kubernetes.io/name: dapr
+
+---
+# Kafka Pub/Sub Component
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kafka-pubsub
+  namespace: remittance
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: "${KAFKA_BROKERS}"
+    - name: consumerGroup
+      value: "remittance-platform"
+    - name: authType
+      value: "none"
+    - name: maxMessageBytes
+      value: "1048576"
+    - name: consumeRetryInterval
+      value: "100ms"
+    - name: version
+      value: "2.8.0"
+    - name: disableTls
+      value: "false"
+
+---
+# Redis State Store Component
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: redis-statestore
+  namespace: remittance
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: "${REDIS_HOST}:6379"
+    - name: redisPassword
+      secretKeyRef:
+        name: redis-secret
+        key: password
+    - name: actorStateStore
+      value: "true"
+    - name: ttlInSeconds
+      value: "3600"
+    - name: queryIndexes
+      value: |
+        [
+          {"name": "transactionId", "indexes": [{"key": "transaction_id", "type": "TEXT"}]},
+          {"name": "userId", "indexes": [{"key": "user_id", "type": "TEXT"}]},
+          {"name": "status", "indexes": [{"key": "status", "type": "TEXT"}]}
+        ]
+
+---
+# AWS Secrets Manager Component
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: aws-secrets
+  namespace: remittance
+spec:
+  type: secretstores.aws.secretmanager
+  version: v1
+  metadata:
+    - name: region
+      value: "${AWS_REGION}"
+    - name: accessKey
+      value: "${AWS_ACCESS_KEY_ID}"
+    - name: secretKey
+      secretKeyRef:
+        name: aws-secret
+        key: secretAccessKey
+
+---
+# PostgreSQL Binding Component
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: postgres-binding
+  namespace: remittance
+spec:
+  type: bindings.postgresql
+  version: v1
+  metadata:
+    - name: url
+      value: "host=${POSTGRES_HOST} user=${POSTGRES_USER} password=${POSTGRES_PASSWORD} port=5432 dbname=remittance sslmode=require"
+
+---
+# SMTP Email Binding Component
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: smtp
+  namespace: remittance
+spec:
+  type: bindings.smtp
+  version: v1
+  metadata:
+    - name: host
+      value: "${SMTP_HOST}"
+    - name: port
+      value: "587"
+    - name: user
+      value: "${SMTP_USER}"
+    - name: password
+      secretKeyRef:
+        name: smtp-secret
+        key: password
+    - name: skipTLSVerify
+      value: "false"
+
+---
+# Twilio SMS Binding Component
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: twilio
+  namespace: remittance
+spec:
+  type: bindings.twilio.sms
+  version: v1
+  metadata:
+    - name: toNumber
+      value: ""
+    - name: fromNumber
+      value: "${TWILIO_FROM_NUMBER}"
+    - name: accountSid
+      value: "${TWILIO_ACCOUNT_SID}"
+    - name: authToken
+      secretKeyRef:
+        name: twilio-secret
+        key: authToken
+
+---
+# S3 Storage Binding Component
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: s3
+  namespace: remittance
+spec:
+  type: bindings.aws.s3
+  version: v1
+  metadata:
+    - name: bucket
+      value: "${S3_BUCKET}"
+    - name: region
+      value: "${AWS_REGION}"
+    - name: accessKey
+      value: "${AWS_ACCESS_KEY_ID}"
+    - name: secretKey
+      secretKeyRef:
+        name: aws-secret
+        key: secretAccessKey
+
+---
+# Cron Binding for Scheduled Tasks
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: reconciliation-cron
+  namespace: remittance
+spec:
+  type: bindings.cron
+  version: v1
+  metadata:
+    - name: schedule
+      value: "0 0 * * *"  # Daily at midnight
+    - name: direction
+      value: "input"
+
+---
+# Rate Limiting Middleware
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: ratelimit
+  namespace: remittance
+spec:
+  type: middleware.http.ratelimit
+  version: v1
+  metadata:
+    - name: maxRequestsPerSecond
+      value: "100"
+    - name: key
+      value: "remote_addr"
+
+---
+# OAuth2 Middleware for Keycloak
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: oauth2
+  namespace: remittance
+spec:
+  type: middleware.http.oauth2
+  version: v1
+  metadata:
+    - name: clientId
+      value: "${KEYCLOAK_CLIENT_ID}"
+    - name: clientSecret
+      secretKeyRef:
+        name: keycloak-secret
+        key: clientSecret
+    - name: scopes
+      value: "openid,profile,email"
+    - name: authURL
+      value: "${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/auth"
+    - name: tokenURL
+      value: "${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token"
+    - name: redirectURL
+      value: "${APP_URL}/oauth/callback"
+    - name: authHeaderName
+      value: "Authorization"
+
+---
+# Resiliency Configuration
+apiVersion: dapr.io/v1alpha1
+kind: Resiliency
+metadata:
+  name: remittance-resiliency
+  namespace: remittance
+spec:
+  policies:
+    timeouts:
+      general: 30s
+      important: 60s
+      critical: 120s
+    retries:
+      pubsubRetry:
+        policy: exponential
+        maxInterval: 10s
+        maxRetries: 5
+      stateRetry:
+        policy: constant
+        duration: 1s
+        maxRetries: 3
+    circuitBreakers:
+      simpleCB:
+        maxRequests: 1
+        interval: 30s
+        timeout: 60s
+        trip: consecutiveFailures >= 5
+  targets:
+    apps:
+      transaction-service:
+        timeout: important
+        retry: stateRetry
+        circuitBreaker: simpleCB
+      wallet-service:
+        timeout: general
+        retry: stateRetry
+      payment-service:
+        timeout: critical
+        retry: pubsubRetry
+        circuitBreaker: simpleCB
+    components:
+      kafka-pubsub:
+        outbound:
+          retry: pubsubRetry
+          circuitBreaker: simpleCB
+      redis-statestore:
+        outbound:
+          retry: stateRetry
+
+---
+# Subscription Configuration
+apiVersion: dapr.io/v2alpha1
+kind: Subscription
+metadata:
+  name: transaction-events-subscription
+  namespace: remittance
+spec:
+  pubsubname: kafka-pubsub
+  topic: transactions
+  routes:
+    default: /dapr/subscribe/transactions
+  scopes:
+    - transaction-service
+    - analytics-service
+
+---
+apiVersion: dapr.io/v2alpha1
+kind: Subscription
+metadata:
+  name: tigerbeetle-events-subscription
+  namespace: remittance
+spec:
+  pubsubname: kafka-pubsub
+  topic: tigerbeetle-events
+  routes:
+    default: /dapr/subscribe/tigerbeetle-events
+  scopes:
+    - transaction-service
+    - reconciliation-service
+
+---
+apiVersion: dapr.io/v2alpha1
+kind: Subscription
+metadata:
+  name: mojaloop-events-subscription
+  namespace: remittance
+spec:
+  pubsubname: kafka-pubsub
+  topic: mojaloop-events
+  routes:
+    default: /dapr/subscribe/mojaloop-events
+  scopes:
+    - mojaloop-connector
+    - transaction-service
+
+---
+apiVersion: dapr.io/v2alpha1
+kind: Subscription
+metadata:
+  name: wallet-events-subscription
+  namespace: remittance
+spec:
+  pubsubname: kafka-pubsub
+  topic: wallets
+  routes:
+    default: /dapr/subscribe/wallets
+  scopes:
+    - wallet-service
+    - notification-service

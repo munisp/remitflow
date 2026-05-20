@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: rustfs
+    hostname: rustfs
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      RUSTFS_ROOT_USER: rustfsadmin
+      RUSTFS_ROOT_PASSWORD: rustfsadmin
+      RUSTFS_BROWSER: "on"
+      RUSTFS_PROMETHEUS_AUTH_TYPE: public
+    volumes:
+      - rustfs_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - remittance-network
+    restart: unless-stopped
+
+  rustfs-init:
+    image: rustfs/rustfs:latest
+    container_name: rustfs-init
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set rustfs http://rustfs:9000 rustfsadmin rustfsadmin;
+      mc mb --ignore-existing rustfs/kyc-documents;
+      mc mb --ignore-existing rustfs/property-kyc-documents;
+      mc mb --ignore-existing rustfs/ml-models;
+      mc mb --ignore-existing rustfs/ml-artifacts;
+      mc mb --ignore-existing rustfs/lakehouse-bronze;
+      mc mb --ignore-existing rustfs/lakehouse-silver;
+      mc mb --ignore-existing rustfs/lakehouse-gold;
+      mc mb --ignore-existing rustfs/audit-logs;
+      mc mb --ignore-existing rustfs/backups;
+      mc anonymous set download rustfs/kyc-documents;
+      echo 'RustFS buckets initialized successfully';
+      exit 0;
+      "
+    networks:
+      - remittance-network
+
+volumes:
+  rustfs_data:
+    driver: local
+
+networks:
+  remittance-network:
+    external: true

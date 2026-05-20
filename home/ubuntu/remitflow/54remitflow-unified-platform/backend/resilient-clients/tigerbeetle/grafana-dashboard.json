@@ -1,0 +1,160 @@
+{
+  "dashboard": {
+    "title": "TigerBeetle Resilience Monitoring",
+    "tags": ["tigerbeetle", "resilience", "circuit-breaker"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "10s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Circuit Breaker State",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "tigerbeetle_circuit_breaker_state",
+            "legendFormat": "{{operation}}",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "0": { "text": "CLOSED", "color": "green" },
+                  "1": { "text": "OPEN", "color": "red" },
+                  "2": { "text": "HALF_OPEN", "color": "yellow" }
+                }
+              }
+            ],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                { "value": 0, "color": "green" },
+                { "value": 1, "color": "red" },
+                { "value": 2, "color": "yellow" }
+              ]
+            }
+          }
+        },
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 }
+      },
+      {
+        "id": 2,
+        "title": "Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(tigerbeetle_requests_total[5m])",
+            "legendFormat": "{{operation}} - {{status}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          { "label": "requests/sec", "format": "short" },
+          { "format": "short", "show": false }
+        ],
+        "gridPos": { "h": 8, "w": 16, "x": 8, "y": 0 }
+      },
+      {
+        "id": 3,
+        "title": "Success Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(tigerbeetle_requests_total{status=\"success\"}[5m]) / rate(tigerbeetle_requests_total[5m])",
+            "legendFormat": "{{operation}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          { "label": "success rate", "format": "percentunit", "max": 1, "min": 0 },
+          { "format": "short", "show": false }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+      },
+      {
+        "id": 4,
+        "title": "Retry Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(tigerbeetle_retries_total[5m])",
+            "legendFormat": "{{operation}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          { "label": "retries/sec", "format": "short" },
+          { "format": "short", "show": false }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+      },
+      {
+        "id": 5,
+        "title": "Operation Duration (p50, p95, p99)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(tigerbeetle_operation_duration_ms_bucket[5m]))",
+            "legendFormat": "p50 - {{operation}}",
+            "refId": "A"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(tigerbeetle_operation_duration_ms_bucket[5m]))",
+            "legendFormat": "p95 - {{operation}}",
+            "refId": "B"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(tigerbeetle_operation_duration_ms_bucket[5m]))",
+            "legendFormat": "p99 - {{operation}}",
+            "refId": "C"
+          }
+        ],
+        "yaxes": [
+          { "label": "duration (ms)", "format": "ms" },
+          { "format": "short", "show": false }
+        ],
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 }
+      },
+      {
+        "id": 6,
+        "title": "Circuit Breaker Failure Count",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "tigerbeetle_circuit_breaker_failure_count",
+            "legendFormat": "{{operation}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          { "label": "failures", "format": "short" },
+          { "format": "short", "show": false }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 }
+      },
+      {
+        "id": 7,
+        "title": "Circuit Breaker State Transitions",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(tigerbeetle_circuit_breaker_state_transitions_total[5m])",
+            "legendFormat": "{{from_state}} → {{to_state}}",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          { "label": "transitions/sec", "format": "short" },
+          { "format": "short", "show": false }
+        ],
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 }
+      }
+    ]
+  }
+}
+

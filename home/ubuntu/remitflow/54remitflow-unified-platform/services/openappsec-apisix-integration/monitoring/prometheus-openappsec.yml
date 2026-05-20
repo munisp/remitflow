@@ -1,0 +1,52 @@
+# Prometheus Configuration for openappsec Monitoring
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'remittance-platform'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+# Load alert rules
+rule_files:
+  - "openappsec-alerts.yml"
+
+# Scrape configurations
+scrape_configs:
+  # openappsec Bridge Service metrics
+  - job_name: 'openappsec-bridge'
+    static_configs:
+      - targets: ['openappsec-bridge:9000']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # openappsec Agent metrics
+  - job_name: 'openappsec-agent'
+    static_configs:
+      - targets: ['openappsec-agent:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # APISIX metrics
+  - job_name: 'apisix'
+    static_configs:
+      - targets: ['apisix:9091']
+    metrics_path: '/apisix/prometheus/metrics'
+    scrape_interval: 10s
+
+  # openappsec Management Console
+  - job_name: 'openappsec-management'
+    static_configs:
+      - targets: ['openappsec-management:8443']
+    metrics_path: '/api/v1/metrics'
+    scrape_interval: 30s
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true

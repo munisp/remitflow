@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RemitFlow — Offline</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.5rem;
+      padding: 2rem;
+      text-align: center;
+    }
+    .icon {
+      width: 96px;
+      height: 96px;
+      border-radius: 24px;
+      background: linear-gradient(135deg, #7c3aed, #10b981);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 3rem;
+      box-shadow: 0 20px 40px rgba(124,58,237,0.3);
+    }
+    h1 { font-size: 1.75rem; font-weight: 700; color: #f1f5f9; }
+    p { font-size: 1rem; color: #94a3b8; max-width: 360px; line-height: 1.6; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 9999px;
+      padding: 0.5rem 1.25rem;
+      font-size: 0.875rem;
+      color: #64748b;
+    }
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #ef4444;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    button {
+      background: linear-gradient(135deg, #7c3aed, #10b981);
+      color: white;
+      border: none;
+      border-radius: 12px;
+      padding: 0.75rem 2rem;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    button:hover { opacity: 0.85; }
+    .features {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0.75rem;
+      max-width: 320px;
+      margin-top: 0.5rem;
+    }
+    .feature {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 0.75rem;
+      font-size: 0.8rem;
+      color: #94a3b8;
+    }
+    .feature-icon { font-size: 1.25rem; margin-bottom: 0.25rem; }
+  </style>
+</head>
+<body>
+  <div class="icon">💸</div>
+  <h1>You're Offline</h1>
+  <div class="badge">
+    <span class="dot"></span>
+    No internet connection
+  </div>
+  <p>RemitFlow needs a connection to process transfers and show live rates. Some features are available offline.</p>
+  <div class="features">
+    <div class="feature">
+      <div class="feature-icon">📊</div>
+      Cached portfolio data
+    </div>
+    <div class="feature">
+      <div class="feature-icon">📋</div>
+      Transaction history
+    </div>
+    <div class="feature">
+      <div class="feature-icon">👤</div>
+      Profile &amp; settings
+    </div>
+    <div class="feature">
+      <div class="feature-icon">📈</div>
+      Price charts (cached)
+    </div>
+  </div>
+  <button onclick="window.location.reload()">Try Again</button>
+  <p style="font-size:0.75rem; color:#475569;">RemitFlow PWA &mdash; v51</p>
+  <script>
+    // Auto-retry when connection is restored
+    window.addEventListener('online', () => window.location.reload());
+  </script>
+</body>
+</html>

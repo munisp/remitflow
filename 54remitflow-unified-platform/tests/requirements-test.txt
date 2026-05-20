@@ -1,0 +1,45 @@
+# Testing Framework
+pytest>=7.0.0,<8.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+pytest-mock>=3.10.0
+pytest-xdist>=3.0.0
+pytest-timeout>=2.0.0
+pytest-benchmark>=4.0.0
+
+# HTTP Testing
+httpx>=0.24.0
+requests-mock>=1.10.0
+responses>=0.23.0
+
+# Database Testing
+pytest-postgresql>=5.0.0
+pytest-redis>=3.0.0
+fakeredis>=2.20.0
+
+# Load Testing
+locust>=2.15.0
+# Note: k6 is a standalone binary tool, not a Python package
+# Install k6 separately: https://k6.io/docs/getting-started/installation/
+
+# Performance Testing
+memory-profiler>=0.60.0
+
+# Mocking & Fixtures
+factory-boy>=3.3.0
+faker>=20.0.0
+freezegun>=1.2.0
+
+# Code Quality
+pylint>=3.0.0
+black>=23.0.0
+isort>=5.12.0
+mypy>=1.0.0
+flake8>=6.0.0
+
+# Coverage
+coverage[toml]>=7.0.0
+
+# Utilities
+pyyaml>=6.0.0
+python-dotenv>=1.0.0

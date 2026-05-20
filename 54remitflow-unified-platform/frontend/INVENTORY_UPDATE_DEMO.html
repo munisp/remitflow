@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inventory Update After QR Payment - Remittance Platform</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+        
+        .timeline {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        .timeline-step {
+            flex: 1;
+            text-align: center;
+            position: relative;
+        }
+        
+        .timeline-step::after {
+            content: '→';
+            position: absolute;
+            right: -20px;
+            top: 20px;
+            font-size: 2rem;
+            color: #667eea;
+        }
+        
+        .timeline-step:last-child::after {
+            display: none;
+        }
+        
+        .timeline-icon {
+            width: 60px;
+            height: 60px;
+            background: #667eea;
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.8rem;
+            margin: 0 auto 10px;
+        }
+        
+        .timeline-icon.active {
+            background: #51cf66;
+            animation: pulse 1s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        
+        .timeline-step h3 {
+            color: #333;
+            font-size: 0.9rem;
+            margin-bottom: 5px;
+        }
+        
+        .timeline-step p {
+            color: #666;
+            font-size: 0.8rem;
+        }
+        
+        .comparison {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        .card h2 {
+            color: #667eea;
+            margin-bottom: 20px;
+            font-size: 1.8rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+        
+        .badge-before {
+            background: #fff3cd;
+            color: #856404;
+        }
+        
+        .badge-after {
+            background: #d1e7dd;
+            color: #0f5132;
+        }
+        
+        .inventory-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        
+        .inventory-table th {
+            background: #f8f9fa;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #333;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        
+        .inventory-table td {
+            padding: 15px 12px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .inventory-table tr:hover {
+            background: #f8f9fa;
+        }
+        
+        .stock-change {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .stock-before {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #666;
+        }
+        
+        .stock-after {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #51cf66;
+        }
+        
+        .stock-arrow {
+            font-size: 1.5rem;
+            color: #667eea;
+        }
+        
+        .stock-diff {
+            background: #ffe0e0;
+            color: #c92a2a;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.9rem;
+            font-weight: bold;
+        }
+        
+        .status-badge {
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        
+        .status-in-stock {
+            background: #d1e7dd;
+            color: #0f5132;
+        }
+        
+        .status-low-stock {
+            background: #fff3cd;
+            color: #856404;
+        }
+        
+        .api-log {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+        }
+        
+        .api-log .method {
+            color: #51cf66;
+            font-weight: bold;
+        }
+        
+        .api-log .endpoint {
+            color: #667eea;
+        }
+        
+        .api-log .status {
+            color: #51cf66;
+            font-weight: bold;
+        }
+        
+        .json-code {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+        }
+        
+        .json-key {
+            color: #66d9ef;
+        }
+        
+        .json-string {
+            color: #a6e22e;
+        }
+        
+        .json-number {
+            color: #ae81ff;
+        }
+        
+        .flow-diagram {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-top: 20px;
+        }
+        
+        .flow-step {
+            display: flex;
+            align-items: start;
+            margin: 20px 0;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-left: 5px solid #667eea;
+        }
+        
+        .flow-step.active {
+            background: #d1e7dd;
+            border-left-color: #51cf66;
+        }
+        
+        .step-number {
+            width: 50px;
+            height: 50px;
+            background: #667eea;
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 1.3rem;
+            margin-right: 20px;
+            flex-shrink: 0;
+        }
+        
+        .flow-step.active .step-number {
+            background: #51cf66;
+        }
+        
+        .step-content h3 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .step-content p {
+            color: #666;
+            margin-bottom: 10px;
+        }
+        
+        .btn {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin: 10px 5px;
+        }
+        
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-success {
+            background: #51cf66;
+            color: white;
+        }
+        
+        .highlight {
+            background: #fff3cd;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📦 Inventory Update Flow</h1>
+            <p>Real-time inventory synchronization after QR code payment</p>
+        </div>
+        
+        <!-- Timeline -->
+        <div class="timeline">
+            <div class="timeline-step">
+                <div class="timeline-icon">💳</div>
+                <h3>Payment Confirmed</h3>
+                <p>₦9,498 paid via QR</p>
+            </div>
+            <div class="timeline-step">
+                <div class="timeline-icon">📊</div>
+                <h3>TigerBeetle</h3>
+                <p>Transaction recorded</p>
+            </div>
+            <div class="timeline-step">
+                <div class="timeline-icon active">📦</div>
+                <h3>Inventory Update</h3>
+                <p>Stock quantities adjusted</p>
+            </div>
+            <div class="timeline-step">
+                <div class="timeline-icon">✅</div>
+                <h3>Order Confirmed</h3>
+                <p>Receipt generated</p>
+            </div>
+        </div>
+        
+        <!-- Before/After Comparison -->
+        <div class="comparison">
+            <!-- Before Payment -->
+            <div class="card">
+                <h2>
+                    <span>📋 Before Payment</span>
+                    <span class="badge badge-before">Initial State</span>
+                </h2>
+                
+                <table class="inventory-table">
+                    <thead>
+                        <tr>
+                            <th>Product</th>
+                            <th>SKU</th>
+                            <th>Stock</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Premium T-Shirt</strong><br><small>Size: M, Color: Blue</small></td>
+                            <td>TSHIRT-001-M-BLUE</td>
+                            <td><span class="stock-before">100</span></td>
+                            <td><span class="status-badge status-in-stock">✓ In Stock</span></td>
+                        </tr>
+                        <tr>
+                            <td><strong>Denim Jeans</strong><br><small>Size: 32, Color: Dark Blue</small></td>
+                            <td>JEANS-001-32-DARK</td>
+                            <td><span class="stock-before">8</span></td>
+                            <td><span class="status-badge status-low-stock">⚠ Low Stock</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- After Payment -->
+            <div class="card">
+                <h2>
+                    <span>✅ After Payment</span>
+                    <span class="badge badge-after">Updated State</span>
+                </h2>
+                
+                <table class="inventory-table">
+                    <thead>
+                        <tr>
+                            <th>Product</th>
+                            <th>SKU</th>
+                            <th>Stock Change</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr style="background: #f0f9ff;">
+                            <td><strong>Premium T-Shirt</strong><br><small>Size: M, Color: Blue</small></td>
+                            <td>TSHIRT-001-M-BLUE</td>
+                            <td>
+                                <div class="stock-change">
+                                    <span class="stock-before">100</span>
+                                    <span class="stock-arrow">→</span>
+                                    <span class="stock-after">99</span>
+                                    <span class="stock-diff">-1</span>
+                                </div>
+                            </td>
+                            <td><span class="status-badge status-in-stock">✓ In Stock</span></td>
+                        </tr>
+                        <tr style="background: #fff9e6;">
+                            <td><strong>Denim Jeans</strong><br><small>Size: 32, Color: Dark Blue</small></td>
+                            <td>JEANS-001-32-DARK</td>
+                            <td>
+                                <div class="stock-change">
+                                    <span class="stock-before">8</span>
+                                    <span class="stock-arrow">→</span>
+                                    <span class="stock-after">7</span>
+                                    <span class="stock-diff">-1</span>
+                                </div>
+                            </td>
+                            <td><span class="status-badge status-low-stock">⚠ Low Stock</span></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <!-- API Call Flow -->
+        <div class="card">
+            <h2>🔄 API Integration Flow</h2>
+            
+            <div class="api-log">
+                <strong>1. Payment Gateway → E-commerce Service</strong><br>
+                <span class="method">POST</span> <span class="endpoint">http://localhost:8020/orders</span><br>
+                Status: <span class="status">201 Created</span>
+            </div>
+            
+            <div class="json-code">
+{
+  <span class="json-key">"order_id"</span>: <span class="json-string">"ORD-2025-001234"</span>,
+  <span class="json-key">"customer_id"</span>: <span class="json-string">"CUST-789"</span>,
+  <span class="json-key">"items"</span>: [
+    {
+      <span class="json-key">"product_id"</span>: <span class="json-string">"PROD-001"</span>,
+      <span class="json-key">"sku"</span>: <span class="json-string">"TSHIRT-001-M-BLUE"</span>,
+      <span class="json-key">"quantity"</span>: <span class="json-number">1</span>,
+      <span class="json-key">"price"</span>: <span class="json-number">2999</span>
+    },
+    {
+      <span class="json-key">"product_id"</span>: <span class="json-string">"PROD-002"</span>,
+      <span class="json-key">"sku"</span>: <span class="json-string">"JEANS-001-32-DARK"</span>,
+      <span class="json-key">"quantity"</span>: <span class="json-number">1</span>,
+      <span class="json-key">"price"</span>: <span class="json-number">5999</span>
+    }
+  ],
+  <span class="json-key">"payment_status"</span>: <span class="json-string">"completed"</span>,
+  <span class="json-key">"transaction_id"</span>: <span class="json-string">"TXN-20251013-ABC123"</span>
+}
+            </div>
+            
+            <div class="api-log">
+                <strong>2. E-commerce Service → Inventory Update (Product 1)</strong><br>
+                <span class="method">POST</span> <span class="endpoint">http://localhost:8020/products/PROD-001/inventory/adjust</span><br>
+                Status: <span class="status">200 OK</span>
+            </div>
+            
+            <div class="json-code">
+{
+  <span class="json-key">"product_id"</span>: <span class="json-string">"PROD-001"</span>,
+  <span class="json-key">"sku"</span>: <span class="json-string">"TSHIRT-001-M-BLUE"</span>,
+  <span class="json-key">"quantity_change"</span>: <span class="json-number">-1</span>,
+  <span class="json-key">"reason"</span>: <span class="json-string">"order_completed:ORD-2025-001234"</span>,
+  <span class="json-key">"previous_quantity"</span>: <span class="json-number">100</span>,
+  <span class="json-key">"new_quantity"</span>: <span class="json-number">99</span>,
+  <span class="json-key">"timestamp"</span>: <span class="json-string">"2025-10-13T15:30:45Z"</span>
+}
+            </div>
+            
+            <div class="api-log">
+                <strong>3. E-commerce Service → Inventory Update (Product 2)</strong><br>
+                <span class="method">POST</span> <span class="endpoint">http://localhost:8020/products/PROD-002/inventory/adjust</span><br>
+                Status: <span class="status">200 OK</span>
+            </div>
+            
+            <div class="json-code">
+{
+  <span class="json-key">"product_id"</span>: <span class="json-string">"PROD-002"</span>,
+  <span class="json-key">"sku"</span>: <span class="json-string">"JEANS-001-32-DARK"</span>,
+  <span class="json-key">"quantity_change"</span>: <span class="json-number">-1</span>,
+  <span class="json-key">"reason"</span>: <span class="json-string">"order_completed:ORD-2025-001234"</span>,
+  <span class="json-key">"previous_quantity"</span>: <span class="json-number">8</span>,
+  <span class="json-key">"new_quantity"</span>: <span class="json-number">7</span>,
+  <span class="json-key">"timestamp"</span>: <span class="json-string">"2025-10-13T15:30:45Z"</span>,
+  <span class="json-key">"alert"</span>: <span class="json-string">"LOW_STOCK_THRESHOLD_REACHED"</span>
+}
+            </div>
+            
+            <div class="api-log">
+                <strong>4. E-commerce Service → Redis Cache Update</strong><br>
+                <span class="method">SET</span> <span class="endpoint">redis://localhost:6379</span><br>
+                Status: <span class="status">OK</span>
+            </div>
+            
+            <div class="json-code">
+<span class="json-key">SET</span> inventory:TSHIRT-001-M-BLUE <span class="json-number">99</span>
+<span class="json-key">SET</span> inventory:JEANS-001-32-DARK <span class="json-number">7</span>
+<span class="json-key">PUBLISH</span> inventory_updates <span class="json-string">"PROD-001:99,PROD-002:7"</span>
+            </div>
+        </div>
+        
+        <!-- Detailed Flow Diagram -->
+        <div class="flow-diagram">
+            <h2 style="color: #667eea; margin-bottom: 20px;">📋 Detailed Inventory Update Process</h2>
+            
+            <div class="flow-step active">
+                <div class="step-number">1</div>
+                <div class="step-content">
+                    <h3>Payment Completed (QR Code Service)</h3>
+                    <p>Payment Gateway confirms ₦9,498 payment via Mobile Money</p>
+                    <p><strong>Transaction ID:</strong> TXN-20251013-ABC123</p>
+                    <p><strong>Order ID:</strong> ORD-2025-001234</p>
+                </div>
+            </div>
+            
+            <div class="flow-step active">
+                <div class="step-number">2</div>
+                <div class="step-content">
+                    <h3>TigerBeetle Financial Recording</h3>
+                    <p>Double-entry bookkeeping transaction recorded:</p>
+                    <p>• Debit Customer Account: <span class="highlight">₦9,498</span></p>
+                    <p>• Credit Merchant Account: <span class="highlight">₦9,023</span> (95%)</p>
+                    <p>• Credit Platform Fees: <span class="highlight">₦475</span> (5%)</p>
+                </div>
+            </div>
+            
+            <div class="flow-step active">
+                <div class="step-number">3</div>
+                <div class="step-content">
+                    <h3>Order Creation (E-commerce Service)</h3>
+                    <p>E-commerce service creates order record with payment confirmation</p>
+                    <p><strong>API Call:</strong> <code>POST /orders</code></p>
+                    <p><strong>Order Items:</strong> 2 products (T-Shirt, Jeans)</p>
+                </div>
+            </div>
+            
+            <div class="flow-step active">
+                <div class="step-number">4</div>
+                <div class="step-content">
+                    <h3>Inventory Adjustment - Product 1</h3>
+                    <p><strong>Product:</strong> Premium T-Shirt (M-Blue)</p>
+                    <p><strong>API Call:</strong> <code>POST /products/PROD-001/inventory/adjust</code></p>
+                    <p><strong>Change:</strong> 100 → 99 units (<span class="highlight">-1</span>)</p>
+                    <p><strong>Database Update:</strong> products table, inventory_logs table</p>
+                </div>
+            </div>
+            
+            <div class="flow-step active">
+                <div class="step-number">5</div>
+                <div class="step-content">
+                    <h3>Inventory Adjustment - Product 2</h3>
+                    <p><strong>Product:</strong> Denim Jeans (32-Dark)</p>
+                    <p><strong>API Call:</strong> <code>POST /products/PROD-002/inventory/adjust</code></p>
+                    <p><strong>Change:</strong> 8 → 7 units (<span class="highlight">-1</span>)</p>
+                    <p><strong>Alert Triggered:</strong> ⚠️ LOW_STOCK_THRESHOLD_REACHED (< 10 units)</p>
+                </div>
+            </div>
+            
+            <div class="flow-step active">
+                <div class="step-number">6</div>
+                <div class="step-content">
+                    <h3>Cache Synchronization (Redis)</h3>
+                    <p>Redis cache updated for real-time inventory queries</p>
+                    <p><strong>Keys Updated:</strong></p>
+                    <p>• <code>inventory:TSHIRT-001-M-BLUE</code> = 99</p>
+                    <p>• <code>inventory:JEANS-001-32-DARK</code> = 7</p>
+                    <p><strong>Pub/Sub:</strong> Inventory update event published</p>
+                </div>
+            </div>
+            
+            <div class="flow-step active">
+                <div class="step-number">7</div>
+                <div class="step-content">
+                    <h3>Low Stock Alert (Inventory Management)</h3>
+                    <p>Inventory Management Service detects low stock on Jeans</p>
+                    <p><strong>Threshold:</strong> 10 units (current: 7)</p>
+                    <p><strong>Action:</strong> Check for automatic reorder from manufacturer</p>
+                    <p><strong>Manufacturer:</strong> Denim Co. (lead time: 5 days)</p>
+                </div>
+            </div>
+            
+            <div class="flow-step active">
+                <div class="step-number">8</div>
+                <div class="step-content">
+                    <h3>Order Confirmation Sent</h3>
+                    <p>Customer receives order confirmation with updated delivery estimate</p>
+                    <p><strong>Email/SMS:</strong> Order ORD-2025-001234 confirmed</p>
+                    <p><strong>Receipt:</strong> Generated and stored</p>
+                    <p><strong>Tracking:</strong> Shipment tracking number assigned</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Controls -->
+        <div style="text-align: center; margin-top: 30px;">
+            <button class="btn btn-primary" onclick="window.location.href='QR_CHECKOUT_DEMO.html'">
+                ← Back to QR Checkout
+            </button>
+            <button class="btn btn-success" onclick="window.location.reload()">
+                🔄 Refresh Demo
+            </button>
+        </div>
+    </div>
+</body>
+</html>
+

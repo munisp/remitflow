@@ -1,0 +1,2134 @@
+{
+  "_type": "export",
+  "__export_format": 4,
+  "__export_date": "2025-11-14T00:37:49.386699Z",
+  "__export_source": "insomnia.desktop.app:v2023.5.0",
+  "resources": [
+    {
+      "_id": "wrk_remittance_platform",
+      "_type": "workspace",
+      "name": "Nigerian Remittance Platform",
+      "description": "Complete API collection for all 30 user journeys",
+      "scope": "collection"
+    },
+    {
+      "_id": "env_base",
+      "_type": "environment",
+      "name": "Base Environment",
+      "data": {
+        "base_url": "http://localhost:8000",
+        "access_token": ""
+      },
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "fld_journey_01_registration",
+      "_type": "request_group",
+      "name": "User Registration",
+      "description": "API endpoints for User Registration",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_01_registration_0",
+      "_type": "request",
+      "name": "Register new user",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/register",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_01_registration",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_01_registration_1",
+      "_type": "request",
+      "name": "Verify OTP",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/verify-otp",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_01_registration",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_01_registration_2",
+      "_type": "request",
+      "name": "Upload KYC document",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/kyc/upload-document",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_01_registration",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_01_registration_3",
+      "_type": "request",
+      "name": "Check KYC status",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/kyc/status",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_01_registration"
+    },
+    {
+      "_id": "fld_journey_02_biometric",
+      "_type": "request_group",
+      "name": "Biometric Authentication Setup",
+      "description": "API endpoints for Biometric Authentication Setup",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_02_biometric_0",
+      "_type": "request",
+      "name": "Setup biometric auth",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/biometric/setup",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_02_biometric",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_02_biometric_1",
+      "_type": "request",
+      "name": "Verify biometric",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/biometric/verify",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_02_biometric",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_02_biometric_2",
+      "_type": "request",
+      "name": "Remove biometric",
+      "method": "DELETE",
+      "url": "{{ _.base_url }}/api/v1/auth/biometric/remove",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_02_biometric"
+    },
+    {
+      "_id": "fld_journey_03_2fa",
+      "_type": "request_group",
+      "name": "Two-Factor Authentication",
+      "description": "API endpoints for Two-Factor Authentication",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_03_2fa_0",
+      "_type": "request",
+      "name": "Enable 2FA",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/2fa/enable",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_03_2fa",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_03_2fa_1",
+      "_type": "request",
+      "name": "Verify 2FA code",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/2fa/verify",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_03_2fa",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_03_2fa_2",
+      "_type": "request",
+      "name": "Disable 2FA",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/2fa/disable",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_03_2fa",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_04_password_reset",
+      "_type": "request_group",
+      "name": "Password Reset",
+      "description": "API endpoints for Password Reset",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_04_password_reset_0",
+      "_type": "request",
+      "name": "Request password reset",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/password/reset-request",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_04_password_reset",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_04_password_reset_1",
+      "_type": "request",
+      "name": "Verify reset code",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/password/verify-code",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_04_password_reset",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_04_password_reset_2",
+      "_type": "request",
+      "name": "Reset password",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/password/reset",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_04_password_reset",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_05_social_login",
+      "_type": "request_group",
+      "name": "Social Login",
+      "description": "API endpoints for Social Login",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_05_social_login_0",
+      "_type": "request",
+      "name": "Google OAuth",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/auth/social/google",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_05_social_login"
+    },
+    {
+      "_id": "req_journey_05_social_login_1",
+      "_type": "request",
+      "name": "Facebook OAuth",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/auth/social/facebook",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_05_social_login"
+    },
+    {
+      "_id": "req_journey_05_social_login_2",
+      "_type": "request",
+      "name": "OAuth callback",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/auth/social/callback",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_05_social_login",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_06_nibss_transfer",
+      "_type": "request_group",
+      "name": "NIBSS Transfer",
+      "description": "API endpoints for NIBSS Transfer",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_06_nibss_transfer_0",
+      "_type": "request",
+      "name": "Initiate NIBSS transfer",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/transfer/nibss",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_06_nibss_transfer",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_06_nibss_transfer_1",
+      "_type": "request",
+      "name": "Check transfer status",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/transfer/{id}/status",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_06_nibss_transfer"
+    },
+    {
+      "_id": "req_journey_06_nibss_transfer_2",
+      "_type": "request",
+      "name": "Get transfer receipt",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/transfer/{id}/receipt",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_06_nibss_transfer"
+    },
+    {
+      "_id": "fld_journey_07_recurring_payment",
+      "_type": "request_group",
+      "name": "Recurring Payment",
+      "description": "API endpoints for Recurring Payment",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_07_recurring_payment_0",
+      "_type": "request",
+      "name": "Create recurring payment",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/recurring/create",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_07_recurring_payment",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_07_recurring_payment_1",
+      "_type": "request",
+      "name": "List recurring payments",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/recurring/list",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_07_recurring_payment"
+    },
+    {
+      "_id": "req_journey_07_recurring_payment_2",
+      "_type": "request",
+      "name": "Pause recurring payment",
+      "method": "PUT",
+      "url": "{{ _.base_url }}/api/v1/recurring/{id}/pause",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_07_recurring_payment",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_07_recurring_payment_3",
+      "_type": "request",
+      "name": "Cancel recurring payment",
+      "method": "DELETE",
+      "url": "{{ _.base_url }}/api/v1/recurring/{id}",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_07_recurring_payment"
+    },
+    {
+      "_id": "fld_journey_08_bill_payment",
+      "_type": "request_group",
+      "name": "Bill Payment",
+      "description": "API endpoints for Bill Payment",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_08_bill_payment_0",
+      "_type": "request",
+      "name": "Get bill categories",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/bills/categories",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_08_bill_payment"
+    },
+    {
+      "_id": "req_journey_08_bill_payment_1",
+      "_type": "request",
+      "name": "Validate bill",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/bills/validate",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_08_bill_payment",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_08_bill_payment_2",
+      "_type": "request",
+      "name": "Pay bill",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/bills/pay",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_08_bill_payment",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_09_airtime_topup",
+      "_type": "request_group",
+      "name": "Airtime Top-up",
+      "description": "API endpoints for Airtime Top-up",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_09_airtime_topup_0",
+      "_type": "request",
+      "name": "Get providers",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/airtime/providers",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_09_airtime_topup"
+    },
+    {
+      "_id": "req_journey_09_airtime_topup_1",
+      "_type": "request",
+      "name": "Buy airtime",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/airtime/topup",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_09_airtime_topup",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_10_p2p_qr",
+      "_type": "request_group",
+      "name": "P2P QR Transfer",
+      "description": "API endpoints for P2P QR Transfer",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_10_p2p_qr_0",
+      "_type": "request",
+      "name": "Generate QR code",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/p2p/generate-qr",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_10_p2p_qr",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_10_p2p_qr_1",
+      "_type": "request",
+      "name": "Scan QR code",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/p2p/scan-qr",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_10_p2p_qr",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_10_p2p_qr_2",
+      "_type": "request",
+      "name": "Execute P2P transfer",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/p2p/transfer",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_10_p2p_qr",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_11_swift",
+      "_type": "request_group",
+      "name": "SWIFT Transfer",
+      "description": "API endpoints for SWIFT Transfer",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_11_swift_0",
+      "_type": "request",
+      "name": "Get SWIFT quote",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/international/swift/quote",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_11_swift",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_11_swift_1",
+      "_type": "request",
+      "name": "Initiate SWIFT transfer",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/international/swift/transfer",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_11_swift",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_11_swift_2",
+      "_type": "request",
+      "name": "Track SWIFT transfer",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/international/swift/{id}/track",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_11_swift"
+    },
+    {
+      "_id": "fld_journey_12_wise",
+      "_type": "request_group",
+      "name": "Wise Transfer",
+      "description": "API endpoints for Wise Transfer",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_12_wise_0",
+      "_type": "request",
+      "name": "Get Wise quote",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/international/wise/quote",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_12_wise",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_12_wise_1",
+      "_type": "request",
+      "name": "Initiate Wise transfer",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/international/wise/transfer",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_12_wise",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_12_wise_2",
+      "_type": "request",
+      "name": "Check Wise status",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/international/wise/{id}/status",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_12_wise"
+    },
+    {
+      "_id": "fld_journey_13_currency_conversion",
+      "_type": "request_group",
+      "name": "Currency Conversion",
+      "description": "API endpoints for Currency Conversion",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_13_currency_conversion_0",
+      "_type": "request",
+      "name": "Get exchange rates",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/wallet/exchange-rates",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_13_currency_conversion"
+    },
+    {
+      "_id": "req_journey_13_currency_conversion_1",
+      "_type": "request",
+      "name": "Convert currency",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/wallet/convert",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_13_currency_conversion",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_14_papss",
+      "_type": "request_group",
+      "name": "PAPSS Transfer",
+      "description": "API endpoints for PAPSS Transfer",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_14_papss_0",
+      "_type": "request",
+      "name": "Get PAPSS quote",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/international/papss/quote",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_14_papss",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_14_papss_1",
+      "_type": "request",
+      "name": "Initiate PAPSS transfer",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/international/papss/transfer",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_14_papss",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_15_stablecoin",
+      "_type": "request_group",
+      "name": "Stablecoin Transfer",
+      "description": "API endpoints for Stablecoin Transfer",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_15_stablecoin_0",
+      "_type": "request",
+      "name": "Transfer stablecoin",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/crypto/transfer",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_15_stablecoin",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_15_stablecoin_1",
+      "_type": "request",
+      "name": "Get crypto balance",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/crypto/balance",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_15_stablecoin"
+    },
+    {
+      "_id": "fld_journey_16_wallet_topup",
+      "_type": "request_group",
+      "name": "Wallet Top-up",
+      "description": "API endpoints for Wallet Top-up",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_16_wallet_topup_0",
+      "_type": "request",
+      "name": "Initiate wallet top-up",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/wallet/topup/initiate",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_16_wallet_topup",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_16_wallet_topup_1",
+      "_type": "request",
+      "name": "Confirm top-up",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/wallet/topup/confirm",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_16_wallet_topup",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_16_wallet_topup_2",
+      "_type": "request",
+      "name": "Get wallet balance",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/wallet/balance",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_16_wallet_topup"
+    },
+    {
+      "_id": "fld_journey_17_virtual_account",
+      "_type": "request_group",
+      "name": "Virtual Account",
+      "description": "API endpoints for Virtual Account",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_17_virtual_account_0",
+      "_type": "request",
+      "name": "Create virtual account",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/wallet/virtual-account/create",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_17_virtual_account",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_17_virtual_account_1",
+      "_type": "request",
+      "name": "Get account details",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/wallet/virtual-account/details",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_17_virtual_account"
+    },
+    {
+      "_id": "fld_journey_18_add_beneficiary",
+      "_type": "request_group",
+      "name": "Add Beneficiary",
+      "description": "API endpoints for Add Beneficiary",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_18_add_beneficiary_0",
+      "_type": "request",
+      "name": "Add beneficiary",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/beneficiary/add",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_18_add_beneficiary",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_18_add_beneficiary_1",
+      "_type": "request",
+      "name": "List beneficiaries",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/beneficiary/list",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_18_add_beneficiary"
+    },
+    {
+      "_id": "req_journey_18_add_beneficiary_2",
+      "_type": "request",
+      "name": "Update beneficiary",
+      "method": "PUT",
+      "url": "{{ _.base_url }}/api/v1/beneficiary/{id}",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_18_add_beneficiary",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_18_add_beneficiary_3",
+      "_type": "request",
+      "name": "Delete beneficiary",
+      "method": "DELETE",
+      "url": "{{ _.base_url }}/api/v1/beneficiary/{id}",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_18_add_beneficiary"
+    },
+    {
+      "_id": "fld_journey_19_card_management",
+      "_type": "request_group",
+      "name": "Card Management",
+      "description": "API endpoints for Card Management",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_19_card_management_0",
+      "_type": "request",
+      "name": "Add card",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/cards/add",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_19_card_management",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_19_card_management_1",
+      "_type": "request",
+      "name": "List cards",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/cards/list",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_19_card_management"
+    },
+    {
+      "_id": "req_journey_19_card_management_2",
+      "_type": "request",
+      "name": "Freeze card",
+      "method": "PUT",
+      "url": "{{ _.base_url }}/api/v1/cards/{id}/freeze",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_19_card_management",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_19_card_management_3",
+      "_type": "request",
+      "name": "Remove card",
+      "method": "DELETE",
+      "url": "{{ _.base_url }}/api/v1/cards/{id}",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_19_card_management"
+    },
+    {
+      "_id": "fld_journey_20_dispute",
+      "_type": "request_group",
+      "name": "Dispute Resolution",
+      "description": "API endpoints for Dispute Resolution",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_20_dispute_0",
+      "_type": "request",
+      "name": "Create dispute",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/disputes/create",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_20_dispute",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_20_dispute_1",
+      "_type": "request",
+      "name": "List disputes",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/disputes/list",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_20_dispute"
+    },
+    {
+      "_id": "req_journey_20_dispute_2",
+      "_type": "request",
+      "name": "Get dispute details",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/disputes/{id}",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_20_dispute"
+    },
+    {
+      "_id": "req_journey_20_dispute_3",
+      "_type": "request",
+      "name": "Submit evidence",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/disputes/{id}/evidence",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_20_dispute",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_21_savings",
+      "_type": "request_group",
+      "name": "Savings Account",
+      "description": "API endpoints for Savings Account",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_21_savings_0",
+      "_type": "request",
+      "name": "Create savings account",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/savings/create",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_21_savings",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_21_savings_1",
+      "_type": "request",
+      "name": "List savings accounts",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/savings/list",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_21_savings"
+    },
+    {
+      "_id": "req_journey_21_savings_2",
+      "_type": "request",
+      "name": "Deposit to savings",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/savings/{id}/deposit",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_21_savings",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_21_savings_3",
+      "_type": "request",
+      "name": "Withdraw from savings",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/savings/{id}/withdraw",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_21_savings",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_22_investment",
+      "_type": "request_group",
+      "name": "Investment",
+      "description": "API endpoints for Investment",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_22_investment_0",
+      "_type": "request",
+      "name": "List investment products",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/investment/products",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_22_investment"
+    },
+    {
+      "_id": "req_journey_22_investment_1",
+      "_type": "request",
+      "name": "Make investment",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/investment/invest",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_22_investment",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_22_investment_2",
+      "_type": "request",
+      "name": "Get portfolio",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/investment/portfolio",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_22_investment"
+    },
+    {
+      "_id": "fld_journey_23_loan",
+      "_type": "request_group",
+      "name": "Loan Application",
+      "description": "API endpoints for Loan Application",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_23_loan_0",
+      "_type": "request",
+      "name": "Apply for loan",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/loans/apply",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_23_loan",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_23_loan_1",
+      "_type": "request",
+      "name": "Check loan status",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/loans/{id}/status",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_23_loan"
+    },
+    {
+      "_id": "req_journey_23_loan_2",
+      "_type": "request",
+      "name": "Get repayment schedule",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/loans/{id}/schedule",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_23_loan"
+    },
+    {
+      "_id": "req_journey_23_loan_3",
+      "_type": "request",
+      "name": "Make loan repayment",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/loans/{id}/repay",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_23_loan",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_24_insurance",
+      "_type": "request_group",
+      "name": "Insurance",
+      "description": "API endpoints for Insurance",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_24_insurance_0",
+      "_type": "request",
+      "name": "List insurance products",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/insurance/products",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_24_insurance"
+    },
+    {
+      "_id": "req_journey_24_insurance_1",
+      "_type": "request",
+      "name": "Purchase insurance",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/insurance/purchase",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_24_insurance",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_24_insurance_2",
+      "_type": "request",
+      "name": "List policies",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/insurance/policies",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_24_insurance"
+    },
+    {
+      "_id": "fld_journey_25_rewards",
+      "_type": "request_group",
+      "name": "Rewards Redemption",
+      "description": "API endpoints for Rewards Redemption",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_25_rewards_0",
+      "_type": "request",
+      "name": "Get rewards balance",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/rewards/balance",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_25_rewards"
+    },
+    {
+      "_id": "req_journey_25_rewards_1",
+      "_type": "request",
+      "name": "Get rewards catalog",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/rewards/catalog",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_25_rewards"
+    },
+    {
+      "_id": "req_journey_25_rewards_2",
+      "_type": "request",
+      "name": "Redeem rewards",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/rewards/redeem",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_25_rewards",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_26_kyc_upgrade",
+      "_type": "request_group",
+      "name": "KYC Upgrade",
+      "description": "API endpoints for KYC Upgrade",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_26_kyc_upgrade_0",
+      "_type": "request",
+      "name": "Initiate KYC upgrade",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/kyc/upgrade/initiate",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_26_kyc_upgrade",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_26_kyc_upgrade_1",
+      "_type": "request",
+      "name": "Submit video verification",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/kyc/upgrade/video",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_26_kyc_upgrade",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_26_kyc_upgrade_2",
+      "_type": "request",
+      "name": "Check upgrade status",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/kyc/upgrade/status",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_26_kyc_upgrade"
+    },
+    {
+      "_id": "fld_journey_27_aml",
+      "_type": "request_group",
+      "name": "AML Monitoring",
+      "description": "API endpoints for AML Monitoring",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_27_aml_0",
+      "_type": "request",
+      "name": "Get flagged transactions",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/compliance/aml/transactions",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_27_aml"
+    },
+    {
+      "_id": "req_journey_27_aml_1",
+      "_type": "request",
+      "name": "Submit AML report",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/compliance/aml/report",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_27_aml",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "fld_journey_28_fraud",
+      "_type": "request_group",
+      "name": "Fraud Detection",
+      "description": "API endpoints for Fraud Detection",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_28_fraud_0",
+      "_type": "request",
+      "name": "Analyze transaction for fraud",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/security/fraud/analyze",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_28_fraud",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_28_fraud_1",
+      "_type": "request",
+      "name": "Get fraud alerts",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/security/fraud/alerts",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_28_fraud"
+    },
+    {
+      "_id": "fld_journey_29_security_incident",
+      "_type": "request_group",
+      "name": "Security Incident",
+      "description": "API endpoints for Security Incident",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_29_security_incident_0",
+      "_type": "request",
+      "name": "Report security incident",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/security/incident/report",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_29_security_incident",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_29_security_incident_1",
+      "_type": "request",
+      "name": "List incidents",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/security/incident/list",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_29_security_incident"
+    },
+    {
+      "_id": "fld_journey_30_reporting",
+      "_type": "request_group",
+      "name": "Regulatory Reporting",
+      "description": "API endpoints for Regulatory Reporting",
+      "parentId": "wrk_remittance_platform"
+    },
+    {
+      "_id": "req_journey_30_reporting_0",
+      "_type": "request",
+      "name": "Generate report",
+      "method": "POST",
+      "url": "{{ _.base_url }}/api/v1/compliance/reports/generate",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_30_reporting",
+      "body": {
+        "mimeType": "application/json",
+        "text": "{\n  \"example_field\": \"example_value\",\n  \"note\": \"Replace with actual request body\"\n}"
+      }
+    },
+    {
+      "_id": "req_journey_30_reporting_1",
+      "_type": "request",
+      "name": "List reports",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/compliance/reports/list",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_30_reporting"
+    },
+    {
+      "_id": "req_journey_30_reporting_2",
+      "_type": "request",
+      "name": "Download report",
+      "method": "GET",
+      "url": "{{ _.base_url }}/api/v1/compliance/reports/{id}/download",
+      "headers": [
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        },
+        {
+          "name": "Authorization",
+          "value": "Bearer {{{{ _.access_token }}}}"
+        }
+      ],
+      "authentication": {},
+      "parentId": "fld_journey_30_reporting"
+    }
+  ]
+}

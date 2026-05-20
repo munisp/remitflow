@@ -1,0 +1,19 @@
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: Keycloak
+metadata:
+  name: keycloak-ha
+  namespace: keycloak
+spec:
+  instances: 3
+  db:
+    vendor: postgres
+    host: keycloak-postgres
+    database: keycloak
+    username: keycloak
+    passwordSecret:
+      name: keycloak-db-secret
+      key: password
+  http:
+    tlsSecret: keycloak-tls-secret
+  hostname:
+    hostname: keycloak.remitflow.com

@@ -1,0 +1,76 @@
+///////////////////////////////////////////////////////////////////////////////
+// RemitFlow — Permify PBAC Schema for CBN Compliance (v187)
+//
+// Policy-Based Access Control for CBN compliance operations.
+// Implements the principle of least privilege for all compliance roles.
+///////////////////////////////////////////////////////////////////////////////
+
+entity user {}
+
+entity organization {
+  relation admin @user
+  relation compliance_officer @user
+  relation settlement_manager @user
+  relation member @user
+
+  // Settlement account permissions
+  permission view_settlement_accounts = admin or compliance_officer or settlement_manager
+  permission create_settlement_account = admin or settlement_manager
+  permission update_settlement_account = admin or settlement_manager
+  permission delete_settlement_account = admin
+  permission file_cbn_settlement = admin or compliance_officer
+
+  // BMATCH rate permissions
+  permission view_bmatch_rates = admin or compliance_officer or settlement_manager or member
+  permission force_bmatch_snapshot = admin
+  permission view_rate_history = admin or compliance_officer or settlement_manager
+
+  // BDC partner permissions
+  permission view_bdc_partners = admin or compliance_officer or settlement_manager
+  permission create_bdc_partner = admin or settlement_manager
+  permission approve_bdc_partner = admin
+  permission create_bdc_liquidity_request = admin or settlement_manager
+
+  // Compliance export permissions
+  permission generate_compliance_export = admin or compliance_officer
+  permission view_compliance_exports = admin or compliance_officer
+  permission download_compliance_export = admin or compliance_officer
+
+  // Wallet funding permissions
+  permission view_funding_events = admin or compliance_officer
+  permission view_blocked_funding = admin or compliance_officer
+
+  // Audit lakehouse permissions
+  permission search_audit_trail = admin or compliance_officer
+  permission index_audit_event = admin  // Only admins can manually index events
+
+  // Dashboard
+  permission view_compliance_dashboard = admin or compliance_officer or settlement_manager
+}
+
+entity settlement_account {
+  relation owner @organization
+  relation creator @user
+
+  permission view = owner.view_settlement_accounts
+  permission update = owner.update_settlement_account
+  permission delete = owner.delete_settlement_account
+  permission file_cbn = owner.file_cbn_settlement
+}
+
+entity bdc_partner {
+  relation owner @organization
+  relation creator @user
+
+  permission view = owner.view_bdc_partners
+  permission update = owner.create_bdc_partner
+  permission approve = owner.approve_bdc_partner
+}
+
+entity compliance_export {
+  relation owner @organization
+  relation creator @user
+
+  permission view = owner.view_compliance_exports
+  permission download = owner.download_compliance_export
+}

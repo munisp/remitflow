@@ -1,0 +1,1516 @@
+# PostgreSQL High-Availability Cluster Configuration for Remittance Platform
+# Enterprise-grade PostgreSQL cluster optimized for Nigerian banking workloads
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: postgres-system
+  labels:
+    name: postgres-system
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/component: database
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  namespace: postgres-system
+  labels:
+    app: postgresql
+data:
+  postgresql.conf: |
+    # PostgreSQL Configuration for Remittance Platform
+    
+    # Connection Settings
+    listen_addresses = '*'
+    port = 5432
+    max_connections = 500
+    superuser_reserved_connections = 10
+    
+    # Memory Settings (optimized for banking workloads)
+    shared_buffers = 2GB
+    effective_cache_size = 6GB
+    maintenance_work_mem = 512MB
+    work_mem = 32MB
+    wal_buffers = 64MB
+    
+    # Checkpoint Settings
+    checkpoint_completion_target = 0.9
+    checkpoint_timeout = 15min
+    max_wal_size = 4GB
+    min_wal_size = 1GB
+    
+    # WAL Settings for Replication
+    wal_level = replica
+    max_wal_senders = 10
+    max_replication_slots = 10
+    hot_standby = on
+    hot_standby_feedback = on
+    
+    # Archive Settings
+    archive_mode = on
+    archive_command = 'test ! -f /var/lib/postgresql/archive/%f && cp %p /var/lib/postgresql/archive/%f'
+    archive_timeout = 300
+    
+    # Logging Settings (for banking compliance)
+    logging_collector = on
+    log_destination = 'stderr'
+    log_directory = '/var/log/postgresql'
+    log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
+    log_rotation_age = 1d
+    log_rotation_size = 100MB
+    log_truncate_on_rotation = on
+    log_line_prefix = '%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+    log_checkpoints = on
+    log_connections = on
+    log_disconnections = on
+    log_lock_waits = on
+    log_statement = 'mod'
+    log_min_duration_statement = 1000
+    
+    # Performance Settings
+    random_page_cost = 1.1
+    effective_io_concurrency = 200
+    max_worker_processes = 8
+    max_parallel_workers_per_gather = 4
+    max_parallel_workers = 8
+    max_parallel_maintenance_workers = 4
+    
+    # Autovacuum Settings
+    autovacuum = on
+    autovacuum_max_workers = 4
+    autovacuum_naptime = 30s
+    autovacuum_vacuum_threshold = 100
+    autovacuum_analyze_threshold = 50
+    autovacuum_vacuum_scale_factor = 0.1
+    autovacuum_analyze_scale_factor = 0.05
+    
+    # Lock Settings
+    deadlock_timeout = 1s
+    lock_timeout = 30s
+    statement_timeout = 300s
+    
+    # Nigerian Banking Specific Settings
+    timezone = 'Africa/Lagos'
+    datestyle = 'iso, mdy'
+    default_text_search_config = 'pg_catalog.english'
+    
+    # Security Settings
+    ssl = on
+    ssl_cert_file = '/etc/ssl/certs/server.crt'
+    ssl_key_file = '/etc/ssl/private/server.key'
+    ssl_ca_file = '/etc/ssl/certs/ca.crt'
+    ssl_crl_file = '/etc/ssl/certs/server.crl'
+    password_encryption = scram-sha-256
+    
+    # Replication Settings
+    synchronous_standby_names = '*'
+    synchronous_commit = on
+    
+    # Shared Preload Libraries
+    shared_preload_libraries = 'pg_stat_statements,auto_explain,pg_cron'
+    
+    # Extensions Settings
+    auto_explain.log_min_duration = 5s
+    auto_explain.log_analyze = on
+    auto_explain.log_buffers = on
+    auto_explain.log_timing = on
+    auto_explain.log_triggers = on
+    auto_explain.log_verbose = on
+    auto_explain.log_nested_statements = on
+    
+    # pg_stat_statements Settings
+    pg_stat_statements.max = 10000
+    pg_stat_statements.track = all
+    pg_stat_statements.track_utility = on
+    pg_stat_statements.save = on
+    
+    # pg_cron Settings
+    cron.database_name = 'banking'
+
+  pg_hba.conf: |
+    # PostgreSQL Client Authentication Configuration
+    # TYPE  DATABASE        USER            ADDRESS                 METHOD
+    
+    # Local connections
+    local   all             all                                     peer
+    
+    # IPv4 local connections
+    host    all             all             127.0.0.1/32            scram-sha-256
+    host    all             all             10.0.0.0/8              scram-sha-256
+    host    all             all             172.16.0.0/12           scram-sha-256
+    host    all             all             192.168.0.0/16          scram-sha-256
+    
+    # IPv6 local connections
+    host    all             all             ::1/128                 scram-sha-256
+    
+    # Kubernetes cluster connections
+    host    all             all             0.0.0.0/0               scram-sha-256
+    
+    # Replication connections
+    host    replication     replicator      10.0.0.0/8              scram-sha-256
+    host    replication     replicator      172.16.0.0/12           scram-sha-256
+    host    replication     replicator      192.168.0.0/16          scram-sha-256
+
+  banking-schema.sql: |
+    -- Banking Schema for Remittance Platform
+    -- Comprehensive database schema for Nigerian banking operations
+    
+    -- Create banking database
+    CREATE DATABASE banking WITH 
+        ENCODING = 'UTF8'
+        LC_COLLATE = 'en_US.UTF-8'
+        LC_CTYPE = 'en_US.UTF-8'
+        TEMPLATE = template0;
+    
+    \c banking;
+    
+    -- Enable required extensions
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+    CREATE EXTENSION IF NOT EXISTS "pg_stat_statements";
+    CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+    CREATE EXTENSION IF NOT EXISTS "btree_gin";
+    CREATE EXTENSION IF NOT EXISTS "btree_gist";
+    CREATE EXTENSION IF NOT EXISTS "pg_cron";
+    
+    -- Create schemas
+    CREATE SCHEMA IF NOT EXISTS banking;
+    CREATE SCHEMA IF NOT EXISTS audit;
+    CREATE SCHEMA IF NOT EXISTS reporting;
+    CREATE SCHEMA IF NOT EXISTS compliance;
+    
+    -- Set search path
+    SET search_path = banking, public;
+    
+    -- Create custom types
+    CREATE TYPE account_status AS ENUM ('active', 'inactive', 'frozen', 'closed');
+    CREATE TYPE transaction_status AS ENUM ('pending', 'processing', 'completed', 'failed', 'reversed');
+    CREATE TYPE transaction_type AS ENUM ('deposit', 'withdrawal', 'transfer', 'payment', 'fee', 'interest', 'reversal');
+    CREATE TYPE agent_status AS ENUM ('active', 'inactive', 'suspended', 'terminated');
+    CREATE TYPE kyc_status AS ENUM ('pending', 'in_progress', 'approved', 'rejected', 'expired');
+    CREATE TYPE loan_status AS ENUM ('applied', 'under_review', 'approved', 'disbursed', 'active', 'completed', 'defaulted', 'written_off');
+    CREATE TYPE compliance_status AS ENUM ('compliant', 'non_compliant', 'under_review', 'remediated');
+    
+    -- Organizations table
+    CREATE TABLE banking.organizations (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        name VARCHAR(255) NOT NULL,
+        code VARCHAR(50) UNIQUE NOT NULL,
+        registration_number VARCHAR(100),
+        tax_id VARCHAR(50),
+        address JSONB,
+        contact_info JSONB,
+        regulatory_licenses JSONB,
+        status account_status DEFAULT 'active',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID
+    );
+    
+    -- Branches table
+    CREATE TABLE banking.branches (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        organization_id UUID NOT NULL REFERENCES banking.organizations(id),
+        name VARCHAR(255) NOT NULL,
+        code VARCHAR(50) UNIQUE NOT NULL,
+        branch_type VARCHAR(50) DEFAULT 'full_service',
+        address JSONB NOT NULL,
+        contact_info JSONB,
+        operating_hours JSONB,
+        services_offered TEXT[],
+        manager_id UUID,
+        status account_status DEFAULT 'active',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID
+    );
+    
+    -- Users table (employees, agents, customers)
+    CREATE TABLE banking.users (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        username VARCHAR(100) UNIQUE NOT NULL,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        phone VARCHAR(20),
+        first_name VARCHAR(100) NOT NULL,
+        last_name VARCHAR(100) NOT NULL,
+        middle_name VARCHAR(100),
+        date_of_birth DATE,
+        gender VARCHAR(10),
+        nationality VARCHAR(50) DEFAULT 'Nigerian',
+        address JSONB,
+        identity_documents JSONB,
+        bvn VARCHAR(11),
+        nin VARCHAR(11),
+        user_type VARCHAR(50) NOT NULL, -- employee, agent, customer
+        organization_id UUID REFERENCES banking.organizations(id),
+        branch_id UUID REFERENCES banking.branches(id),
+        roles TEXT[],
+        permissions JSONB,
+        kyc_status kyc_status DEFAULT 'pending',
+        kyc_documents JSONB,
+        kyc_verified_at TIMESTAMP WITH TIME ZONE,
+        kyc_verified_by UUID,
+        status account_status DEFAULT 'active',
+        last_login TIMESTAMP WITH TIME ZONE,
+        password_hash VARCHAR(255),
+        password_changed_at TIMESTAMP WITH TIME ZONE,
+        failed_login_attempts INTEGER DEFAULT 0,
+        locked_until TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID
+    );
+    
+    -- Accounts table
+    CREATE TABLE banking.accounts (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        account_number VARCHAR(20) UNIQUE NOT NULL,
+        account_name VARCHAR(255) NOT NULL,
+        account_type VARCHAR(50) NOT NULL, -- savings, current, fixed_deposit, loan
+        currency VARCHAR(3) DEFAULT 'NGN',
+        balance DECIMAL(20,2) DEFAULT 0.00,
+        available_balance DECIMAL(20,2) DEFAULT 0.00,
+        minimum_balance DECIMAL(20,2) DEFAULT 0.00,
+        maximum_balance DECIMAL(20,2),
+        daily_transaction_limit DECIMAL(20,2),
+        monthly_transaction_limit DECIMAL(20,2),
+        customer_id UUID NOT NULL REFERENCES banking.users(id),
+        branch_id UUID NOT NULL REFERENCES banking.branches(id),
+        product_code VARCHAR(50),
+        interest_rate DECIMAL(5,4),
+        maturity_date DATE,
+        authorized_signatories UUID[],
+        joint_account_holders UUID[],
+        status account_status DEFAULT 'active',
+        opened_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        closed_at TIMESTAMP WITH TIME ZONE,
+        last_transaction_at TIMESTAMP WITH TIME ZONE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID
+    );
+    
+    -- Transactions table
+    CREATE TABLE banking.transactions (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        transaction_reference VARCHAR(100) UNIQUE NOT NULL,
+        transaction_type transaction_type NOT NULL,
+        amount DECIMAL(20,2) NOT NULL,
+        currency VARCHAR(3) DEFAULT 'NGN',
+        description TEXT,
+        debit_account_id UUID REFERENCES banking.accounts(id),
+        credit_account_id UUID REFERENCES banking.accounts(id),
+        external_reference VARCHAR(100),
+        channel VARCHAR(50), -- atm, pos, mobile, web, ussd, branch
+        location JSONB,
+        device_info JSONB,
+        ip_address INET,
+        user_agent TEXT,
+        initiated_by UUID REFERENCES banking.users(id),
+        processed_by UUID REFERENCES banking.users(id),
+        approved_by UUID REFERENCES banking.users(id),
+        branch_id UUID REFERENCES banking.branches(id),
+        agent_id UUID REFERENCES banking.users(id),
+        pos_terminal_id UUID,
+        status transaction_status DEFAULT 'pending',
+        failure_reason TEXT,
+        fees DECIMAL(20,2) DEFAULT 0.00,
+        charges JSONB,
+        exchange_rate DECIMAL(10,6),
+        value_date DATE,
+        posting_date DATE,
+        reversal_reference VARCHAR(100),
+        parent_transaction_id UUID REFERENCES banking.transactions(id),
+        fraud_score DECIMAL(5,4),
+        fraud_indicators JSONB,
+        compliance_flags TEXT[],
+        regulatory_reporting JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        processed_at TIMESTAMP WITH TIME ZONE,
+        completed_at TIMESTAMP WITH TIME ZONE
+    );
+    
+    -- Agents table
+    CREATE TABLE banking.agents (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        user_id UUID NOT NULL REFERENCES banking.users(id),
+        agent_code VARCHAR(50) UNIQUE NOT NULL,
+        business_name VARCHAR(255),
+        business_registration VARCHAR(100),
+        business_address JSONB,
+        territory VARCHAR(100),
+        supervisor_id UUID REFERENCES banking.users(id),
+        territory_manager_id UUID REFERENCES banking.users(id),
+        branch_id UUID NOT NULL REFERENCES banking.branches(id),
+        commission_structure JSONB,
+        float_limit DECIMAL(20,2),
+        current_float DECIMAL(20,2) DEFAULT 0.00,
+        daily_transaction_limit DECIMAL(20,2),
+        monthly_transaction_limit DECIMAL(20,2),
+        services_offered TEXT[],
+        operating_hours JSONB,
+        location JSONB,
+        onboarding_date DATE,
+        training_completed BOOLEAN DEFAULT FALSE,
+        certification_expiry DATE,
+        performance_metrics JSONB,
+        status agent_status DEFAULT 'active',
+        suspended_at TIMESTAMP WITH TIME ZONE,
+        suspended_by UUID,
+        suspension_reason TEXT,
+        terminated_at TIMESTAMP WITH TIME ZONE,
+        terminated_by UUID,
+        termination_reason TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID
+    );
+    
+    -- POS Terminals table
+    CREATE TABLE banking.pos_terminals (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        terminal_id VARCHAR(50) UNIQUE NOT NULL,
+        serial_number VARCHAR(100) UNIQUE NOT NULL,
+        model VARCHAR(100),
+        manufacturer VARCHAR(100),
+        agent_id UUID REFERENCES banking.agents(id),
+        branch_id UUID REFERENCES banking.branches(id),
+        location JSONB,
+        configuration JSONB,
+        last_heartbeat TIMESTAMP WITH TIME ZONE,
+        software_version VARCHAR(50),
+        hardware_version VARCHAR(50),
+        encryption_keys JSONB,
+        certificates JSONB,
+        status account_status DEFAULT 'active',
+        deployed_at TIMESTAMP WITH TIME ZONE,
+        last_maintenance TIMESTAMP WITH TIME ZONE,
+        next_maintenance DATE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID
+    );
+    
+    -- Loans table
+    CREATE TABLE banking.loans (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        loan_number VARCHAR(50) UNIQUE NOT NULL,
+        customer_id UUID NOT NULL REFERENCES banking.users(id),
+        branch_id UUID NOT NULL REFERENCES banking.branches(id),
+        loan_officer_id UUID REFERENCES banking.users(id),
+        product_code VARCHAR(50),
+        loan_type VARCHAR(50), -- personal, business, mortgage, agriculture
+        principal_amount DECIMAL(20,2) NOT NULL,
+        interest_rate DECIMAL(5,4) NOT NULL,
+        term_months INTEGER NOT NULL,
+        repayment_frequency VARCHAR(20) DEFAULT 'monthly', -- daily, weekly, monthly
+        disbursement_account_id UUID REFERENCES banking.accounts(id),
+        repayment_account_id UUID REFERENCES banking.accounts(id),
+        collateral JSONB,
+        guarantors JSONB,
+        purpose TEXT,
+        application_date DATE,
+        approval_date DATE,
+        disbursement_date DATE,
+        maturity_date DATE,
+        outstanding_balance DECIMAL(20,2),
+        accrued_interest DECIMAL(20,2),
+        penalty_amount DECIMAL(20,2),
+        last_payment_date DATE,
+        next_payment_date DATE,
+        payment_amount DECIMAL(20,2),
+        days_past_due INTEGER DEFAULT 0,
+        classification VARCHAR(50) DEFAULT 'performing', -- performing, watch, substandard, doubtful, loss
+        provision_amount DECIMAL(20,2),
+        status loan_status DEFAULT 'applied',
+        approved_by UUID REFERENCES banking.users(id),
+        disbursed_by UUID REFERENCES banking.users(id),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID
+    );
+    
+    -- Compliance Records table
+    CREATE TABLE compliance.compliance_records (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        record_type VARCHAR(100) NOT NULL, -- aml, kyc, ctr, str, regulatory_report
+        entity_type VARCHAR(50) NOT NULL, -- customer, transaction, agent, account
+        entity_id UUID NOT NULL,
+        regulation VARCHAR(100), -- cbn_aml, ndpr, fatf, etc.
+        requirement TEXT NOT NULL,
+        status compliance_status DEFAULT 'under_review',
+        findings JSONB,
+        remediation_actions JSONB,
+        evidence JSONB,
+        risk_rating VARCHAR(20), -- low, medium, high, critical
+        officer_id UUID REFERENCES banking.users(id),
+        reviewer_id UUID REFERENCES banking.users(id),
+        due_date DATE,
+        completed_date DATE,
+        next_review_date DATE,
+        regulatory_submission JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID
+    );
+    
+    -- Fraud Cases table
+    CREATE TABLE banking.fraud_cases (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        case_number VARCHAR(50) UNIQUE NOT NULL,
+        case_type VARCHAR(50) NOT NULL, -- transaction_fraud, identity_theft, account_takeover
+        severity VARCHAR(20) DEFAULT 'medium', -- low, medium, high, critical
+        amount_involved DECIMAL(20,2),
+        currency VARCHAR(3) DEFAULT 'NGN',
+        related_transactions UUID[],
+        related_accounts UUID[],
+        related_users UUID[],
+        detection_method VARCHAR(100), -- rule_based, ml_model, manual_review, customer_report
+        detection_timestamp TIMESTAMP WITH TIME ZONE,
+        reported_by UUID REFERENCES banking.users(id),
+        assigned_analyst UUID REFERENCES banking.users(id),
+        assigned_investigator UUID REFERENCES banking.users(id),
+        branch_id UUID REFERENCES banking.branches(id),
+        description TEXT,
+        investigation_notes JSONB,
+        evidence JSONB,
+        timeline JSONB,
+        impact_assessment JSONB,
+        recovery_amount DECIMAL(20,2),
+        status VARCHAR(50) DEFAULT 'open', -- open, investigating, resolved, closed
+        resolution TEXT,
+        lessons_learned TEXT,
+        preventive_measures JSONB,
+        regulatory_notification JSONB,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        resolved_at TIMESTAMP WITH TIME ZONE,
+        closed_at TIMESTAMP WITH TIME ZONE
+    );
+    
+    -- Audit Logs table
+    CREATE TABLE audit.audit_logs (
+        id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+        table_name VARCHAR(100) NOT NULL,
+        operation VARCHAR(10) NOT NULL, -- INSERT, UPDATE, DELETE
+        record_id UUID NOT NULL,
+        old_values JSONB,
+        new_values JSONB,
+        changed_fields TEXT[],
+        user_id UUID REFERENCES banking.users(id),
+        session_id VARCHAR(100),
+        ip_address INET,
+        user_agent TEXT,
+        application VARCHAR(100),
+        timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+    
+    -- Create indexes for performance
+    
+    -- Users indexes
+    CREATE INDEX idx_users_username ON banking.users(username);
+    CREATE INDEX idx_users_email ON banking.users(email);
+    CREATE INDEX idx_users_phone ON banking.users(phone);
+    CREATE INDEX idx_users_bvn ON banking.users(bvn);
+    CREATE INDEX idx_users_nin ON banking.users(nin);
+    CREATE INDEX idx_users_branch_id ON banking.users(branch_id);
+    CREATE INDEX idx_users_organization_id ON banking.users(organization_id);
+    CREATE INDEX idx_users_user_type ON banking.users(user_type);
+    CREATE INDEX idx_users_status ON banking.users(status);
+    CREATE INDEX idx_users_created_at ON banking.users(created_at);
+    
+    -- Accounts indexes
+    CREATE INDEX idx_accounts_account_number ON banking.accounts(account_number);
+    CREATE INDEX idx_accounts_customer_id ON banking.accounts(customer_id);
+    CREATE INDEX idx_accounts_branch_id ON banking.accounts(branch_id);
+    CREATE INDEX idx_accounts_account_type ON banking.accounts(account_type);
+    CREATE INDEX idx_accounts_status ON banking.accounts(status);
+    CREATE INDEX idx_accounts_created_at ON banking.accounts(created_at);
+    
+    -- Transactions indexes
+    CREATE INDEX idx_transactions_reference ON banking.transactions(transaction_reference);
+    CREATE INDEX idx_transactions_debit_account ON banking.transactions(debit_account_id);
+    CREATE INDEX idx_transactions_credit_account ON banking.transactions(credit_account_id);
+    CREATE INDEX idx_transactions_type ON banking.transactions(transaction_type);
+    CREATE INDEX idx_transactions_status ON banking.transactions(status);
+    CREATE INDEX idx_transactions_created_at ON banking.transactions(created_at);
+    CREATE INDEX idx_transactions_processed_at ON banking.transactions(processed_at);
+    CREATE INDEX idx_transactions_amount ON banking.transactions(amount);
+    CREATE INDEX idx_transactions_branch_id ON banking.transactions(branch_id);
+    CREATE INDEX idx_transactions_agent_id ON banking.transactions(agent_id);
+    CREATE INDEX idx_transactions_channel ON banking.transactions(channel);
+    CREATE INDEX idx_transactions_fraud_score ON banking.transactions(fraud_score);
+    
+    -- Composite indexes for common queries
+    CREATE INDEX idx_transactions_account_date ON banking.transactions(debit_account_id, created_at);
+    CREATE INDEX idx_transactions_account_status ON banking.transactions(debit_account_id, status);
+    CREATE INDEX idx_transactions_branch_date ON banking.transactions(branch_id, created_at);
+    CREATE INDEX idx_accounts_customer_type ON banking.accounts(customer_id, account_type);
+    CREATE INDEX idx_users_branch_type ON banking.users(branch_id, user_type);
+    
+    -- GIN indexes for JSONB columns
+    CREATE INDEX idx_users_address_gin ON banking.users USING GIN(address);
+    CREATE INDEX idx_users_identity_documents_gin ON banking.users USING GIN(identity_documents);
+    CREATE INDEX idx_transactions_device_info_gin ON banking.transactions USING GIN(device_info);
+    CREATE INDEX idx_transactions_fraud_indicators_gin ON banking.transactions USING GIN(fraud_indicators);
+    
+    -- Full-text search indexes
+    CREATE INDEX idx_users_search ON banking.users USING GIN(to_tsvector('english', first_name || ' ' || last_name || ' ' || COALESCE(email, '')));
+    CREATE INDEX idx_accounts_search ON banking.accounts USING GIN(to_tsvector('english', account_name || ' ' || account_number));
+    
+    -- Create triggers for audit logging
+    CREATE OR REPLACE FUNCTION audit.log_changes()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        IF TG_OP = 'INSERT' THEN
+            INSERT INTO audit.audit_logs (table_name, operation, record_id, new_values, user_id)
+            VALUES (TG_TABLE_NAME, TG_OP, NEW.id, to_jsonb(NEW), NEW.created_by);
+            RETURN NEW;
+        ELSIF TG_OP = 'UPDATE' THEN
+            INSERT INTO audit.audit_logs (table_name, operation, record_id, old_values, new_values, user_id)
+            VALUES (TG_TABLE_NAME, TG_OP, NEW.id, to_jsonb(OLD), to_jsonb(NEW), NEW.updated_by);
+            RETURN NEW;
+        ELSIF TG_OP = 'DELETE' THEN
+            INSERT INTO audit.audit_logs (table_name, operation, record_id, old_values, user_id)
+            VALUES (TG_TABLE_NAME, TG_OP, OLD.id, to_jsonb(OLD), OLD.updated_by);
+            RETURN OLD;
+        END IF;
+        RETURN NULL;
+    END;
+    $$ LANGUAGE plpgsql;
+    
+    -- Create audit triggers for all main tables
+    CREATE TRIGGER audit_organizations AFTER INSERT OR UPDATE OR DELETE ON banking.organizations
+        FOR EACH ROW EXECUTE FUNCTION audit.log_changes();
+    
+    CREATE TRIGGER audit_branches AFTER INSERT OR UPDATE OR DELETE ON banking.branches
+        FOR EACH ROW EXECUTE FUNCTION audit.log_changes();
+    
+    CREATE TRIGGER audit_users AFTER INSERT OR UPDATE OR DELETE ON banking.users
+        FOR EACH ROW EXECUTE FUNCTION audit.log_changes();
+    
+    CREATE TRIGGER audit_accounts AFTER INSERT OR UPDATE OR DELETE ON banking.accounts
+        FOR EACH ROW EXECUTE FUNCTION audit.log_changes();
+    
+    CREATE TRIGGER audit_transactions AFTER INSERT OR UPDATE OR DELETE ON banking.transactions
+        FOR EACH ROW EXECUTE FUNCTION audit.log_changes();
+    
+    CREATE TRIGGER audit_agents AFTER INSERT OR UPDATE OR DELETE ON banking.agents
+        FOR EACH ROW EXECUTE FUNCTION audit.log_changes();
+    
+    CREATE TRIGGER audit_loans AFTER INSERT OR UPDATE OR DELETE ON banking.loans
+        FOR EACH ROW EXECUTE FUNCTION audit.log_changes();
+    
+    -- Create function to update timestamps
+    CREATE OR REPLACE FUNCTION update_updated_at_column()
+    RETURNS TRIGGER AS $$
+    BEGIN
+        NEW.updated_at = CURRENT_TIMESTAMP;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    
+    -- Create triggers to automatically update updated_at columns
+    CREATE TRIGGER update_organizations_updated_at BEFORE UPDATE ON banking.organizations
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    
+    CREATE TRIGGER update_branches_updated_at BEFORE UPDATE ON banking.branches
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    
+    CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON banking.users
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    
+    CREATE TRIGGER update_accounts_updated_at BEFORE UPDATE ON banking.accounts
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    
+    CREATE TRIGGER update_transactions_updated_at BEFORE UPDATE ON banking.transactions
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    
+    CREATE TRIGGER update_agents_updated_at BEFORE UPDATE ON banking.agents
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    
+    CREATE TRIGGER update_loans_updated_at BEFORE UPDATE ON banking.loans
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    
+    -- Create views for reporting
+    CREATE VIEW reporting.account_summary AS
+    SELECT 
+        a.id,
+        a.account_number,
+        a.account_name,
+        a.account_type,
+        a.balance,
+        a.available_balance,
+        a.status,
+        u.first_name || ' ' || u.last_name AS customer_name,
+        u.email AS customer_email,
+        u.phone AS customer_phone,
+        b.name AS branch_name,
+        b.code AS branch_code,
+        a.created_at,
+        a.last_transaction_at
+    FROM banking.accounts a
+    JOIN banking.users u ON a.customer_id = u.id
+    JOIN banking.branches b ON a.branch_id = b.id;
+    
+    CREATE VIEW reporting.transaction_summary AS
+    SELECT 
+        t.id,
+        t.transaction_reference,
+        t.transaction_type,
+        t.amount,
+        t.currency,
+        t.description,
+        t.status,
+        t.channel,
+        da.account_number AS debit_account,
+        ca.account_number AS credit_account,
+        u.first_name || ' ' || u.last_name AS initiated_by_name,
+        b.name AS branch_name,
+        t.created_at,
+        t.processed_at,
+        t.completed_at
+    FROM banking.transactions t
+    LEFT JOIN banking.accounts da ON t.debit_account_id = da.id
+    LEFT JOIN banking.accounts ca ON t.credit_account_id = ca.id
+    LEFT JOIN banking.users u ON t.initiated_by = u.id
+    LEFT JOIN banking.branches b ON t.branch_id = b.id;
+    
+    -- Create materialized views for performance
+    CREATE MATERIALIZED VIEW reporting.daily_transaction_summary AS
+    SELECT 
+        DATE(created_at) as transaction_date,
+        branch_id,
+        transaction_type,
+        channel,
+        COUNT(*) as transaction_count,
+        SUM(amount) as total_amount,
+        AVG(amount) as average_amount,
+        COUNT(CASE WHEN status = 'completed' THEN 1 END) as successful_count,
+        COUNT(CASE WHEN status = 'failed' THEN 1 END) as failed_count
+    FROM banking.transactions
+    WHERE created_at >= CURRENT_DATE - INTERVAL '90 days'
+    GROUP BY DATE(created_at), branch_id, transaction_type, channel;
+    
+    CREATE UNIQUE INDEX idx_daily_summary_unique ON reporting.daily_transaction_summary 
+        (transaction_date, branch_id, transaction_type, channel);
+    
+    -- Create function to refresh materialized views
+    CREATE OR REPLACE FUNCTION reporting.refresh_daily_summary()
+    RETURNS void AS $$
+    BEGIN
+        REFRESH MATERIALIZED VIEW CONCURRENTLY reporting.daily_transaction_summary;
+    END;
+    $$ LANGUAGE plpgsql;
+    
+    -- Schedule daily refresh of materialized views
+    SELECT cron.schedule('refresh-daily-summary', '0 1 * * *', 'SELECT reporting.refresh_daily_summary();');
+    
+    -- Create database users and permissions
+    CREATE USER keycloak_user WITH PASSWORD 'keycloak-db-password';
+    CREATE DATABASE keycloak OWNER keycloak_user;
+    
+    CREATE USER permify_user WITH PASSWORD 'permify-db-password';
+    CREATE DATABASE permify OWNER permify_user;
+    
+    CREATE USER temporal_user WITH PASSWORD 'temporal-db-password';
+    CREATE DATABASE temporal OWNER temporal_user;
+    
+    CREATE USER dapr_user WITH PASSWORD 'dapr-db-password';
+    CREATE DATABASE dapr OWNER dapr_user;
+    
+    -- Grant permissions
+    GRANT CONNECT ON DATABASE banking TO keycloak_user, permify_user, temporal_user, dapr_user;
+    GRANT USAGE ON SCHEMA banking TO keycloak_user, permify_user, temporal_user, dapr_user;
+    GRANT SELECT ON ALL TABLES IN SCHEMA banking TO keycloak_user, permify_user, temporal_user, dapr_user;
+    GRANT USAGE ON SCHEMA reporting TO keycloak_user, permify_user, temporal_user, dapr_user;
+    GRANT SELECT ON ALL TABLES IN SCHEMA reporting TO keycloak_user, permify_user, temporal_user, dapr_user;
+
+  patroni.yml: |
+    # Patroni Configuration for PostgreSQL HA Cluster
+    scope: postgres-cluster
+    namespace: /postgres-cluster/
+    name: postgres-{POD_NAME}
+    
+    restapi:
+      listen: 0.0.0.0:8008
+      connect_address: {POD_IP}:8008
+      
+    etcd:
+      hosts: etcd-client.etcd-system.svc.cluster.local:2379
+      
+    bootstrap:
+      dcs:
+        ttl: 30
+        loop_wait: 10
+        retry_timeout: 30
+        maximum_lag_on_failover: 1048576
+        master_start_timeout: 300
+        synchronous_mode: true
+        synchronous_mode_strict: false
+        synchronous_node_count: 1
+        postgresql:
+          use_pg_rewind: true
+          use_slots: true
+          parameters:
+            max_connections: 500
+            shared_buffers: 2GB
+            effective_cache_size: 6GB
+            maintenance_work_mem: 512MB
+            checkpoint_completion_target: 0.9
+            wal_buffers: 64MB
+            default_statistics_target: 100
+            random_page_cost: 1.1
+            effective_io_concurrency: 200
+            work_mem: 32MB
+            min_wal_size: 1GB
+            max_wal_size: 4GB
+            max_worker_processes: 8
+            max_parallel_workers_per_gather: 4
+            max_parallel_workers: 8
+            max_parallel_maintenance_workers: 4
+            wal_level: replica
+            hot_standby: "on"
+            wal_keep_segments: 8
+            max_wal_senders: 10
+            max_replication_slots: 10
+            wal_log_hints: "on"
+            
+      initdb:
+      - encoding: UTF8
+      - data-checksums
+      
+      pg_hba:
+      - host replication replicator 127.0.0.1/32 md5
+      - host replication replicator 10.0.0.0/8 md5
+      - host replication replicator 172.16.0.0/12 md5
+      - host replication replicator 192.168.0.0/16 md5
+      - host all all 0.0.0.0/0 md5
+      
+      users:
+        admin:
+          password: admin-password-change-in-production
+          options:
+            - createrole
+            - createdb
+        replicator:
+          password: replicator-password-change-in-production
+          options:
+            - replication
+            
+    postgresql:
+      listen: 0.0.0.0:5432
+      connect_address: {POD_IP}:5432
+      data_dir: /var/lib/postgresql/data
+      bin_dir: /usr/lib/postgresql/15/bin
+      config_dir: /var/lib/postgresql/data
+      pgpass: /tmp/pgpass
+      authentication:
+        replication:
+          username: replicator
+          password: replicator-password-change-in-production
+        superuser:
+          username: postgres
+          password: postgres-password-change-in-production
+        rewind:
+          username: replicator
+          password: replicator-password-change-in-production
+      parameters:
+        unix_socket_directories: '/var/run/postgresql'
+        
+    tags:
+      nofailover: false
+      noloadbalance: false
+      clonefrom: false
+      nosync: false
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secrets
+  namespace: postgres-system
+type: Opaque
+data:
+  # Base64 encoded secrets
+  postgres-password: cG9zdGdyZXMtcGFzc3dvcmQtY2hhbmdlLWluLXByb2R1Y3Rpb24=
+  admin-password: YWRtaW4tcGFzc3dvcmQtY2hhbmdlLWluLXByb2R1Y3Rpb24=
+  replicator-password: cmVwbGljYXRvci1wYXNzd29yZC1jaGFuZ2UtaW4tcHJvZHVjdGlvbg==
+  keycloak-password: a2V5Y2xvYWstZGItcGFzc3dvcmQ=
+  permify-password: cGVybWlmeS1kYi1wYXNzd29yZA==
+  temporal-password: dGVtcG9yYWwtZGItcGFzc3dvcmQ=
+  dapr-password: ZGFwci1kYi1wYXNzd29yZA==
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: postgres-system
+  labels:
+    app: postgresql
+    role: master
+spec:
+  type: ClusterIP
+  ports:
+  - name: postgresql
+    port: 5432
+    targetPort: 5432
+  - name: patroni
+    port: 8008
+    targetPort: 8008
+  selector:
+    app: postgresql
+    role: master
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica-service
+  namespace: postgres-system
+  labels:
+    app: postgresql
+    role: replica
+spec:
+  type: ClusterIP
+  ports:
+  - name: postgresql
+    port: 5432
+    targetPort: 5432
+  selector:
+    app: postgresql
+    role: replica
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: postgres-system
+  labels:
+    app: postgresql
+spec:
+  clusterIP: None
+  ports:
+  - name: postgresql
+    port: 5432
+    targetPort: 5432
+  - name: patroni
+    port: 8008
+    targetPort: 8008
+  selector:
+    app: postgresql
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: postgres-system
+  labels:
+    app: postgresql
+spec:
+  serviceName: postgres-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: postgresql
+  template:
+    metadata:
+      labels:
+        app: postgresql
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - postgresql
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: postgres
+        image: postgres:15.4
+        ports:
+        - containerPort: 5432
+          name: postgresql
+        - containerPort: 8008
+          name: patroni
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secrets
+              key: postgres-password
+        - name: POSTGRES_USER
+          value: "postgres"
+        - name: POSTGRES_DB
+          value: "postgres"
+        - name: PGDATA
+          value: "/var/lib/postgresql/data"
+        - name: PATRONI_CONFIGURATION
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: patroni.yml
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        - name: postgres-config
+          mountPath: /etc/postgresql/postgresql.conf
+          subPath: postgresql.conf
+        - name: postgres-config
+          mountPath: /etc/postgresql/pg_hba.conf
+          subPath: pg_hba.conf
+        - name: postgres-logs
+          mountPath: /var/log/postgresql
+        - name: postgres-archive
+          mountPath: /var/lib/postgresql/archive
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "1"
+          limits:
+            memory: "8Gi"
+            cpu: "2"
+        livenessProbe:
+          httpGet:
+            path: /liveness
+            port: 8008
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readiness
+            port: 8008
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /liveness
+            port: 8008
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      - name: patroni
+        image: patroni/patroni:3.1.0
+        ports:
+        - containerPort: 8008
+          name: patroni-api
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: PATRONI_CONFIGURATION
+          valueFrom:
+            configMapKeyRef:
+              name: postgres-config
+              key: patroni.yml
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        - name: patroni-config
+          mountPath: /etc/patroni/patroni.yml
+          subPath: patroni.yml
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+      volumes:
+      - name: postgres-config
+        configMap:
+          name: postgres-config
+      - name: patroni-config
+        configMap:
+          name: postgres-config
+      - name: postgres-logs
+        emptyDir: {}
+      - name: postgres-archive
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 100Gi
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: postgres-schema-setup
+  namespace: postgres-system
+  labels:
+    app: postgres-schema-setup
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: postgres-setup
+        image: postgres:15.4
+        command:
+        - sh
+        - -c
+        - |
+          # Wait for PostgreSQL to be ready
+          echo "Waiting for PostgreSQL to be ready..."
+          while ! pg_isready -h postgres-service -p 5432 -U postgres; do
+            echo "Waiting for PostgreSQL..."
+            sleep 10
+          done
+          
+          # Run schema setup
+          echo "Setting up banking schema..."
+          psql -h postgres-service -U postgres -f /tmp/banking-schema.sql
+          
+          echo "PostgreSQL banking schema setup completed successfully!"
+        env:
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secrets
+              key: postgres-password
+        volumeMounts:
+        - name: schema-files
+          mountPath: /tmp/banking-schema.sql
+          subPath: banking-schema.sql
+      volumes:
+      - name: schema-files
+        configMap:
+          name: postgres-config
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgbouncer
+  namespace: postgres-system
+  labels:
+    app: pgbouncer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pgbouncer
+  template:
+    metadata:
+      labels:
+        app: pgbouncer
+    spec:
+      containers:
+      - name: pgbouncer
+        image: pgbouncer/pgbouncer:1.20.1
+        ports:
+        - containerPort: 5432
+          name: pgbouncer
+        env:
+        - name: DATABASES_HOST
+          value: "postgres-service"
+        - name: DATABASES_PORT
+          value: "5432"
+        - name: DATABASES_USER
+          value: "postgres"
+        - name: DATABASES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secrets
+              key: postgres-password
+        - name: DATABASES_DBNAME
+          value: "banking"
+        - name: POOL_MODE
+          value: "transaction"
+        - name: SERVER_RESET_QUERY
+          value: "DISCARD ALL"
+        - name: MAX_CLIENT_CONN
+          value: "1000"
+        - name: DEFAULT_POOL_SIZE
+          value: "100"
+        - name: MIN_POOL_SIZE
+          value: "10"
+        - name: RESERVE_POOL_SIZE
+          value: "20"
+        - name: RESERVE_POOL_TIMEOUT
+          value: "5"
+        - name: MAX_DB_CONNECTIONS
+          value: "100"
+        - name: MAX_USER_CONNECTIONS
+          value: "100"
+        - name: SERVER_ROUND_ROBIN
+          value: "1"
+        - name: LOG_CONNECTIONS
+          value: "1"
+        - name: LOG_DISCONNECTIONS
+          value: "1"
+        - name: LOG_POOLER_ERRORS
+          value: "1"
+        - name: STATS_PERIOD
+          value: "60"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          tcpSocket:
+            port: 5432
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 5432
+          initialDelaySeconds: 10
+          periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgbouncer
+  namespace: postgres-system
+  labels:
+    app: pgbouncer
+spec:
+  type: ClusterIP
+  ports:
+  - name: pgbouncer
+    port: 5432
+    targetPort: 5432
+  selector:
+    app: pgbouncer
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgres-pdb
+  namespace: postgres-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: postgresql
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-network-policy
+  namespace: postgres-system
+spec:
+  podSelector:
+    matchLabels:
+      app: postgresql
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: keycloak-system
+    - namespaceSelector:
+        matchLabels:
+          name: permify-system
+    - namespaceSelector:
+        matchLabels:
+          name: temporal-system
+    - namespaceSelector:
+        matchLabels:
+          name: dapr-system
+    - namespaceSelector:
+        matchLabels:
+          name: remittance-system
+    - podSelector:
+        matchLabels:
+          app: postgresql
+    - podSelector:
+        matchLabels:
+          app: pgbouncer
+    ports:
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 8008
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: etcd-system
+    ports:
+    - protocol: TCP
+      port: 2379
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgresql
+    ports:
+    - protocol: TCP
+      port: 5432
+    - protocol: TCP
+      port: 8008
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+
+---
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: postgres-metrics
+  namespace: postgres-system
+  labels:
+    app: postgresql
+spec:
+  selector:
+    matchLabels:
+      app: postgresql
+  endpoints:
+  - port: patroni
+    interval: 30s
+    path: /metrics
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-exporter
+  namespace: postgres-system
+  labels:
+    app: postgres-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-exporter
+  template:
+    metadata:
+      labels:
+        app: postgres-exporter
+    spec:
+      containers:
+      - name: postgres-exporter
+        image: prometheuscommunity/postgres-exporter:v0.13.2
+        ports:
+        - containerPort: 9187
+          name: metrics
+        env:
+        - name: DATA_SOURCE_NAME
+          value: "postgresql://postgres:$(POSTGRES_PASSWORD)@postgres-service:5432/banking?sslmode=disable"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-secrets
+              key: postgres-password
+        - name: PG_EXPORTER_EXTEND_QUERY_PATH
+          value: "/etc/postgres_exporter/queries.yaml"
+        volumeMounts:
+        - name: queries
+          mountPath: /etc/postgres_exporter/queries.yaml
+          subPath: queries.yaml
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: 9187
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: 9187
+          initialDelaySeconds: 10
+          periodSeconds: 5
+      volumes:
+      - name: queries
+        configMap:
+          name: postgres-exporter-queries
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-exporter-queries
+  namespace: postgres-system
+data:
+  queries.yaml: |
+    banking_accounts_total:
+      query: "SELECT account_type, status, COUNT(*) as count FROM banking.accounts GROUP BY account_type, status"
+      metrics:
+        - count:
+            usage: "GAUGE"
+            description: "Total number of banking accounts by type and status"
+      labels:
+        - account_type
+        - status
+    
+    banking_transactions_total:
+      query: "SELECT transaction_type, status, COUNT(*) as count FROM banking.transactions WHERE created_at >= NOW() - INTERVAL '24 hours' GROUP BY transaction_type, status"
+      metrics:
+        - count:
+            usage: "GAUGE"
+            description: "Total number of transactions in last 24 hours by type and status"
+      labels:
+        - transaction_type
+        - status
+    
+    banking_transaction_volume:
+      query: "SELECT transaction_type, SUM(amount) as volume FROM banking.transactions WHERE created_at >= NOW() - INTERVAL '24 hours' AND status = 'completed' GROUP BY transaction_type"
+      metrics:
+        - volume:
+            usage: "GAUGE"
+            description: "Total transaction volume in last 24 hours by type"
+      labels:
+        - transaction_type
+    
+    banking_agents_status:
+      query: "SELECT status, COUNT(*) as count FROM banking.agents GROUP BY status"
+      metrics:
+        - count:
+            usage: "GAUGE"
+            description: "Total number of agents by status"
+      labels:
+        - status
+    
+    banking_fraud_cases:
+      query: "SELECT status, severity, COUNT(*) as count FROM banking.fraud_cases WHERE created_at >= NOW() - INTERVAL '7 days' GROUP BY status, severity"
+      metrics:
+        - count:
+            usage: "GAUGE"
+            description: "Total number of fraud cases in last 7 days by status and severity"
+      labels:
+        - status
+        - severity
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-exporter
+  namespace: postgres-system
+  labels:
+    app: postgres-exporter
+spec:
+  ports:
+  - name: metrics
+    port: 9187
+    targetPort: 9187
+  selector:
+    app: postgres-exporter
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  namespace: postgres-system
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: postgres-backup
+            image: postgres:15.4
+            command:
+            - sh
+            - -c
+            - |
+              # Create backup directory
+              mkdir -p /backup/$(date +%Y-%m-%d)
+              
+              # Full database backup
+              pg_dumpall -h postgres-service -U postgres > /backup/$(date +%Y-%m-%d)/full_backup.sql
+              
+              # Individual database backups
+              pg_dump -h postgres-service -U postgres -d banking > /backup/$(date +%Y-%m-%d)/banking_backup.sql
+              pg_dump -h postgres-service -U postgres -d keycloak > /backup/$(date +%Y-%m-%d)/keycloak_backup.sql
+              pg_dump -h postgres-service -U postgres -d permify > /backup/$(date +%Y-%m-%d)/permify_backup.sql
+              pg_dump -h postgres-service -U postgres -d temporal > /backup/$(date +%Y-%m-%d)/temporal_backup.sql
+              
+              # Compress backups
+              cd /backup/$(date +%Y-%m-%d)
+              gzip *.sql
+              
+              # Clean up old backups (keep 30 days)
+              find /backup -type d -mtime +30 -exec rm -rf {} +
+              
+              echo "Backup completed successfully!"
+            env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secrets
+                  key: postgres-password
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backup
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: postgres-backup-pvc
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-backup-pvc
+  namespace: postgres-system
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 200Gi
+

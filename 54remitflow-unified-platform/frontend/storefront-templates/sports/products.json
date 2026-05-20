@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Running Shoes Pro",
+    "price": 25000,
+    "category": "Footwear",
+    "description": "Professional running shoes with cushioning",
+    "stock": 60
+  },
+  {
+    "name": "Yoga Mat Premium",
+    "price": 8500,
+    "category": "Equipment",
+    "description": "Non-slip yoga mat with carrying strap",
+    "stock": 100
+  }
+]

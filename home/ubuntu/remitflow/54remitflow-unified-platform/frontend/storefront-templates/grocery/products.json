@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Organic Tomatoes (1kg)",
+    "price": 800,
+    "category": "Fresh Produce",
+    "description": "Fresh organic tomatoes from local farms",
+    "stock": 150
+  },
+  {
+    "name": "Fresh Chicken (1kg)",
+    "price": 4500,
+    "category": "Meat & Poultry",
+    "description": "Locally raised, hormone-free chicken",
+    "stock": 80
+  }
+]

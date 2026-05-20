@@ -1,0 +1,483 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  PYTHON_VERSION: "3.11"
+  GO_VERSION: "1.21"
+  NODE_VERSION: "20"
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+  # ── Environment Validation ─────────────────────────────────────────────────
+  validate-env:
+    name: Validate Environment Secrets
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check required secrets are configured
+        run: |
+          MISSING=()
+          for secret in POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET_KEY ENCRYPTION_KEY \
+                        DOCKER_USERNAME DOCKER_PASSWORD KUBE_CONFIG_PROD SENTRY_DSN \
+                        WISE_API_KEY TWILIO_AUTH_TOKEN FIREBASE_SERVER_KEY; do
+            if [ -z "${!secret}" ]; then
+              MISSING+=("$secret")
+            fi
+          done
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "ERROR: The following required secrets are not configured in GitHub:"
+            printf '  - %s\n' "${MISSING[@]}"
+            exit 1
+          fi
+          echo "All required secrets are configured."
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          KUBE_CONFIG_PROD: ${{ secrets.KUBE_CONFIG_PROD }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          WISE_API_KEY: ${{ secrets.WISE_API_KEY }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          FIREBASE_SERVER_KEY: ${{ secrets.FIREBASE_SERVER_KEY }}
+
+  # ── Unit Tests ─────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r tests/requirements-test.txt
+      - name: Run unit tests with coverage
+        run: |
+          cd tests
+          pytest unit/ -v -m unit --cov=../backend --cov-report=xml --cov-fail-under=70
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./tests/coverage.xml
+          flags: unittests
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # ── Integration Tests ──────────────────────────────────────────────────────
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: test_password_ci
+          POSTGRES_USER: test_user
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r tests/requirements-test.txt
+      - name: Run database migrations
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          cd database
+          alembic upgrade head
+        env:
+          DATABASE_URL: postgresql://test_user:test_password_ci@localhost:5432/test_db
+      - name: Run integration tests
+        run: |
+          cd tests
+          pytest integration/ -v -m integration
+        env:
+          REDIS_URL: redis://localhost:6379
+          DATABASE_URL: postgresql://test_user:test_password_ci@localhost:5432/test_db
+          JWT_SECRET_KEY: ci-test-jwt-secret-key-not-for-production
+          ENCRYPTION_KEY: ci-test-encryption-key-not-for-production
+
+  # ── E2E Tests ──────────────────────────────────────────────────────────────
+  e2e-tests:
+    name: End-to-End Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r tests/requirements-test.txt
+      - name: Run E2E tests
+        run: |
+          cd tests
+          pytest e2e/ -v -m e2e --maxfail=3
+
+  # ── Performance Tests ──────────────────────────────────────────────────────
+  performance-tests:
+    name: Performance Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r tests/requirements-test.txt
+      - name: Run performance benchmarks
+        run: |
+          cd tests
+          pytest performance/ -v -m performance --benchmark-only
+
+  # ── Code Quality ───────────────────────────────────────────────────────────
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      - name: Install linting tools
+        run: pip install pylint black isort mypy flake8 bandit
+      - name: Run Black (format check)
+        run: black --check backend/
+      - name: Run isort (import order check)
+        run: isort --check-only backend/
+      - name: Run flake8 (style check)
+        run: flake8 backend/ --max-line-length=120
+      - name: Run pylint (quality check)
+        run: pylint backend/ --fail-under=7.0
+      - name: Run Bandit (security linting)
+        run: bandit -r backend/ -ll -x backend/tests/
+
+  # ── Frontend Tests ─────────────────────────────────────────────────────────
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: pwa/package-lock.json
+      - name: Install PWA dependencies
+        run: cd pwa && npm ci --frozen-lockfile
+      - name: Run PWA tests
+        run: cd pwa && npm test -- --watchAll=false --passWithNoTests
+      - name: Build PWA (verify build succeeds)
+        run: cd pwa && npm run build
+        env:
+          VITE_API_URL: https://api.remitflow.com
+          VITE_APP_ENV: production
+
+  # ── Mobile Tests ───────────────────────────────────────────────────────────
+  mobile-tests:
+    name: Mobile App Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/mobile-app/package-lock.json
+      - name: Install mobile dependencies
+        run: cd frontend/mobile-app && npm ci --frozen-lockfile
+      - name: Run mobile lint
+        run: cd frontend/mobile-app && npm run lint
+      - name: Run mobile tests
+        run: cd frontend/mobile-app && npm test -- --watchAll=false --passWithNoTests
+
+  # ── Security Scan ──────────────────────────────────────────────────────────
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Trivy vulnerability scanner (filesystem)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+      - name: Check for hardcoded secrets with gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Build Docker Images ────────────────────────────────────────────────────
+  build-images:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, code-quality, frontend-tests, mobile-tests, security-scan]
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        include:
+          - name: api
+            context: ./backend
+            dockerfile: ./backend/Dockerfile
+          - name: pwa
+            context: ./pwa
+            dockerfile: ./pwa/Dockerfile
+          - name: mobile-web
+            context: ./frontend/mobile-app
+            dockerfile: ./frontend/mobile-app/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKER_USERNAME }}/remitflow-${{ matrix.name }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build and push ${{ matrix.name }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          dockerfile: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VITE_API_URL=https://api.remitflow.com
+            VITE_APP_ENV=production
+            EXPO_PUBLIC_API_URL=https://api.remitflow.com
+
+  # ── Deploy to Staging ──────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-images]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: https://staging.remitflow.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.29.0'
+      - name: Configure kubectl for staging
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_STAGING }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.14.0'
+      - name: Run database migrations
+        run: |
+          kubectl run migration-job \
+            --image=${{ secrets.DOCKER_USERNAME }}/remitflow-api:latest \
+            --restart=Never \
+            --rm \
+            --wait \
+            --timeout=300s \
+            --env="DATABASE_URL=${{ secrets.STAGING_DATABASE_URL }}" \
+            -- python -m alembic upgrade head
+      - name: Deploy to staging via Helm
+        run: |
+          helm upgrade --install remitflow-staging \
+            ./deployment/helm/remittance-platform \
+            --namespace remitflow-staging \
+            --create-namespace \
+            --set image.tag=sha-${{ github.sha }} \
+            --set environment=staging \
+            --set api.replicaCount=1 \
+            --set secrets.postgresPassword="${{ secrets.STAGING_POSTGRES_PASSWORD }}" \
+            --set secrets.redisPassword="${{ secrets.STAGING_REDIS_PASSWORD }}" \
+            --set secrets.jwtSecretKey="${{ secrets.STAGING_JWT_SECRET_KEY }}" \
+            --set secrets.encryptionKey="${{ secrets.STAGING_ENCRYPTION_KEY }}" \
+            --set secrets.sentryDsn="${{ secrets.SENTRY_DSN }}" \
+            --set ingress.host=staging.remitflow.com \
+            --wait \
+            --timeout=10m
+      - name: Verify staging deployment
+        run: |
+          kubectl rollout status deployment/remitflow-api -n remitflow-staging --timeout=300s
+          kubectl rollout status deployment/remitflow-pwa -n remitflow-staging --timeout=300s
+          echo "Staging deployment successful: https://staging.remitflow.com"
+      - name: Run smoke tests against staging
+        run: |
+          sleep 30
+          curl -f https://staging.remitflow.com/health || exit 1
+          curl -f https://staging-api.remitflow.com/health || exit 1
+          echo "Smoke tests passed."
+
+  # ── Deploy to Production ───────────────────────────────────────────────────
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://app.remitflow.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.29.0'
+      - name: Configure kubectl for production
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: 'v3.14.0'
+      - name: Run database migrations (production)
+        run: |
+          kubectl run migration-prod-${{ github.run_number }} \
+            --image=${{ secrets.DOCKER_USERNAME }}/remitflow-api:sha-${{ github.sha }} \
+            --restart=Never \
+            --rm \
+            --wait \
+            --timeout=600s \
+            --namespace=remitflow-prod \
+            --env="DATABASE_URL=${{ secrets.PROD_DATABASE_URL }}" \
+            -- python -m alembic upgrade head
+      - name: Deploy to production via Helm (rolling update)
+        run: |
+          helm upgrade --install remitflow-prod \
+            ./deployment/helm/remittance-platform \
+            --namespace remitflow-prod \
+            --create-namespace \
+            --set image.tag=sha-${{ github.sha }} \
+            --set environment=production \
+            --set api.replicaCount=3 \
+            --set pwa.replicaCount=2 \
+            --set secrets.postgresPassword="${{ secrets.POSTGRES_PASSWORD }}" \
+            --set secrets.redisPassword="${{ secrets.REDIS_PASSWORD }}" \
+            --set secrets.jwtSecretKey="${{ secrets.JWT_SECRET_KEY }}" \
+            --set secrets.encryptionKey="${{ secrets.ENCRYPTION_KEY }}" \
+            --set secrets.sentryDsn="${{ secrets.SENTRY_DSN }}" \
+            --set secrets.wiseApiKey="${{ secrets.WISE_API_KEY }}" \
+            --set secrets.twilioAuthToken="${{ secrets.TWILIO_AUTH_TOKEN }}" \
+            --set secrets.firebaseServerKey="${{ secrets.FIREBASE_SERVER_KEY }}" \
+            --set secrets.circleApiKey="${{ secrets.CIRCLE_API_KEY }}" \
+            --set secrets.infuraProjectId="${{ secrets.INFURA_PROJECT_ID }}" \
+            --set secrets.africasTalkingApiKey="${{ secrets.AFRICAS_TALKING_API_KEY }}" \
+            --set secrets.paystackWebhookSecret="${{ secrets.PAYSTACK_WEBHOOK_SECRET }}" \
+            --set secrets.flutterwaveWebhookSecret="${{ secrets.FLUTTERWAVE_WEBHOOK_SECRET }}" \
+            --set secrets.stripeWebhookSecret="${{ secrets.STRIPE_WEBHOOK_SECRET }}" \
+            --set ingress.host=app.remitflow.com \
+            --set ingress.apiHost=api.remitflow.com \
+            --set ingress.tls.enabled=true \
+            --wait \
+            --timeout=15m
+      - name: Verify production deployment
+        run: |
+          kubectl rollout status deployment/remitflow-api -n remitflow-prod --timeout=600s
+          kubectl rollout status deployment/remitflow-pwa -n remitflow-prod --timeout=600s
+          echo "Production deployment successful."
+      - name: Run production smoke tests
+        run: |
+          sleep 60
+          curl -f https://api.remitflow.com/health || exit 1
+          curl -f https://app.remitflow.com/ || exit 1
+          echo "Production smoke tests passed."
+      - name: Notify deployment success
+        if: success()
+        run: |
+          echo "Deployment sha-${{ github.sha }} to production succeeded."
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Deployment failed — rolling back to previous release..."
+          helm rollback remitflow-prod --namespace remitflow-prod
+          echo "Rollback completed."
+
+  # ── Mobile App Build (EAS) ─────────────────────────────────────────────────
+  build-mobile:
+    name: Build Mobile App (EAS)
+    runs-on: ubuntu-latest
+    needs: [unit-tests, mobile-tests, security-scan]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/mobile-app/package-lock.json
+      - name: Install dependencies
+        run: cd frontend/mobile-app && npm ci --frozen-lockfile
+      - name: Install EAS CLI
+        run: npm install -g eas-cli
+      - name: Build Android (EAS)
+        run: |
+          cd frontend/mobile-app
+          eas build --platform android --profile production --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EXPO_PUBLIC_API_URL: https://api.remitflow.com
+          EXPO_PUBLIC_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}

@@ -1,0 +1,536 @@
+version: '3.8'
+
+services:
+  # Core Infrastructure Services
+  redis-resilient:
+    image: redis:7-alpine
+    container_name: redis-resilient
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - ./config/redis.conf:/usr/local/etc/redis/redis.conf
+    command: redis-server /usr/local/etc/redis/redis.conf
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  postgres-resilient:
+    image: postgres:15-alpine
+    container_name: postgres-resilient
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: remittance_resilient
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Power Management Service
+  power-manager:
+    build:
+      context: ./power-management
+      dockerfile: Dockerfile
+    container_name: power-manager
+    restart: unless-stopped
+    environment:
+      - SERVICE_PORT=8090
+      - DATABASE_URL=postgresql://postgres:postgres123@postgres-resilient:5432/remittance_resilient
+      - REDIS_URL=redis://redis-resilient:6379
+      - UPS_DEVICE=/dev/ttyUSB0
+      - SOLAR_CONTROLLER_IP=192.168.1.100
+      - GENERATOR_CONTROL_IP=192.168.1.101
+      - POWER_MONITORING_ENABLED=true
+      - BATTERY_OPTIMIZATION_ENABLED=true
+      - EMERGENCY_SHUTDOWN_ENABLED=true
+    ports:
+      - "8090:8090"
+    volumes:
+      - /dev:/dev
+      - ./logs/power-manager:/app/logs
+      - ./config/power:/app/config
+    privileged: true
+    depends_on:
+      - redis-resilient
+      - postgres-resilient
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Ultra-Low Bandwidth Service
+  ultra-bandwidth:
+    build:
+      context: ./connectivity-enhancement
+      dockerfile: Dockerfile
+    container_name: ultra-bandwidth
+    restart: unless-stopped
+    environment:
+      - SERVICE_PORT=8150
+      - DATABASE_URL=postgresql://postgres:postgres123@postgres-resilient:5432/remittance_resilient
+      - REDIS_URL=redis://redis-resilient:6379
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - SMS_GATEWAY_URL=${SMS_GATEWAY_URL}
+      - SMS_GATEWAY_API_KEY=${SMS_GATEWAY_API_KEY}
+      - MTN_USSD_GATEWAY=${MTN_USSD_GATEWAY}
+      - AIRTEL_USSD_GATEWAY=${AIRTEL_USSD_GATEWAY}
+      - GLO_USSD_GATEWAY=${GLO_USSD_GATEWAY}
+      - NINMOBILE_USSD_GATEWAY=${NINMOBILE_USSD_GATEWAY}
+    ports:
+      - "8150:8150"
+    volumes:
+      - ./logs/ultra-bandwidth:/app/logs
+      - ./config/connectivity:/app/config
+    depends_on:
+      - redis-resilient
+      - postgres-resilient
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8150/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Complete Offline Service
+  offline-service:
+    build:
+      context: ./offline-enhancement
+      dockerfile: Dockerfile
+    container_name: offline-service
+    restart: unless-stopped
+    environment:
+      - PORT=8095
+      - OFFLINE_DB_PATH=/app/data/complete_offline.db
+      - AGENT_ID=${AGENT_ID:-agent_001}
+      - MAX_OFFLINE_TRANSACTIONS=10000
+      - MAX_OFFLINE_CUSTOMERS=5000
+      - MAX_OFFLINE_DOCUMENTS=2000
+      - FRAUD_DETECTION_ENABLED=true
+      - BIOMETRIC_ENABLED=true
+      - DOCUMENT_PROCESSING_ENABLED=true
+      - COMPLIANCE_ENABLED=true
+      - BUSINESS_INTELLIGENCE_ENABLED=true
+      - AUTO_SYNC_ENABLED=true
+    ports:
+      - "8095:8095"
+    volumes:
+      - offline_data:/app/data
+      - ./logs/offline-service:/app/logs
+      - ./config/offline:/app/config
+      - ./documents:/app/documents
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8095/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Enhanced KYB Service with Resilience
+  kyb-service-resilient:
+    build:
+      context: ./kyb-resilient
+      dockerfile: Dockerfile
+    container_name: kyb-service-resilient
+    restart: unless-stopped
+    environment:
+      - SERVICE_PORT=8081
+      - DATABASE_URL=postgresql://postgres:postgres123@postgres-resilient:5432/remittance_resilient
+      - REDIS_URL=redis://redis-resilient:6379
+      - POWER_MANAGER_URL=http://power-manager:8090
+      - BANDWIDTH_SERVICE_URL=http://ultra-bandwidth:8150
+      - OFFLINE_SERVICE_URL=http://offline-service:8095
+      - RESILIENCE_MODE=enabled
+      - OFFLINE_FALLBACK=enabled
+      - POWER_AWARE=enabled
+      - BANDWIDTH_OPTIMIZATION=enabled
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./logs/kyb-resilient:/app/logs
+      - ./config/kyb:/app/config
+    depends_on:
+      - redis-resilient
+      - postgres-resilient
+      - power-manager
+      - ultra-bandwidth
+      - offline-service
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # TigerBeetle Zig Core (Enhanced)
+  tigerbeetle-core:
+    build:
+      context: ./tigerbeetle-enhanced
+      dockerfile: Dockerfile.zig
+    container_name: tigerbeetle-core
+    restart: unless-stopped
+    environment:
+      - TIGERBEETLE_PORT=3000
+      - TIGERBEETLE_DATA_DIR=/app/data
+      - POWER_AWARE_MODE=enabled
+      - OFFLINE_PERSISTENCE=enabled
+      - RESILIENCE_FEATURES=enabled
+    ports:
+      - "3000:3000"
+    volumes:
+      - tigerbeetle_data:/app/data
+      - ./logs/tigerbeetle-core:/app/logs
+      - ./config/tigerbeetle:/app/config
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # TigerBeetle Go Edge (Enhanced)
+  tigerbeetle-edge:
+    build:
+      context: ./tigerbeetle-enhanced
+      dockerfile: Dockerfile.go
+    container_name: tigerbeetle-edge
+    restart: unless-stopped
+    environment:
+      - SERVICE_PORT=3001
+      - TIGERBEETLE_CORE_URL=http://tigerbeetle-core:3000
+      - DATABASE_URL=postgresql://postgres:postgres123@postgres-resilient:5432/remittance_resilient
+      - REDIS_URL=redis://redis-resilient:6379
+      - POWER_MANAGER_URL=http://power-manager:8090
+      - BANDWIDTH_SERVICE_URL=http://ultra-bandwidth:8150
+      - OFFLINE_SERVICE_URL=http://offline-service:8095
+      - SYNC_ENABLED=true
+      - RESILIENCE_MODE=enabled
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./logs/tigerbeetle-edge:/app/logs
+      - ./config/tigerbeetle-edge:/app/config
+    depends_on:
+      - tigerbeetle-core
+      - redis-resilient
+      - postgres-resilient
+      - power-manager
+      - ultra-bandwidth
+      - offline-service
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Enhanced API Gateway
+  api-gateway-resilient:
+    build:
+      context: ./api-gateway-enhanced
+      dockerfile: Dockerfile
+    container_name: api-gateway-resilient
+    restart: unless-stopped
+    environment:
+      - GATEWAY_PORT=8000
+      - KYB_SERVICE_URL=http://kyb-service-resilient:8081
+      - TIGERBEETLE_ZIG_URL=http://tigerbeetle-core:3000
+      - TIGERBEETLE_GO_URL=http://tigerbeetle-edge:3001
+      - POWER_MANAGER_URL=http://power-manager:8090
+      - BANDWIDTH_SERVICE_URL=http://ultra-bandwidth:8150
+      - OFFLINE_SERVICE_URL=http://offline-service:8095
+      - REDIS_URL=redis://redis-resilient:6379
+      - RESILIENCE_MODE=enabled
+      - CIRCUIT_BREAKER_ENABLED=true
+      - ADAPTIVE_ROUTING=enabled
+      - POWER_AWARE_ROUTING=enabled
+      - BANDWIDTH_OPTIMIZATION=enabled
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs/api-gateway:/app/logs
+      - ./config/gateway:/app/config
+    depends_on:
+      - kyb-service-resilient
+      - tigerbeetle-core
+      - tigerbeetle-edge
+      - power-manager
+      - ultra-bandwidth
+      - offline-service
+      - redis-resilient
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Load Balancer with Resilience
+  haproxy-resilient:
+    image: haproxy:2.8-alpine
+    container_name: haproxy-resilient
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8404:8404"  # HAProxy stats
+    volumes:
+      - ./config/haproxy-resilient.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./ssl:/etc/ssl/certs
+      - ./logs/haproxy:/var/log/haproxy
+    depends_on:
+      - api-gateway-resilient
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8404/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Monitoring Stack
+  prometheus-resilient:
+    image: prom/prometheus:latest
+    container_name: prometheus-resilient
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus-resilient.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  grafana-resilient:
+    image: grafana/grafana:latest
+    container_name: grafana-resilient
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus-resilient
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Elasticsearch for Logging
+  elasticsearch-resilient:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: elasticsearch-resilient
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Kibana for Log Visualization
+  kibana-resilient:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: kibana-resilient
+    restart: unless-stopped
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch-resilient:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch-resilient
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5601/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Logstash for Log Processing
+  logstash-resilient:
+    image: docker.elastic.co/logstash/logstash:8.11.0
+    container_name: logstash-resilient
+    restart: unless-stopped
+    volumes:
+      - ./config/logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./config/logstash/config:/usr/share/logstash/config:ro
+      - ./logs:/app/logs:ro
+    depends_on:
+      - elasticsearch-resilient
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9600/_node/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Network Monitoring
+  network-monitor:
+    build:
+      context: ./network-monitoring
+      dockerfile: Dockerfile
+    container_name: network-monitor
+    restart: unless-stopped
+    environment:
+      - MONITOR_PORT=8200
+      - REDIS_URL=redis://redis-resilient:6379
+      - PROMETHEUS_URL=http://prometheus-resilient:9090
+      - CHECK_INTERVAL=30s
+      - NETWORK_PROVIDERS=MTN,AIRTEL,GLO,9MOBILE
+    ports:
+      - "8200:8200"
+    volumes:
+      - ./logs/network-monitor:/app/logs
+      - ./config/network:/app/config
+    depends_on:
+      - redis-resilient
+      - prometheus-resilient
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Backup Service
+  backup-service:
+    build:
+      context: ./backup-service
+      dockerfile: Dockerfile
+    container_name: backup-service
+    restart: unless-stopped
+    environment:
+      - BACKUP_INTERVAL=1h
+      - BACKUP_RETENTION=30d
+      - DATABASE_URL=postgresql://postgres:postgres123@postgres-resilient:5432/remittance_resilient
+      - REDIS_URL=redis://redis-resilient:6379
+      - BACKUP_STORAGE=/app/backups
+      - CLOUD_BACKUP_ENABLED=true
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_S3_BUCKET=${AWS_S3_BUCKET}
+    volumes:
+      - backup_data:/app/backups
+      - postgres_data:/app/postgres-data:ro
+      - redis_data:/app/redis-data:ro
+      - offline_data:/app/offline-data:ro
+      - tigerbeetle_data:/app/tigerbeetle-data:ro
+      - ./logs/backup-service:/app/logs
+    depends_on:
+      - postgres-resilient
+      - redis-resilient
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8300/health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  # Health Check Service
+  health-checker:
+    build:
+      context: ./health-checker
+      dockerfile: Dockerfile
+    container_name: health-checker
+    restart: unless-stopped
+    environment:
+      - HEALTH_CHECK_PORT=8400
+      - CHECK_INTERVAL=30s
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL}
+      - SERVICES_TO_MONITOR=power-manager,ultra-bandwidth,offline-service,kyb-service-resilient,tigerbeetle-core,tigerbeetle-edge,api-gateway-resilient
+    ports:
+      - "8400:8400"
+    volumes:
+      - ./logs/health-checker:/app/logs
+      - ./config/health:/app/config
+    networks:
+      - resilient-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8400/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  resilient-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  offline_data:
+    driver: local
+  tigerbeetle_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  elasticsearch_data:
+    driver: local
+  backup_data:
+    driver: local
+

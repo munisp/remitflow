@@ -1,0 +1,225 @@
+{
+  "metadata": {
+    "demo_executed": "2025-08-29T18:55:26.441569",
+    "platform_version": "v2.0.0-diaspora",
+    "demo_duration_seconds": 5.0,
+    "features_demonstrated": 6
+  },
+  "onboarding_result": {
+    "customer_id": "DIAS_EFEDA93F",
+    "onboarding_status": "INITIATED",
+    "kyc_status": "APPROVED",
+    "kyc_checks_completed": [
+      "SSN verification - PASSED",
+      "US address verification - PASSED",
+      "Employment verification - PASSED",
+      "OFAC sanctions screening - CLEAR",
+      "NIN verification - PASSED",
+      "BVN verification - PASSED",
+      "Passport verification - PASSED",
+      "Nigerian address verification - PASSED"
+    ],
+    "kyc_checks_pending": [],
+    "account_numbers": {
+      "usd_account": "USD3561154049",
+      "ngn_account": "NGN3561154050",
+      "eur_account": "EUR3561154051",
+      "gbp_account": "GBP3561154052",
+      "routing_number": "026073150",
+      "swift_code": "NEOBNGLA"
+    },
+    "virtual_card": {
+      "card_id": "CARD_ECCE12DD",
+      "customer_id": "DIAS_EFEDA93F",
+      "card_number": "4532758380085166",
+      "expiry_date": "08/28",
+      "cvv": "581",
+      "card_type": "VIRTUAL_VISA",
+      "status": "PENDING_ACTIVATION",
+      "spending_limit_usd": 5000.0,
+      "monthly_limit_usd": 15000.0,
+      "usage_restrictions": [
+        "NIGERIA_ONLY",
+        "ONLINE_PAYMENTS",
+        "ATM_WITHDRAWALS"
+      ],
+      "linked_account": "USD3561154049",
+      "created_at": "2025-08-29T18:55:24.640121"
+    },
+    "estimated_completion_time": "24-48 hours",
+    "next_steps": [
+      "Complete document verification",
+      "Verify US address",
+      "Complete employment verification",
+      "Fund initial deposit",
+      "Activate virtual card"
+    ],
+    "compliance_status": "UNDER_REVIEW",
+    "created_at": "2025-08-29T18:55:24.640216"
+  },
+  "transfer_result": {
+    "transaction_id": "TXN_D81777ED",
+    "status": "COMPLETED",
+    "amount_usd": 500.0,
+    "amount_ngn": 412750.0,
+    "exchange_rate": 825.5,
+    "fees_usd": 4.99,
+    "net_amount_usd": 495.01,
+    "estimated_delivery": "2-5 minutes",
+    "beneficiary_name": "Folake Johnson",
+    "reference_number": "TXN_D81777ED",
+    "compliance_status": "APPROVED",
+    "processing_details": {
+      "success": true,
+      "network_used": "REAL_TIME_PAYMENTS",
+      "processing_time": "2-5 minutes",
+      "confirmation_code": "CONF_7D8C8D88",
+      "beneficiary_notification": "SMS and email sent",
+      "tracking_reference": "TRK_A3473D"
+    }
+  },
+  "activation_result": {
+    "card_id": "CARD_ECCE12DD",
+    "status": "ACTIVE",
+    "card_number_masked": "****-****-****-5166",
+    "expiry_date": "08/28",
+    "spending_limits": {
+      "daily_usd": 5000.0,
+      "monthly_usd": 15000.0,
+      "atm_daily_ngn": 200000,
+      "pos_daily_ngn": 500000
+    },
+    "usage_locations": [
+      "Nigeria"
+    ],
+    "supported_merchants": [
+      "GROCERY_STORES",
+      "RESTAURANTS",
+      "FUEL_STATIONS",
+      "ONLINE_MERCHANTS",
+      "ATM_WITHDRAWALS",
+      "UTILITY_PAYMENTS",
+      "MOBILE_MONEY"
+    ],
+    "security_features": [
+      "3D_SECURE",
+      "TRANSACTION_ALERTS",
+      "LOCATION_VERIFICATION",
+      "VELOCITY_CHECKING"
+    ],
+    "mobile_app_integration": true,
+    "contactless_enabled": true,
+    "activation_date": "2025-08-29T18:55:25.640787"
+  },
+  "payment_result": {
+    "payment_id": "PAY_6C4B94FA",
+    "status": "APPROVED",
+    "amount_usd": 25.0,
+    "amount_ngn": 20637.5,
+    "exchange_rate": 825.5,
+    "merchant_name": "Shoprite Lagos",
+    "merchant_location": "NIGERIA",
+    "transaction_date": "2025-08-29T18:55:26.441274",
+    "authorization_code": "AUTH478065",
+    "reference_number": "REF8D6D2B96",
+    "remaining_daily_limit": 4975.0
+  },
+  "dashboard_data": {
+    "customer_info": {
+      "customer_id": "DIAS_EFEDA93F",
+      "full_name": "Adebayo Johnson",
+      "email": "adebayo.johnson@email.com",
+      "residence_country": "USA",
+      "kyc_status": "APPROVED",
+      "risk_rating": "MEDIUM",
+      "account_status": "ACTIVE",
+      "member_since": "2025-08-29T18:55:21.438537"
+    },
+    "account_balances": {
+      "usd_balance": 6380.41205463019,
+      "ngn_balance": 7248439.449276172,
+      "last_updated": "2025-08-29T18:55:26.441395"
+    },
+    "virtual_cards": [
+      {
+        "card_id": "CARD_ECCE12DD",
+        "card_number_masked": "****-****-****-5166",
+        "status": "ACTIVE",
+        "spending_limit_usd": 5000.0,
+        "monthly_limit_usd": 15000.0,
+        "expiry_date": "08/28"
+      }
+    ],
+    "transaction_summary": {
+      "total_transactions": 1,
+      "total_sent_usd": 500.0,
+      "total_fees_paid_usd": 4.99,
+      "average_transaction_usd": 500.0,
+      "this_month_transactions": 1
+    },
+    "recent_transactions": [
+      {
+        "transaction_id": "TXN_D81777ED",
+        "amount_usd": 500.0,
+        "amount_ngn": 412750.0,
+        "beneficiary_name": "Folake Johnson",
+        "status": "COMPLETED",
+        "created_at": "2025-08-29T18:55:24.640354",
+        "completed_at": "2025-08-29T18:55:25.640598"
+      }
+    ],
+    "exchange_rates": {
+      "usd_ngn": 825.5,
+      "last_updated": "2025-08-29T18:55:21.438500"
+    },
+    "compliance_status": {
+      "kyc_approved": true,
+      "documents_required": [],
+      "next_review_date": "2026-08-29"
+    }
+  },
+  "platform_capabilities": {
+    "kyc_compliance": [
+      "USA",
+      "Nigeria",
+      "Multi-jurisdiction"
+    ],
+    "payment_networks": [
+      "SWIFT",
+      "NIBSS",
+      "Real-time Payments"
+    ],
+    "supported_currencies": [
+      "USD",
+      "NGN",
+      "EUR",
+      "GBP"
+    ],
+    "virtual_card_features": [
+      "Nigeria-only usage",
+      "Real-time notifications",
+      "Spending controls"
+    ],
+    "compliance_features": [
+      "AML monitoring",
+      "OFAC screening",
+      "CTR reporting"
+    ],
+    "security_features": [
+      "3D Secure",
+      "Transaction alerts",
+      "Fraud detection"
+    ]
+  },
+  "business_metrics": {
+    "target_market_size": "17+ million Nigerian diaspora",
+    "average_remittance_usd": 500,
+    "estimated_monthly_volume": "50,000+ transactions",
+    "competitive_advantages": [
+      "Lowest fees in market",
+      "Fastest transfer times",
+      "Complete compliance coverage",
+      "Virtual card integration"
+    ]
+  }
+}

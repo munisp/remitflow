@@ -1,0 +1,49 @@
+{
+  "results": [
+    {
+      "input": "LoginScreen",
+      "output": {
+        "screen_name": "LoginScreen",
+        "file_path": "/home/ubuntu/file_path(1)/0_UpSpf6Yes1YXjLE24C1klI_1761591841175_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc2NyZWVucy9BdXRoL0xvZ2luU2NyZWVu.tsx",
+        "features": "TypeScript implementation; React Native Paper UI; react-hook-form validation with yup; Mocked Redux integration; Mocked Biometric authentication (Face ID/Fingerprint); Loading states and error handling; Responsive design with SafeArea; Navigation to Home/Register/Forgot Password (mocked)."
+      },
+      "error": ""
+    },
+    {
+      "input": "RegisterScreen",
+      "output": {
+        "screen_name": "RegisterScreen",
+        "file_path": "/home/ubuntu/file_path(1)/1_ulUdME2w8FQqgfUwaiqQdG_1761591828143_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc2NyZWVucy9BdXRoL1JlZ2lzdGVyU2NyZWVu.tsx",
+        "features": "TypeScript, React Native Paper UI, react-hook-form with yup validation, Redux integration (mocked), Biometric authentication setup (mocked), Error handling, Loading states, Navigation to LoginScreen, Responsive design with ScrollView and useTheme."
+      },
+      "error": ""
+    },
+    {
+      "input": "ForgotPasswordScreen",
+      "output": {
+        "screen_name": "ForgotPasswordScreen",
+        "file_path": "/home/ubuntu/file_path(1)/2_ZFUY6GxdSkBbb12lEox3R3_1761591835058_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc2NyZWVucy9BdXRoL0ZvcmdvdFBhc3N3b3JkU2NyZWVu.tsx",
+        "features": "- Full TypeScript implementation\n- React Native Paper UI components\n- Form validation with react-hook-form (email required and format validation)\n- Redux integration (uses `useSelector` for loading/error state and `useDispatch` for `forgotPassword` action)\n- Error handling (displays Redux error state with `Alert` and clears error)\n- Loading states (submit button disabled and shows spinner when loading)\n- Navigation (uses `useNavigation` and `Appbar.BackAction` to go back/navigate to Login)\n- Responsive design (uses `KeyboardAvoidingView` for keyboard responsiveness)\n- Biometric authentication is not applicable for a simple password reset screen, so it was omitted."
+      },
+      "error": ""
+    },
+    {
+      "input": "BiometricSetupScreen",
+      "output": {
+        "screen_name": "BiometricSetupScreen",
+        "file_path": "/home/ubuntu/file_path(1)/3_l3ji9BLX31FGZUZiR3HYoO_1761591832348_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc2NyZWVucy9BdXRoL0Jpb21ldHJpY1NldHVwU2NyZWVu.tsx",
+        "features": "TypeScript implementation; React Native Paper UI components; Biometric authentication using expo-local-authentication; Mock Redux integration (useAppSelector, useAppDispatch, mock actions); Error handling and loading states; Navigation using React Navigation (mocked); Responsive design with StyleSheet."
+      },
+      "error": ""
+    },
+    {
+      "input": "PINSetupScreen",
+      "output": {
+        "screen_name": "PINSetupScreen",
+        "file_path": "/home/ubuntu/file_path(1)/4_gCVYT8TKMd3qwVrBK4YUyt_1761591830785_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc2NyZWVucy9BdXRoL1BJTlNldHVwU2NyZWVu.tsx",
+        "features": "PIN setup with 4-6 digit validation, confirmation check, React Native Paper UI, react-hook-form for validation, Redux integration (mocked for context), loading/error states, navigation, and optional biometric authentication setup using expo-local-authentication."
+      },
+      "error": ""
+    }
+  ]
+}

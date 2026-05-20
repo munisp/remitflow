@@ -1,0 +1,58 @@
+{
+  "results": [
+    {
+      "input": "auth",
+      "output": {
+        "slice_name": "auth",
+        "file_path": "/home/ubuntu/file_path/0_MovJlxj0GVDPcWp3BgE3Gs_1761591776040_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc3RvcmUvc2xpY2VzL2F1dGhTbGljZQ.ts",
+        "features": "TypeScript types for state and user, initial state, async thunks (loginUser, registerUser, logoutUser), synchronous reducers (clearAuthError, setUserFromStorage), extra reducers for handling thunk lifecycle (pending, fulfilled, rejected), selectors (selectIsAuthenticated, selectAuthUser, selectAuthToken, selectAuthLoading, selectAuthError), error handling, and loading states."
+      },
+      "error": ""
+    },
+    {
+      "input": "transaction",
+      "output": {
+        "slice_name": "transaction",
+        "file_path": "/home/ubuntu/file_path/1_j55AXmpkrgeB7wSnxhT7nu_1761591772019_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc3RvcmUvc2xpY2VzL3RyYW5zYWN0aW9uU2xpY2U.ts",
+        "features": "TypeScript interfaces for Transaction and TransactionState; Initial state definition; Async thunks for fetchTransactions, createTransaction, updateTransaction, and deleteTransaction; Reducers for handling pending, fulfilled, and rejected states for all thunks; Synchronous reducers for local state manipulation (clear, local update/delete); Selectors for accessing transactions, loading states, errors, and total balance."
+      },
+      "error": ""
+    },
+    {
+      "input": "customer",
+      "output": {
+        "slice_name": "customer",
+        "file_path": "/home/ubuntu/file_path/2_aI2di0i0Bf0yypLpL6Oxcp_1761591766239_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc3RvcmUvc2xpY2VzL2N1c3RvbWVyU2xpY2U.ts",
+        "features": "TypeScript interfaces for Customer and CustomerState, initial state, async thunks for fetchCustomer, createCustomer, updateCustomer, and deleteCustomer (CRUD operations), standard reducers (clearCustomer, setCustomer, clearError), extraReducers to handle all thunk lifecycle actions (pending, fulfilled, rejected) for loading and error states, and comprehensive selectors."
+      },
+      "error": ""
+    },
+    {
+      "input": "commission",
+      "output": {
+        "slice_name": "commission",
+        "file_path": "/home/ubuntu/file_path/3_QK0DqCTx3z55TT4nSnXemI_1761591768137_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc3RvcmUvc2xpY2VzL2NvbW1pc3Npb25TbGljZQ.ts",
+        "features": "TypeScript types for Commission, initial state, async thunks for CRUD (fetch, create, update, delete), reducers to handle thunk lifecycle (pending, fulfilled, rejected) and local state changes (selectCommission, clearError), selectors (all, loading, error, selected, paid, pending), and integrated loading/error states."
+      },
+      "error": ""
+    },
+    {
+      "input": "offline",
+      "output": {
+        "slice_name": "offline",
+        "file_path": "/home/ubuntu/file_path/4_cXhlxCuJV7HwnYoE6kD5Qm_1761591762834_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc3RvcmUvc2xpY2VzL29mZmxpbmVTbGljZQ.ts",
+        "features": "Initial state with TypeScript types, `syncOfflineData` async thunk with loading and error states, CRUD reducers (`addItem`, `updateItem`, `removeItem`, `clearSyncedItems`), custom error handling (`setOfflineError`), and comprehensive selectors."
+      },
+      "error": ""
+    },
+    {
+      "input": "settings",
+      "output": {
+        "slice_name": "settingsSlice",
+        "file_path": "/home/ubuntu/file_path/5_MR0445rCjGaJDKgjiYuj9a_1761591765293_na1fn_L2hvbWUvdWJ1bnR1L2FnZW50LWJhbmtpbmctcGxhdGZvcm0vZnJvbnRlbmQvbW9iaWxlLWFwcC1jb21wbGV0ZS9zcmMvc3RvcmUvc2xpY2VzL3NldHRpbmdzU2xpY2U.ts",
+        "features": "TypeScript interfaces (AppSettings, SettingsState), initial state, two async thunks (fetchSettings, updateSettings) for simulated API calls, main slice with synchronous reducers (clearSettingsError, setLocalLanguage), extraReducers for handling thunk lifecycle (pending, fulfilled, rejected) with loading and error states, and multiple selectors."
+      },
+      "error": ""
+    }
+  ]
+}

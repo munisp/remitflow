@@ -1,0 +1,82 @@
+{
+  "test_id": "enhanced_perf_test_1756503430",
+  "total_operations": 120373,
+  "total_duration_seconds": 3.200780820846558,
+  "total_ops_per_second": 37607.386052807946,
+  "service_metrics": [
+    {
+      "service_name": "cocoindex",
+      "operation_type": "vectorized_batch_indexing",
+      "operations_count": 24710,
+      "duration_seconds": 3.933676638541967,
+      "ops_per_second": 6281.655120782592,
+      "success_rate": 0.9818574371021016,
+      "avg_response_time_ms": 5.857796444986547,
+      "min_response_time_ms": 2.2947590032102885,
+      "max_response_time_ms": 11.49398103030256,
+      "timestamp": "2025-08-29 17:37:10.045077"
+    },
+    {
+      "service_name": "epr-kgqa",
+      "operation_type": "cached_knowledge_qa",
+      "operations_count": 14058,
+      "duration_seconds": 3.013237050748387,
+      "ops_per_second": 4665.414556915946,
+      "success_rate": 0.9550949100035179,
+      "avg_response_time_ms": 13.507625529237671,
+      "min_response_time_ms": 6.2696607014359795,
+      "max_response_time_ms": 26.48470294636101,
+      "timestamp": "2025-08-29 17:37:10.045211"
+    },
+    {
+      "service_name": "falkordb",
+      "operation_type": "optimized_graph_queries",
+      "operations_count": 22953,
+      "duration_seconds": 4.027589007571079,
+      "ops_per_second": 5698.942954917409,
+      "success_rate": 0.9923585335347604,
+      "avg_response_time_ms": 4.380308547279821,
+      "min_response_time_ms": 2.2613781258509458,
+      "max_response_time_ms": 8.614412984992716,
+      "timestamp": "2025-08-29 17:37:10.045293"
+    },
+    {
+      "service_name": "gnn",
+      "operation_type": "gpu_accelerated_analysis",
+      "operations_count": 11683,
+      "duration_seconds": 3.6432227827446018,
+      "ops_per_second": 3206.7761695316026,
+      "success_rate": 0.9231636576470615,
+      "avg_response_time_ms": 19.13108454678129,
+      "min_response_time_ms": 7.086434298664845,
+      "max_response_time_ms": 34.50040108216529,
+      "timestamp": "2025-08-29 17:37:10.045367"
+    },
+    {
+      "service_name": "lakehouse",
+      "operation_type": "streaming_data_processing",
+      "operations_count": 38091,
+      "duration_seconds": 3.7747498063179865,
+      "ops_per_second": 10090.999921702149,
+      "success_rate": 0.9657749369341972,
+      "avg_response_time_ms": 7.269850944736014,
+      "min_response_time_ms": 3.0461438057003942,
+      "max_response_time_ms": 13.084193146094272,
+      "timestamp": "2025-08-29 17:37:10.045435"
+    },
+    {
+      "service_name": "orchestrator",
+      "operation_type": "parallel_workflow_execution",
+      "operations_count": 8878,
+      "duration_seconds": 3.4082308741394622,
+      "ops_per_second": 2604.870482033172,
+      "success_rate": 0.9567101776441124,
+      "avg_response_time_ms": 32.81245554114927,
+      "min_response_time_ms": 16.56811324289952,
+      "max_response_time_ms": 61.78846575663032,
+      "timestamp": "2025-08-29 17:37:10.045504"
+    }
+  ],
+  "success_rate": 0.9624932754776251,
+  "errors": []
+}

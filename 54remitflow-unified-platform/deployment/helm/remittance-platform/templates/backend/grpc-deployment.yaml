@@ -1,0 +1,54 @@
+{{- if .Values.backend.grpc.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "remittance-platform.fullname" . }}-grpc
+  labels:
+    {{- include "remittance-platform.labels" . | nindent 4 }}
+    app.kubernetes.io/component: grpc-backend
+spec:
+  {{- if not .Values.backend.grpc.autoscaling.enabled }}
+  replicas: {{ .Values.backend.grpc.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "remittance-platform.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: grpc-backend
+  template:
+    metadata:
+      labels:
+        {{- include "remittance-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: grpc-backend
+    spec:
+      containers:
+      - name: grpc
+        image: "{{ .Values.global.imageRegistry }}/{{ .Values.backend.grpc.image.repository }}:{{ .Values.backend.grpc.image.tag }}"
+        imagePullPolicy: {{ .Values.backend.grpc.image.pullPolicy }}
+        ports:
+        - name: grpc
+          containerPort: 50051
+          protocol: TCP
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "remittance-platform.fullname" . }}-secrets
+              key: database-url
+        - name: TEMPORAL_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "remittance-platform.fullname" . }}-config
+              key: temporal-host
+        livenessProbe:
+          grpc:
+            port: 50051
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          grpc:
+            port: 50051
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          {{- toYaml .Values.backend.grpc.resources | nindent 12 }}
+{{- end }}

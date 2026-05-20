@@ -1,0 +1,25 @@
+[package]
+name = "rust-liveness-proxy"
+version = "1.0.0"
+edition = "2021"
+description = "RemitFlow — Rust Liveness Proxy Sidecar (port 8096). Fail-closed reverse proxy for the Python KYC liveness service with circuit-breaker, rate-limiting, and audit logging."
+
+[[bin]]
+name = "liveness-proxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio       = { version = "1", features = ["full"] }
+axum        = { version = "0.7", features = ["json"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+reqwest     = { version = "0.12", features = ["json", "stream"] }
+chrono      = { version = "0.4", features = ["serde"] }
+uuid        = { version = "1", features = ["v4"] }
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tower-http  = { version = "0.5", features = ["cors", "trace"] }
+tower       = "0.5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }

@@ -1,0 +1,166 @@
+{
+  "dashboard": {
+    "title": "openappsec Security Dashboard",
+    "tags": ["openappsec", "security", "apisix"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Threat Detection Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(openappsec_threats_detected_total[5m])",
+            "legendFormat": "{{ threat_type }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "Blocked Requests",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(openappsec_blocked_requests_total[1h]))",
+            "legendFormat": "Blocked (1h)"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Total Requests",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(openappsec_requests_total[1h]))",
+            "legendFormat": "Total (1h)"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}
+      },
+      {
+        "id": 4,
+        "title": "Threats by Type",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "sum by (threat_type) (increase(openappsec_threats_detected_total[24h]))",
+            "legendFormat": "{{ threat_type }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 6, "x": 12, "y": 4}
+      },
+      {
+        "id": 5,
+        "title": "Threats by Severity",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "sum by (severity) (increase(openappsec_threats_detected_total[24h]))",
+            "legendFormat": "{{ severity }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 6, "x": 18, "y": 4}
+      },
+      {
+        "id": 6,
+        "title": "Inspection Latency (p95)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(openappsec_inspection_duration_seconds_bucket[5m]))",
+            "legendFormat": "{{ policy }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "id": 7,
+        "title": "Request Verdict Distribution",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(openappsec_requests_total[5m])",
+            "legendFormat": "{{ verdict }}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+      },
+      {
+        "id": 8,
+        "title": "Top Threat Types (24h)",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "topk(10, sum by (threat_type) (increase(openappsec_threats_detected_total[24h])))",
+            "format": "table"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "id": 9,
+        "title": "SQL Injection Attempts",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(openappsec_threats_detected_total{threat_type=\"sql_injection\"}[24h]))"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 20}
+      },
+      {
+        "id": 10,
+        "title": "XSS Attempts",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(increase(openappsec_threats_detected_total{threat_type=\"xss\"}[24h]))"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 20}
+      },
+      {
+        "id": 11,
+        "title": "Service Uptime",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"openappsec-bridge\"}"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 24}
+      },
+      {
+        "id": 12,
+        "title": "Memory Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "process_resident_memory_bytes{job=\"openappsec-bridge\"} / 1024 / 1024",
+            "legendFormat": "Memory (MB)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 6, "y": 24}
+      },
+      {
+        "id": 13,
+        "title": "CPU Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(process_cpu_seconds_total{job=\"openappsec-bridge\"}[5m]) * 100",
+            "legendFormat": "CPU %"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 18, "y": 24}
+      }
+    ]
+  }
+}
+

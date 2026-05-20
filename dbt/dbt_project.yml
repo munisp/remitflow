@@ -1,0 +1,27 @@
+name: 'remitflow'
+version: '1.0.0'
+config-version: 2
+
+profile: 'remitflow'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  remitflow:
+    staging:
+      +materialized: view
+      +tags: ["staging", "daily"]
+    intermediate:
+      +materialized: view
+      +tags: ["intermediate", "daily"]
+    marts:
+      +materialized: table
+      +tags: ["marts", "daily"]

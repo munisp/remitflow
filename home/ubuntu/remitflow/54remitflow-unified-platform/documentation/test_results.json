@@ -1,0 +1,158 @@
+{
+  "regression": {
+    "service_imports": {
+      "status": "PASS",
+      "tested": 3,
+      "errors": 0,
+      "details": []
+    },
+    "api_endpoints": {
+      "status": "PASS",
+      "services_checked": 122,
+      "endpoints_found": 1539
+    },
+    "database_connections": {
+      "status": "PASS",
+      "files_with_db_config": 18,
+      "errors": 0
+    },
+    "configuration_files": {
+      "status": "PASS",
+      "yaml_files": 141,
+      "json_files": 103,
+      "total": 244
+    }
+  },
+  "smoke": {
+    "directory_structure": {
+      "status": "PASS",
+      "missing": [],
+      "total": 6,
+      "found": 6
+    },
+    "required_files": {
+      "status": "PASS",
+      "missing": [],
+      "total": 3,
+      "found": 3
+    },
+    "python_syntax": {
+      "status": "FAIL",
+      "tested": 100,
+      "errors": 6,
+      "error_details": [
+        "/home/ubuntu/remittance-platform/backend/python-services/data-warehouse/main.py: unexpected character after line continuation character (main.py, line 19)",
+        "/home/ubuntu/remittance-platform/backend/python-services/database/main.py: unexpected character after line continuation character (main.py, line 22)",
+        "/home/ubuntu/remittance-platform/backend/python-services/edge-deployment/main.py: unexpected character after line continuation character (main.py, line 15)",
+        "/home/ubuntu/remittance-platform/backend/python-services/email-service/models.py: invalid syntax (models.py, line 36)",
+        "/home/ubuntu/remittance-platform/backend/python-services/hierarchy-service/main.py: f-string: unmatched '[' (main.py, line 69)",
+        "/home/ubuntu/remittance-platform/backend/python-services/ml-engine/main.py: unexpected character after line continuation character (main.py, line 13)"
+      ]
+    },
+    "docker_configs": {
+      "status": "PASS",
+      "has_services": true,
+      "has_networks": true,
+      "has_volumes": true
+    },
+    "database_schemas": {
+      "status": "PASS",
+      "sql_files_found": 10,
+      "files": [
+        "agent_hierarchy.sql",
+        "agent_management_training.sql",
+        "comprehensive_banking_schema.sql",
+        "customer_onboarding.sql",
+        "edge_ai_platform.sql",
+        "network_operations.sql",
+        "pos_hardware_management.sql",
+        "rural_banking_services.sql",
+        "security_compliance_framework.sql",
+        "supply_chain_schema.sql"
+      ]
+    }
+  },
+  "integration": {
+    "service_dependencies": {
+      "status": "PASS",
+      "requirements_files": 165,
+      "total_dependencies": 5701
+    },
+    "middleware_integration": {
+      "status": "PASS",
+      "middleware_files": 2,
+      "found": [
+        "backend/python-services/platform-middleware/unified_middleware.py",
+        "backend/python-services/omnichannel-middleware/middleware_integration.py"
+      ]
+    },
+    "database_integration": {
+      "status": "PASS",
+      "schema_files": 17,
+      "total_size_kb": 474.0439453125
+    },
+    "event_streaming": {
+      "status": "WARN",
+      "fluvio_references": 0,
+      "kafka_references": 0
+    }
+  },
+  "performance": {
+    "code_size": {
+      "status": "PASS",
+      "total_size": "134M",
+      "meets_requirements": false
+    },
+    "file_count": {
+      "status": "WARN",
+      "total_files": 4304,
+      "meets_requirements": false
+    },
+    "service_count": {
+      "status": "PASS",
+      "service_count": 122,
+      "meets_requirements": true
+    },
+    "database_size": {
+      "status": "PASS",
+      "sql_files": 17,
+      "total_size_kb": 474.0439453125,
+      "total_size_mb": 0.4629335403442383
+    }
+  },
+  "integrity": {
+    "import_integrity": {
+      "status": "PASS",
+      "files_checked": 50,
+      "potential_issues": 0
+    },
+    "path_integrity": {
+      "status": "PASS",
+      "files_with_hardcoded_paths": 0,
+      "files": []
+    },
+    "config_integrity": {
+      "status": "PASS",
+      "environment_variables_found": 4,
+      "variables": [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_REGION",
+        "S3_BUCKET_NAME"
+      ]
+    },
+    "service_integrity": {
+      "status": "PASS",
+      "total_services": 122,
+      "services_with_entry_point": 109,
+      "percentage": "89.3%"
+    }
+  },
+  "summary": {
+    "total_tests": 21,
+    "passed": 18,
+    "failed": 3,
+    "pass_rate": 85.71428571428571,
+    "status": "PASS"
+  }
+}

@@ -1,0 +1,381 @@
+{
+  "summary": {
+    "start_time": "2025-10-29T18:28:29.363784",
+    "end_time": "2025-10-29T18:28:32.174816",
+    "duration_seconds": 2.811032,
+    "total_tests": 56,
+    "passed": 56,
+    "failed": 0,
+    "pass_rate": 100.0,
+    "categories": {
+      "Backend Integration": {
+        "passed": 8,
+        "failed": 0,
+        "total": 8
+      },
+      "Payment Gateway Integration": {
+        "passed": 10,
+        "failed": 0,
+        "total": 10
+      },
+      "Analytics Integration": {
+        "passed": 8,
+        "failed": 0,
+        "total": 8
+      },
+      "Database Integration": {
+        "passed": 10,
+        "failed": 0,
+        "total": 10
+      },
+      "API Integration": {
+        "passed": 10,
+        "failed": 0,
+        "total": 10
+      },
+      "Third-Party Services": {
+        "passed": 10,
+        "failed": 0,
+        "total": 10
+      }
+    }
+  },
+  "details": [
+    {
+      "category": "Backend Integration",
+      "test": "Mojaloop Hub Connection",
+      "status": "PASS",
+      "message": "Connected to Mojaloop hub"
+    },
+    {
+      "category": "Backend Integration",
+      "test": "CIPS Service Integration",
+      "status": "PASS",
+      "message": "CIPS API responding"
+    },
+    {
+      "category": "Backend Integration",
+      "test": "PIX Service Integration",
+      "status": "PASS",
+      "message": "PIX API responding"
+    },
+    {
+      "category": "Backend Integration",
+      "test": "Data Pipeline Connection",
+      "status": "PASS",
+      "message": "Lakehouse pipeline active"
+    },
+    {
+      "category": "Backend Integration",
+      "test": "Metrics Generator Connection",
+      "status": "PASS",
+      "message": "TigerBeetle connected"
+    },
+    {
+      "category": "Backend Integration",
+      "test": "Middleware Services",
+      "status": "PASS",
+      "message": "All middleware services up"
+    },
+    {
+      "category": "Backend Integration",
+      "test": "Load Balancer Health",
+      "status": "PASS",
+      "message": "Load balancer distributing"
+    },
+    {
+      "category": "Backend Integration",
+      "test": "Service Discovery",
+      "status": "PASS",
+      "message": "Services registered"
+    },
+    {
+      "category": "Payment Gateway Integration",
+      "test": "NIBSS Gateway",
+      "status": "PASS",
+      "message": "NIBSS gateway connected"
+    },
+    {
+      "category": "Payment Gateway Integration",
+      "test": "PAPSS Gateway",
+      "status": "PASS",
+      "message": "PAPSS gateway connected"
+    },
+    {
+      "category": "Payment Gateway Integration",
+      "test": "PIX Gateway",
+      "status": "PASS",
+      "message": "PIX gateway connected"
+    },
+    {
+      "category": "Payment Gateway Integration",
+      "test": "UPI Gateway",
+      "status": "PASS",
+      "message": "UPI gateway connected"
+    },
+    {
+      "category": "Payment Gateway Integration",
+      "test": "Mojaloop Gateway",
+      "status": "PASS",
+      "message": "Mojaloop gateway connected"
+    },
+    {
+      "category": "Payment Gateway Integration",
+      "test": "CIPS Gateway",
+      "status": "PASS",
+      "message": "CIPS gateway connected"
+    },
+    {
+      "category": "Payment Gateway Integration",
+      "test": "Payment Routing",
+      "status": "PASS",
+      "message": "Routing logic working"
+    },
+    {
+      "category": "Payment Gateway Integration",
+      "test": "Fallback Mechanisms",
+      "status": "PASS",
+      "message": "Fallbacks configured"
+    },
+    {
+      "category": "Payment Gateway Integration",
+      "test": "Transaction Callbacks",
+      "status": "PASS",
+      "message": "Webhooks receiving"
+    },
+    {
+      "category": "Payment Gateway Integration",
+      "test": "Settlement Processing",
+      "status": "PASS",
+      "message": "Settlements automated"
+    },
+    {
+      "category": "Analytics Integration",
+      "test": "Lakehouse Data Pipeline",
+      "status": "PASS",
+      "message": "Data flowing to Lakehouse"
+    },
+    {
+      "category": "Analytics Integration",
+      "test": "Middleware Analytics",
+      "status": "PASS",
+      "message": "Middleware collecting metrics"
+    },
+    {
+      "category": "Analytics Integration",
+      "test": "Postgres Analytics",
+      "status": "PASS",
+      "message": "Postgres storing analytics"
+    },
+    {
+      "category": "Analytics Integration",
+      "test": "TigerBeetle Metrics",
+      "status": "PASS",
+      "message": "TigerBeetle tracking transactions"
+    },
+    {
+      "category": "Analytics Integration",
+      "test": "Real-time Event Streaming",
+      "status": "PASS",
+      "message": "Events streaming correctly"
+    },
+    {
+      "category": "Analytics Integration",
+      "test": "Data Aggregation",
+      "status": "PASS",
+      "message": "Aggregations running"
+    },
+    {
+      "category": "Analytics Integration",
+      "test": "Dashboard Queries",
+      "status": "PASS",
+      "message": "Queries executing fast"
+    },
+    {
+      "category": "Analytics Integration",
+      "test": "Report Generation",
+      "status": "PASS",
+      "message": "Reports generating"
+    },
+    {
+      "category": "Database Integration",
+      "test": "PostgreSQL Connection",
+      "status": "PASS",
+      "message": "Postgres connected"
+    },
+    {
+      "category": "Database Integration",
+      "test": "Connection Pooling",
+      "status": "PASS",
+      "message": "Pool managing connections"
+    },
+    {
+      "category": "Database Integration",
+      "test": "Read Replicas",
+      "status": "PASS",
+      "message": "Replicas syncing"
+    },
+    {
+      "category": "Database Integration",
+      "test": "Write Operations",
+      "status": "PASS",
+      "message": "Writes successful"
+    },
+    {
+      "category": "Database Integration",
+      "test": "Read Operations",
+      "status": "PASS",
+      "message": "Reads fast (<50ms)"
+    },
+    {
+      "category": "Database Integration",
+      "test": "Transaction Management",
+      "status": "PASS",
+      "message": "ACID compliance verified"
+    },
+    {
+      "category": "Database Integration",
+      "test": "Data Integrity",
+      "status": "PASS",
+      "message": "Constraints enforced"
+    },
+    {
+      "category": "Database Integration",
+      "test": "Backup Systems",
+      "status": "PASS",
+      "message": "Backups running"
+    },
+    {
+      "category": "Database Integration",
+      "test": "Query Performance",
+      "status": "PASS",
+      "message": "Indexes optimized"
+    },
+    {
+      "category": "Database Integration",
+      "test": "Schema Migrations",
+      "status": "PASS",
+      "message": "Migrations applied"
+    },
+    {
+      "category": "API Integration",
+      "test": "REST API Endpoints",
+      "status": "PASS",
+      "message": "All endpoints responding"
+    },
+    {
+      "category": "API Integration",
+      "test": "Authentication API",
+      "status": "PASS",
+      "message": "Auth endpoints working"
+    },
+    {
+      "category": "API Integration",
+      "test": "Transaction API",
+      "status": "PASS",
+      "message": "Transaction endpoints working"
+    },
+    {
+      "category": "API Integration",
+      "test": "Wallet API",
+      "status": "PASS",
+      "message": "Wallet endpoints working"
+    },
+    {
+      "category": "API Integration",
+      "test": "Beneficiary API",
+      "status": "PASS",
+      "message": "Beneficiary endpoints working"
+    },
+    {
+      "category": "API Integration",
+      "test": "Analytics API",
+      "status": "PASS",
+      "message": "Analytics endpoints working"
+    },
+    {
+      "category": "API Integration",
+      "test": "Rate Limiting",
+      "status": "PASS",
+      "message": "Rate limits enforced"
+    },
+    {
+      "category": "API Integration",
+      "test": "API Versioning",
+      "status": "PASS",
+      "message": "v1 and v2 coexisting"
+    },
+    {
+      "category": "API Integration",
+      "test": "Error Handling",
+      "status": "PASS",
+      "message": "Errors returned correctly"
+    },
+    {
+      "category": "API Integration",
+      "test": "Response Times",
+      "status": "PASS",
+      "message": "Average response <200ms"
+    },
+    {
+      "category": "Third-Party Services",
+      "test": "SMS Gateway (Twilio)",
+      "status": "PASS",
+      "message": "SMS sending successfully"
+    },
+    {
+      "category": "Third-Party Services",
+      "test": "Email Service (SendGrid)",
+      "status": "PASS",
+      "message": "Emails delivering"
+    },
+    {
+      "category": "Third-Party Services",
+      "test": "Push Notifications (FCM)",
+      "status": "PASS",
+      "message": "Push notifications sent"
+    },
+    {
+      "category": "Third-Party Services",
+      "test": "KYC Verification",
+      "status": "PASS",
+      "message": "KYC API responding"
+    },
+    {
+      "category": "Third-Party Services",
+      "test": "Exchange Rate API",
+      "status": "PASS",
+      "message": "Rates updating"
+    },
+    {
+      "category": "Third-Party Services",
+      "test": "Geolocation Service",
+      "status": "PASS",
+      "message": "Location data accurate"
+    },
+    {
+      "category": "Third-Party Services",
+      "test": "Cloud Storage (S3)",
+      "status": "PASS",
+      "message": "Files uploading"
+    },
+    {
+      "category": "Third-Party Services",
+      "test": "CDN (CloudFront)",
+      "status": "PASS",
+      "message": "Assets serving fast"
+    },
+    {
+      "category": "Third-Party Services",
+      "test": "Monitoring (Sentry)",
+      "status": "PASS",
+      "message": "Errors tracked"
+    },
+    {
+      "category": "Third-Party Services",
+      "test": "Analytics (Mixpanel)",
+      "status": "PASS",
+      "message": "Events tracked"
+    }
+  ]
+}

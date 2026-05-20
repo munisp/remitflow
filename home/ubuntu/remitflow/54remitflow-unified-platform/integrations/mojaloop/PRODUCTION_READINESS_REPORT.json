@@ -1,0 +1,39 @@
+{
+  "total_score": 69,
+  "total_max": 105,
+  "percentage": 65.7,
+  "grade": "D",
+  "production_ready": false,
+  "categories": {
+    "infrastructure": {
+      "score": 24,
+      "max": 25,
+      "percentage": 96.0
+    },
+    "code": {
+      "score": 0,
+      "max": 30,
+      "percentage": 0.0
+    },
+    "integrations": {
+      "score": 20,
+      "max": 20,
+      "percentage": 100.0
+    },
+    "testing": {
+      "score": 12,
+      "max": 15,
+      "percentage": 80.0
+    },
+    "monitoring": {
+      "score": 9,
+      "max": 10,
+      "percentage": 90.0
+    },
+    "documentation": {
+      "score": 4,
+      "max": 5,
+      "percentage": 80.0
+    }
+  }
+}

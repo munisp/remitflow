@@ -1,0 +1,33 @@
+{
+  "name": "AutoPro Parts",
+  "tagline": "Quality Parts, Reliable Service",
+  "description": "Auto parts template with VIN lookup, compatibility checker, and installation guides",
+  "theme": {
+    "primary": "#1e293b",
+    "secondary": "#f97316",
+    "accent": "#dc2626",
+    "background": "#f8fafc",
+    "text": "#1e293b"
+  },
+  "categories": [
+    "Engine Parts",
+    "Brakes",
+    "Suspension",
+    "Electrical",
+    "Body Parts",
+    "Accessories"
+  ],
+  "features": [
+    "vin_lookup",
+    "compatibility_checker",
+    "installation_guides",
+    "mechanic_finder",
+    "bulk_orders"
+  ],
+  "payment_methods": [
+    "qr_code",
+    "mobile_money",
+    "bank_transfer",
+    "card"
+  ]
+}

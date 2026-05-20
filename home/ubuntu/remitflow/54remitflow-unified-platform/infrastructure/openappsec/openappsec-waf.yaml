@@ -1,0 +1,631 @@
+# OpenAppSec 5/5 Bank-Grade WAF Configuration
+# High Availability, Performance, Security, Observability, Disaster Recovery
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openappsec
+  labels:
+    app.kubernetes.io/name: openappsec
+    app.kubernetes.io/component: security
+---
+# OpenAppSec Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openappsec-config
+  namespace: openappsec
+data:
+  local_policy.yaml: |
+    policies:
+      - name: remittance-platform-policy
+        mode: prevent
+        practices:
+          - name: web-attacks
+            type: WebAttacks
+            parameters:
+              minimumConfidence: medium
+              protections:
+                sqlInjection: true
+                crossSiteScripting: true
+                commandInjection: true
+                pathTraversal: true
+                ldapInjection: true
+                xmlExternalEntity: true
+                serverSideRequestForgery: true
+                remoteCodeExecution: true
+                localFileInclusion: true
+                httpResponseSplitting: true
+          
+          - name: api-protection
+            type: APIProtection
+            parameters:
+              schemaValidation: true
+              parameterValidation: true
+              contentTypeValidation: true
+              maxBodySize: 10485760
+              maxUrlLength: 2048
+              maxHeaderSize: 8192
+          
+          - name: bot-protection
+            type: BotProtection
+            parameters:
+              badBots: prevent
+              suspiciousBots: detect
+              goodBots: allow
+              unknownBots: detect
+              challengeType: captcha
+          
+          - name: rate-limiting
+            type: RateLimiting
+            parameters:
+              scope: source
+              limit: 1000
+              unit: minute
+              burstLimit: 100
+              burstUnit: second
+          
+          - name: geo-blocking
+            type: GeoBlocking
+            parameters:
+              mode: allowlist
+              countries:
+                - NG  # Nigeria
+                - GH  # Ghana
+                - KE  # Kenya
+                - ZA  # South Africa
+                - GB  # United Kingdom
+                - US  # United States
+                - CA  # Canada
+                - DE  # Germany
+                - FR  # France
+                - AE  # UAE
+        
+        triggers:
+          # Payment APIs - Highest Protection
+          - name: payment-apis
+            type: WebAPI
+            parameters:
+              uri: /api/v1/payments/*
+              methods:
+                - POST
+                - PUT
+                - DELETE
+            overrides:
+              minimumConfidence: high
+              rateLimit: 100
+              rateLimitUnit: minute
+          
+          # Transfer APIs - Highest Protection
+          - name: transfer-apis
+            type: WebAPI
+            parameters:
+              uri: /api/v1/transfers/*
+              methods:
+                - POST
+                - PUT
+                - DELETE
+            overrides:
+              minimumConfidence: high
+              rateLimit: 100
+              rateLimitUnit: minute
+          
+          # Wallet APIs - High Protection
+          - name: wallet-apis
+            type: WebAPI
+            parameters:
+              uri: /api/v1/wallet/*
+              methods:
+                - POST
+                - PUT
+                - DELETE
+            overrides:
+              minimumConfidence: high
+              rateLimit: 200
+              rateLimitUnit: minute
+          
+          # KYC APIs - High Protection
+          - name: kyc-apis
+            type: WebAPI
+            parameters:
+              uri: /api/v1/kyc/*
+              methods:
+                - POST
+                - PUT
+            overrides:
+              minimumConfidence: high
+              rateLimit: 50
+              rateLimitUnit: minute
+          
+          # Authentication APIs - Brute Force Protection
+          - name: auth-apis
+            type: WebAPI
+            parameters:
+              uri: /api/v1/auth/*
+              methods:
+                - POST
+            overrides:
+              rateLimit: 10
+              rateLimitUnit: minute
+              burstLimit: 5
+              burstUnit: second
+          
+          # Admin APIs - Strictest Protection
+          - name: admin-apis
+            type: WebAPI
+            parameters:
+              uri: /api/v1/admin/*
+              methods:
+                - GET
+                - POST
+                - PUT
+                - DELETE
+            overrides:
+              minimumConfidence: high
+              rateLimit: 50
+              rateLimitUnit: minute
+              ipAllowlist:
+                - 10.0.0.0/8
+                - 172.16.0.0/12
+                - 192.168.0.0/16
+          
+          # Mojaloop Callbacks - Allow Higher Rate
+          - name: mojaloop-callbacks
+            type: WebAPI
+            parameters:
+              uri: /mojaloop/*
+              methods:
+                - POST
+                - PUT
+            overrides:
+              rateLimit: 5000
+              rateLimitUnit: minute
+          
+          # Health Checks - Exclude from WAF
+          - name: health-checks
+            type: WebAPI
+            parameters:
+              uri: /health/*
+              methods:
+                - GET
+            overrides:
+              mode: detect
+              rateLimit: 10000
+              rateLimitUnit: minute
+          
+          # Metrics - Exclude from WAF
+          - name: metrics
+            type: WebAPI
+            parameters:
+              uri: /metrics
+              methods:
+                - GET
+            overrides:
+              mode: detect
+        
+        exceptions:
+          # Allow internal service-to-service communication
+          - name: internal-services
+            type: SourceIP
+            parameters:
+              ips:
+                - 10.0.0.0/8
+                - 172.16.0.0/12
+            overrides:
+              mode: detect
+        
+        log:
+          enabled: true
+          level: info
+          format: json
+          destinations:
+            - type: syslog
+              address: opensearch.opensearch.svc.cluster.local:514
+              protocol: tcp
+            - type: file
+              path: /var/log/openappsec/waf.log
+              maxSize: 100MB
+              maxFiles: 10
+          
+          # Log all blocked requests
+          blockedRequests: true
+          
+          # Log suspicious requests
+          suspiciousRequests: true
+          
+          # Include request body in logs (for forensics)
+          includeRequestBody: true
+          maxRequestBodySize: 10240
+          
+          # Mask sensitive data
+          maskFields:
+            - password
+            - pin
+            - cvv
+            - card_number
+            - account_number
+            - bvn
+            - nin
+  
+  custom_rules.yaml: |
+    rules:
+      # Block requests with suspicious user agents
+      - name: block-suspicious-user-agents
+        type: header
+        field: User-Agent
+        operator: regex
+        value: "(sqlmap|nikto|nessus|nmap|masscan|zgrab|gobuster|dirbuster|wfuzz|hydra)"
+        action: block
+        severity: high
+      
+      # Block requests with SQL injection patterns in headers
+      - name: block-sql-injection-headers
+        type: header
+        field: "*"
+        operator: regex
+        value: "('|\"|--).*?(select|union|insert|update|delete|drop|exec|execute)"
+        action: block
+        severity: critical
+      
+      # Block requests with XSS patterns
+      - name: block-xss-patterns
+        type: body
+        operator: regex
+        value: "<script[^>]*>.*?</script>|javascript:|on\\w+\\s*="
+        action: block
+        severity: high
+      
+      # Block requests with path traversal
+      - name: block-path-traversal
+        type: uri
+        operator: regex
+        value: "(\\.\\./|\\.\\.\\\\|%2e%2e%2f|%2e%2e/|\\.\\.%2f|%2e%2e%5c)"
+        action: block
+        severity: high
+      
+      # Block requests with command injection
+      - name: block-command-injection
+        type: body
+        operator: regex
+        value: "(;|\\||\\$\\(|`|&&|\\|\\|)\\s*(cat|ls|pwd|whoami|id|uname|wget|curl|nc|bash|sh|python|perl|ruby)"
+        action: block
+        severity: critical
+      
+      # Rate limit failed login attempts
+      - name: rate-limit-failed-logins
+        type: response
+        field: status
+        operator: equals
+        value: "401"
+        action: rate_limit
+        rateLimit: 5
+        rateLimitUnit: minute
+        rateLimitScope: source_ip
+      
+      # Block requests from TOR exit nodes
+      - name: block-tor-exit-nodes
+        type: source
+        operator: tor_exit_node
+        action: block
+        severity: medium
+      
+      # Require specific headers for API requests
+      - name: require-api-headers
+        type: header
+        field: X-Request-ID
+        operator: missing
+        action: block
+        severity: low
+        triggers:
+          - /api/v1/*
+      
+      # Block oversized requests
+      - name: block-oversized-requests
+        type: request
+        field: content_length
+        operator: greater_than
+        value: "10485760"
+        action: block
+        severity: medium
+      
+      # Fintech-specific: Block suspicious transaction patterns
+      - name: block-suspicious-amounts
+        type: body
+        field: amount
+        operator: regex
+        value: "^(0|0\\.0+|999999999|1000000000)$"
+        action: detect
+        severity: high
+        triggers:
+          - /api/v1/transfers/*
+          - /api/v1/payments/*
+---
+# OpenAppSec DaemonSet
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: openappsec-agent
+  namespace: openappsec
+  labels:
+    app: openappsec-agent
+spec:
+  selector:
+    matchLabels:
+      app: openappsec-agent
+  template:
+    metadata:
+      labels:
+        app: openappsec-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: openappsec
+      containers:
+        - name: openappsec-agent
+          image: ghcr.io/openappsec/agent:1.0.2
+          ports:
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/openappsec
+            - name: logs
+              mountPath: /var/log/openappsec
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 9090
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        - name: config
+          configMap:
+            name: openappsec-config
+        - name: logs
+          hostPath:
+            path: /var/log/openappsec
+            type: DirectoryOrCreate
+---
+# Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openappsec
+  namespace: openappsec
+---
+# RBAC
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openappsec
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openappsec
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openappsec
+subjects:
+  - kind: ServiceAccount
+    name: openappsec
+    namespace: openappsec
+---
+# Metrics Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: openappsec-metrics
+  namespace: openappsec
+  labels:
+    app: openappsec-agent
+spec:
+  type: ClusterIP
+  selector:
+    app: openappsec-agent
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+---
+# Prometheus ServiceMonitor
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: openappsec
+  namespace: openappsec
+  labels:
+    app: openappsec
+spec:
+  selector:
+    matchLabels:
+      app: openappsec-agent
+  endpoints:
+    - port: metrics
+      interval: 30s
+      path: /metrics
+---
+# OpenAppSec Alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: openappsec-alerts
+  namespace: openappsec
+spec:
+  groups:
+    - name: openappsec
+      rules:
+        - alert: WAFBlockedRequestsHigh
+          expr: rate(openappsec_blocked_requests_total[5m]) > 100
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "WAF blocked requests rate is high"
+            description: "WAF is blocking {{ $value }} requests per second"
+        - alert: WAFCriticalAttackDetected
+          expr: increase(openappsec_attacks_total{severity="critical"}[5m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Critical attack detected by WAF"
+            description: "WAF detected {{ $value }} critical attacks in the last 5 minutes"
+        - alert: WAFAgentDown
+          expr: up{job="openappsec"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "OpenAppSec agent is down"
+            description: "OpenAppSec agent on node {{ $labels.node }} is not responding"
+        - alert: WAFHighLatency
+          expr: openappsec_request_latency_seconds > 0.1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "WAF latency is high"
+            description: "WAF is adding {{ $value }}s latency to requests"
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openappsec-network-policy
+  namespace: openappsec
+spec:
+  podSelector:
+    matchLabels:
+      app: openappsec-agent
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: opensearch
+      ports:
+        - protocol: TCP
+          port: 514
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+---
+# WAF Dashboard ConfigMap (for Grafana)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openappsec-dashboard
+  namespace: openappsec
+  labels:
+    grafana_dashboard: "1"
+data:
+  openappsec-dashboard.json: |
+    {
+      "dashboard": {
+        "title": "OpenAppSec WAF Dashboard",
+        "panels": [
+          {
+            "title": "Blocked Requests Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(openappsec_blocked_requests_total[5m])",
+                "legendFormat": "{{node}}"
+              }
+            ]
+          },
+          {
+            "title": "Attacks by Type",
+            "type": "piechart",
+            "targets": [
+              {
+                "expr": "sum by (attack_type) (openappsec_attacks_total)",
+                "legendFormat": "{{attack_type}}"
+              }
+            ]
+          },
+          {
+            "title": "Top Blocked IPs",
+            "type": "table",
+            "targets": [
+              {
+                "expr": "topk(10, sum by (source_ip) (openappsec_blocked_requests_total))",
+                "legendFormat": "{{source_ip}}"
+              }
+            ]
+          },
+          {
+            "title": "Request Latency",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.99, rate(openappsec_request_latency_seconds_bucket[5m]))",
+                "legendFormat": "p99"
+              },
+              {
+                "expr": "histogram_quantile(0.95, rate(openappsec_request_latency_seconds_bucket[5m]))",
+                "legendFormat": "p95"
+              },
+              {
+                "expr": "histogram_quantile(0.50, rate(openappsec_request_latency_seconds_bucket[5m]))",
+                "legendFormat": "p50"
+              }
+            ]
+          }
+        ]
+      }
+    }

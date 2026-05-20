@@ -1,0 +1,774 @@
+{
+  "total_services": 109,
+  "verified_services": 108,
+  "verification_rate": 99.08256880733946,
+  "total_lines": 24592,
+  "total_endpoints": 984,
+  "claims_verification": {
+    "109 Backend Services": true,
+    "109 Services Implemented": false,
+    "All services have FastAPI": false,
+    "All services have endpoints": true,
+    "All services have health checks": false,
+    "All services have stats": false
+  },
+  "all_claims_verified": false,
+  "services": [
+    {
+      "name": "agent-ecommerce-platform",
+      "lines": 532,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "agent-hierarchy-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "agent-performance",
+      "lines": 87,
+      "endpoints": 4,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "agent-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "agent-training",
+      "lines": 87,
+      "endpoints": 4,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "ai-ml-services",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "ai-orchestration",
+      "lines": 585,
+      "endpoints": 6,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "amazon-ebay-integration",
+      "lines": 354,
+      "endpoints": 12,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "amazon-service",
+      "lines": 240,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "analytics-dashboard",
+      "lines": 260,
+      "endpoints": 14,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "art-agent-service",
+      "lines": 485,
+      "endpoints": 6,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "audit-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "backup-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "workflow-integration",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "business-intelligence",
+      "lines": 87,
+      "endpoints": 4,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "cocoindex-service",
+      "lines": 424,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "commission-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "communication-gateway",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "compliance-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "compliance-workflows",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "credit-scoring",
+      "lines": 672,
+      "endpoints": 5,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "customer-analytics",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "customer-service",
+      "lines": 87,
+      "endpoints": 4,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "data-warehouse",
+      "lines": 296,
+      "endpoints": 15,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "database",
+      "lines": 331,
+      "endpoints": 24,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "device-management",
+      "lines": 215,
+      "endpoints": 14,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "discord-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "dispute-resolution",
+      "lines": 87,
+      "endpoints": 4,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "document-management",
+      "lines": 323,
+      "endpoints": 12,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "document-processing",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "ebay-service",
+      "lines": 240,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "edge-computing",
+      "lines": 15,
+      "endpoints": 1,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "edge-deployment",
+      "lines": 175,
+      "endpoints": 14,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "email-service",
+      "lines": 219,
+      "endpoints": 9,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "epr-kgqa-service",
+      "lines": 445,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "falkordb-service",
+      "lines": 464,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "fraud-detection",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "gaming-integration",
+      "lines": 397,
+      "endpoints": 15,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "gaming-service",
+      "lines": 154,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "global-payment-gateway",
+      "lines": 97,
+      "endpoints": 2,
+      "has_health": false,
+      "has_stats": false
+    },
+    {
+      "name": "gnn-engine",
+      "lines": 244,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "google-assistant-service",
+      "lines": 154,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "hierarchy-service",
+      "lines": 188,
+      "endpoints": 14,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "hybrid-engine",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "instagram-service",
+      "lines": 288,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "integration-layer",
+      "lines": 150,
+      "endpoints": 12,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "integration-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "inventory-management",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "jumia-service",
+      "lines": 240,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "konga-service",
+      "lines": 240,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "kyb-verification",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "kyc-service",
+      "lines": 580,
+      "endpoints": 12,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "lakehouse-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "loyalty-service",
+      "lines": 87,
+      "endpoints": 4,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "marketplace-integration",
+      "lines": 381,
+      "endpoints": 15,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "messenger-service",
+      "lines": 288,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "metaverse-service",
+      "lines": 434,
+      "endpoints": 16,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "mfa",
+      "lines": 37,
+      "endpoints": 1,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "middleware-integration",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "ml-engine",
+      "lines": 145,
+      "endpoints": 12,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "multi-ocr-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "multilingual-integration-service",
+      "lines": 506,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "notification-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "ocr-processing",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "offline-sync",
+      "lines": 216,
+      "endpoints": 5,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "ollama-service",
+      "lines": 461,
+      "endpoints": 9,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "onboarding-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "payout-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "pos-integration",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "promotion-service",
+      "lines": 87,
+      "endpoints": 4,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "push-notification-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "qr-code-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "rbac",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "rcs-service",
+      "lines": 288,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "reconciliation-service",
+      "lines": 87,
+      "endpoints": 4,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "reporting-engine",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "risk-assessment",
+      "lines": 1115,
+      "endpoints": 6,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "rule-engine",
+      "lines": 35,
+      "endpoints": 3,
+      "has_health": false,
+      "has_stats": false
+    },
+    {
+      "name": "scheduler-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "security-monitoring",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "settlement-service",
+      "lines": 87,
+      "endpoints": 4,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "sms-service",
+      "lines": 207,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "snapchat-service",
+      "lines": 288,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "sync-manager",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "telegram-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "territory-management",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "tigerbeetle-sync",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "tigerbeetle-zig",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "tiktok-service",
+      "lines": 288,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "transaction-history",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "translation-service",
+      "lines": 381,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "twitter-service",
+      "lines": 288,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "unified-analytics",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "unified-communication-hub",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "unified-communication-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "user-management",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "ussd-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "voice-ai-service",
+      "lines": 288,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "voice-assistant-service",
+      "lines": 438,
+      "endpoints": 12,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "websocket-service",
+      "lines": 438,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "wechat-service",
+      "lines": 288,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "whatsapp-ai-bot",
+      "lines": 467,
+      "endpoints": 6,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "whatsapp-order-service",
+      "lines": 87,
+      "endpoints": 4,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "whatsapp-service",
+      "lines": 154,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    },
+    {
+      "name": "workflow-orchestration",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "workflow-service",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "zapier-integration",
+      "lines": 155,
+      "endpoints": 10,
+      "has_health": true,
+      "has_stats": true
+    },
+    {
+      "name": "zapier-service",
+      "lines": 154,
+      "endpoints": 8,
+      "has_health": true,
+      "has_stats": false
+    }
+  ]
+}

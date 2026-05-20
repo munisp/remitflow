@@ -1,0 +1,129 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kafka-pubsub-west-africa
+  namespace: remitflow
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    # Kafka broker connection
+    - name: brokers
+      value: "kafka:9092"
+    - name: consumerGroup
+      value: "remitflow-west-africa"
+    - name: authRequired
+      value: "false"
+    - name: initialOffset
+      value: "newest"
+    - name: maxMessageBytes
+      value: "1048576"
+    # Topics for West African XOF corridor
+    # xof-transfers: All XOF corridor transfer events (Togo, Niger, Mali, Benin, Ghana)
+    # west-africa-fx-rates: Real-time XOF/NGN FX rate updates from BCEAO
+    # west-africa-compliance: ECOWAS/BCEAO compliance events and alerts
+    # mojaloop-xof-events: Mojaloop settlement events for XOF corridor
+    # west-africa-agent-events: Agent network cash-in/cash-out events
+    - name: topics
+      value: "xof-transfers,west-africa-fx-rates,west-africa-compliance,mojaloop-xof-events,west-africa-agent-events"
+scopes:
+  - go-xof-adapter
+  - python-corridor-ml
+  - python-lakehouse-corridors
+  - python-sme-compliance
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: redis-state-west-africa
+  namespace: remitflow
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: "redis:6379"
+    - name: redisPassword
+      value: ""
+    - name: actorStateStore
+      value: "false"
+    - name: keyPrefix
+      value: "west-africa"
+    # Cache TTL for XOF FX rates: 60 seconds
+    - name: ttlInSeconds
+      value: "60"
+scopes:
+  - go-xof-adapter
+  - python-corridor-ml
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kafka-pubsub-hnw
+  namespace: remitflow
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: "kafka:9092"
+    - name: consumerGroup
+      value: "remitflow-hnw"
+    - name: authRequired
+      value: "false"
+    - name: initialOffset
+      value: "newest"
+    - name: topics
+      value: "hnw-events,hnw-rate-locks,hnw-portfolio-updates,hnw-rm-notifications"
+scopes:
+  - go-hnw-routing
+  - rust-hnw-fx-engine
+  - python-hnw-scoring
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kafka-pubsub-sme
+  namespace: remitflow
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: "kafka:9092"
+    - name: consumerGroup
+      value: "remitflow-sme"
+    - name: authRequired
+      value: "false"
+    - name: initialOffset
+      value: "newest"
+    - name: topics
+      value: "sme-trade-events,sme-batch-status,correspondent-events,form-m-events"
+scopes:
+  - go-sme-trade-service
+  - rust-sme-bulk-processor
+  - python-sme-compliance
+  - go-correspondent-manager
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kafka-pubsub-kyc
+  namespace: remitflow
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: "kafka:9092"
+    - name: consumerGroup
+      value: "remitflow-kyc"
+    - name: authRequired
+      value: "false"
+    - name: initialOffset
+      value: "newest"
+    - name: topics
+      value: "kyc-events,immigrant-worker-events,tiered-kyc-upgrades"
+scopes:
+  - rust-immigrant-worker-kyc
+  - python-corridor-ml

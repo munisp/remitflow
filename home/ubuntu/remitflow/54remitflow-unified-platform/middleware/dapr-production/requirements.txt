@@ -1,0 +1,27 @@
+# Dapr SDK
+dapr==1.12.0
+dapr-ext-grpc==1.12.0
+dapr-ext-fastapi==1.12.0
+
+# Web frameworks
+flask==3.0.0
+flask-cors==4.0.0
+fastapi==0.104.1
+uvicorn==0.24.0
+
+# Async support
+aiohttp==3.9.0
+asyncio==3.4.3
+
+# CloudEvents
+cloudevents==1.10.1
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-mock==3.12.0
+
+# Utilities
+python-json-logger==2.0.7
+pydantic==2.5.0
+

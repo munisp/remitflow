@@ -1,0 +1,168 @@
+# Permify Authorization Schema for Mojaloop
+# Defines fine-grained access control for all Mojaloop resources
+
+schema: |
+  # FSP (Financial Service Provider) entity
+  entity fsp {
+    # Relations
+    relation owner @user
+    relation admin @user
+    relation operator @user
+    relation viewer @user
+    relation member @user
+    
+    # Permissions
+    permission view = owner or admin or operator or viewer or member
+    permission initiate_transfer = owner or admin or operator
+    permission view_position = owner or admin or operator or viewer
+    permission adjust_liquidity = owner or admin
+    permission manage_limits = owner or admin
+    permission manage_members = owner or admin
+    permission delete = owner
+  }
+  
+  # Transfer entity
+  entity transfer {
+    # Relations
+    relation payer_fsp @fsp
+    relation payee_fsp @fsp
+    relation initiator @user
+    
+    # Permissions
+    permission view = payer_fsp.view or payee_fsp.view or initiator
+    permission fulfill = payee_fsp.initiate_transfer
+    permission abort = payer_fsp.initiate_transfer or payee_fsp.initiate_transfer
+  }
+  
+  # Settlement entity
+  entity settlement {
+    # Relations
+    relation hub_operator @user
+    relation participant @fsp
+    relation auditor @user
+    
+    # Permissions
+    permission view = hub_operator or participant.view or auditor
+    permission manage = hub_operator
+    permission close_window = hub_operator
+    permission approve = hub_operator
+  }
+  
+  # Participant entity (extends FSP with Mojaloop-specific permissions)
+  entity participant {
+    # Relations
+    relation fsp @fsp
+    relation hub_operator @user
+    
+    # Permissions
+    permission view = fsp.view or hub_operator
+    permission activate = hub_operator
+    permission suspend = hub_operator
+    permission update_ndc = hub_operator or fsp.manage_limits
+    permission view_position = fsp.view_position or hub_operator
+    permission adjust_liquidity = fsp.adjust_liquidity or hub_operator
+  }
+  
+  # Quote entity
+  entity quote {
+    # Relations
+    relation payer_fsp @fsp
+    relation payee_fsp @fsp
+    relation initiator @user
+    
+    # Permissions
+    permission view = payer_fsp.view or payee_fsp.view or initiator
+    permission respond = payee_fsp.initiate_transfer
+  }
+  
+  # TigerBeetle Account entity
+  entity tigerbeetle_account {
+    # Relations
+    relation owner @fsp
+    relation hub_operator @user
+    
+    # Permissions
+    permission view_balance = owner.view_position or hub_operator
+    permission create_transfer = owner.initiate_transfer
+    permission view_history = owner.view or hub_operator
+  }
+  
+  # System-level permissions
+  entity system {
+    # Relations
+    relation super_admin @user
+    relation hub_operator @user
+    relation auditor @user
+    
+    # Permissions
+    permission manage_participants = super_admin or hub_operator
+    permission view_all_transfers = super_admin or hub_operator or auditor
+    permission view_all_positions = super_admin or hub_operator or auditor
+    permission manage_settlements = super_admin or hub_operator
+    permission view_audit_logs = super_admin or auditor
+    permission manage_system = super_admin
+  }
+  
+  # User entity
+  entity user {}
+
+---
+# Initial relationships for Mojaloop system
+relationships:
+  # System-level roles
+  - entity: system
+    id: mojaloop
+    relation: super_admin
+    subject:
+      type: user
+      id: admin
+  
+  - entity: system
+    id: mojaloop
+    relation: hub_operator
+    subject:
+      type: user
+      id: hub-operator
+  
+  - entity: system
+    id: mojaloop
+    relation: auditor
+    subject:
+      type: user
+      id: auditor
+
+---
+# Permission check examples
+examples:
+  - description: "Check if user can initiate transfer for FSP"
+    check:
+      entity:
+        type: fsp
+        id: bank-a
+      permission: initiate_transfer
+      subject:
+        type: user
+        id: bank-a-operator
+    expected: true
+  
+  - description: "Check if user can view position"
+    check:
+      entity:
+        type: fsp
+        id: bank-a
+      permission: view_position
+      subject:
+        type: user
+        id: bank-a-viewer
+    expected: true
+  
+  - description: "Check if hub operator can manage settlements"
+    check:
+      entity:
+        type: system
+        id: mojaloop
+      permission: manage_settlements
+      subject:
+        type: user
+        id: hub-operator
+    expected: true

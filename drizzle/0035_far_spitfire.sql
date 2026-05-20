@@ -1,0 +1,1 @@
+ALTER TABLE "exchange_rate_alerts" ADD COLUMN "snooze_until" timestamp;

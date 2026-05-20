@@ -1,0 +1,732 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keycloak
+  labels:
+    name: keycloak
+    component: identity-provider
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-config
+  namespace: keycloak
+data:
+  keycloak.conf: |
+    # Database
+    db=postgres
+    db-url=jdbc:postgresql://postgresql:5432/keycloak
+    db-username=keycloak
+    db-password=keycloak123
+    
+    # Observability
+    metrics-enabled=true
+    health-enabled=true
+    
+    # HTTP
+    http-enabled=true
+    http-port=8080
+    https-port=8443
+    
+    # Hostname
+    hostname=keycloak.remittance.local
+    hostname-strict=false
+    hostname-strict-https=false
+    
+    # Proxy
+    proxy=edge
+    
+    # Cache
+    cache=ispn
+    cache-stack=kubernetes
+    
+    # Clustering
+    cache-config-file=cache-ispn.xml
+    
+    # Features
+    features=token-exchange,admin-fine-grained-authz,declarative-user-profile
+    
+    # Logging
+    log-level=INFO
+    log-console-output=default
+    log-console-format=%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c] (%t) %s%e%n
+    
+    # Transaction
+    transaction-xa-enabled=false
+  
+  cache-ispn.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <infinispan
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="urn:infinispan:config:14.0 http://www.infinispan.org/schemas/infinispan-config-14.0.xsd"
+            xmlns="urn:infinispan:config:14.0">
+        <cache-container name="keycloak">
+            <transport lock-timeout="60000"/>
+            <local-cache name="realms">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <memory max-count="10000"/>
+            </local-cache>
+            <local-cache name="users">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <memory max-count="10000"/>
+            </local-cache>
+            <distributed-cache name="sessions" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            <distributed-cache name="authenticationSessions" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            <distributed-cache name="offlineSessions" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            <distributed-cache name="clientSessions" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            <distributed-cache name="offlineClientSessions" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            <distributed-cache name="loginFailures" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            <local-cache name="authorization">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <memory max-count="10000"/>
+            </local-cache>
+            <replicated-cache name="work">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="-1"/>
+            </replicated-cache>
+            <local-cache name="keys">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration max-idle="3600000"/>
+                <memory max-count="1000"/>
+            </local-cache>
+            <distributed-cache name="actionTokens" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration max-idle="-1" lifespan="-1" interval="300000"/>
+                <memory max-count="-1"/>
+            </distributed-cache>
+        </cache-container>
+    </infinispan>
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  serviceName: keycloak
+  replicas: 3
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+      - name: keycloak
+        image: quay.io/keycloak/keycloak:23.0.3
+        args:
+        - start
+        - --config-file=/opt/keycloak/conf/keycloak.conf
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 8443
+          name: https
+        - containerPort: 7800
+          name: jgroups
+        - containerPort: 9990
+          name: metrics
+        env:
+        - name: KEYCLOAK_ADMIN
+          value: "admin"
+        - name: KEYCLOAK_ADMIN_PASSWORD
+          value: "admin123"
+        - name: KC_CACHE_STACK
+          value: "kubernetes"
+        - name: JAVA_OPTS_APPEND
+          value: "-Djgroups.dns.query=keycloak-headless.keycloak.svc.cluster.local"
+        - name: KC_LOG_LEVEL
+          value: "INFO"
+        - name: KC_METRICS_ENABLED
+          value: "true"
+        - name: KC_HEALTH_ENABLED
+          value: "true"
+        - name: KC_DB
+          value: "postgres"
+        - name: KC_DB_URL
+          value: "jdbc:postgresql://postgresql:5432/keycloak"
+        - name: KC_DB_USERNAME
+          value: "keycloak"
+        - name: KC_DB_PASSWORD
+          value: "keycloak123"
+        - name: KC_HOSTNAME
+          value: "keycloak.remittance.local"
+        - name: KC_HOSTNAME_STRICT
+          value: "false"
+        - name: KC_HOSTNAME_STRICT_HTTPS
+          value: "false"
+        - name: KC_HTTP_ENABLED
+          value: "true"
+        - name: KC_PROXY
+          value: "edge"
+        volumeMounts:
+        - name: config
+          mountPath: /opt/keycloak/conf/keycloak.conf
+          subPath: keycloak.conf
+        - name: config
+          mountPath: /opt/keycloak/conf/cache-ispn.xml
+          subPath: cache-ispn.xml
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        startupProbe:
+          httpGet:
+            path: /health/started
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      volumes:
+      - name: config
+        configMap:
+          name: keycloak-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  selector:
+    app: keycloak
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: https
+    port: 8443
+    targetPort: 8443
+  - name: metrics
+    port: 9990
+    targetPort: 9990
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-headless
+  namespace: keycloak
+spec:
+  clusterIP: None
+  selector:
+    app: keycloak
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: jgroups
+    port: 7800
+    targetPort: 7800
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: keycloak-ingress
+  namespace: keycloak
+  annotations:
+    kubernetes.io/ingress.class: "openappsec"
+    openappsec.io/waf-enabled: "true"
+    openappsec.io/api-protection: "false"
+    nginx.ingress.kubernetes.io/proxy-buffer-size: "16k"
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+spec:
+  tls:
+  - hosts:
+    - keycloak.remittance.local
+    secretName: keycloak-tls
+  rules:
+  - host: keycloak.remittance.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: keycloak
+            port:
+              number: 8080
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-tls
+  namespace: keycloak
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t  # Base64 encoded certificate
+  tls.key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t  # Base64 encoded private key
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-realm-setup
+  namespace: keycloak
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: keycloak-setup
+        image: curlimages/curl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Wait for Keycloak to be ready
+          until curl -f http://keycloak:8080/health/ready; do
+            echo "Waiting for Keycloak to be ready..."
+            sleep 10
+          done
+          
+          # Get admin token
+          ADMIN_TOKEN=$(curl -s -X POST \
+            "http://keycloak:8080/realms/master/protocol/openid-connect/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "username=admin" \
+            -d "password=admin123" \
+            -d "grant_type=password" \
+            -d "client_id=admin-cli" | \
+            grep -o '"access_token":"[^"]*' | \
+            grep -o '[^"]*$')
+          
+          # Create Remittance Platform realm
+          curl -X POST \
+            "http://keycloak:8080/admin/realms" \
+            -H "Authorization: Bearer $ADMIN_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "realm": "remittance",
+              "displayName": "Remittance Platform",
+              "enabled": true,
+              "sslRequired": "external",
+              "registrationAllowed": false,
+              "loginWithEmailAllowed": true,
+              "duplicateEmailsAllowed": false,
+              "resetPasswordAllowed": true,
+              "editUsernameAllowed": false,
+              "bruteForceProtected": true,
+              "permanentLockout": false,
+              "maxFailureWaitSeconds": 900,
+              "minimumQuickLoginWaitSeconds": 60,
+              "waitIncrementSeconds": 60,
+              "quickLoginCheckMilliSeconds": 1000,
+              "maxDeltaTimeSeconds": 43200,
+              "failureFactor": 30,
+              "defaultRoles": ["offline_access", "uma_authorization"],
+              "requiredCredentials": ["password"],
+              "otpPolicyType": "totp",
+              "otpPolicyAlgorithm": "HmacSHA1",
+              "otpPolicyInitialCounter": 0,
+              "otpPolicyDigits": 6,
+              "otpPolicyLookAheadWindow": 1,
+              "otpPolicyPeriod": 30,
+              "otpSupportedApplications": ["FreeOTP", "Google Authenticator"],
+              "webAuthnPolicyRpEntityName": "Remittance Platform",
+              "webAuthnPolicySignatureAlgorithms": ["ES256", "RS256"],
+              "webAuthnPolicyRpId": "remittance.local",
+              "webAuthnPolicyAttestationConveyancePreference": "not specified",
+              "webAuthnPolicyAuthenticatorAttachment": "not specified",
+              "webAuthnPolicyRequireResidentKey": "not specified",
+              "webAuthnPolicyUserVerificationRequirement": "not specified",
+              "webAuthnPolicyCreateTimeout": 0,
+              "webAuthnPolicyAvoidSameAuthenticatorRegister": false,
+              "webAuthnPolicyAcceptableAaguids": [],
+              "browserSecurityHeaders": {
+                "contentSecurityPolicyReportOnly": "",
+                "xContentTypeOptions": "nosniff",
+                "xRobotsTag": "none",
+                "xFrameOptions": "SAMEORIGIN",
+                "contentSecurityPolicy": "frame-src '\''self'\''; frame-ancestors '\''self'\''; object-src '\''none'\'';"
+              },
+              "smtpServer": {
+                "replyToDisplayName": "Remittance Platform",
+                "starttls": "false",
+                "auth": "false",
+                "port": "587",
+                "host": "localhost",
+                "replyTo": "noreply@remittance.com",
+                "from": "noreply@remittance.com",
+                "fromDisplayName": "Remittance Platform",
+                "ssl": "false"
+              },
+              "loginTheme": "keycloak",
+              "accountTheme": "keycloak",
+              "adminTheme": "keycloak",
+              "emailTheme": "keycloak"
+            }'
+          
+          echo "Remittance Platform realm created successfully"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: keycloak-metrics
+  namespace: keycloak
+spec:
+  selector:
+    matchLabels:
+      app: keycloak
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm-config
+  namespace: keycloak
+data:
+  remittance-realm.json: |
+    {
+      "realm": "remittance",
+      "displayName": "Remittance Platform",
+      "enabled": true,
+      "sslRequired": "external",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": true,
+      "editUsernameAllowed": false,
+      "bruteForceProtected": true,
+      "permanentLockout": false,
+      "maxFailureWaitSeconds": 900,
+      "minimumQuickLoginWaitSeconds": 60,
+      "waitIncrementSeconds": 60,
+      "quickLoginCheckMilliSeconds": 1000,
+      "maxDeltaTimeSeconds": 43200,
+      "failureFactor": 30,
+      "roles": {
+        "realm": [
+          {
+            "name": "agent",
+            "description": "Agent role for banking agents"
+          },
+          {
+            "name": "bank_employee",
+            "description": "Bank employee role"
+          },
+          {
+            "name": "admin",
+            "description": "Administrator role"
+          },
+          {
+            "name": "customer",
+            "description": "Customer role"
+          },
+          {
+            "name": "supervisor",
+            "description": "Supervisor role"
+          }
+        ]
+      },
+      "clients": [
+        {
+          "clientId": "remittance-web",
+          "name": "Remittance Platform Web Application",
+          "description": "Web application for remittance",
+          "enabled": true,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "web-client-secret-123",
+          "redirectUris": [
+            "https://app.remittance.local/*",
+            "http://localhost:3000/*"
+          ],
+          "webOrigins": [
+            "https://app.remittance.local",
+            "http://localhost:3000"
+          ],
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "bearerOnly": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": true,
+          "serviceAccountsEnabled": false,
+          "authorizationServicesEnabled": true,
+          "fullScopeAllowed": false,
+          "defaultClientScopes": [
+            "web-origins",
+            "profile",
+            "roles",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "address",
+            "phone",
+            "offline_access",
+            "microprofile-jwt"
+          ]
+        },
+        {
+          "clientId": "remittance-mobile",
+          "name": "Remittance Platform Mobile Application",
+          "description": "Mobile application for remittance",
+          "enabled": true,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "mobile-client-secret-123",
+          "redirectUris": [
+            "remittance://callback",
+            "http://localhost:8080/callback"
+          ],
+          "protocol": "openid-connect",
+          "publicClient": true,
+          "bearerOnly": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": true,
+          "serviceAccountsEnabled": false,
+          "fullScopeAllowed": false,
+          "defaultClientScopes": [
+            "profile",
+            "roles",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "address",
+            "phone",
+            "offline_access"
+          ]
+        },
+        {
+          "clientId": "remittance-api",
+          "name": "Remittance Platform API",
+          "description": "API client for backend services",
+          "enabled": true,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "api-client-secret-123",
+          "protocol": "openid-connect",
+          "publicClient": false,
+          "bearerOnly": true,
+          "standardFlowEnabled": false,
+          "implicitFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": true,
+          "authorizationServicesEnabled": true,
+          "fullScopeAllowed": false,
+          "defaultClientScopes": [
+            "profile",
+            "roles",
+            "email"
+          ]
+        }
+      ],
+      "groups": [
+        {
+          "name": "agents",
+          "path": "/agents",
+          "realmRoles": ["agent"],
+          "subGroups": [
+            {
+              "name": "tier1-agents",
+              "path": "/agents/tier1-agents"
+            },
+            {
+              "name": "tier2-agents",
+              "path": "/agents/tier2-agents"
+            },
+            {
+              "name": "super-agents",
+              "path": "/agents/super-agents"
+            }
+          ]
+        },
+        {
+          "name": "bank-employees",
+          "path": "/bank-employees",
+          "realmRoles": ["bank_employee"],
+          "subGroups": [
+            {
+              "name": "tellers",
+              "path": "/bank-employees/tellers"
+            },
+            {
+              "name": "managers",
+              "path": "/bank-employees/managers"
+            },
+            {
+              "name": "supervisors",
+              "path": "/bank-employees/supervisors",
+              "realmRoles": ["supervisor"]
+            }
+          ]
+        },
+        {
+          "name": "customers",
+          "path": "/customers",
+          "realmRoles": ["customer"]
+        },
+        {
+          "name": "administrators",
+          "path": "/administrators",
+          "realmRoles": ["admin"]
+        }
+      ],
+      "authenticationFlows": [
+        {
+          "alias": "remittance-browser",
+          "description": "Browser based authentication with MFA",
+          "providerId": "basic-flow",
+          "topLevel": true,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-cookie",
+              "requirement": "ALTERNATIVE",
+              "priority": 10,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            },
+            {
+              "authenticator": "auth-spnego",
+              "requirement": "DISABLED",
+              "priority": 20,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            },
+            {
+              "authenticator": "identity-provider-redirector",
+              "requirement": "ALTERNATIVE",
+              "priority": 25,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            },
+            {
+              "flowAlias": "remittance-forms",
+              "requirement": "ALTERNATIVE",
+              "priority": 30,
+              "userSetupAllowed": false,
+              "autheticatorFlow": true
+            }
+          ]
+        },
+        {
+          "alias": "remittance-forms",
+          "description": "Username, password, otp and other auth forms.",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-username-password-form",
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            },
+            {
+              "flowAlias": "remittance-browser-conditional-otp",
+              "requirement": "CONDITIONAL",
+              "priority": 20,
+              "userSetupAllowed": false,
+              "autheticatorFlow": true
+            }
+          ]
+        },
+        {
+          "alias": "remittance-browser-conditional-otp",
+          "description": "Flow to determine if the OTP is required for the authentication",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-user-configured",
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            },
+            {
+              "authenticator": "auth-otp-form",
+              "requirement": "REQUIRED",
+              "priority": 20,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            }
+          ]
+        }
+      ],
+      "browserFlow": "remittance-browser",
+      "registrationFlow": "registration",
+      "directGrantFlow": "direct grant",
+      "resetCredentialsFlow": "reset credentials",
+      "clientAuthenticationFlow": "clients",
+      "dockerAuthenticationFlow": "docker auth"
+    }
+

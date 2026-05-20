@@ -1,0 +1,8 @@
+{
+  "query": "\n-- First, check existing users\nSELECT id, name, email, role, open_id FROM users LIMIT 10;\n",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway04.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2t5rixfHAYLQmtB.eb9688c7beea --database Sh4oWWY2yrd9dx9Nck2id8 --execute \n-- First, check existing users\nSELECT id, name, email, role, open_id FROM users LIMIT 10;\n",
+  "returncode": 1,
+  "logs": [
+    "ERROR 1054 (42S22) at line 3: Unknown column 'open_id' in 'field list'"
+  ]
+}

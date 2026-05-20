@@ -1,0 +1,248 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "remittance-overview",
+    "title": "Nigerian Remittance Platform - Overview",
+    "tags": ["remittance", "overview"],
+    "timezone": "browser",
+    "schemaVersion": 30,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Transaction Volume (24h)",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(increase(transaction_total[24h]))",
+            "legendFormat": "Total Transactions"
+          }
+        ],
+        "options": {
+          "colorMode": "value",
+          "graphMode": "area",
+          "justifyMode": "auto"
+        }
+      },
+      {
+        "id": 2,
+        "title": "Transaction Success Rate",
+        "type": "gauge",
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "1 - (sum(rate(transaction_failures_total[1h])) / sum(rate(transaction_total[1h])))",
+            "legendFormat": "Success Rate"
+          }
+        ],
+        "options": {
+          "showThresholdLabels": false,
+          "showThresholdMarkers": true
+        },
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "red", "value": null},
+                {"color": "yellow", "value": 0.95},
+                {"color": "green", "value": 0.99}
+              ]
+            },
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Total Volume (NGN)",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+        "targets": [
+          {
+            "expr": "sum(increase(transaction_volume_ngn_total[24h]))",
+            "legendFormat": "Volume"
+          }
+        ],
+        "options": {
+          "colorMode": "value"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyNGN"
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Active Users (24h)",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+        "targets": [
+          {
+            "expr": "count(count by (user_id) (transaction_total))",
+            "legendFormat": "Active Users"
+          }
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Transaction Rate",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+        "targets": [
+          {
+            "expr": "sum(rate(transaction_total[5m]))",
+            "legendFormat": "Transactions/sec"
+          },
+          {
+            "expr": "sum(rate(transaction_failures_total[5m]))",
+            "legendFormat": "Failures/sec"
+          }
+        ],
+        "options": {
+          "legend": {"displayMode": "list", "placement": "bottom"}
+        }
+      },
+      {
+        "id": 6,
+        "title": "Corridor Performance",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+        "targets": [
+          {
+            "expr": "sum by (corridor) (rate(corridor_requests_total[5m]))",
+            "legendFormat": "{{corridor}}"
+          }
+        ],
+        "options": {
+          "legend": {"displayMode": "list", "placement": "bottom"}
+        }
+      },
+      {
+        "id": 7,
+        "title": "Transaction Latency (p95)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(transaction_duration_seconds_bucket[5m]))",
+            "legendFormat": "p95 Latency"
+          },
+          {
+            "expr": "histogram_quantile(0.50, rate(transaction_duration_seconds_bucket[5m]))",
+            "legendFormat": "p50 Latency"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Corridor Health",
+        "type": "table",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+        "targets": [
+          {
+            "expr": "corridor_health_status",
+            "legendFormat": "{{corridor}}",
+            "format": "table",
+            "instant": true
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "renameByName": {
+                "corridor": "Corridor",
+                "Value": "Status"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": 9,
+        "title": "Risk Assessments",
+        "type": "piechart",
+        "gridPos": {"h": 8, "w": 8, "x": 0, "y": 20},
+        "targets": [
+          {
+            "expr": "sum by (decision) (increase(risk_assessments_total[24h]))",
+            "legendFormat": "{{decision}}"
+          }
+        ]
+      },
+      {
+        "id": 10,
+        "title": "Reconciliation Status",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 8, "x": 8, "y": 20},
+        "targets": [
+          {
+            "expr": "reconciliation_discrepancy_count",
+            "legendFormat": "Unresolved Discrepancies"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"color": "green", "value": null},
+                {"color": "yellow", "value": 5},
+                {"color": "red", "value": 20}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 11,
+        "title": "KYC Verification Queue",
+        "type": "stat",
+        "gridPos": {"h": 4, "w": 8, "x": 16, "y": 20},
+        "targets": [
+          {
+            "expr": "kyc_pending_verifications",
+            "legendFormat": "Pending Verifications"
+          }
+        ]
+      },
+      {
+        "id": 12,
+        "title": "Service Health",
+        "type": "table",
+        "gridPos": {"h": 8, "w": 8, "x": 8, "y": 24},
+        "targets": [
+          {
+            "expr": "up",
+            "legendFormat": "{{job}}",
+            "format": "table",
+            "instant": true
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "title": "Lakehouse Ingestion Rate",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 24},
+        "targets": [
+          {
+            "expr": "sum(rate(lakehouse_events_ingested_total[5m]))",
+            "legendFormat": "Events/sec"
+          }
+        ]
+      }
+    ]
+  }
+}

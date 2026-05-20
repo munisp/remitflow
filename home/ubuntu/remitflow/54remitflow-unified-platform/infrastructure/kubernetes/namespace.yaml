@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remittance
+  labels:
+    name: remittance
+    environment: production
+    project: remittance-network
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remittance-dev
+  labels:
+    name: remittance-dev
+    environment: development
+    project: remittance-network
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remittance-staging
+  labels:
+    name: remittance-staging
+    environment: staging
+    project: remittance-network
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remittance-security
+  labels:
+    name: remittance-security
+    environment: production
+    project: remittance-network
+    component: security
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remittance-monitoring
+  labels:
+    name: remittance-monitoring
+    environment: production
+    project: remittance-network
+    component: monitoring
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remittance-data
+  labels:
+    name: remittance-data
+    environment: production
+    project: remittance-network
+    component: data-platform
+

@@ -1,0 +1,350 @@
+# Payment Rails Configuration
+# Mojaloop, CIPS, PIX, and UPI Integration
+
+services:
+  cips:
+    name: "CIPS Integration Service"
+    endpoint: "http://cips-integration:8000"
+    timeout: 60s
+    retry:
+      max_attempts: 3
+      initial_interval: 1s
+      backoff_coefficient: 2.0
+    features:
+      - supplier_validation
+      - payment_submission
+      - settlement_tracking
+      - document_verification
+    limits:
+      min_amount_ngn: 10000
+      max_amount_ngn: 50000000
+      daily_limit_ngn: 100000000
+    fees:
+      percentage: 0.01  # 1%
+      min_fee_ngn: 500
+      max_fee_ngn: 5000
+    settlement:
+      same_day_cutoff: "15:00:00 CST"
+      next_day_cutoff: "23:00:00 CST"
+    
+  pix:
+    name: "PIX Integration Service"
+    endpoint: "http://payment-gateway-service:8000/pix"
+    timeout: 30s
+    retry:
+      max_attempts: 3
+      initial_interval: 500ms
+      backoff_coefficient: 2.0
+    features:
+      - dict_lookup
+      - instant_payment
+      - qr_code_payment
+      - scheduled_payment
+    limits:
+      min_amount_ngn: 100
+      max_amount_ngn: 10000000
+      daily_limit_ngn: 50000000
+    fees:
+      percentage: 0.003  # 0.3%
+      max_fee_ngn: 150
+    settlement:
+      type: "instant"  # PIX is always instant
+    
+  upi:
+    name: "UPI Integration Service"
+    endpoint: "http://upi-integration:8000"
+    timeout: 30s
+    retry:
+      max_attempts: 3
+      initial_interval: 500ms
+      backoff_coefficient: 2.0
+    features:
+      - vpa_validation
+      - intent_payment
+      - collect_request
+      - qr_code_payment
+    limits:
+      min_amount_ngn: 50
+      max_amount_ngn: 5000000
+      daily_limit_ngn: 20000000
+    fees:
+      percentage: 0.005  # 0.5%
+      max_fee_ngn: 200
+    settlement:
+      type: "instant"  # UPI is always instant
+    
+  mojaloop:
+    name: "Mojaloop Integration Service"
+    endpoint: "http://mojaloop-service:8000"
+    timeout: 45s
+    retry:
+      max_attempts: 3
+      initial_interval: 1s
+      backoff_coefficient: 2.0
+    features:
+      - party_lookup
+      - quote_request
+      - transfer_execution
+      - settlement_tracking
+    supported_countries:
+      - KE  # Kenya
+      - GH  # Ghana
+      - UG  # Uganda
+      - TZ  # Tanzania
+      - RW  # Rwanda
+      - ZA  # South Africa
+    limits:
+      min_amount_ngn: 100
+      max_amount_ngn: 2000000
+      daily_limit_ngn: 10000000
+    fees:
+      percentage: 0.01  # 1%
+      min_fee_ngn: 50
+    settlement:
+      type: "instant"  # Mojaloop is instant
+
+# Middleware Integration
+middleware:
+  kafka:
+    brokers:
+      - "kafka-1:9092"
+      - "kafka-2:9092"
+      - "kafka-3:9092"
+    topics:
+      cips_payments: "cips-payments"
+      pix_payments: "pix-payments"
+      upi_payments: "upi-payments"
+      mojaloop_payments: "mojaloop-payments"
+    producer:
+      acks: "all"
+      compression: "snappy"
+      max_in_flight: 5
+    consumer:
+      group_id: "payment-rails-consumer"
+      auto_offset_reset: "earliest"
+  
+  redis:
+    endpoints:
+      - "redis-master:6379"
+      - "redis-replica-1:6379"
+      - "redis-replica-2:6379"
+    database: 2
+    password_env: "REDIS_PASSWORD"
+    pools:
+      fx_quotes:
+        ttl: 60s  # FX rate lock duration
+      party_lookup_cache:
+        ttl: 300s  # 5 minutes
+      supplier_validation_cache:
+        ttl: 600s  # 10 minutes
+  
+  apisix:
+    admin_url: "http://apisix-admin:9180"
+    gateway_url: "http://apisix-gateway:9080"
+    routes:
+      - name: "cips-payment"
+        uri: "/api/v1/payments/cips"
+        upstream: "cips-integration:8000"
+        plugins:
+          - rate-limit:
+              count: 100
+              time_window: 60
+          - key-auth: {}
+          - prometheus: {}
+      - name: "pix-payment"
+        uri: "/api/v1/payments/pix"
+        upstream: "payment-gateway-service:8000"
+        plugins:
+          - rate-limit:
+              count: 200
+              time_window: 60
+          - key-auth: {}
+          - prometheus: {}
+      - name: "upi-payment"
+        uri: "/api/v1/payments/upi"
+        upstream: "upi-integration:8000"
+        plugins:
+          - rate-limit:
+              count: 200
+              time_window: 60
+          - key-auth: {}
+          - prometheus: {}
+      - name: "mojaloop-payment"
+        uri: "/api/v1/payments/mojaloop"
+        upstream: "mojaloop-service:8000"
+        plugins:
+          - rate-limit:
+              count: 150
+              time_window: 60
+          - key-auth: {}
+          - prometheus: {}
+  
+  tigerbeetle:
+    cluster_id: 0
+    replicas:
+      - "tigerbeetle-1:3000"
+      - "tigerbeetle-2:3000"
+      - "tigerbeetle-3:3000"
+    accounts:
+      payment_gateway_settlement: "9004"
+      cips_clearing: "9005"
+      pix_clearing: "9006"
+      upi_clearing: "9007"
+      mojaloop_clearing: "9008"
+    transfer_codes:
+      cips_transfer: "2001"
+      pix_transfer: "2003"
+      upi_transfer: "2004"
+      mojaloop_transfer: "2005"
+  
+  keycloak:
+    realm: "remittance-platform"
+    auth_server_url: "http://keycloak:8080/auth"
+    client_id: "payment-rails-service"
+    client_secret_env: "KEYCLOAK_CLIENT_SECRET"
+    roles:
+      cips_payment: "cips_payment_user"
+      pix_payment: "international_transfer_user"
+      upi_payment: "international_transfer_user"
+      mojaloop_payment: "international_transfer_user"
+  
+  permify:
+    endpoint: "http://permify:3476"
+    schema_version: "v1"
+    permissions:
+      cips_payment:
+        resource: "business_payment"
+        action: "execute"
+        context_required:
+          - amount
+          - destination
+          - payment_rail
+      pix_payment:
+        resource: "international_transfer"
+        action: "execute"
+        context_required:
+          - amount
+          - destination
+          - payment_rail
+      upi_payment:
+        resource: "international_transfer"
+        action: "execute"
+        context_required:
+          - amount
+          - destination
+          - payment_rail
+      mojaloop_payment:
+        resource: "international_transfer"
+        action: "execute"
+        context_required:
+          - amount
+          - destination
+          - payment_rail
+  
+  dapr:
+    app_id: "payment-rails-service"
+    app_port: 8080
+    dapr_http_port: 3500
+    dapr_grpc_port: 50001
+    components:
+      - name: "statestore"
+        type: "state.redis"
+        version: "v1"
+      - name: "pubsub"
+        type: "pubsub.kafka"
+        version: "v1"
+      - name: "secretstore"
+        type: "secretstores.kubernetes"
+        version: "v1"
+  
+  fluvio:
+    sc_endpoint: "fluvio-sc:9003"
+    topics:
+      - name: "payment-events"
+        partitions: 10
+        replication: 3
+      - name: "settlement-events"
+        partitions: 5
+        replication: 3
+  
+  lakehouse:
+    endpoint: "http://lakehouse-api:8000"
+    database: "remittance_analytics"
+    tables:
+      cips_transactions: "cips_transactions"
+      pix_transactions: "pix_transactions"
+      upi_transactions: "upi_transactions"
+      mojaloop_transactions: "mojaloop_transactions"
+    batch_size: 100
+    flush_interval: 10s
+
+# Temporal Configuration
+temporal:
+  namespace: "payment-rails"
+  task_queue: "payment-rails-tasks"
+  workflows:
+    - name: "CIPSPaymentWorkflow"
+      timeout: "5m"
+      retry_policy:
+        max_attempts: 3
+    - name: "PIXPaymentWorkflow"
+      timeout: "2m"
+      retry_policy:
+        max_attempts: 3
+    - name: "UPIPaymentWorkflow"
+      timeout: "2m"
+      retry_policy:
+        max_attempts: 3
+    - name: "MojaloopPaymentWorkflow"
+      timeout: "3m"
+      retry_policy:
+        max_attempts: 3
+
+# Monitoring & Observability
+monitoring:
+  prometheus:
+    endpoint: "http://prometheus:9090"
+    scrape_interval: 15s
+    metrics:
+      - payment_requests_total
+      - payment_success_total
+      - payment_failure_total
+      - payment_duration_seconds
+      - settlement_duration_seconds
+  
+  grafana:
+    endpoint: "http://grafana:3000"
+    dashboards:
+      - "payment-rails-overview"
+      - "cips-payments"
+      - "pix-payments"
+      - "upi-payments"
+      - "mojaloop-payments"
+  
+  jaeger:
+    endpoint: "http://jaeger:14268"
+    sampler:
+      type: "probabilistic"
+      param: 0.1  # Sample 10% of traces
+
+# Security
+security:
+  encryption:
+    at_rest: true
+    in_transit: true
+    algorithm: "AES-256-GCM"
+  
+  compliance:
+    pci_dss: true
+    gdpr: true
+    ndpr: true  # Nigeria Data Protection Regulation
+    cbna: true  # Central Bank of Nigeria Act
+  
+  rate_limiting:
+    per_user:
+      requests_per_minute: 20
+      requests_per_hour: 500
+      requests_per_day: 5000
+    per_ip:
+      requests_per_minute: 100
+      requests_per_hour: 2000

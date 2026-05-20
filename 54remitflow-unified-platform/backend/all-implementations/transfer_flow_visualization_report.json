@@ -1,0 +1,52 @@
+{
+    "visualization_type": "12_step_transfer_flow",
+    "total_diagrams": 6,
+    "diagrams_created": [
+        "transfer_flow_sequence.mmd - Complete sequence diagram",
+        "transfer_flow_timeline.mmd - Timeline visualization",
+        "transfer_flow_detailed.mmd - Detailed step flow",
+        "service_interaction_flow.mmd - Service interactions",
+        "transfer_flow_performance.png - Performance metrics",
+        "cost_comparison_chart.png - Cost comparison"
+    ],
+    "transfer_characteristics": {
+        "total_steps": 12,
+        "total_time": "8.3 seconds",
+        "success_rate": "99.5%+",
+        "cost_savings": "85-90% vs competitors",
+        "speed_advantage": "100x faster than traditional"
+    },
+    "step_breakdown": {
+        "user_layer": [
+            "Step 1: User Initiation"
+        ],
+        "api_layer": [
+            "Step 2: API Gateway",
+            "Step 3: Orchestration"
+        ],
+        "validation_layer": [
+            "Step 4: User Validation",
+            "Step 5: Fraud Detection",
+            "Step 6: Compliance"
+        ],
+        "financial_layer": [
+            "Step 7: Exchange Rate",
+            "Step 8: Conversion",
+            "Step 9: Ledger"
+        ],
+        "pix_layer": [
+            "Step 10: PIX Execution"
+        ],
+        "communication_layer": [
+            "Step 11: Notifications",
+            "Step 12: Data Sync"
+        ]
+    },
+    "performance_metrics": {
+        "fastest_step": "Step 5: Fraud Detection (100ms)",
+        "slowest_step": "Step 10: PIX Execution (2.8s)",
+        "validation_time": "1.6s (Steps 4-6)",
+        "financial_processing": "1.7s (Steps 7-9)",
+        "pix_settlement": "2.8s (Step 10)"
+    }
+}

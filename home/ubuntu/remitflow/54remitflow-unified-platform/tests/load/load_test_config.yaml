@@ -1,0 +1,35 @@
+# Load test configuration
+
+scenarios:
+  - name: normal_load
+    users: 100
+    spawn_rate: 10
+    duration: 300s  # 5 minutes
+    
+  - name: peak_load
+    users: 500
+    spawn_rate: 50
+    duration: 600s  # 10 minutes
+    
+  - name: stress_test
+    users: 1000
+    spawn_rate: 100
+    duration: 300s  # 5 minutes
+
+thresholds:
+  response_time_p95: 200ms
+  response_time_p99: 500ms
+  error_rate: 1%
+  throughput_min: 1000  # requests per second
+
+endpoints:
+  - path: /products
+    weight: 30
+  - path: /orders
+    weight: 25
+  - path: /payments
+    weight: 20
+  - path: /inventory
+    weight: 15
+  - path: /health
+    weight: 10

@@ -1,0 +1,94 @@
+# Podfile - Remittance Platform iOS Dependencies
+# Production-grade CocoaPods configuration
+
+platform :ios, '14.0'
+use_frameworks!
+inhibit_all_warnings!
+
+# Flipper configuration for React Native debugging
+flipper_config = ENV['NO_FLIPPER'] == "1" ? FlipperConfiguration.disabled : FlipperConfiguration.enabled
+
+target 'AgentBanking' do
+  # React Native Core
+  config = use_native_modules!
+  
+  use_react_native!(
+    :path => config[:reactNativePath],
+    :flipper_configuration => flipper_config,
+    :app_path => "#{Pod::Config.instance.installation_root}/.."
+  )
+  
+  # Security & Cryptography
+  pod 'TrustKit', '~> 3.0'                    # Certificate pinning
+  pod 'IOSSecuritySuite', '~> 1.9'            # Jailbreak detection & RASP
+  pod 'CryptoSwift', '~> 1.8'                 # Cryptographic operations
+  pod 'KeychainAccess', '~> 4.2'              # Secure keychain wrapper
+  
+  # Device Attestation
+  pod 'DeviceCheck'                            # Apple DeviceCheck API
+  
+  # Crash Reporting & Analytics
+  pod 'Sentry', '~> 8.0'                      # Crash reporting
+  pod 'Firebase/Analytics', '~> 10.0'         # Analytics
+  pod 'Firebase/Crashlytics', '~> 10.0'       # Crash analytics
+  pod 'Firebase/Performance', '~> 10.0'       # Performance monitoring
+  
+  # Biometrics
+  pod 'BiometricAuthentication', '~> 3.1'     # Face ID / Touch ID
+  
+  # Networking
+  pod 'Alamofire', '~> 5.8'                   # HTTP networking
+  pod 'AlamofireNetworkActivityIndicator'     # Network activity
+  
+  # Offline & Storage
+  pod 'RealmSwift', '~> 10.0'                 # Local database
+  pod 'MMKV', '~> 1.3'                        # Fast key-value storage
+  
+  # Push Notifications
+  pod 'Firebase/Messaging', '~> 10.0'         # FCM
+  
+  # Feature Flags & Remote Config
+  pod 'Firebase/RemoteConfig', '~> 10.0'      # Remote configuration
+  pod 'LaunchDarkly', '~> 9.0'                # Feature flags
+  
+  # Code Push / OTA Updates
+  pod 'CodePush', '~> 8.0'                    # Microsoft CodePush
+  
+  target 'AgentBankingTests' do
+    inherit! :complete
+    pod 'Quick', '~> 7.0'                     # BDD testing
+    pod 'Nimble', '~> 13.0'                   # Matcher framework
+    pod 'OHHTTPStubs/Swift', '~> 9.0'         # Network stubbing
+  end
+  
+  target 'AgentBankingUITests' do
+    inherit! :complete
+  end
+  
+  post_install do |installer|
+    react_native_post_install(
+      installer,
+      config[:reactNativePath],
+      :mac_catalyst_enabled => false
+    )
+    
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |config|
+        # Minimum iOS version
+        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
+        
+        # Enable bitcode for App Store
+        config.build_settings['ENABLE_BITCODE'] = 'NO'
+        
+        # Code signing
+        config.build_settings['CODE_SIGN_IDENTITY'] = ''
+        
+        # Swift version
+        config.build_settings['SWIFT_VERSION'] = '5.0'
+        
+        # Exclude arm64 for simulator (M1 compatibility)
+        config.build_settings['EXCLUDED_ARCHS[sdk=iphonesimulator*]'] = 'arm64'
+      end
+    end
+  end
+end

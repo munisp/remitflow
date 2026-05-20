@@ -1,0 +1,401 @@
+/*
+RemitFlow Community Activity Feed Service (Go)
+Real-time SSE stream of community events:
+  - Marketplace orders placed / delivered
+  - Community fund contributions
+  - Talent bookings
+  - DiasporaVest collective joins
+  - Referral completions
+  - Family transfers
+
+Port: 8084
+Endpoints:
+  GET  /health
+  GET  /stream            — SSE event stream (token auth via ?token=)
+  POST /publish           — internal: publish an event (from Node.js)
+  GET  /recent            — last 50 events (JSON)
+  GET  /stats             — connection + event counts
+*/
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"math/rand"
+	"net/http"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type ActivityEvent struct {
+	ID        string                 `json:"id"`
+	Type      string                 `json:"type"`
+	Category  string                 `json:"category"`
+	Actor     string                 `json:"actor"`
+	Action    string                 `json:"action"`
+	Detail    string                 `json:"detail"`
+	Amount    *float64               `json:"amount,omitempty"`
+	Currency  string                 `json:"currency,omitempty"`
+	Country   string                 `json:"country,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Timestamp time.Time              `json:"timestamp"`
+}
+
+type PublishRequest struct {
+	Type     string                 `json:"type" binding:"required"`
+	Category string                 `json:"category" binding:"required"`
+	Actor    string                 `json:"actor" binding:"required"`
+	Action   string                 `json:"action" binding:"required"`
+	Detail   string                 `json:"detail"`
+	Amount   *float64               `json:"amount"`
+	Currency string                 `json:"currency"`
+	Country  string                 `json:"country"`
+	Metadata map[string]interface{} `json:"metadata"`
+}
+
+type StatsResponse struct {
+	ConnectedClients int   `json:"connectedClients"`
+	TotalEvents      int64 `json:"totalEvents"`
+	EventsPerMinute  int64 `json:"eventsPerMinute"`
+	Uptime           int64 `json:"uptimeSeconds"`
+}
+
+// ─── Hub ──────────────────────────────────────────────────────────────────────
+
+type Hub struct {
+	mu          sync.RWMutex
+	clients     map[chan ActivityEvent]bool
+	recent      []ActivityEvent
+	totalEvents int64
+	startTime   time.Time
+	eventCount1m int64
+	lastMinute  time.Time
+}
+
+func newHub() *Hub {
+	h := &Hub{
+		clients:    make(map[chan ActivityEvent]bool),
+		recent:     make([]ActivityEvent, 0, 50),
+		startTime:  time.Now(),
+		lastMinute: time.Now(),
+	}
+	return h
+}
+
+func (h *Hub) subscribe() chan ActivityEvent {
+	ch := make(chan ActivityEvent, 32)
+	h.mu.Lock()
+	h.clients[ch] = true
+	h.mu.Unlock()
+	return ch
+}
+
+func (h *Hub) unsubscribe(ch chan ActivityEvent) {
+	h.mu.Lock()
+	delete(h.clients, ch)
+	h.mu.Unlock()
+	close(ch)
+}
+
+func (h *Hub) publish(evt ActivityEvent) {
+	h.mu.Lock()
+	// Append to recent ring buffer (max 50)
+	if len(h.recent) >= 50 {
+		h.recent = h.recent[1:]
+	}
+	h.recent = append(h.recent, evt)
+	h.totalEvents++
+	h.eventCount1m++
+	// Reset per-minute counter
+	if time.Since(h.lastMinute) >= time.Minute {
+		h.eventCount1m = 0
+		h.lastMinute = time.Now()
+	}
+	// Snapshot clients
+	snapshot := make([]chan ActivityEvent, 0, len(h.clients))
+	for ch := range h.clients {
+		snapshot = append(snapshot, ch)
+	}
+	h.mu.Unlock()
+
+	// Non-blocking send to all subscribers
+	for _, ch := range snapshot {
+		select {
+		case ch <- evt:
+		default:
+			// Client too slow — drop event for this subscriber
+		}
+	}
+}
+
+func (h *Hub) getRecent() []ActivityEvent {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	result := make([]ActivityEvent, len(h.recent))
+	copy(result, h.recent)
+	return result
+}
+
+func (h *Hub) getStats() StatsResponse {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return StatsResponse{
+		ConnectedClients: len(h.clients),
+		TotalEvents:      h.totalEvents,
+		EventsPerMinute:  h.eventCount1m,
+		Uptime:           int64(time.Since(h.startTime).Seconds()),
+	}
+}
+
+// ─── Demo event generator ─────────────────────────────────────────────────────
+
+var demoActors = []string{
+	"Amara K.", "Kwame O.", "Fatima B.", "Chidi N.", "Aisha M.",
+	"Emeka D.", "Zainab A.", "Kofi T.", "Ngozi E.", "Seun L.",
+	"Yaw A.", "Bola F.", "Kemi S.", "Tunde R.", "Adaeze P.",
+}
+
+var demoCountries = []string{"NG", "GH", "KE", "ZA", "SN", "ET", "TZ", "UG", "RW", "CI"}
+
+type demoEventTemplate struct {
+	eventType string
+	category  string
+	action    string
+	detail    string
+	hasAmount bool
+	currency  string
+}
+
+var demoTemplates = []demoEventTemplate{
+	{"marketplace_order", "marketplace", "placed an order", "Purchased handmade Ankara fabric", true, "USD"},
+	{"marketplace_delivery", "marketplace", "confirmed delivery", "AfriMarket order delivered successfully", false, ""},
+	{"marketplace_listing", "marketplace", "posted a new listing", "Listed premium shea butter products", false, ""},
+	{"community_contribution", "community", "contributed to a fund", "Supported Lagos School Building Fund", true, "USD"},
+	{"community_proposal", "community", "submitted a proposal", "Healthcare clinic expansion proposal", false, ""},
+	{"community_vote", "community", "voted on a proposal", "Voted YES on Nairobi Water Project", false, ""},
+	{"talent_booking", "talent", "booked a consultation", "Fintech advisory session booked", true, "USD"},
+	{"talent_profile", "talent", "joined TalentBridge", "Healthcare professional available for projects", false, ""},
+	{"diaspora_invest", "invest", "joined a collective", "Joined West Africa Tech Collective", true, "USD"},
+	{"diaspora_opportunity", "invest", "expressed interest", "Interested in Lagos Solar Bond", false, ""},
+	{"family_transfer", "family", "sent money home", "Family support transfer completed", true, "NGN"},
+	{"family_member", "family", "added a family member", "Added beneficiary to family dashboard", false, ""},
+	{"referral_complete", "referral", "earned a referral reward", "Friend signed up using referral code", true, "NGN"},
+	{"referral_tier", "referral", "reached a new tier", "Upgraded to Gold tier — 10% fee discount unlocked", false, ""},
+}
+
+func generateDemoEvent() ActivityEvent {
+	tmpl := demoTemplates[rand.Intn(len(demoTemplates))]
+	actor := demoActors[rand.Intn(len(demoActors))]
+	country := demoCountries[rand.Intn(len(demoCountries))]
+
+	evt := ActivityEvent{
+		ID:        fmt.Sprintf("evt_%d_%d", time.Now().UnixNano(), rand.Intn(9999)),
+		Type:      tmpl.eventType,
+		Category:  tmpl.category,
+		Actor:     actor,
+		Action:    tmpl.action,
+		Detail:    tmpl.detail,
+		Country:   country,
+		Timestamp: time.Now(),
+	}
+
+	if tmpl.hasAmount {
+		var amount float64
+		switch tmpl.currency {
+		case "NGN":
+			amount = float64(rand.Intn(200000)+5000) / 100.0 * 100
+		default:
+			amount = float64(rand.Intn(50000)+500) / 100.0
+		}
+		evt.Amount = &amount
+		evt.Currency = tmpl.currency
+	}
+
+	return evt
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+func main() {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8084"
+	}
+
+	internalToken := os.Getenv("INTERNAL_TOKEN")
+	if internalToken == "" {
+		internalToken = "remitflow-internal-2024"
+	}
+
+	hub := newHub()
+
+	// Seed with recent demo events
+	for i := 0; i < 15; i++ {
+		evt := generateDemoEvent()
+		evt.Timestamp = time.Now().Add(-time.Duration(rand.Intn(3600)) * time.Second)
+		hub.publish(evt)
+	}
+
+	// Background demo event generator (simulates live activity)
+	go func() {
+		for {
+			// Random interval: 3-12 seconds
+			interval := time.Duration(3000+rand.Intn(9000)) * time.Millisecond
+			time.Sleep(interval)
+			hub.publish(generateDemoEvent())
+		}
+	}()
+
+	// Heartbeat goroutine — sends ping every 25s to keep connections alive
+	go func() {
+		ticker := time.NewTicker(25 * time.Second)
+		for range ticker.C {
+			hub.publish(ActivityEvent{
+				ID:        fmt.Sprintf("ping_%d", time.Now().Unix()),
+				Type:      "ping",
+				Category:  "system",
+				Actor:     "system",
+				Action:    "heartbeat",
+				Timestamp: time.Now(),
+			})
+		}
+	}()
+
+	// ─── Router ──────────────────────────────────────────────────────────────
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+
+	// CORS
+	r.Use(func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Internal-Token")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
+	})
+
+	// ─── Health ──────────────────────────────────────────────────────────────
+	r.GET("/health", func(c *gin.Context) {
+		stats := hub.getStats()
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "ok",
+			"service": "go-community-feed",
+			"version": "1.0.0",
+			"port":    port,
+			"stats":   stats,
+		})
+	})
+
+	// ─── SSE Stream ──────────────────────────────────────────────────────────
+	r.GET("/stream", func(c *gin.Context) {
+		// Set SSE headers
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
+
+		// Subscribe to hub
+		ch := hub.subscribe()
+		defer hub.unsubscribe(ch)
+
+		// Send last 10 recent events as backfill
+		recent := hub.getRecent()
+		start := len(recent) - 10
+		if start < 0 {
+			start = 0
+		}
+		for _, evt := range recent[start:] {
+			data, _ := json.Marshal(evt)
+			fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+		}
+		c.Writer.Flush()
+
+		// Stream new events
+		clientGone := c.Request.Context().Done()
+		for {
+			select {
+			case <-clientGone:
+				return
+			case evt, ok := <-ch:
+				if !ok {
+					return
+				}
+				data, _ := json.Marshal(evt)
+				fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+				c.Writer.Flush()
+			}
+		}
+	})
+
+	// ─── Publish (internal) ──────────────────────────────────────────────────
+	r.POST("/publish", func(c *gin.Context) {
+		// Validate internal token
+		token := c.GetHeader("X-Internal-Token")
+		if token != internalToken {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			return
+		}
+
+		var req PublishRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		evt := ActivityEvent{
+			ID:        fmt.Sprintf("evt_%d_%d", time.Now().UnixNano(), rand.Intn(9999)),
+			Type:      req.Type,
+			Category:  req.Category,
+			Actor:     req.Actor,
+			Action:    req.Action,
+			Detail:    req.Detail,
+			Amount:    req.Amount,
+			Currency:  req.Currency,
+			Country:   req.Country,
+			Metadata:  req.Metadata,
+			Timestamp: time.Now(),
+		}
+
+		hub.publish(evt)
+		log.Printf("[Feed] Published event: %s by %s", evt.Type, evt.Actor)
+
+		c.JSON(http.StatusOK, gin.H{
+			"ok":      true,
+			"eventId": evt.ID,
+		})
+	})
+
+	// ─── Recent events ───────────────────────────────────────────────────────
+	r.GET("/recent", func(c *gin.Context) {
+		events := hub.getRecent()
+		// Return in reverse chronological order
+		reversed := make([]ActivityEvent, len(events))
+		for i, e := range events {
+			reversed[len(events)-1-i] = e
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"events": reversed,
+			"count":  len(reversed),
+		})
+	})
+
+	// ─── Stats ───────────────────────────────────────────────────────────────
+	r.GET("/stats", func(c *gin.Context) {
+		c.JSON(http.StatusOK, hub.getStats())
+	})
+
+	log.Printf("[CommunityFeed] Starting on port %s", port)
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("[CommunityFeed] Failed to start: %v", err)
+	}
+}

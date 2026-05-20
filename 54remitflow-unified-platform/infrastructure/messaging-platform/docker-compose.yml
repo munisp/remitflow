@@ -1,0 +1,541 @@
+version: '3.8'
+
+services:
+  # Database Services
+  postgres:
+    image: postgres:15-alpine
+    container_name: messaging-postgres
+    environment:
+      POSTGRES_DB: messaging_platform
+      POSTGRES_USER: messaging_user
+      POSTGRES_PASSWORD: messaging_secure_password_2024
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    networks:
+      - messaging-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U messaging_user -d messaging_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: messaging-redis
+    command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - messaging-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Core Messaging Services
+  ussd-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.ussd
+    container_name: messaging-ussd
+    environment:
+      - DATABASE_URL=postgres://messaging_user:messaging_secure_password_2024@postgres:5432/messaging_platform?sslmode=disable
+      - REDIS_URL=redis:6379
+      - PORT=8083
+      - MTN_USSD_URL=https://api.mtn.ng/ussd
+      - AIRTEL_USSD_URL=https://api.airtel.ng/ussd
+      - GLO_USSD_URL=https://api.glo.com/ussd
+      - NINEMOBILE_USSD_URL=https://api.9mobile.com.ng/ussd
+      - MTN_API_KEY=${MTN_API_KEY}
+      - AIRTEL_API_KEY=${AIRTEL_API_KEY}
+      - GLO_API_KEY=${GLO_API_KEY}
+      - NINEMOBILE_API_KEY=${NINEMOBILE_API_KEY}
+      - COMPRESSION_ENABLED=true
+      - MAX_SESSION_DURATION=300
+      - SESSION_CLEANUP_INTERVAL=60
+    ports:
+      - "8083:8083"
+    networks:
+      - messaging-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+        reservations:
+          memory: 256M
+          cpus: '0.5'
+
+  sms-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.sms
+    container_name: messaging-sms
+    environment:
+      - DATABASE_URL=postgres://messaging_user:messaging_secure_password_2024@postgres:5432/messaging_platform?sslmode=disable
+      - REDIS_URL=redis:6379
+      - PORT=8084
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - AFRICAS_TALKING_USERNAME=${AFRICAS_TALKING_USERNAME}
+      - AFRICAS_TALKING_API_KEY=${AFRICAS_TALKING_API_KEY}
+      - TERMII_API_KEY=${TERMII_API_KEY}
+      - BULK_SMS_NIGERIA_TOKEN=${BULK_SMS_NIGERIA_TOKEN}
+      - DEFAULT_SENDER_ID=AgentBank
+      - MAX_RETRIES=3
+      - RETRY_DELAY_SECONDS=5
+      - COST_OPTIMIZATION_ENABLED=true
+      - DELIVERY_REPORT_ENABLED=true
+    ports:
+      - "8084:8084"
+    networks:
+      - messaging-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8084/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+        limits:
+          memory: 1G
+          cpus: '2.0'
+        reservations:
+          memory: 512M
+          cpus: '1.0'
+
+  whatsapp-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.whatsapp
+    container_name: messaging-whatsapp
+    environment:
+      - DATABASE_URL=postgres://messaging_user:messaging_secure_password_2024@postgres:5432/messaging_platform?sslmode=disable
+      - REDIS_URL=redis:6379
+      - PORT=8085
+      - WHATSAPP_BUSINESS_ACCOUNT_ID=${WHATSAPP_BUSINESS_ACCOUNT_ID}
+      - WHATSAPP_ACCESS_TOKEN=${WHATSAPP_ACCESS_TOKEN}
+      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
+      - WHATSAPP_WEBHOOK_VERIFY_TOKEN=${WHATSAPP_WEBHOOK_VERIFY_TOKEN}
+      - FACEBOOK_APP_ID=${FACEBOOK_APP_ID}
+      - FACEBOOK_APP_SECRET=${FACEBOOK_APP_SECRET}
+      - MEDIA_STORAGE_PATH=/app/media
+      - MAX_FILE_SIZE_MB=100
+      - SUPPORTED_MEDIA_TYPES=image/jpeg,image/png,application/pdf,audio/mpeg,video/mp4
+      - TEMPLATE_CACHE_TTL=3600
+      - MESSAGE_RATE_LIMIT=1000
+    ports:
+      - "8085:8085"
+    volumes:
+      - whatsapp_media:/app/media
+    networks:
+      - messaging-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+        limits:
+          memory: 1G
+          cpus: '2.0'
+        reservations:
+          memory: 512M
+          cpus: '1.0'
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.analytics
+    container_name: messaging-analytics
+    environment:
+      - DATABASE_URL=postgres://messaging_user:messaging_secure_password_2024@postgres:5432/messaging_platform?sslmode=disable
+      - REDIS_URL=redis:6379
+      - PORT=8087
+      - REPORT_STORAGE_PATH=/app/reports
+      - AGGREGATION_INTERVAL=3600
+      - RETENTION_DAYS=365
+      - COST_ANALYSIS_ENABLED=true
+      - TREND_ANALYSIS_ENABLED=true
+      - PREDICTIVE_ANALYTICS_ENABLED=true
+    ports:
+      - "8087:8087"
+    volumes:
+      - analytics_reports:/app/reports
+    networks:
+      - messaging-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8087/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+        limits:
+          memory: 1G
+          cpus: '2.0'
+        reservations:
+          memory: 512M
+          cpus: '1.0'
+
+  # Unified Messaging Platform (Main Orchestrator)
+  messaging-platform:
+    build:
+      context: .
+      dockerfile: Dockerfile.platform
+    container_name: messaging-platform
+    environment:
+      - DATABASE_URL=postgres://messaging_user:messaging_secure_password_2024@postgres:5432/messaging_platform?sslmode=disable
+      - REDIS_URL=redis:6379
+      - PORT=8080
+      - USSD_SERVICE_URL=http://ussd-service:8083
+      - SMS_SERVICE_URL=http://sms-service:8084
+      - WHATSAPP_SERVICE_URL=http://whatsapp-service:8085
+      - ANALYTICS_SERVICE_URL=http://analytics-service:8087
+      - MAX_RETRIES=3
+      - RETRY_DELAY_SECONDS=2
+      - CIRCUIT_BREAKER_THRESHOLD=5
+      - HEALTH_CHECK_INTERVAL=60
+      - BULK_BATCH_SIZE=100
+      - CONCURRENT_BATCHES=10
+      - COST_OPTIMIZATION_ENABLED=true
+    ports:
+      - "8080:8080"
+    networks:
+      - messaging-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ussd-service:
+        condition: service_healthy
+      sms-service:
+        condition: service_healthy
+      whatsapp-service:
+        condition: service_healthy
+      analytics-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+        limits:
+          memory: 2G
+          cpus: '4.0'
+        reservations:
+          memory: 1G
+          cpus: '2.0'
+
+  # Load Balancer
+  haproxy:
+    image: haproxy:2.8-alpine
+    container_name: messaging-haproxy
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8404:8404"  # HAProxy stats
+    networks:
+      - messaging-network
+    depends_on:
+      - messaging-platform
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8404/stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Monitoring Services
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: messaging-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - messaging-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: messaging-grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel,grafana-worldmap-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3000:3000"
+    networks:
+      - messaging-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # ELK Stack for Logging
+  opensearch:
+    image: opensearchproject/opensearch:8.8.0
+    container_name: messaging-opensearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - messaging-network
+    restart: unless-stopped
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.8.0
+    container_name: messaging-logstash
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./logstash/config:/usr/share/logstash/config:ro
+    ports:
+      - "5044:5044"
+      - "9600:9600"
+    networks:
+      - messaging-network
+    depends_on:
+      - opensearch
+    restart: unless-stopped
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:8.8.0
+    container_name: messaging-opensearch-dashboards
+    environment:
+      - OPENSEARCH_HOSTS=http://opensearch:9200
+    ports:
+      - "5601:5601"
+    networks:
+      - messaging-network
+    depends_on:
+      - opensearch
+    restart: unless-stopped
+
+  # Message Queue (Additional Redis for queuing)
+  redis-queue:
+    image: redis:7-alpine
+    container_name: messaging-redis-queue
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_queue_data:/data
+    ports:
+      - "6380:6379"
+    networks:
+      - messaging-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Nginx for static content and reverse proxy
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: messaging-nginx
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./static:/usr/share/nginx/html:ro
+      - nginx_logs:/var/log/nginx
+    ports:
+      - "8888:80"
+    networks:
+      - messaging-network
+    depends_on:
+      - messaging-platform
+    restart: unless-stopped
+
+  # Background Services
+  message-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile.processor
+    container_name: messaging-processor
+    environment:
+      - DATABASE_URL=postgres://messaging_user:messaging_secure_password_2024@postgres:5432/messaging_platform?sslmode=disable
+      - REDIS_URL=redis:6379
+      - REDIS_QUEUE_URL=redis-queue:6379
+      - PROCESSING_INTERVAL=5
+      - BATCH_SIZE=100
+      - CONCURRENT_WORKERS=10
+      - MAX_RETRIES=3
+      - RETRY_DELAY_SECONDS=30
+      - DEAD_LETTER_QUEUE_ENABLED=true
+    networks:
+      - messaging-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
+    restart: unless-stopped
+        limits:
+          memory: 1G
+          cpus: '2.0'
+
+  cost-optimizer:
+    build:
+      context: .
+      dockerfile: Dockerfile.optimizer
+    container_name: messaging-cost-optimizer
+    environment:
+      - DATABASE_URL=postgres://messaging_user:messaging_secure_password_2024@postgres:5432/messaging_platform?sslmode=disable
+      - REDIS_URL=redis:6379
+      - OPTIMIZATION_INTERVAL=3600
+      - COST_THRESHOLD_PERCENTAGE=15
+      - PROVIDER_SWITCHING_ENABLED=true
+      - ANALYTICS_SERVICE_URL=http://analytics-service:8087
+    networks:
+      - messaging-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      analytics-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Health Monitor
+  health-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitor
+    container_name: messaging-health-monitor
+    environment:
+      - DATABASE_URL=postgres://messaging_user:messaging_secure_password_2024@postgres:5432/messaging_platform?sslmode=disable
+      - REDIS_URL=redis:6379
+      - MONITORING_INTERVAL=30
+      - ALERT_WEBHOOK_URL=${ALERT_WEBHOOK_URL}
+      - SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL}
+      - EMAIL_SMTP_HOST=${EMAIL_SMTP_HOST}
+      - EMAIL_SMTP_PORT=${EMAIL_SMTP_PORT}
+      - EMAIL_USERNAME=${EMAIL_USERNAME}
+      - EMAIL_PASSWORD=${EMAIL_PASSWORD}
+      - CIRCUIT_BREAKER_THRESHOLD=5
+      - RECOVERY_CHECK_INTERVAL=60
+    networks:
+      - messaging-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  messaging-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  redis_queue_data:
+    driver: local
+  opensearch_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  whatsapp_media:
+    driver: local
+  analytics_reports:
+    driver: local
+  nginx_logs:
+    driver: local
+
+# Environment file template
+# Create a .env file with the following variables:
+#
+# # Nigerian Telecom API Keys
+# MTN_API_KEY=your_mtn_api_key
+# AIRTEL_API_KEY=your_airtel_api_key
+# GLO_API_KEY=your_glo_api_key
+# NINEMOBILE_API_KEY=your_9mobile_api_key
+#
+# # SMS Provider API Keys
+# TWILIO_ACCOUNT_SID=your_twilio_account_sid
+# TWILIO_AUTH_TOKEN=your_twilio_auth_token
+# AFRICAS_TALKING_USERNAME=your_africas_talking_username
+# AFRICAS_TALKING_API_KEY=your_africas_talking_api_key
+# TERMII_API_KEY=your_termii_api_key
+# BULK_SMS_NIGERIA_TOKEN=your_bulk_sms_nigeria_token
+#
+# # WhatsApp Business API
+# WHATSAPP_BUSINESS_ACCOUNT_ID=your_business_account_id
+# WHATSAPP_ACCESS_TOKEN=your_access_token
+# WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
+# WHATSAPP_WEBHOOK_VERIFY_TOKEN=your_webhook_verify_token
+# FACEBOOK_APP_ID=your_facebook_app_id
+# FACEBOOK_APP_SECRET=your_facebook_app_secret
+#
+# # Monitoring and Alerts
+# ALERT_WEBHOOK_URL=your_alert_webhook_url
+# SLACK_WEBHOOK_URL=your_slack_webhook_url
+# EMAIL_SMTP_HOST=smtp.gmail.com
+# EMAIL_SMTP_PORT=587
+# EMAIL_USERNAME=your_email@gmail.com
+# EMAIL_PASSWORD=your_email_password
+

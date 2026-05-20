@@ -1,0 +1,65 @@
+{
+    "dashboard_type": "live_keda_autoscaling_metrics",
+    "timestamp": "2025-08-30T07:59:46.468418",
+    "features": {
+        "real_time_metrics": "5-second update interval",
+        "business_metrics": [
+            "Payments per second",
+            "PIX transfers per second",
+            "Revenue per second",
+            "Fraud checks per second",
+            "High-value transactions",
+            "Cross-border transfers",
+            "User registrations",
+            "API requests per second"
+        ],
+        "scaling_metrics": [
+            "Current replicas per service",
+            "Scaling events timeline",
+            "Scaling triggers and reasons",
+            "Scale up/down decisions",
+            "Scaling latency tracking"
+        ],
+        "performance_metrics": [
+            "Total replica count",
+            "CPU utilization",
+            "Memory utilization",
+            "Response time P95",
+            "Error rate percentage",
+            "Scaling efficiency"
+        ],
+        "cost_metrics": [
+            "Current cost per hour",
+            "Maximum cost per hour",
+            "Cost savings percentage",
+            "Resource utilization",
+            "Efficiency score"
+        ],
+        "visualization": [
+            "Real-time charts",
+            "Business metrics trends",
+            "Scaling activity graphs",
+            "Service replica status",
+            "Alert notifications"
+        ]
+    },
+    "technical_specifications": {
+        "update_frequency": "5 seconds",
+        "data_retention": "20 data points per chart",
+        "alert_retention": "1 hour",
+        "scaling_events_retention": "100 events",
+        "chart_types": [
+            "Line charts",
+            "Bar charts",
+            "Metric cards"
+        ],
+        "responsive_design": "Mobile and desktop compatible"
+    },
+    "business_intelligence": {
+        "business_hours_detection": "Automatic scaling based on Nigeria/Brazil time zones",
+        "spike_detection": "10% chance simulation with alert generation",
+        "revenue_tracking": "Real-time revenue per second monitoring",
+        "cost_optimization": "Live cost savings calculation",
+        "efficiency_scoring": "Resource utilization efficiency metrics"
+    }
+}

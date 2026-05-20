@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Brake Pads Set",
+    "price": 15000,
+    "category": "Brakes",
+    "description": "High-performance ceramic brake pads",
+    "stock": 80
+  },
+  {
+    "name": "Engine Oil Filter",
+    "price": 3500,
+    "category": "Engine Parts",
+    "description": "Premium oil filter for most vehicles",
+    "stock": 150
+  }
+]

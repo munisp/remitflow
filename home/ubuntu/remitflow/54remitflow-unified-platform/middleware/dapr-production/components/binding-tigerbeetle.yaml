@@ -1,0 +1,23 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: tigerbeetle-binding
+  namespace: remittance-platform
+spec:
+  type: bindings.http
+  version: v1
+  metadata:
+  - name: url
+    value: "http://tigerbeetle-service:3000"
+  - name: method
+    value: "POST"
+  - name: headers
+    value: "Content-Type: application/json"
+  - name: securityToken
+    secretKeyRef:
+      name: tigerbeetle-secret
+      key: api-token
+scopes:
+- payment-service
+- transfer-service
+

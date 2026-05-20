@@ -1,0 +1,1126 @@
+# Keycloak Identity and Access Management Configuration for Remittance Platform
+# High-Availability Keycloak Cluster optimized for Nigerian banking identity management
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keycloak-system
+  labels:
+    name: keycloak-system
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/component: identity-management
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-config
+  namespace: keycloak-system
+  labels:
+    app: keycloak
+data:
+  keycloak.conf: |
+    # Keycloak Configuration for Remittance Platform
+    
+    # Database configuration for HA clustering
+    db=postgres
+    db-url=jdbc:postgresql://postgres-service.postgres-system.svc.cluster.local:5432/keycloak
+    db-username=keycloak_user
+    db-password=${KEYCLOAK_DB_PASSWORD}
+    db-pool-initial-size=20
+    db-pool-min-size=10
+    db-pool-max-size=100
+    
+    # Clustering configuration for HA
+    cache=ispn
+    cache-stack=kubernetes
+    cache-config-file=cache-ispn-jdbc-ping.xml
+    
+    # HTTP/HTTPS configuration
+    hostname=keycloak.remittance.local
+    hostname-strict=false
+    hostname-strict-https=false
+    http-enabled=true
+    http-port=8080
+    https-port=8443
+    
+    # TLS/SSL configuration
+    https-certificate-file=/etc/keycloak/tls/tls.crt
+    https-certificate-key-file=/etc/keycloak/tls/tls.key
+    https-trust-store-file=/etc/keycloak/tls/truststore.jks
+    https-trust-store-password=${KEYCLOAK_TRUSTSTORE_PASSWORD}
+    
+    # Proxy configuration for Nigerian banking infrastructure
+    proxy=edge
+    proxy-headers=forwarded|x-forwarded
+    
+    # Logging configuration for banking compliance
+    log-level=INFO
+    log-format=json
+    log-file=/var/log/keycloak/keycloak.log
+    
+    # Performance tuning for Nigerian banking workloads
+    http-max-queued-requests=1000
+    http-pool-max-threads=200
+    
+    # Security configuration
+    fips-mode=disabled
+    
+    # Health check configuration
+    health-enabled=true
+    metrics-enabled=true
+    
+    # Features configuration for banking
+    features=account2,account-api,admin-fine-grained-authz,admin2,authorization,ciba,client-policies,declarative-user-profile,docker,impersonation,openshift-integration,par,recovery-codes,scripts,step-up-authentication,token-exchange,update-email,web-authn
+    
+    # Transaction timeout for banking operations
+    transaction-xa-enabled=false
+
+  cache-ispn-jdbc-ping.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <infinispan
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="urn:infinispan:config:14.0 http://www.infinispan.org/schemas/infinispan-config-14.0.xsd"
+        xmlns="urn:infinispan:config:14.0">
+        
+        <cache-container name="keycloak">
+            <transport lock-timeout="60000"/>
+            <local-cache name="realms">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <memory max-count="10000"/>
+            </local-cache>
+            <local-cache name="users">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <memory max-count="10000"/>
+            </local-cache>
+            <distributed-cache name="sessions" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="1800000"/>
+            </distributed-cache>
+            <distributed-cache name="authenticationSessions" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="900000"/>
+            </distributed-cache>
+            <distributed-cache name="offlineSessions" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="5184000000"/>
+            </distributed-cache>
+            <distributed-cache name="clientSessions" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="1800000"/>
+            </distributed-cache>
+            <distributed-cache name="offlineClientSessions" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="5184000000"/>
+            </distributed-cache>
+            <distributed-cache name="loginFailures" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="900000"/>
+            </distributed-cache>
+            <local-cache name="authorization">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <memory max-count="10000"/>
+            </local-cache>
+            <replicated-cache name="work">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration lifespan="900000"/>
+            </replicated-cache>
+            <local-cache name="keys">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration max-idle="3600000"/>
+                <memory max-count="1000"/>
+            </local-cache>
+            <distributed-cache name="actionTokens" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration max-idle="300000" lifespan="300000"/>
+                <memory max-count="10000"/>
+            </distributed-cache>
+        </cache-container>
+    </infinispan>
+
+  banking-realm.json: |
+    {
+      "realm": "banking",
+      "displayName": "Remittance Platform",
+      "displayNameHtml": "<div class=\"kc-logo-text\"><span>Remittance Platform</span></div>",
+      "enabled": true,
+      "sslRequired": "external",
+      "registrationAllowed": false,
+      "registrationEmailAsUsername": false,
+      "rememberMe": true,
+      "verifyEmail": true,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": true,
+      "editUsernameAllowed": false,
+      "bruteForceProtected": true,
+      "permanentLockout": false,
+      "maxFailureWaitSeconds": 900,
+      "minimumQuickLoginWaitSeconds": 60,
+      "waitIncrementSeconds": 60,
+      "quickLoginCheckMilliSeconds": 1000,
+      "maxDeltaTimeSeconds": 43200,
+      "failureFactor": 30,
+      "defaultSignatureAlgorithm": "RS256",
+      "revokeRefreshToken": true,
+      "refreshTokenMaxReuse": 0,
+      "accessTokenLifespan": 300,
+      "accessTokenLifespanForImplicitFlow": 900,
+      "ssoSessionIdleTimeout": 1800,
+      "ssoSessionMaxLifespan": 36000,
+      "ssoSessionIdleTimeoutRememberMe": 0,
+      "ssoSessionMaxLifespanRememberMe": 0,
+      "offlineSessionIdleTimeout": 2592000,
+      "offlineSessionMaxLifespanEnabled": false,
+      "offlineSessionMaxLifespan": 5184000,
+      "clientSessionIdleTimeout": 0,
+      "clientSessionMaxLifespan": 0,
+      "clientOfflineSessionIdleTimeout": 0,
+      "clientOfflineSessionMaxLifespan": 0,
+      "accessCodeLifespan": 60,
+      "accessCodeLifespanUserAction": 300,
+      "accessCodeLifespanLogin": 1800,
+      "actionTokenGeneratedByAdminLifespan": 43200,
+      "actionTokenGeneratedByUserLifespan": 300,
+      "oauth2DeviceCodeLifespan": 600,
+      "oauth2DevicePollingInterval": 5,
+      "internationalizationEnabled": true,
+      "supportedLocales": ["en", "ha", "yo", "ig"],
+      "defaultLocale": "en",
+      "authenticationFlows": [
+        {
+          "alias": "banking-browser",
+          "description": "Browser based authentication with MFA for banking",
+          "providerId": "basic-flow",
+          "topLevel": true,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-cookie",
+              "requirement": "ALTERNATIVE",
+              "priority": 10,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            },
+            {
+              "authenticator": "auth-spnego",
+              "requirement": "DISABLED",
+              "priority": 20,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            },
+            {
+              "authenticator": "identity-provider-redirector",
+              "requirement": "ALTERNATIVE",
+              "priority": 25,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            },
+            {
+              "flowAlias": "banking-browser-forms",
+              "requirement": "ALTERNATIVE",
+              "priority": 30,
+              "userSetupAllowed": false,
+              "autheticatorFlow": true
+            }
+          ]
+        },
+        {
+          "alias": "banking-browser-forms",
+          "description": "Username, password, otp and other auth forms for banking",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "auth-username-password-form",
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            },
+            {
+              "flowAlias": "banking-browser-conditional-otp",
+              "requirement": "CONDITIONAL",
+              "priority": 20,
+              "userSetupAllowed": false,
+              "autheticatorFlow": true
+            }
+          ]
+        },
+        {
+          "alias": "banking-browser-conditional-otp",
+          "description": "Flow to determine if the OTP is required for banking users",
+          "providerId": "basic-flow",
+          "topLevel": false,
+          "builtIn": false,
+          "authenticationExecutions": [
+            {
+              "authenticator": "conditional-user-configured",
+              "requirement": "REQUIRED",
+              "priority": 10,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            },
+            {
+              "authenticator": "auth-otp-form",
+              "requirement": "REQUIRED",
+              "priority": 20,
+              "userSetupAllowed": false,
+              "autheticatorFlow": false
+            }
+          ]
+        }
+      ],
+      "browserFlow": "banking-browser",
+      "registrationFlow": "registration",
+      "directGrantFlow": "direct grant",
+      "resetCredentialsFlow": "reset credentials",
+      "clientAuthenticationFlow": "clients",
+      "dockerAuthenticationFlow": "docker auth",
+      "attributes": {
+        "cibaBackchannelTokenDeliveryMode": "poll",
+        "cibaExpiresIn": "120",
+        "cibaInterval": "5",
+        "cibaAuthRequestedUserHint": "login_hint",
+        "parRequestUriLifespan": "60",
+        "frontendUrl": "https://keycloak.remittance.local/auth",
+        "adminEventsEnabled": "true",
+        "adminEventsDetailsEnabled": "true",
+        "eventsEnabled": "true",
+        "eventsListeners": ["jboss-logging", "banking-audit-listener"],
+        "enabledEventTypes": [
+          "LOGIN", "LOGOUT", "REGISTER", "REMOVE_TOTP", "UPDATE_TOTP", 
+          "UPDATE_PROFILE", "UPDATE_PASSWORD", "UPDATE_EMAIL", "VERIFY_EMAIL",
+          "REMOVE_FEDERATED_IDENTITY", "UPDATE_FEDERATED_IDENTITY", "FEDERATED_IDENTITY_LINK",
+          "SEND_VERIFY_EMAIL", "SEND_RESET_PASSWORD", "SEND_IDENTITY_PROVIDER_LINK",
+          "RESET_PASSWORD", "RESTART_AUTHENTICATION", "INVALID_SIGNATURE",
+          "REGISTER_NODE", "UNREGISTER_NODE", "USER_INFO_REQUEST", "GRANT_CONSENT",
+          "UPDATE_CONSENT", "REVOKE_GRANT", "LOGIN_ERROR", "REGISTER_ERROR",
+          "RESET_PASSWORD_ERROR", "VERIFY_EMAIL_ERROR", "REMOVE_TOTP_ERROR",
+          "UPDATE_TOTP_ERROR", "UPDATE_PROFILE_ERROR", "UPDATE_PASSWORD_ERROR",
+          "UPDATE_EMAIL_ERROR", "FEDERATED_IDENTITY_LINK_ERROR", "IDENTITY_PROVIDER_LINK_ACCOUNT_ERROR",
+          "IDENTITY_PROVIDER_LOGIN_ERROR", "IMPERSONATE_ERROR", "CUSTOM_REQUIRED_ACTION_ERROR",
+          "EXECUTE_ACTION_TOKEN_ERROR", "EXECUTE_ACTIONS_ERROR", "CLIENT_INFO",
+          "CLIENT_REGISTER", "CLIENT_UPDATE", "CLIENT_DELETE", "CLIENT_LOGIN",
+          "CLIENT_INITIATED_ACCOUNT_LINKING", "TOKEN_EXCHANGE", "AUTHREQID_TO_TOKEN",
+          "AUTHREQID_TO_TOKEN_ERROR", "PERMISSION_TOKEN"
+        ]
+      },
+      "keycloakVersion": "22.0.5",
+      "userManagedAccessAllowed": false,
+      "clientProfiles": {
+        "profiles": []
+      },
+      "clientPolicies": {
+        "policies": []
+      },
+      "roles": {
+        "realm": [
+          {
+            "name": "banking-admin",
+            "description": "Banking system administrator with full access",
+            "composite": false,
+            "clientRole": false,
+            "containerId": "banking"
+          },
+          {
+            "name": "banking-user",
+            "description": "Standard banking user with basic access",
+            "composite": false,
+            "clientRole": false,
+            "containerId": "banking"
+          },
+          {
+            "name": "transaction-processor",
+            "description": "User authorized to process banking transactions",
+            "composite": false,
+            "clientRole": false,
+            "containerId": "banking"
+          },
+          {
+            "name": "fraud-analyst",
+            "description": "User authorized to analyze fraud and risk",
+            "composite": false,
+            "clientRole": false,
+            "containerId": "banking"
+          },
+          {
+            "name": "compliance-officer",
+            "description": "User authorized for compliance and audit operations",
+            "composite": false,
+            "clientRole": false,
+            "containerId": "banking"
+          },
+          {
+            "name": "customer-service",
+            "description": "Customer service representative with limited access",
+            "composite": false,
+            "clientRole": false,
+            "containerId": "banking"
+          },
+          {
+            "name": "agent-manager",
+            "description": "Banking agent manager with agent oversight",
+            "composite": false,
+            "clientRole": false,
+            "containerId": "banking"
+          },
+          {
+            "name": "branch-manager",
+            "description": "Branch manager with regional oversight",
+            "composite": false,
+            "clientRole": false,
+            "containerId": "banking"
+          }
+        ]
+      },
+      "groups": [
+        {
+          "name": "Banking Administrators",
+          "path": "/Banking Administrators",
+          "realmRoles": ["banking-admin"]
+        },
+        {
+          "name": "Transaction Processors",
+          "path": "/Transaction Processors", 
+          "realmRoles": ["transaction-processor", "banking-user"]
+        },
+        {
+          "name": "Fraud Analysts",
+          "path": "/Fraud Analysts",
+          "realmRoles": ["fraud-analyst", "banking-user"]
+        },
+        {
+          "name": "Compliance Officers",
+          "path": "/Compliance Officers",
+          "realmRoles": ["compliance-officer", "banking-user"]
+        },
+        {
+          "name": "Customer Service",
+          "path": "/Customer Service",
+          "realmRoles": ["customer-service", "banking-user"]
+        },
+        {
+          "name": "Agent Managers",
+          "path": "/Agent Managers",
+          "realmRoles": ["agent-manager", "banking-user"]
+        },
+        {
+          "name": "Branch Managers",
+          "path": "/Branch Managers",
+          "realmRoles": ["branch-manager", "banking-user"]
+        }
+      ],
+      "clients": [
+        {
+          "clientId": "banking-client",
+          "name": "Remittance Platform Client",
+          "description": "Main client application for Remittance Platform",
+          "enabled": true,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "banking-client-secret-change-in-production",
+          "redirectUris": [
+            "https://banking.agent-network.local/*",
+            "https://admin.agent-network.local/*",
+            "https://agent.agent-network.local/*",
+            "https://mobile.agent-network.local/*"
+          ],
+          "webOrigins": [
+            "https://banking.agent-network.local",
+            "https://admin.agent-network.local",
+            "https://agent.agent-network.local",
+            "https://mobile.agent-network.local"
+          ],
+          "protocol": "openid-connect",
+          "attributes": {
+            "saml.assertion.signature": "false",
+            "saml.force.post.binding": "false",
+            "saml.multivalued.roles": "false",
+            "saml.encrypt": "false",
+            "saml.server.signature": "false",
+            "saml.server.signature.keyinfo.ext": "false",
+            "exclude.session.state.from.auth.response": "false",
+            "saml_force_name_id_format": "false",
+            "saml.client.signature": "false",
+            "tls.client.certificate.bound.access.tokens": "false",
+            "saml.authnstatement": "false",
+            "display.on.consent.screen": "false",
+            "saml.onetimeuse.condition": "false"
+          },
+          "authenticationFlowBindingOverrides": {},
+          "fullScopeAllowed": true,
+          "nodeReRegistrationTimeout": -1,
+          "protocolMappers": [
+            {
+              "name": "banking-roles",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-realm-role-mapper",
+              "consentRequired": false,
+              "config": {
+                "multivalued": "true",
+                "userinfo.token.claim": "true",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": "roles",
+                "jsonType.label": "String"
+              }
+            },
+            {
+              "name": "banking-permissions",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "multivalued": "true",
+                "userinfo.token.claim": "true",
+                "user.attribute": "permissions",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": "permissions",
+                "jsonType.label": "String"
+              }
+            },
+            {
+              "name": "banking-context",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "userinfo.token.claim": "true",
+                "user.attribute": "banking_context",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "claim.name": "user_context",
+                "jsonType.label": "JSON"
+              }
+            }
+          ],
+          "defaultClientScopes": [
+            "web-origins",
+            "role_list",
+            "profile",
+            "roles",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "address",
+            "phone",
+            "offline_access",
+            "microprofile-jwt"
+          ]
+        }
+      ],
+      "clientScopes": [
+        {
+          "name": "banking",
+          "description": "Banking specific scopes",
+          "protocol": "openid-connect",
+          "attributes": {
+            "include.in.token.scope": "true",
+            "display.on.consent.screen": "true",
+            "consent.screen.text": "Banking operations access"
+          },
+          "protocolMappers": [
+            {
+              "name": "banking-scope",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "consentRequired": false,
+              "config": {
+                "included.client.audience": "banking-client",
+                "id.token.claim": "false",
+                "access.token.claim": "true"
+              }
+            }
+          ]
+        }
+      ],
+      "defaultDefaultClientScopes": [
+        "role_list",
+        "profile",
+        "email",
+        "web-origins"
+      ],
+      "defaultOptionalClientScopes": [
+        "offline_access",
+        "address",
+        "phone",
+        "microprofile-jwt",
+        "banking"
+      ],
+      "browserSecurityHeaders": {
+        "contentSecurityPolicyReportOnly": "",
+        "xContentTypeOptions": "nosniff",
+        "xRobotsTag": "none",
+        "xFrameOptions": "SAMEORIGIN",
+        "contentSecurityPolicy": "frame-src 'self'; frame-ancestors 'self'; object-src 'none';",
+        "xXSSProtection": "1; mode=block",
+        "strictTransportSecurity": "max-age=31536000; includeSubDomains"
+      },
+      "smtpServer": {
+        "password": "${KEYCLOAK_SMTP_PASSWORD}",
+        "starttls": "true",
+        "auth": "true",
+        "port": "587",
+        "host": "smtp.gmail.com",
+        "replyToDisplayName": "Remittance Platform",
+        "replyTo": "noreply@remittance.local",
+        "fromDisplayName": "Remittance Platform",
+        "from": "noreply@remittance.local",
+        "user": "${KEYCLOAK_SMTP_USER}"
+      },
+      "eventsConfig": {
+        "eventsEnabled": true,
+        "eventsListeners": ["jboss-logging"],
+        "enabledEventTypes": [
+          "LOGIN", "LOGOUT", "REGISTER", "UPDATE_PROFILE", "UPDATE_PASSWORD",
+          "UPDATE_EMAIL", "VERIFY_EMAIL", "RESET_PASSWORD", "LOGIN_ERROR",
+          "REGISTER_ERROR", "RESET_PASSWORD_ERROR", "VERIFY_EMAIL_ERROR",
+          "UPDATE_PROFILE_ERROR", "UPDATE_PASSWORD_ERROR", "UPDATE_EMAIL_ERROR"
+        ],
+        "adminEventsEnabled": true,
+        "adminEventsDetailsEnabled": true
+      },
+      "loginTheme": "banking",
+      "accountTheme": "banking",
+      "adminTheme": "banking",
+      "emailTheme": "banking"
+    }
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-secrets
+  namespace: keycloak-system
+type: Opaque
+data:
+  # Base64 encoded secrets
+  db-password: a2V5Y2xvYWstZGItcGFzc3dvcmQ=
+  admin-password: a2V5Y2xvYWstYWRtaW4tcGFzc3dvcmQ=
+  truststore-password: a2V5Y2xvYWstdHJ1c3RzdG9yZS1wYXNzd29yZA==
+  smtp-password: a2V5Y2xvYWstc210cC1wYXNzd29yZA==
+  smtp-user: bm9yZXBseUBhZ2VudC1iYW5raW5nLmxvY2Fs
+  client-secret: YmFua2luZy1jbGllbnQtc2VjcmV0LWNoYW5nZS1pbi1wcm9kdWN0aW9u
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak-system
+  labels:
+    app: keycloak
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: https
+    port: 8443
+    targetPort: 8443
+  - name: management
+    port: 9990
+    targetPort: 9990
+  selector:
+    app: keycloak
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-headless
+  namespace: keycloak-system
+  labels:
+    app: keycloak
+spec:
+  clusterIP: None
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: https
+    port: 8443
+    targetPort: 8443
+  - name: jgroups
+    port: 7600
+    targetPort: 7600
+  selector:
+    app: keycloak
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: keycloak
+  namespace: keycloak-system
+  labels:
+    app: keycloak
+spec:
+  serviceName: keycloak-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - keycloak
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: keycloak
+        image: quay.io/keycloak/keycloak:22.0.5
+        command:
+        - /opt/keycloak/bin/kc.sh
+        - start
+        - --config-file=/opt/keycloak/conf/keycloak.conf
+        - --import-realm
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 8443
+          name: https
+        - containerPort: 9990
+          name: management
+        - containerPort: 7600
+          name: jgroups
+        env:
+        - name: KEYCLOAK_ADMIN
+          value: "admin"
+        - name: KEYCLOAK_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secrets
+              key: admin-password
+        - name: KEYCLOAK_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secrets
+              key: db-password
+        - name: KEYCLOAK_TRUSTSTORE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secrets
+              key: truststore-password
+        - name: KEYCLOAK_SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secrets
+              key: smtp-password
+        - name: KEYCLOAK_SMTP_USER
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secrets
+              key: smtp-user
+        - name: KC_CACHE_STACK
+          value: "kubernetes"
+        - name: JGROUPS_DISCOVERY_PROTOCOL
+          value: "kubernetes.KUBE_PING"
+        - name: JGROUPS_DISCOVERY_PROPERTIES
+          value: "dump_requests=true,port_range=10"
+        - name: KUBERNETES_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: KUBERNETES_LABELS
+          value: "app=keycloak"
+        - name: JAVA_OPTS_APPEND
+          value: "-Djgroups.dns.query=keycloak-headless.keycloak-system.svc.cluster.local -Xms2g -Xmx4g -XX:MetaspaceSize=256m -XX:MaxMetaspaceSize=512m -Djava.net.preferIPv4Stack=true -Djboss.modules.system.pkgs=org.jboss.byteman -Djava.awt.headless=true"
+        volumeMounts:
+        - name: keycloak-config
+          mountPath: /opt/keycloak/conf/keycloak.conf
+          subPath: keycloak.conf
+        - name: keycloak-config
+          mountPath: /opt/keycloak/conf/cache-ispn-jdbc-ping.xml
+          subPath: cache-ispn-jdbc-ping.xml
+        - name: keycloak-realm
+          mountPath: /opt/keycloak/data/import/banking-realm.json
+          subPath: banking-realm.json
+        - name: tls-certs
+          mountPath: /etc/keycloak/tls
+          readOnly: true
+        - name: keycloak-data
+          mountPath: /opt/keycloak/data
+        - name: keycloak-logs
+          mountPath: /var/log/keycloak
+        resources:
+          requests:
+            memory: "3Gi"
+            cpu: "1"
+          limits:
+            memory: "6Gi"
+            cpu: "2"
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8080
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      volumes:
+      - name: keycloak-config
+        configMap:
+          name: keycloak-config
+      - name: keycloak-realm
+        configMap:
+          name: keycloak-config
+      - name: tls-certs
+        secret:
+          secretName: keycloak-secrets
+      - name: keycloak-logs
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: keycloak-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 20Gi
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-realm-setup
+  namespace: keycloak-system
+  labels:
+    app: keycloak-realm-setup
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: keycloak-setup
+        image: quay.io/keycloak/keycloak:22.0.5
+        command:
+        - sh
+        - -c
+        - |
+          # Wait for Keycloak to be ready
+          echo "Waiting for Keycloak to be ready..."
+          while ! curl -f http://keycloak:8080/health/ready; do
+            echo "Waiting for Keycloak..."
+            sleep 10
+          done
+          
+          # Configure Keycloak admin CLI
+          /opt/keycloak/bin/kcadm.sh config credentials \
+            --server http://keycloak:8080 \
+            --realm master \
+            --user admin \
+            --password $KEYCLOAK_ADMIN_PASSWORD
+          
+          # Create banking realm if it doesn't exist
+          echo "Creating banking realm..."
+          /opt/keycloak/bin/kcadm.sh create realms -f /tmp/banking-realm.json || true
+          
+          # Configure banking realm settings
+          echo "Configuring banking realm..."
+          /opt/keycloak/bin/kcadm.sh update realms/banking \
+            -s enabled=true \
+            -s registrationAllowed=false \
+            -s verifyEmail=true \
+            -s loginWithEmailAllowed=true \
+            -s duplicateEmailsAllowed=false \
+            -s resetPasswordAllowed=true \
+            -s bruteForceProtected=true \
+            -s permanentLockout=false \
+            -s maxFailureWaitSeconds=900 \
+            -s minimumQuickLoginWaitSeconds=60 \
+            -s waitIncrementSeconds=60 \
+            -s quickLoginCheckMilliSeconds=1000 \
+            -s maxDeltaTimeSeconds=43200 \
+            -s failureFactor=30
+          
+          # Create banking client
+          echo "Creating banking client..."
+          /opt/keycloak/bin/kcadm.sh create clients -r banking \
+            -s clientId=banking-client \
+            -s enabled=true \
+            -s clientAuthenticatorType=client-secret \
+            -s secret=banking-client-secret-change-in-production \
+            -s 'redirectUris=["https://banking.agent-network.local/*","https://admin.agent-network.local/*","https://agent.agent-network.local/*","https://mobile.agent-network.local/*"]' \
+            -s 'webOrigins=["https://banking.agent-network.local","https://admin.agent-network.local","https://agent.agent-network.local","https://mobile.agent-network.local"]' \
+            -s protocol=openid-connect \
+            -s fullScopeAllowed=true || true
+          
+          # Create banking roles
+          echo "Creating banking roles..."
+          /opt/keycloak/bin/kcadm.sh create roles -r banking -s name=banking-admin -s description="Banking system administrator with full access" || true
+          /opt/keycloak/bin/kcadm.sh create roles -r banking -s name=banking-user -s description="Standard banking user with basic access" || true
+          /opt/keycloak/bin/kcadm.sh create roles -r banking -s name=transaction-processor -s description="User authorized to process banking transactions" || true
+          /opt/keycloak/bin/kcadm.sh create roles -r banking -s name=fraud-analyst -s description="User authorized to analyze fraud and risk" || true
+          /opt/keycloak/bin/kcadm.sh create roles -r banking -s name=compliance-officer -s description="User authorized for compliance and audit operations" || true
+          /opt/keycloak/bin/kcadm.sh create roles -r banking -s name=customer-service -s description="Customer service representative with limited access" || true
+          /opt/keycloak/bin/kcadm.sh create roles -r banking -s name=agent-manager -s description="Banking agent manager with agent oversight" || true
+          /opt/keycloak/bin/kcadm.sh create roles -r banking -s name=branch-manager -s description="Branch manager with regional oversight" || true
+          
+          # Create banking groups
+          echo "Creating banking groups..."
+          /opt/keycloak/bin/kcadm.sh create groups -r banking -s name="Banking Administrators" -s path="/Banking Administrators" || true
+          /opt/keycloak/bin/kcadm.sh create groups -r banking -s name="Transaction Processors" -s path="/Transaction Processors" || true
+          /opt/keycloak/bin/kcadm.sh create groups -r banking -s name="Fraud Analysts" -s path="/Fraud Analysts" || true
+          /opt/keycloak/bin/kcadm.sh create groups -r banking -s name="Compliance Officers" -s path="/Compliance Officers" || true
+          /opt/keycloak/bin/kcadm.sh create groups -r banking -s name="Customer Service" -s path="/Customer Service" || true
+          /opt/keycloak/bin/kcadm.sh create groups -r banking -s name="Agent Managers" -s path="/Agent Managers" || true
+          /opt/keycloak/bin/kcadm.sh create groups -r banking -s name="Branch Managers" -s path="/Branch Managers" || true
+          
+          # Create default admin user
+          echo "Creating default admin user..."
+          /opt/keycloak/bin/kcadm.sh create users -r banking \
+            -s username=admin \
+            -s enabled=true \
+            -s emailVerified=true \
+            -s email=admin@remittance.local \
+            -s firstName=Banking \
+            -s lastName=Administrator || true
+          
+          # Set admin user password
+          /opt/keycloak/bin/kcadm.sh set-password -r banking --username admin --new-password banking-admin-password-change-in-production
+          
+          # Add admin role to admin user
+          /opt/keycloak/bin/kcadm.sh add-roles -r banking --uusername admin --rolename banking-admin
+          
+          echo "Keycloak banking realm setup completed successfully!"
+        env:
+        - name: KEYCLOAK_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secrets
+              key: admin-password
+        volumeMounts:
+        - name: keycloak-realm
+          mountPath: /tmp/banking-realm.json
+          subPath: banking-realm.json
+      volumes:
+      - name: keycloak-realm
+        configMap:
+          name: keycloak-config
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keycloak-pdb
+  namespace: keycloak-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: keycloak
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: keycloak-network-policy
+  namespace: keycloak-system
+spec:
+  podSelector:
+    matchLabels:
+      app: keycloak
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: remittance-system
+    - namespaceSelector:
+        matchLabels:
+          name: dapr-system
+    - namespaceSelector:
+        matchLabels:
+          name: temporal-system
+    - podSelector:
+        matchLabels:
+          app: keycloak
+    ports:
+    - protocol: TCP
+      port: 8080
+    - protocol: TCP
+      port: 8443
+    - protocol: TCP
+      port: 7600
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: postgres-system
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: keycloak
+    ports:
+    - protocol: TCP
+      port: 7600
+    - protocol: TCP
+      port: 8080
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 587  # SMTP
+    - protocol: TCP
+      port: 465  # SMTPS
+
+---
+apiVersion: v1
+kind: ServiceMonitor
+metadata:
+  name: keycloak-metrics
+  namespace: keycloak-system
+  labels:
+    app: keycloak
+spec:
+  selector:
+    matchLabels:
+      app: keycloak
+  endpoints:
+  - port: management
+    interval: 30s
+    path: /metrics
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak-exporter
+  namespace: keycloak-system
+  labels:
+    app: keycloak-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak-exporter
+  template:
+    metadata:
+      labels:
+        app: keycloak-exporter
+    spec:
+      containers:
+      - name: keycloak-exporter
+        image: aerogear/keycloak-metrics-spi:2.5.3
+        ports:
+        - containerPort: 8080
+          name: metrics
+        env:
+        - name: KEYCLOAK_URL
+          value: "http://keycloak:8080"
+        - name: KEYCLOAK_USER
+          value: "admin"
+        - name: KEYCLOAK_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-secrets
+              key: admin-password
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /metrics
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-exporter
+  namespace: keycloak-system
+  labels:
+    app: keycloak-exporter
+spec:
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+  selector:
+    app: keycloak-exporter
+

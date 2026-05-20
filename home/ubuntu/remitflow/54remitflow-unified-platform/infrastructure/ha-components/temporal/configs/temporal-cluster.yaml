@@ -1,0 +1,1099 @@
+# Temporal Workflow Orchestration Configuration for Remittance Platform
+# High-Availability Temporal Cluster optimized for Nigerian banking workflows
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: temporal-system
+  labels:
+    name: temporal-system
+    app.kubernetes.io/name: temporal
+    app.kubernetes.io/component: workflow
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: temporal-config
+  namespace: temporal-system
+  labels:
+    app: temporal
+data:
+  config.yaml: |
+    # Temporal Server Configuration for Remittance Platform
+    
+    # Global configuration
+    global:
+      membership:
+        maxJoinDuration: 30s
+        broadcastAddress: "0.0.0.0"
+      pprof:
+        port: 7936
+      metrics:
+        prometheus:
+          timerType: "histogram"
+          listenAddress: "0.0.0.0:9090"
+        tags:
+          environment: "production"
+          service: "temporal"
+          region: "nigeria"
+    
+    # Persistence configuration for banking data durability
+    persistence:
+      defaultStore: default
+      visibilityStore: visibility
+      numHistoryShards: 4
+      datastores:
+        default:
+          sql:
+            pluginName: "postgres"
+            databaseName: "temporal"
+            connectAddr: "postgres-service.postgres-system.svc.cluster.local:5432"
+            connectProtocol: "tcp"
+            user: "temporal_user"
+            password: "temporal_password"
+            maxConns: 20
+            maxIdleConns: 20
+            maxConnLifetime: "1h"
+            tls:
+              enabled: true
+              caFile: "/etc/temporal/tls/ca.crt"
+              certFile: "/etc/temporal/tls/client.crt"
+              keyFile: "/etc/temporal/tls/client.key"
+              enableHostVerification: true
+        visibility:
+          sql:
+            pluginName: "postgres"
+            databaseName: "temporal_visibility"
+            connectAddr: "postgres-service.postgres-system.svc.cluster.local:5432"
+            connectProtocol: "tcp"
+            user: "temporal_user"
+            password: "temporal_password"
+            maxConns: 10
+            maxIdleConns: 10
+            maxConnLifetime: "1h"
+            tls:
+              enabled: true
+              caFile: "/etc/temporal/tls/ca.crt"
+              certFile: "/etc/temporal/tls/client.crt"
+              keyFile: "/etc/temporal/tls/client.key"
+              enableHostVerification: true
+    
+    # Services configuration for HA deployment
+    services:
+      frontend:
+        rpc:
+          grpcPort: 7233
+          membershipPort: 6933
+          bindOnLocalHost: false
+        metrics:
+          prometheus:
+            timerType: "histogram"
+            listenAddress: "0.0.0.0:9090"
+        pprof:
+          port: 7936
+      
+      matching:
+        rpc:
+          grpcPort: 7235
+          membershipPort: 6935
+          bindOnLocalHost: false
+        metrics:
+          prometheus:
+            timerType: "histogram"
+            listenAddress: "0.0.0.0:9091"
+        pprof:
+          port: 7937
+      
+      history:
+        rpc:
+          grpcPort: 7234
+          membershipPort: 6934
+          bindOnLocalHost: false
+        metrics:
+          prometheus:
+            timerType: "histogram"
+            listenAddress: "0.0.0.0:9092"
+        pprof:
+          port: 7938
+      
+      worker:
+        rpc:
+          grpcPort: 7239
+          membershipPort: 6939
+          bindOnLocalHost: false
+        metrics:
+          prometheus:
+            timerType: "histogram"
+            listenAddress: "0.0.0.0:9093"
+        pprof:
+          port: 7940
+    
+    # Cluster membership configuration
+    clusterMetadata:
+      enableGlobalNamespace: true
+      failoverVersionIncrement: 10
+      masterClusterName: "active"
+      currentClusterName: "active"
+      clusterInformation:
+        active:
+          enabled: true
+          initialFailoverVersion: 1
+          rpcName: "frontend"
+          rpcAddress: "temporal-frontend:7233"
+    
+    # Dynamic configuration for banking workflows
+    dynamicConfigClient:
+      filepath: "/etc/temporal/dynamic_config.yaml"
+      pollInterval: "10s"
+    
+    # Authorization configuration for banking security
+    authorization:
+      jwtKeyProvider:
+        keySourceURIs:
+        - "https://keycloak.keycloak-system.svc.cluster.local/auth/realms/banking/protocol/openid-connect/certs"
+        refreshInterval: "1h"
+      defaultAuthorizer:
+        name: "default"
+        config:
+          adminRoles: ["temporal-admin", "banking-admin"]
+          userRoles: ["temporal-user", "banking-user"]
+      claimMapper:
+        name: "default"
+        config:
+          roleKey: "roles"
+          namespaceKey: "namespace"
+    
+    # TLS configuration for secure communication
+    tls:
+      internode:
+        server:
+          certFile: "/etc/temporal/tls/tls.crt"
+          keyFile: "/etc/temporal/tls/tls.key"
+          clientCaFiles: ["/etc/temporal/tls/ca.crt"]
+          requireClientAuth: true
+        client:
+          certFile: "/etc/temporal/tls/tls.crt"
+          keyFile: "/etc/temporal/tls/tls.key"
+          caFile: "/etc/temporal/tls/ca.crt"
+          enableHostVerification: true
+      frontend:
+        server:
+          certFile: "/etc/temporal/tls/tls.crt"
+          keyFile: "/etc/temporal/tls/tls.key"
+          clientCaFiles: ["/etc/temporal/tls/ca.crt"]
+          requireClientAuth: true
+        client:
+          certFile: "/etc/temporal/tls/tls.crt"
+          keyFile: "/etc/temporal/tls/tls.key"
+          caFile: "/etc/temporal/tls/ca.crt"
+          enableHostVerification: true
+
+  dynamic_config.yaml: |
+    # Dynamic configuration for banking workflow optimizations
+    
+    # Frontend service limits
+    frontend.rps: 2000
+    frontend.globalRPS: 10000
+    frontend.maxConcurrentLongRunningRequestsPerInstance: 1000
+    frontend.maxConcurrentRequestsPerInstance: 2000
+    
+    # History service limits optimized for banking transactions
+    history.rps: 3000
+    history.globalRPS: 15000
+    history.maxAutoResetPoints: 20
+    history.defaultActivityRetryPolicy:
+      InitialIntervalInSeconds: 1
+      MaximumIntervalInSeconds: 100
+      BackoffCoefficient: 2.0
+      MaximumAttempts: 3
+    history.defaultWorkflowRetryPolicy:
+      InitialIntervalInSeconds: 1
+      MaximumIntervalInSeconds: 100
+      BackoffCoefficient: 2.0
+      MaximumAttempts: 3
+    
+    # Matching service configuration for banking task queues
+    matching.rps: 2000
+    matching.globalRPS: 10000
+    matching.numTaskqueueReadPartitions: 4
+    matching.numTaskqueueWritePartitions: 4
+    matching.forwarderMaxOutstandingPolls: 1
+    matching.forwarderMaxOutstandingTasks: 1
+    matching.forwarderMaxRatePerSecond: 10
+    matching.forwarderMaxChildrenPerNode: 20
+    
+    # Worker service configuration
+    worker.rps: 1000
+    worker.globalRPS: 5000
+    
+    # System workflow configurations for banking operations
+    system.enableEagerWorkflowStart: true
+    system.enableCrossNamespaceCommands: false
+    system.enableParentClosePolicy: true
+    system.enableShadowWorkflow: false
+    
+    # Namespace-specific configurations for banking
+    namespace.banking-transactions.retention: "30d"
+    namespace.banking-transactions.historyArchivalState: "enabled"
+    namespace.banking-transactions.visibilityArchivalState: "enabled"
+    namespace.banking-transactions.badBinaries: {}
+    
+    namespace.banking-compliance.retention: "2555d"  # 7 years for compliance
+    namespace.banking-compliance.historyArchivalState: "enabled"
+    namespace.banking-compliance.visibilityArchivalState: "enabled"
+    namespace.banking-compliance.badBinaries: {}
+    
+    namespace.banking-analytics.retention: "90d"
+    namespace.banking-analytics.historyArchivalState: "enabled"
+    namespace.banking-analytics.visibilityArchivalState: "enabled"
+    namespace.banking-analytics.badBinaries: {}
+    
+    # Archival configuration for long-term storage
+    archival.history.state: "enabled"
+    archival.history.enableRead: true
+    archival.history.provider:
+      s3:
+        region: "us-east-1"
+        endpoint: "s3.amazonaws.com"
+        bucket: "temporal-banking-history"
+        keyPrefix: "temporal-history"
+        credentialsProvider: "environment"
+    
+    archival.visibility.state: "enabled"
+    archival.visibility.enableRead: true
+    archival.visibility.provider:
+      s3:
+        region: "us-east-1"
+        endpoint: "s3.amazonaws.com"
+        bucket: "temporal-banking-visibility"
+        keyPrefix: "temporal-visibility"
+        credentialsProvider: "environment"
+
+  banking_workflows.yaml: |
+    # Banking-specific workflow configurations
+    
+    workflows:
+      # Transaction processing workflow
+      transaction_processing:
+        taskQueue: "banking-transaction-queue"
+        executionTimeout: "5m"
+        runTimeout: "5m"
+        taskTimeout: "30s"
+        retryPolicy:
+          initialInterval: "1s"
+          backoffCoefficient: 2.0
+          maximumInterval: "100s"
+          maximumAttempts: 3
+        activities:
+          - name: "validate_transaction"
+            scheduleToCloseTimeout: "30s"
+            scheduleToStartTimeout: "10s"
+            startToCloseTimeout: "20s"
+            heartbeatTimeout: "5s"
+          - name: "check_fraud"
+            scheduleToCloseTimeout: "60s"
+            scheduleToStartTimeout: "10s"
+            startToCloseTimeout: "50s"
+            heartbeatTimeout: "10s"
+          - name: "process_payment"
+            scheduleToCloseTimeout: "120s"
+            scheduleToStartTimeout: "10s"
+            startToCloseTimeout: "110s"
+            heartbeatTimeout: "15s"
+          - name: "send_notification"
+            scheduleToCloseTimeout: "30s"
+            scheduleToStartTimeout: "5s"
+            startToCloseTimeout: "25s"
+            heartbeatTimeout: "5s"
+      
+      # KYC verification workflow
+      kyc_verification:
+        taskQueue: "banking-kyc-queue"
+        executionTimeout: "24h"
+        runTimeout: "24h"
+        taskTimeout: "5m"
+        retryPolicy:
+          initialInterval: "10s"
+          backoffCoefficient: 2.0
+          maximumInterval: "300s"
+          maximumAttempts: 5
+        activities:
+          - name: "collect_documents"
+            scheduleToCloseTimeout: "1h"
+            scheduleToStartTimeout: "5m"
+            startToCloseTimeout: "55m"
+            heartbeatTimeout: "5m"
+          - name: "verify_identity"
+            scheduleToCloseTimeout: "30m"
+            scheduleToStartTimeout: "5m"
+            startToCloseTimeout: "25m"
+            heartbeatTimeout: "2m"
+          - name: "check_sanctions"
+            scheduleToCloseTimeout: "15m"
+            scheduleToStartTimeout: "2m"
+            startToCloseTimeout: "13m"
+            heartbeatTimeout: "1m"
+          - name: "approve_customer"
+            scheduleToCloseTimeout: "10m"
+            scheduleToStartTimeout: "1m"
+            startToCloseTimeout: "9m"
+            heartbeatTimeout: "30s"
+      
+      # Loan processing workflow
+      loan_processing:
+        taskQueue: "banking-loan-queue"
+        executionTimeout: "72h"
+        runTimeout: "72h"
+        taskTimeout: "10m"
+        retryPolicy:
+          initialInterval: "30s"
+          backoffCoefficient: 2.0
+          maximumInterval: "600s"
+          maximumAttempts: 3
+        activities:
+          - name: "credit_check"
+            scheduleToCloseTimeout: "2h"
+            scheduleToStartTimeout: "10m"
+            startToCloseTimeout: "110m"
+            heartbeatTimeout: "10m"
+          - name: "risk_assessment"
+            scheduleToCloseTimeout: "1h"
+            scheduleToStartTimeout: "5m"
+            startToCloseTimeout: "55m"
+            heartbeatTimeout: "5m"
+          - name: "manual_review"
+            scheduleToCloseTimeout: "48h"
+            scheduleToStartTimeout: "1h"
+            startToCloseTimeout: "47h"
+            heartbeatTimeout: "1h"
+          - name: "loan_approval"
+            scheduleToCloseTimeout: "30m"
+            scheduleToStartTimeout: "5m"
+            startToCloseTimeout: "25m"
+            heartbeatTimeout: "2m"
+      
+      # Compliance reporting workflow
+      compliance_reporting:
+        taskQueue: "banking-compliance-queue"
+        executionTimeout: "12h"
+        runTimeout: "12h"
+        taskTimeout: "30m"
+        retryPolicy:
+          initialInterval: "1m"
+          backoffCoefficient: 2.0
+          maximumInterval: "10m"
+          maximumAttempts: 5
+        activities:
+          - name: "collect_data"
+            scheduleToCloseTimeout: "4h"
+            scheduleToStartTimeout: "30m"
+            startToCloseTimeout: "3h30m"
+            heartbeatTimeout: "30m"
+          - name: "generate_report"
+            scheduleToCloseTimeout: "2h"
+            scheduleToStartTimeout: "15m"
+            startToCloseTimeout: "1h45m"
+            heartbeatTimeout: "15m"
+          - name: "validate_report"
+            scheduleToCloseTimeout: "1h"
+            scheduleToStartTimeout: "10m"
+            startToCloseTimeout: "50m"
+            heartbeatTimeout: "10m"
+          - name: "submit_report"
+            scheduleToCloseTimeout: "30m"
+            scheduleToStartTimeout: "5m"
+            startToCloseTimeout: "25m"
+            heartbeatTimeout: "5m"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-secrets
+  namespace: temporal-system
+type: Opaque
+data:
+  # Base64 encoded secrets
+  postgres-password: dGVtcG9yYWwtcGFzc3dvcmQ=
+  jwt-private-key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t
+  jwt-public-key: LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0=
+  tls-cert: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t
+  tls-key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t
+  ca-cert: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-frontend
+  namespace: temporal-system
+  labels:
+    app: temporal-frontend
+spec:
+  type: ClusterIP
+  ports:
+  - name: grpc
+    port: 7233
+    targetPort: 7233
+  - name: membership
+    port: 6933
+    targetPort: 6933
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  selector:
+    app: temporal-frontend
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-frontend
+  namespace: temporal-system
+  labels:
+    app: temporal-frontend
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: temporal-frontend
+  template:
+    metadata:
+      labels:
+        app: temporal-frontend
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - temporal-frontend
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: temporal-frontend
+        image: temporalio/server:1.22.0
+        command:
+        - temporal-server
+        - --root-dir
+        - /etc/temporal
+        - --config
+        - config.yaml
+        - --env
+        - production
+        - start
+        - --service
+        - frontend
+        ports:
+        - containerPort: 7233
+          name: grpc
+        - containerPort: 6933
+          name: membership
+        - containerPort: 9090
+          name: metrics
+        - containerPort: 7936
+          name: pprof
+        env:
+        - name: SERVICES
+          value: "frontend"
+        - name: TEMPORAL_CLI_ADDRESS
+          value: "temporal-frontend:7233"
+        - name: TEMPORAL_CLI_TLS_CA
+          value: "/etc/temporal/tls/ca.crt"
+        - name: TEMPORAL_CLI_TLS_CERT
+          value: "/etc/temporal/tls/tls.crt"
+        - name: TEMPORAL_CLI_TLS_KEY
+          value: "/etc/temporal/tls/tls.key"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-secrets
+              key: postgres-password
+        volumeMounts:
+        - name: temporal-config
+          mountPath: /etc/temporal
+        - name: tls-certs
+          mountPath: /etc/temporal/tls
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        livenessProbe:
+          tcpSocket:
+            port: 7233
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 7233
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: temporal-config
+        configMap:
+          name: temporal-config
+      - name: tls-certs
+        secret:
+          secretName: temporal-secrets
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-history
+  namespace: temporal-system
+  labels:
+    app: temporal-history
+spec:
+  clusterIP: None
+  ports:
+  - name: grpc
+    port: 7234
+    targetPort: 7234
+  - name: membership
+    port: 6934
+    targetPort: 6934
+  - name: metrics
+    port: 9092
+    targetPort: 9092
+  selector:
+    app: temporal-history
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: temporal-history
+  namespace: temporal-system
+  labels:
+    app: temporal-history
+spec:
+  serviceName: temporal-history
+  replicas: 4
+  selector:
+    matchLabels:
+      app: temporal-history
+  template:
+    metadata:
+      labels:
+        app: temporal-history
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - temporal-history
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: temporal-history
+        image: temporalio/server:1.22.0
+        command:
+        - temporal-server
+        - --root-dir
+        - /etc/temporal
+        - --config
+        - config.yaml
+        - --env
+        - production
+        - start
+        - --service
+        - history
+        ports:
+        - containerPort: 7234
+          name: grpc
+        - containerPort: 6934
+          name: membership
+        - containerPort: 9092
+          name: metrics
+        - containerPort: 7938
+          name: pprof
+        env:
+        - name: SERVICES
+          value: "history"
+        - name: TEMPORAL_CLI_ADDRESS
+          value: "temporal-frontend:7233"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-secrets
+              key: postgres-password
+        volumeMounts:
+        - name: temporal-config
+          mountPath: /etc/temporal
+        - name: tls-certs
+          mountPath: /etc/temporal/tls
+          readOnly: true
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+        livenessProbe:
+          tcpSocket:
+            port: 7234
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 7234
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: temporal-config
+        configMap:
+          name: temporal-config
+      - name: tls-certs
+        secret:
+          secretName: temporal-secrets
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-matching
+  namespace: temporal-system
+  labels:
+    app: temporal-matching
+spec:
+  clusterIP: None
+  ports:
+  - name: grpc
+    port: 7235
+    targetPort: 7235
+  - name: membership
+    port: 6935
+    targetPort: 6935
+  - name: metrics
+    port: 9091
+    targetPort: 9091
+  selector:
+    app: temporal-matching
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: temporal-matching
+  namespace: temporal-system
+  labels:
+    app: temporal-matching
+spec:
+  serviceName: temporal-matching
+  replicas: 3
+  selector:
+    matchLabels:
+      app: temporal-matching
+  template:
+    metadata:
+      labels:
+        app: temporal-matching
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - temporal-matching
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: temporal-matching
+        image: temporalio/server:1.22.0
+        command:
+        - temporal-server
+        - --root-dir
+        - /etc/temporal
+        - --config
+        - config.yaml
+        - --env
+        - production
+        - start
+        - --service
+        - matching
+        ports:
+        - containerPort: 7235
+          name: grpc
+        - containerPort: 6935
+          name: membership
+        - containerPort: 9091
+          name: metrics
+        - containerPort: 7937
+          name: pprof
+        env:
+        - name: SERVICES
+          value: "matching"
+        - name: TEMPORAL_CLI_ADDRESS
+          value: "temporal-frontend:7233"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-secrets
+              key: postgres-password
+        volumeMounts:
+        - name: temporal-config
+          mountPath: /etc/temporal
+        - name: tls-certs
+          mountPath: /etc/temporal/tls
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        livenessProbe:
+          tcpSocket:
+            port: 7235
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 7235
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: temporal-config
+        configMap:
+          name: temporal-config
+      - name: tls-certs
+        secret:
+          secretName: temporal-secrets
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-worker
+  namespace: temporal-system
+  labels:
+    app: temporal-worker
+spec:
+  clusterIP: None
+  ports:
+  - name: grpc
+    port: 7239
+    targetPort: 7239
+  - name: membership
+    port: 6939
+    targetPort: 6939
+  - name: metrics
+    port: 9093
+    targetPort: 9093
+  selector:
+    app: temporal-worker
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-worker
+  namespace: temporal-system
+  labels:
+    app: temporal-worker
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: temporal-worker
+  template:
+    metadata:
+      labels:
+        app: temporal-worker
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - temporal-worker
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: temporal-worker
+        image: temporalio/server:1.22.0
+        command:
+        - temporal-server
+        - --root-dir
+        - /etc/temporal
+        - --config
+        - config.yaml
+        - --env
+        - production
+        - start
+        - --service
+        - worker
+        ports:
+        - containerPort: 7239
+          name: grpc
+        - containerPort: 6939
+          name: membership
+        - containerPort: 9093
+          name: metrics
+        - containerPort: 7940
+          name: pprof
+        env:
+        - name: SERVICES
+          value: "worker"
+        - name: TEMPORAL_CLI_ADDRESS
+          value: "temporal-frontend:7233"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-secrets
+              key: postgres-password
+        volumeMounts:
+        - name: temporal-config
+          mountPath: /etc/temporal
+        - name: banking-workflows
+          mountPath: /etc/temporal/workflows
+        - name: tls-certs
+          mountPath: /etc/temporal/tls
+          readOnly: true
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        livenessProbe:
+          tcpSocket:
+            port: 7239
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 7239
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      volumes:
+      - name: temporal-config
+        configMap:
+          name: temporal-config
+      - name: banking-workflows
+        configMap:
+          name: temporal-config
+      - name: tls-certs
+        secret:
+          secretName: temporal-secrets
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: temporal-schema-setup
+  namespace: temporal-system
+  labels:
+    app: temporal-schema-setup
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: temporal-schema-setup
+        image: temporalio/admin-tools:1.22.0
+        command:
+        - sh
+        - -c
+        - |
+          # Wait for PostgreSQL to be ready
+          echo "Waiting for PostgreSQL to be ready..."
+          while ! pg_isready -h postgres-service.postgres-system.svc.cluster.local -p 5432 -U temporal_user; do
+            echo "Waiting for PostgreSQL..."
+            sleep 5
+          done
+          
+          # Setup Temporal database schema
+          echo "Setting up Temporal database schema..."
+          temporal-sql-tool --plugin postgres --ep postgres-service.postgres-system.svc.cluster.local -p 5432 -u temporal_user -pw temporal_password --db temporal create-database
+          temporal-sql-tool --plugin postgres --ep postgres-service.postgres-system.svc.cluster.local -p 5432 -u temporal_user -pw temporal_password --db temporal setup-schema -v 0.0
+          temporal-sql-tool --plugin postgres --ep postgres-service.postgres-system.svc.cluster.local -p 5432 -u temporal_user -pw temporal_password --db temporal update-schema -d /etc/temporal/schema/postgresql/v96
+          
+          # Setup Temporal visibility database schema
+          echo "Setting up Temporal visibility database schema..."
+          temporal-sql-tool --plugin postgres --ep postgres-service.postgres-system.svc.cluster.local -p 5432 -u temporal_user -pw temporal_password --db temporal_visibility create-database
+          temporal-sql-tool --plugin postgres --ep postgres-service.postgres-system.svc.cluster.local -p 5432 -u temporal_user -pw temporal_password --db temporal_visibility setup-schema -v 0.0
+          temporal-sql-tool --plugin postgres --ep postgres-service.postgres-system.svc.cluster.local -p 5432 -u temporal_user -pw temporal_password --db temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v96/visibility
+          
+          # Create banking namespaces
+          echo "Creating banking namespaces..."
+          tctl --address temporal-frontend:7233 --tls_ca_path /etc/temporal/tls/ca.crt --tls_cert_path /etc/temporal/tls/tls.crt --tls_key_path /etc/temporal/tls/tls.key namespace register --namespace banking-transactions --description "Banking transaction workflows"
+          tctl --address temporal-frontend:7233 --tls_ca_path /etc/temporal/tls/ca.crt --tls_cert_path /etc/temporal/tls/tls.crt --tls_key_path /etc/temporal/tls/tls.key namespace register --namespace banking-compliance --description "Banking compliance workflows"
+          tctl --address temporal-frontend:7233 --tls_ca_path /etc/temporal/tls/ca.crt --tls_cert_path /etc/temporal/tls/tls.crt --tls_key_path /etc/temporal/tls/tls.key namespace register --namespace banking-analytics --description "Banking analytics workflows"
+          
+          echo "Temporal setup completed successfully!"
+        env:
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: temporal-secrets
+              key: postgres-password
+        volumeMounts:
+        - name: tls-certs
+          mountPath: /etc/temporal/tls
+          readOnly: true
+      volumes:
+      - name: tls-certs
+        secret:
+          secretName: temporal-secrets
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-frontend-pdb
+  namespace: temporal-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: temporal-frontend
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-history-pdb
+  namespace: temporal-system
+spec:
+  minAvailable: 3
+  selector:
+    matchLabels:
+      app: temporal-history
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-matching-pdb
+  namespace: temporal-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: temporal-matching
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: temporal-worker-pdb
+  namespace: temporal-system
+spec:
+  minAvailable: 4
+  selector:
+    matchLabels:
+      app: temporal-worker
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: temporal-network-policy
+  namespace: temporal-system
+spec:
+  podSelector:
+    matchLabels:
+      app: temporal-frontend
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: remittance-system
+    - namespaceSelector:
+        matchLabels:
+          name: dapr-system
+    - podSelector:
+        matchLabels:
+          app: temporal-history
+    - podSelector:
+        matchLabels:
+          app: temporal-matching
+    - podSelector:
+        matchLabels:
+          app: temporal-worker
+    ports:
+    - protocol: TCP
+      port: 7233
+    - protocol: TCP
+      port: 7234
+    - protocol: TCP
+      port: 7235
+    - protocol: TCP
+      port: 7239
+    - protocol: TCP
+      port: 9090
+    - protocol: TCP
+      port: 9091
+    - protocol: TCP
+      port: 9092
+    - protocol: TCP
+      port: 9093
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: postgres-system
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: temporal-history
+    - podSelector:
+        matchLabels:
+          app: temporal-matching
+    - podSelector:
+        matchLabels:
+          app: temporal-worker
+    ports:
+    - protocol: TCP
+      port: 7234
+    - protocol: TCP
+      port: 7235
+    - protocol: TCP
+      port: 7239
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+

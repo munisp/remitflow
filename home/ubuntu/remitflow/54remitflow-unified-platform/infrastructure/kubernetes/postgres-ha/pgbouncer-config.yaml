@@ -1,0 +1,235 @@
+# PgBouncer Configuration for Mojaloop PostgreSQL HA
+# Provides connection pooling and load balancing
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgbouncer-config
+  namespace: remittance
+data:
+  pgbouncer.ini: |
+    [databases]
+    ; Primary database for read-write operations
+    mojaloop = host=mojaloop-postgres-primary.remittance.svc.cluster.local port=5432 dbname=mojaloop
+    central_ledger = host=mojaloop-postgres-primary.remittance.svc.cluster.local port=5432 dbname=mojaloop
+    settlement = host=mojaloop-postgres-primary.remittance.svc.cluster.local port=5432 dbname=mojaloop
+    participant_registry = host=mojaloop-postgres-primary.remittance.svc.cluster.local port=5432 dbname=mojaloop
+    transfers = host=mojaloop-postgres-primary.remittance.svc.cluster.local port=5432 dbname=mojaloop
+    quotes = host=mojaloop-postgres-primary.remittance.svc.cluster.local port=5432 dbname=mojaloop
+    
+    ; Read replicas for read-only operations
+    mojaloop_ro = host=mojaloop-postgres-replica.remittance.svc.cluster.local port=5432 dbname=mojaloop
+    central_ledger_ro = host=mojaloop-postgres-replica.remittance.svc.cluster.local port=5432 dbname=mojaloop
+    
+    [pgbouncer]
+    ; Connection settings
+    listen_addr = 0.0.0.0
+    listen_port = 6432
+    unix_socket_dir = /var/run/pgbouncer
+    
+    ; Authentication
+    auth_type = scram-sha-256
+    auth_file = /etc/pgbouncer/userlist.txt
+    auth_query = SELECT usename, passwd FROM pg_shadow WHERE usename=$1
+    
+    ; Pool settings
+    pool_mode = transaction
+    max_client_conn = 1000
+    default_pool_size = 25
+    min_pool_size = 5
+    reserve_pool_size = 5
+    reserve_pool_timeout = 3
+    
+    ; Connection limits
+    max_db_connections = 100
+    max_user_connections = 100
+    
+    ; Timeouts
+    server_connect_timeout = 15
+    server_login_retry = 3
+    query_timeout = 120
+    query_wait_timeout = 60
+    client_idle_timeout = 300
+    client_login_timeout = 60
+    idle_transaction_timeout = 60
+    
+    ; Logging
+    log_connections = 1
+    log_disconnections = 1
+    log_pooler_errors = 1
+    stats_period = 60
+    
+    ; Admin settings
+    admin_users = pgbouncer_admin
+    stats_users = pgbouncer_stats
+    
+    ; TLS settings
+    server_tls_sslmode = prefer
+    server_tls_protocols = secure
+    
+    ; DNS settings
+    dns_max_ttl = 15
+    dns_nxdomain_ttl = 15
+    
+    ; Application name tracking
+    application_name_add_host = 1
+    
+    ; Ignore startup parameters that might cause issues
+    ignore_startup_parameters = extra_float_digits,geqo
+    
+  userlist.txt: |
+    ; Format: "username" "password"
+    ; Passwords should be SCRAM-SHA-256 hashed in production
+    ; This is a placeholder - actual passwords come from secrets
+    "mojaloop" ""
+    "central_ledger" ""
+    "settlement_service" ""
+    "participant_registry" ""
+    "transfer_service" ""
+    "quote_service" ""
+    "app_readonly" ""
+    "pgbouncer_admin" ""
+    "pgbouncer_stats" ""
+---
+# PgBouncer Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pgbouncer
+  namespace: remittance
+  labels:
+    app: pgbouncer
+    component: connection-pooler
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pgbouncer
+  template:
+    metadata:
+      labels:
+        app: pgbouncer
+        component: connection-pooler
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9127"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: pgbouncer
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: pgbouncer
+          image: bitnami/pgbouncer:1.21.0
+          ports:
+            - name: pgbouncer
+              containerPort: 6432
+              protocol: TCP
+          env:
+            - name: PGBOUNCER_DATABASE
+              value: "mojaloop"
+            - name: POSTGRESQL_HOST
+              value: "mojaloop-postgres-primary.remittance.svc.cluster.local"
+            - name: POSTGRESQL_PORT
+              value: "5432"
+            - name: PGBOUNCER_PORT
+              value: "6432"
+            - name: PGBOUNCER_POOL_MODE
+              value: "transaction"
+            - name: PGBOUNCER_MAX_CLIENT_CONN
+              value: "1000"
+            - name: PGBOUNCER_DEFAULT_POOL_SIZE
+              value: "25"
+            - name: PGBOUNCER_AUTH_TYPE
+              value: "scram-sha-256"
+            - name: POSTGRESQL_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mojaloop.mojaloop-postgres.credentials.postgresql.acid.zalan.do
+                  key: username
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mojaloop.mojaloop-postgres.credentials.postgresql.acid.zalan.do
+                  key: password
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            tcpSocket:
+              port: 6432
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 6432
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: pgbouncer-config
+              mountPath: /bitnami/pgbouncer/conf
+              readOnly: true
+        - name: exporter
+          image: prometheuscommunity/pgbouncer-exporter:v0.7.0
+          ports:
+            - name: metrics
+              containerPort: 9127
+              protocol: TCP
+          env:
+            - name: PGBOUNCER_EXPORTER_HOST
+              value: "localhost"
+            - name: PGBOUNCER_EXPORTER_PORT
+              value: "6432"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: pgbouncer-config
+          configMap:
+            name: pgbouncer-config
+---
+# PgBouncer Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgbouncer
+  namespace: remittance
+  labels:
+    app: pgbouncer
+spec:
+  type: ClusterIP
+  ports:
+    - name: pgbouncer
+      port: 6432
+      targetPort: 6432
+      protocol: TCP
+    - name: metrics
+      port: 9127
+      targetPort: 9127
+      protocol: TCP
+  selector:
+    app: pgbouncer
+---
+# PodDisruptionBudget for PgBouncer
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pgbouncer-pdb
+  namespace: remittance
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: pgbouncer

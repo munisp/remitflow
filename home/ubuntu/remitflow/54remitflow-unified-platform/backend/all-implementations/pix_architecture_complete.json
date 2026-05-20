@@ -1,0 +1,607 @@
+{
+    "system_overview": {
+        "name": "Nigerian Remittance Platform - PIX Integration",
+        "architecture_type": "Microservices with Event-Driven Architecture",
+        "deployment_model": "Containerized with Docker + Kubernetes",
+        "total_services": 12,
+        "infrastructure_components": 5,
+        "supported_regions": [
+            "Nigeria",
+            "Brazil"
+        ],
+        "supported_currencies": [
+            "NGN",
+            "BRL",
+            "USD",
+            "USDC"
+        ],
+        "target_throughput": "1,000+ TPS",
+        "target_latency": "<10 seconds cross-border"
+    },
+    "microservices_architecture": {
+        "pix_integration_layer": {
+            "description": "New services specifically for Brazilian PIX integration",
+            "services": {
+                "pix_gateway": {
+                    "port": 5001,
+                    "technology": "Go",
+                    "purpose": "Direct integration with Brazilian Central Bank PIX system",
+                    "key_functions": [
+                        "PIX payment processing",
+                        "BCB API integration",
+                        "PIX key validation",
+                        "QR code generation",
+                        "Transaction status tracking"
+                    ],
+                    "external_integrations": [
+                        "BCB (Central Bank of Brazil) API",
+                        "Brazilian banking network",
+                        "PIX instant payment system"
+                    ],
+                    "data_flow": "Receives payment requests \u2192 Validates PIX keys \u2192 Processes via BCB \u2192 Returns confirmation"
+                },
+                "brl_liquidity_manager": {
+                    "port": 5002,
+                    "technology": "Python/Flask",
+                    "purpose": "Exchange rate management and BRL liquidity pools",
+                    "key_functions": [
+                        "Real-time exchange rate retrieval",
+                        "BRL liquidity pool management",
+                        "Currency conversion optimization",
+                        "Market maker integration",
+                        "Liquidity monitoring and alerts"
+                    ],
+                    "external_integrations": [
+                        "Multiple exchange rate APIs",
+                        "Brazilian financial markets",
+                        "Liquidity providers"
+                    ],
+                    "data_flow": "Monitors exchange rates \u2192 Manages liquidity pools \u2192 Provides conversion rates \u2192 Optimizes spreads"
+                },
+                "brazilian_compliance": {
+                    "port": 5003,
+                    "technology": "Go",
+                    "purpose": "Brazilian regulatory compliance and AML/CFT",
+                    "key_functions": [
+                        "AML/CFT screening",
+                        "LGPD data protection compliance",
+                        "BCB regulatory reporting",
+                        "Sanctions list checking",
+                        "Tax reporting for large transactions"
+                    ],
+                    "external_integrations": [
+                        "Brazilian AML databases",
+                        "LGPD compliance systems",
+                        "BCB reporting systems",
+                        "International sanctions lists"
+                    ],
+                    "data_flow": "Receives transaction data \u2192 Performs compliance checks \u2192 Reports to regulators \u2192 Returns approval/rejection"
+                },
+                "customer_support_pt": {
+                    "port": 5004,
+                    "technology": "Python/Flask",
+                    "purpose": "Portuguese customer support and Brazilian user experience",
+                    "key_functions": [
+                        "Portuguese language support",
+                        "Brazilian timezone handling",
+                        "Local customer service integration",
+                        "Brazilian banking knowledge base",
+                        "Escalation to local support teams"
+                    ],
+                    "external_integrations": [
+                        "Brazilian customer service platforms",
+                        "Portuguese language services",
+                        "Local support teams"
+                    ],
+                    "data_flow": "Receives support requests \u2192 Routes to Portuguese agents \u2192 Provides Brazilian context \u2192 Resolves issues"
+                },
+                "integration_orchestrator": {
+                    "port": 5005,
+                    "technology": "Go",
+                    "purpose": "Cross-border transfer orchestration and workflow management",
+                    "key_functions": [
+                        "Multi-step workflow coordination",
+                        "Service-to-service communication",
+                        "Error handling and retry logic",
+                        "Transaction state management",
+                        "Cross-border process optimization"
+                    ],
+                    "internal_integrations": [
+                        "All PIX services",
+                        "All enhanced platform services",
+                        "Nigerian platform services"
+                    ],
+                    "data_flow": "Receives transfer request \u2192 Coordinates all services \u2192 Manages workflow \u2192 Returns final status"
+                },
+                "data_sync_service": {
+                    "port": 5006,
+                    "technology": "Python/Flask",
+                    "purpose": "Real-time data synchronization between Nigerian and Brazilian systems",
+                    "key_functions": [
+                        "Bidirectional data synchronization",
+                        "Conflict resolution",
+                        "Data consistency maintenance",
+                        "Cross-platform state management",
+                        "Real-time event streaming"
+                    ],
+                    "internal_integrations": [
+                        "Nigerian platform databases",
+                        "Brazilian system databases",
+                        "Event streaming systems"
+                    ],
+                    "data_flow": "Monitors data changes \u2192 Synchronizes across platforms \u2192 Resolves conflicts \u2192 Maintains consistency"
+                }
+            }
+        },
+        "enhanced_platform_layer": {
+            "description": "Existing Nigerian platform services enhanced with Brazilian capabilities",
+            "services": {
+                "enhanced_tigerbeetle": {
+                    "port": 3011,
+                    "technology": "Go",
+                    "original_purpose": "High-performance accounting ledger",
+                    "enhancements": [
+                        "BRL currency support",
+                        "PIX transaction metadata",
+                        "Multi-currency atomic transfers",
+                        "Cross-border transaction processing",
+                        "Brazilian accounting standards"
+                    ],
+                    "performance": "1M+ TPS capability",
+                    "data_flow": "Receives transactions \u2192 Records in ledger \u2192 Maintains balances \u2192 Provides audit trail"
+                },
+                "enhanced_notifications": {
+                    "port": 3002,
+                    "technology": "Python/Flask",
+                    "original_purpose": "Multi-channel notification system",
+                    "enhancements": [
+                        "Portuguese language templates",
+                        "PIX-specific notifications",
+                        "Brazilian timezone support",
+                        "Local phone number formatting",
+                        "Brazilian regulatory notifications"
+                    ],
+                    "channels": [
+                        "Email",
+                        "SMS",
+                        "Push",
+                        "WhatsApp"
+                    ],
+                    "data_flow": "Receives notification request \u2192 Selects template \u2192 Localizes content \u2192 Sends via channel"
+                },
+                "enhanced_user_management": {
+                    "port": 3001,
+                    "technology": "Go",
+                    "original_purpose": "User authentication and profile management",
+                    "enhancements": [
+                        "Brazilian KYC with CPF validation",
+                        "PIX key management",
+                        "Multi-country user profiles",
+                        "Brazilian address validation",
+                        "LGPD consent management"
+                    ],
+                    "compliance": [
+                        "Nigerian BVN",
+                        "Brazilian CPF",
+                        "LGPD"
+                    ],
+                    "data_flow": "Manages user profiles \u2192 Validates documents \u2192 Stores preferences \u2192 Handles authentication"
+                },
+                "enhanced_stablecoin": {
+                    "port": 3003,
+                    "technology": "Python/Flask",
+                    "original_purpose": "Stablecoin and DeFi integration",
+                    "enhancements": [
+                        "BRL liquidity pools",
+                        "NGN-BRL direct conversion",
+                        "Brazilian market integration",
+                        "Real-time Brazilian rates",
+                        "Cross-border liquidity management"
+                    ],
+                    "supported_coins": [
+                        "USDC",
+                        "USDT",
+                        "BUSD"
+                    ],
+                    "data_flow": "Manages liquidity \u2192 Executes conversions \u2192 Optimizes rates \u2192 Provides stability"
+                },
+                "enhanced_gnn": {
+                    "port": 4004,
+                    "technology": "Python/Flask",
+                    "original_purpose": "Graph Neural Network fraud detection",
+                    "enhancements": [
+                        "Brazilian fraud pattern detection",
+                        "PIX-specific risk models",
+                        "Cross-border anomaly detection",
+                        "Brazilian regulatory compliance",
+                        "Real-time risk scoring"
+                    ],
+                    "ai_models": [
+                        "Nigerian patterns",
+                        "Brazilian patterns",
+                        "Cross-border patterns"
+                    ],
+                    "data_flow": "Analyzes transactions \u2192 Applies ML models \u2192 Calculates risk scores \u2192 Triggers alerts"
+                },
+                "enhanced_api_gateway": {
+                    "port": 8000,
+                    "technology": "Go",
+                    "original_purpose": "API routing and load balancing",
+                    "enhancements": [
+                        "Intelligent routing for PIX requests",
+                        "Brazilian service integration",
+                        "Multi-region load balancing",
+                        "PIX-specific rate limiting",
+                        "Cross-border request optimization"
+                    ],
+                    "routing_rules": [
+                        "Country-based",
+                        "Currency-based",
+                        "Service-based"
+                    ],
+                    "data_flow": "Receives requests \u2192 Routes intelligently \u2192 Load balances \u2192 Returns responses"
+                }
+            }
+        }
+    },
+    "infrastructure_architecture": {
+        "data_layer": {
+            "postgresql_primary": {
+                "purpose": "Primary transactional database",
+                "port": 5432,
+                "configuration": "High-performance ACID compliance",
+                "data_stored": [
+                    "User profiles and KYC data",
+                    "Transaction records",
+                    "PIX payment history",
+                    "Compliance audit logs",
+                    "Exchange rate history"
+                ],
+                "backup_strategy": "Continuous WAL archiving + daily snapshots",
+                "performance": "10,000+ TPS capability"
+            },
+            "postgresql_replica": {
+                "purpose": "Read-only queries and reporting",
+                "port": 5433,
+                "configuration": "Streaming replication",
+                "use_cases": [
+                    "Analytics and reporting",
+                    "Read-heavy operations",
+                    "Backup and disaster recovery"
+                ]
+            },
+            "redis_cluster": {
+                "purpose": "High-performance caching and session management",
+                "port": 6379,
+                "configuration": "Cluster mode with persistence",
+                "data_cached": [
+                    "User sessions",
+                    "Exchange rates",
+                    "PIX key validations",
+                    "Fraud detection results",
+                    "API response cache"
+                ],
+                "performance": "100,000+ ops/sec"
+            }
+        },
+        "networking_layer": {
+            "nginx_load_balancer": {
+                "purpose": "SSL termination and load balancing",
+                "ports": [
+                    80,
+                    443
+                ],
+                "configuration": "Round-robin with health checks",
+                "features": [
+                    "SSL/TLS termination",
+                    "HTTP/2 support",
+                    "Gzip compression",
+                    "Rate limiting",
+                    "DDoS protection"
+                ],
+                "routing_rules": [
+                    "/api/v1/pix/* \u2192 PIX Gateway",
+                    "/api/v1/rates \u2192 BRL Liquidity",
+                    "/api/v1/transfers \u2192 Integration Orchestrator",
+                    "/* \u2192 Enhanced API Gateway"
+                ]
+            },
+            "service_mesh": {
+                "type": "Docker networks with service discovery",
+                "networks": [
+                    "pix-network (internal services)",
+                    "monitoring-network (observability)",
+                    "external-network (public access)"
+                ],
+                "security": "Network isolation with encrypted communication"
+            }
+        },
+        "monitoring_layer": {
+            "prometheus": {
+                "purpose": "Metrics collection and alerting",
+                "port": 9090,
+                "configuration": "15s scrape interval, 30d retention",
+                "metrics_collected": [
+                    "Service health and performance",
+                    "Transaction volumes and latencies",
+                    "Error rates and success rates",
+                    "Infrastructure resource usage",
+                    "Business KPIs and revenue"
+                ],
+                "alert_rules": [
+                    "Service downtime >1 minute",
+                    "Error rate >5%",
+                    "Latency >10 seconds",
+                    "Low liquidity <10%"
+                ]
+            },
+            "grafana": {
+                "purpose": "Visualization and dashboards",
+                "port": 3000,
+                "configuration": "Auto-provisioned dashboards",
+                "dashboards": [
+                    "PIX Integration Overview",
+                    "Service Performance Metrics",
+                    "Business KPIs and Revenue",
+                    "Security and Fraud Detection",
+                    "Infrastructure Health"
+                ],
+                "users": [
+                    "Admin",
+                    "Operations",
+                    "Business",
+                    "Support"
+                ]
+            }
+        }
+    },
+    "data_flow_architecture": {
+        "nigeria_to_brazil_flow": {
+            "description": "Complete flow for Nigeria \u2192 Brazil PIX transfer",
+            "steps": [
+                {
+                    "step": 1,
+                    "component": "Mobile App / Customer Portal",
+                    "action": "User initiates NGN transfer to Brazil",
+                    "data": "Transfer amount, recipient PIX key, user authentication"
+                },
+                {
+                    "step": 2,
+                    "component": "Enhanced API Gateway",
+                    "action": "Routes request and validates authentication",
+                    "data": "JWT token validation, request routing to orchestrator"
+                },
+                {
+                    "step": 3,
+                    "component": "Integration Orchestrator",
+                    "action": "Initiates cross-border transfer workflow",
+                    "data": "Transfer metadata, workflow state, service coordination"
+                },
+                {
+                    "step": 4,
+                    "component": "Enhanced User Management",
+                    "action": "Validates sender identity and compliance",
+                    "data": "Nigerian BVN verification, KYC status, transfer limits"
+                },
+                {
+                    "step": 5,
+                    "component": "Enhanced GNN",
+                    "action": "Performs fraud detection analysis",
+                    "data": "Transaction patterns, risk scores, fraud indicators"
+                },
+                {
+                    "step": 6,
+                    "component": "Brazilian Compliance",
+                    "action": "Validates recipient and performs AML/CFT checks",
+                    "data": "CPF validation, sanctions screening, LGPD compliance"
+                },
+                {
+                    "step": 7,
+                    "component": "BRL Liquidity Manager",
+                    "action": "Calculates exchange rate and checks liquidity",
+                    "data": "NGN/BRL rate, liquidity availability, conversion quote"
+                },
+                {
+                    "step": 8,
+                    "component": "Enhanced Stablecoin",
+                    "action": "Converts NGN \u2192 USDC \u2192 BRL",
+                    "data": "Stablecoin conversion, liquidity pool access, rate optimization"
+                },
+                {
+                    "step": 9,
+                    "component": "Enhanced TigerBeetle",
+                    "action": "Records transaction in ledger",
+                    "data": "Double-entry accounting, balance updates, audit trail"
+                },
+                {
+                    "step": 10,
+                    "component": "PIX Gateway",
+                    "action": "Executes PIX transfer to Brazilian bank",
+                    "data": "PIX payment instruction, BCB transaction ID, confirmation"
+                },
+                {
+                    "step": 11,
+                    "component": "Enhanced Notifications",
+                    "action": "Sends confirmation to both parties",
+                    "data": "Portuguese notification to recipient, English to sender"
+                },
+                {
+                    "step": 12,
+                    "component": "Data Sync Service",
+                    "action": "Synchronizes transaction data across platforms",
+                    "data": "Cross-platform state sync, audit trail, reporting data"
+                }
+            ],
+            "total_latency": "<10 seconds",
+            "success_rate": "99.5%+"
+        },
+        "brazil_to_nigeria_flow": {
+            "description": "Reverse flow for Brazil \u2192 Nigeria transfers",
+            "key_differences": [
+                "PIX Gateway receives incoming transfer notification",
+                "BRL Liquidity Manager converts BRL \u2192 USDC \u2192 NGN",
+                "Enhanced User Management validates Brazilian sender CPF",
+                "Nigerian banking integration for final delivery"
+            ],
+            "total_latency": "<15 seconds",
+            "success_rate": "99.5%+"
+        }
+    },
+    "service_communication": {
+        "communication_patterns": {
+            "synchronous_http": {
+                "description": "Direct HTTP API calls between services",
+                "use_cases": [
+                    "Real-time data retrieval",
+                    "Immediate response requirements",
+                    "Health checks and status queries"
+                ],
+                "examples": [
+                    "API Gateway \u2192 Integration Orchestrator",
+                    "Orchestrator \u2192 PIX Gateway",
+                    "Orchestrator \u2192 BRL Liquidity"
+                ]
+            },
+            "asynchronous_events": {
+                "description": "Event-driven communication via message queues",
+                "use_cases": [
+                    "Transaction status updates",
+                    "Notification triggers",
+                    "Audit log generation"
+                ],
+                "examples": [
+                    "PIX Gateway \u2192 Notification Service",
+                    "TigerBeetle \u2192 Data Sync Service",
+                    "Compliance \u2192 Audit Service"
+                ]
+            },
+            "database_sharing": {
+                "description": "Shared database access for consistency",
+                "use_cases": [
+                    "Transaction state persistence",
+                    "User profile access",
+                    "Audit trail maintenance"
+                ],
+                "access_patterns": [
+                    "Read-heavy services use replica",
+                    "Write operations use primary",
+                    "Cache frequently accessed data"
+                ]
+            }
+        },
+        "service_dependencies": {
+            "tier_1_core": [
+                "PostgreSQL",
+                "Redis"
+            ],
+            "tier_2_platform": [
+                "Enhanced TigerBeetle",
+                "Enhanced User Management"
+            ],
+            "tier_3_pix": [
+                "PIX Gateway",
+                "BRL Liquidity",
+                "Brazilian Compliance"
+            ],
+            "tier_4_orchestration": [
+                "Integration Orchestrator",
+                "Data Sync"
+            ],
+            "tier_5_gateway": [
+                "Enhanced API Gateway"
+            ],
+            "tier_6_monitoring": [
+                "Prometheus",
+                "Grafana"
+            ]
+        }
+    },
+    "security_architecture": {
+        "network_security": {
+            "network_isolation": "Services communicate via private Docker networks",
+            "ssl_termination": "Nginx handles SSL/TLS for external traffic",
+            "internal_encryption": "Service-to-service communication encrypted",
+            "firewall_rules": "Only necessary ports exposed externally"
+        },
+        "authentication_authorization": {
+            "jwt_tokens": "Stateless authentication with JWT",
+            "rbac": "Role-based access control",
+            "api_keys": "Service-to-service authentication",
+            "mfa": "Multi-factor authentication for admin access"
+        },
+        "data_protection": {
+            "encryption_at_rest": "AES-256 for database storage",
+            "encryption_in_transit": "TLS 1.3 for all communications",
+            "pii_tokenization": "Sensitive data tokenized",
+            "key_management": "Kubernetes secrets + HashiCorp Vault"
+        },
+        "compliance_controls": {
+            "lgpd_compliance": "Brazilian data protection law compliance",
+            "aml_cft": "Anti-money laundering and counter-terrorism financing",
+            "pci_dss": "Payment card industry compliance",
+            "soc2": "Service organization control 2 compliance"
+        }
+    },
+    "scalability_architecture": {
+        "horizontal_scaling": {
+            "auto_scaling": "Kubernetes Horizontal Pod Autoscaler",
+            "scaling_triggers": [
+                "CPU >70%",
+                "Memory >80%",
+                "Request rate >1000/min"
+            ],
+            "scaling_limits": [
+                "Min: 2 replicas",
+                "Max: 20 replicas per service"
+            ],
+            "scaling_strategy": "Gradual scale-up, rapid scale-down"
+        },
+        "vertical_scaling": {
+            "resource_optimization": "Kubernetes Vertical Pod Autoscaler",
+            "memory_management": "Automatic memory allocation optimization",
+            "cpu_optimization": "Dynamic CPU allocation based on load"
+        },
+        "database_scaling": {
+            "read_replicas": "Multiple read replicas for query distribution",
+            "connection_pooling": "PgBouncer for connection efficiency",
+            "query_optimization": "Indexed queries and materialized views",
+            "partitioning": "Table partitioning for large datasets"
+        },
+        "cache_scaling": {
+            "redis_cluster": "Horizontal Redis scaling with sharding",
+            "cache_strategies": [
+                "Write-through",
+                "Write-behind",
+                "Cache-aside"
+            ],
+            "cache_invalidation": "Event-driven cache invalidation",
+            "cache_warming": "Proactive cache population"
+        }
+    },
+    "deployment_architecture": {
+        "containerization": {
+            "container_runtime": "Docker with optimized images",
+            "image_strategy": "Multi-stage builds for minimal size",
+            "registry": "Private container registry",
+            "security_scanning": "Automated vulnerability scanning"
+        },
+        "orchestration": {
+            "kubernetes": "Production-grade container orchestration",
+            "namespaces": "Environment isolation (dev, staging, prod)",
+            "ingress": "Nginx Ingress Controller with SSL",
+            "service_mesh": "Istio for advanced traffic management"
+        },
+        "deployment_strategies": {
+            "blue_green": "Zero-downtime deployments",
+            "canary": "Gradual rollout with monitoring",
+            "rolling_update": "Sequential service updates",
+            "rollback": "Automatic rollback on failure"
+        },
+        "infrastructure_as_code": {
+            "terraform": "Infrastructure provisioning",
+            "helm_charts": "Kubernetes application packaging",
+            "ansible": "Configuration management",
+            "gitops": "Git-based deployment automation"
+        }
+    }
+}

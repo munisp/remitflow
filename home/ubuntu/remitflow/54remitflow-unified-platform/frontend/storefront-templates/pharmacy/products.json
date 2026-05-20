@@ -1,0 +1,16 @@
+[
+  {
+    "name": "Paracetamol 500mg (20 tablets)",
+    "price": 500,
+    "category": "OTC Medications",
+    "description": "Pain relief and fever reducer",
+    "stock": 200
+  },
+  {
+    "name": "Multivitamin Complex",
+    "price": 3500,
+    "category": "Vitamins & Supplements",
+    "description": "Complete daily multivitamin",
+    "stock": 100
+  }
+]

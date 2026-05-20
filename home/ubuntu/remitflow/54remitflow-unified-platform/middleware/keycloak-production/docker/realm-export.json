@@ -1,0 +1,268 @@
+{
+  "id": "remittance",
+  "realm": "remittance",
+  "displayName": "Nigerian Remittance Platform",
+  "displayNameHtml": "<div class=\"kc-logo-text\"><span>Nigerian Remittance Platform</span></div>",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": true,
+  "registrationEmailAsUsername": true,
+  "rememberMe": true,
+  "verifyEmail": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "waitIncrementSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "failureFactor": 5,
+  "defaultSignatureAlgorithm": "RS256",
+  "offlineSessionMaxLifespanEnabled": false,
+  "offlineSessionMaxLifespan": 5184000,
+  "accessTokenLifespan": 300,
+  "accessTokenLifespanForImplicitFlow": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "ssoSessionIdleTimeoutRememberMe": 0,
+  "ssoSessionMaxLifespanRememberMe": 0,
+  "accessCodeLifespan": 60,
+  "accessCodeLifespanUserAction": 300,
+  "accessCodeLifespanLogin": 1800,
+  "actionTokenGeneratedByAdminLifespan": 43200,
+  "actionTokenGeneratedByUserLifespan": 300,
+  "oauth2DeviceCodeLifespan": 600,
+  "oauth2DevicePollingInterval": 5,
+  "smtpServer": {
+    "host": "smtp.example.com",
+    "port": "587",
+    "from": "noreply@remittance-platform.ng",
+    "fromDisplayName": "Nigerian Remittance Platform",
+    "replyTo": "support@remittance-platform.ng",
+    "replyToDisplayName": "Support Team",
+    "auth": "true",
+    "starttls": "true",
+    "user": "smtp-user",
+    "password": "**********"
+  },
+  "eventsEnabled": true,
+  "eventsListeners": ["jboss-logging"],
+  "enabledEventTypes": [
+    "LOGIN",
+    "LOGIN_ERROR",
+    "LOGOUT",
+    "LOGOUT_ERROR",
+    "REGISTER",
+    "REGISTER_ERROR",
+    "UPDATE_EMAIL",
+    "UPDATE_PASSWORD",
+    "UPDATE_PROFILE",
+    "VERIFY_EMAIL",
+    "VERIFY_EMAIL_ERROR",
+    "SEND_RESET_PASSWORD",
+    "SEND_VERIFY_EMAIL",
+    "REMOVE_TOTP",
+    "UPDATE_TOTP",
+    "CODE_TO_TOKEN",
+    "CODE_TO_TOKEN_ERROR"
+  ],
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "internationalizationEnabled": true,
+  "supportedLocales": ["en", "fr", "ar", "sw", "ha", "yo", "ig"],
+  "defaultLocale": "en",
+  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and specialChars(1) and notUsername and passwordHistory(5) and forceExpiredPasswordChange(90)",
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyInitialCounter": 0,
+  "otpPolicyDigits": 6,
+  "otpPolicyLookAheadWindow": 1,
+  "otpPolicyPeriod": 30,
+  "webAuthnPolicyRpEntityName": "Nigerian Remittance Platform",
+  "webAuthnPolicySignatureAlgorithms": ["ES256", "RS256"],
+  "webAuthnPolicyRpId": "remittance-platform.ng",
+  "webAuthnPolicyAttestationConveyancePreference": "not specified",
+  "webAuthnPolicyAuthenticatorAttachment": "not specified",
+  "webAuthnPolicyRequireResidentKey": "not specified",
+  "webAuthnPolicyUserVerificationRequirement": "preferred",
+  "webAuthnPolicyCreateTimeout": 0,
+  "webAuthnPolicyAvoidSameAuthenticatorRegister": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "admin",
+        "description": "Administrator with full access",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "name": "operator",
+        "description": "Operator with operational access",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "name": "compliance_officer",
+        "description": "Compliance officer with compliance access",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "name": "auditor",
+        "description": "Auditor with read-only access",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "name": "customer_support",
+        "description": "Customer support with support access",
+        "composite": false,
+        "clientRole": false
+      },
+      {
+        "name": "user",
+        "description": "Standard user",
+        "composite": false,
+        "clientRole": false
+      }
+    ]
+  },
+  "groups": [
+    {
+      "name": "administrators",
+      "path": "/administrators",
+      "attributes": {},
+      "realmRoles": ["admin"],
+      "clientRoles": {},
+      "subGroups": []
+    },
+    {
+      "name": "operators",
+      "path": "/operators",
+      "attributes": {},
+      "realmRoles": ["operator"],
+      "clientRoles": {},
+      "subGroups": []
+    },
+    {
+      "name": "compliance",
+      "path": "/compliance",
+      "attributes": {},
+      "realmRoles": ["compliance_officer"],
+      "clientRoles": {},
+      "subGroups": []
+    },
+    {
+      "name": "auditors",
+      "path": "/auditors",
+      "attributes": {},
+      "realmRoles": ["auditor"],
+      "clientRoles": {},
+      "subGroups": []
+    },
+    {
+      "name": "support",
+      "path": "/support",
+      "attributes": {},
+      "realmRoles": ["customer_support"],
+      "clientRoles": {},
+      "subGroups": []
+    },
+    {
+      "name": "users",
+      "path": "/users",
+      "attributes": {},
+      "realmRoles": ["user"],
+      "clientRoles": {},
+      "subGroups": []
+    }
+  ],
+  "defaultRoles": ["user"],
+  "requiredCredentials": ["password"],
+  "scopeMappings": [],
+  "clientScopeMappings": {},
+  "clients": [],
+  "clientScopes": [
+    {
+      "name": "profile",
+      "description": "OpenID Connect built-in scope: profile",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "full name",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-full-name-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true"
+          }
+        },
+        {
+          "name": "email",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-property-mapper",
+          "consentRequired": false,
+          "config": {
+            "userinfo.token.claim": "true",
+            "user.attribute": "email",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "email",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    },
+    {
+      "name": "roles",
+      "description": "OpenID Connect scope for add user roles to the access token",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "realm roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "multivalued": "true",
+            "user.attribute": "foo",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String"
+          }
+        }
+      ]
+    }
+  ],
+  "browserSecurityHeaders": {
+    "contentSecurityPolicyReportOnly": "",
+    "xContentTypeOptions": "nosniff",
+    "xRobotsTag": "none",
+    "xFrameOptions": "SAMEORIGIN",
+    "contentSecurityPolicy": "frame-src 'self'; frame-ancestors 'self'; object-src 'none';",
+    "xXSSProtection": "1; mode=block",
+    "strictTransportSecurity": "max-age=31536000; includeSubDomains"
+  },
+  "attributes": {
+    "frontendUrl": "https://keycloak.remittance-platform.ng",
+    "adminUrl": "https://keycloak.remittance-platform.ng",
+    "displayName": "Nigerian Remittance Platform",
+    "displayNameHtml": "<div class=\"kc-logo-text\"><span>Nigerian Remittance Platform</span></div>"
+  }
+}
+

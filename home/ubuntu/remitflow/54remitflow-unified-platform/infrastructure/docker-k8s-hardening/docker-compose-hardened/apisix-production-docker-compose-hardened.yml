@@ -1,0 +1,143 @@
+version: '3.8'
+services:
+  etcd:
+    image: bitnami/etcd:3.5.11
+    container_name: apisix-etcd-secure
+    environment:
+    - ALLOW_NONE_AUTHENTICATION=no
+    - ETCD_ROOT_PASSWORD=${ETCD_ROOT_PASSWORD:-changeme123}
+    - ETCD_AUTH_TOKEN=simple
+    - ETCD_ADVERTISE_CLIENT_URLS=https://etcd:2379
+    - ETCD_LISTEN_CLIENT_URLS=https://0.0.0.0:2379
+    - ETCD_INITIAL_ADVERTISE_PEER_URLS=https://etcd:2380
+    - ETCD_LISTEN_PEER_URLS=https://0.0.0.0:2380
+    - ETCD_CERT_FILE=/certs/etcd-server.pem
+    - ETCD_KEY_FILE=/certs/etcd-server-key.pem
+    - ETCD_TRUSTED_CA_FILE=/certs/ca.pem
+    - ETCD_CLIENT_CERT_AUTH=true
+    - ETCD_PEER_CERT_FILE=/certs/etcd-peer.pem
+    - ETCD_PEER_KEY_FILE=/certs/etcd-peer-key.pem
+    - ETCD_PEER_TRUSTED_CA_FILE=/certs/ca.pem
+    - ETCD_PEER_CLIENT_CERT_AUTH=true
+    - ETCD_QUOTA_BACKEND_BYTES=8589934592
+    - ETCD_AUTO_COMPACTION_MODE=periodic
+    - ETCD_AUTO_COMPACTION_RETENTION=1h
+    - ETCD_SNAPSHOT_COUNT=10000
+    - ETCD_MAX_REQUEST_BYTES=33554432
+    - ETCD_LOG_LEVEL=info
+    - ETCD_LOGGER=zap
+    - ETCD_LOG_OUTPUTS=stderr
+    ports:
+    - 2379:2379
+    - 2380:2380
+    volumes:
+    - etcd_data:/bitnami/etcd
+    - ./certs:/certs:ro
+    - ./backup:/backup
+    networks:
+    - apisix-network
+    healthcheck:
+      test:
+      - CMD
+      - etcdctl
+      - --endpoints=https://localhost:2379
+      - --cacert=/certs/ca.pem
+      - --cert=/certs/etcd-client.pem
+      - --key=/certs/etcd-client-key.pem
+      - endpoint
+      - health
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+  apisix:
+    image: apache/apisix:3.7.0-debian
+    container_name: apisix-gateway-secure
+    restart: always
+    volumes:
+    - ./config/config-secure.yaml:/usr/local/apisix/conf/config.yaml:ro
+    - ./certs:/certs:ro
+    - apisix_logs:/usr/local/apisix/logs
+    ports:
+    - 9080:9080
+    - 9443:9443
+    - 9091:9091
+    - 9092:9092
+    networks:
+    - apisix-network
+    depends_on:
+      etcd:
+        condition: service_healthy
+    environment:
+    - APISIX_STAND_ALONE=false
+    - ETCD_ENDPOINTS=https://etcd:2379
+    healthcheck:
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:9080/apisix/status
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+  etcd-backup:
+    image: bitnami/etcd:3.5.11
+    container_name: etcd-backup-service
+    volumes:
+    - ./certs:/certs:ro
+    - ./backup:/backup
+    - ./scripts:/scripts:ro
+    networks:
+    - apisix-network
+    depends_on:
+    - etcd
+    command: /bin/bash -c "while true; do sleep 86400; /scripts/backup-etcd.sh; done"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+networks:
+  apisix-network:
+    driver: bridge
+volumes:
+  etcd_data: null
+  apisix_logs: null

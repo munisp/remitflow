@@ -1,0 +1,28 @@
+# DataFusion Configuration for Remittance Platform
+
+[datafusion]
+# Memory settings
+memory_limit = "4GB"
+batch_size = 8192
+
+# Optimization settings
+enable_optimizer = true
+enable_predicate_pushdown = true
+enable_projection_pushdown = true
+
+# Execution settings
+target_partitions = 4
+max_memory_per_partition = "1GB"
+
+# File format settings
+parquet_enable_page_index = true
+parquet_enable_bloom_filter = true
+parquet_compression = "snappy"
+
+# Delta Lake integration
+enable_delta_lake = true
+delta_log_retention_duration = "30 days"
+
+# Metrics and monitoring
+enable_metrics = true
+metrics_port = 9091

@@ -1,0 +1,33 @@
+{
+  "name": "FitZone Sports",
+  "tagline": "Gear Up for Success",
+  "description": "Sports store template with size finders, workout plans, and fitness tracking",
+  "theme": {
+    "primary": "#0891b2",
+    "secondary": "#f97316",
+    "accent": "#1f2937",
+    "background": "#ecfeff",
+    "text": "#1e293b"
+  },
+  "categories": [
+    "Footwear",
+    "Apparel",
+    "Equipment",
+    "Accessories",
+    "Supplements",
+    "Outdoor Gear"
+  ],
+  "features": [
+    "size_finder",
+    "workout_plans",
+    "fitness_tracking",
+    "team_orders",
+    "product_reviews"
+  ],
+  "payment_methods": [
+    "qr_code",
+    "mobile_money",
+    "bank_transfer",
+    "card"
+  ]
+}

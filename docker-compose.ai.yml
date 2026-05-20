@@ -1,0 +1,201 @@
+# ============================================================
+# RemitFlow — AI / ML Services Stack  (v88)
+# ============================================================
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.ai.yml up -d
+#
+# Services added:
+#   qdrant      — Vector database (semantic search, anomaly detection)
+#   falkordb    — Graph database (fraud rings, transaction networks)
+#   ollama      — Local LLM inference (privacy-preserving compliance chat)
+#   cocoindex   — Incremental indexing pipeline (Postgres → Qdrant + FalkorDB)
+#
+# Environment variables (set in .env or override inline):
+#   QDRANT_URL          default: http://qdrant:6333
+#   FALKORDB_HOST       default: falkordb
+#   FALKORDB_PORT       default: 6379
+#   OLLAMA_URL          default: http://ollama:11434
+#   OLLAMA_MODEL        default: llama3.2
+# ============================================================
+
+version: "3.9"
+
+services:
+  # ── Qdrant Vector Database ───────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:v1.9.2
+    container_name: remitflow_qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"   # HTTP REST + gRPC
+      - "127.0.0.1:6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__HTTP_PORT: "6333"
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+      QDRANT__LOG_LEVEL: INFO
+      # Persistence settings
+      QDRANT__STORAGE__STORAGE_PATH: /qdrant/storage
+      QDRANT__STORAGE__SNAPSHOTS_PATH: /qdrant/snapshots
+      # Performance tuning for remittance workloads
+      QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS: "4"
+      QDRANT__STORAGE__OPTIMIZERS__INDEXING_THRESHOLD: "20000"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:6333/healthz"]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - remitflow_net
+    labels:
+      com.remitflow.service: "qdrant"
+      com.remitflow.tier: "ai"
+
+  # ── FalkorDB Graph Database ──────────────────────────────────────────────────
+  falkordb:
+    image: falkordb/falkordb:v4.0.1
+    container_name: remitflow_falkordb
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"   # Redis-compatible protocol
+      - "127.0.0.1:3000:3000"   # FalkorDB Browser UI (optional)
+    volumes:
+      - falkordb_data:/data
+    environment:
+      # FalkorDB configuration
+      FALKORDB_TIMEOUT: "10000"
+      FALKORDB_RESULTSET_SIZE: "10000"
+      FALKORDB_QUERY_MEM_CAPACITY: "268435456"  # 256MB
+    command: >
+      redis-server
+      --loadmodule /FalkorDB/bin/linux-x64-release/src/falkordb.so
+      --save 60 1
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - remitflow_net
+    labels:
+      com.remitflow.service: "falkordb"
+      com.remitflow.tier: "ai"
+
+  # ── Ollama Local LLM Inference ───────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:0.3.12
+    container_name: remitflow_ollama
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      OLLAMA_HOST: "0.0.0.0"
+      OLLAMA_ORIGINS: "*"
+      OLLAMA_KEEP_ALIVE: "5m"
+      OLLAMA_NUM_PARALLEL: "2"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+    # Pull default model on startup
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "ollama serve &
+       sleep 10 &&
+       ollama pull llama3.2 &&
+       ollama pull nomic-embed-text &&
+       wait"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 120s
+    # GPU support (uncomment if NVIDIA GPU available)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    networks:
+      - remitflow_net
+    labels:
+      com.remitflow.service: "ollama"
+      com.remitflow.tier: "ai"
+
+  # ── CocoIndex Incremental Indexing Pipeline ──────────────────────────────────
+  cocoindex:
+    image: python:3.11-slim
+    container_name: remitflow_cocoindex
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./scripts/cocoindex:/app
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://remitflow:remitflow_secret@db:5432/remitflow}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      FALKORDB_HOST: ${FALKORDB_HOST:-falkordb}
+      FALKORDB_PORT: ${FALKORDB_PORT:-6379}
+      BATCH_SIZE: "100"
+      POLL_INTERVAL_SECONDS: "30"
+      LOG_LEVEL: INFO
+    command: >
+      sh -c "pip install cocoindex qdrant-client redis psycopg2-binary --quiet &&
+             python pipeline.py"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+    networks:
+      - remitflow_net
+    labels:
+      com.remitflow.service: "cocoindex"
+      com.remitflow.tier: "ai"
+
+  # ── Qdrant Web UI (optional, dev only) ──────────────────────────────────────
+  qdrant-ui:
+    image: qdrant/qdrant-web-ui:latest
+    container_name: remitflow_qdrant_ui
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6335:80"
+    environment:
+      QDRANT_URL: http://qdrant:6333
+    depends_on:
+      - qdrant
+    networks:
+      - remitflow_net
+    profiles:
+      - dev
+    labels:
+      com.remitflow.service: "qdrant-ui"
+      com.remitflow.tier: "ai-dev"
+
+volumes:
+  qdrant_data:
+    driver: local
+    labels:
+      com.remitflow.volume: "qdrant-vectors"
+  falkordb_data:
+    driver: local
+    labels:
+      com.remitflow.volume: "falkordb-graph"
+  ollama_models:
+    driver: local
+    labels:
+      com.remitflow.volume: "ollama-models"
+
+# Extends the main remitflow_net network
+networks:
+  remitflow_net:
+    external: true
+    name: remitflow_remitflow_net

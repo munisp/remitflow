@@ -1,0 +1,570 @@
+# Keycloak 5/5 Bank-Grade Cluster Configuration
+# High Availability, Performance, Security, Observability, Disaster Recovery
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keycloak
+  labels:
+    app.kubernetes.io/name: keycloak
+    app.kubernetes.io/component: identity
+---
+# Keycloak Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-config
+  namespace: keycloak
+data:
+  keycloak.conf: |
+    # Database
+    db=postgres
+    db-url-host=${KC_DB_HOST}
+    db-url-database=${KC_DB_DATABASE}
+    db-username=${KC_DB_USERNAME}
+    db-password=${KC_DB_PASSWORD}
+    db-pool-initial-size=5
+    db-pool-min-size=5
+    db-pool-max-size=50
+    
+    # HTTP/HTTPS
+    http-enabled=false
+    https-port=8443
+    https-certificate-file=/certs/tls.crt
+    https-certificate-key-file=/certs/tls.key
+    
+    # Hostname
+    hostname-strict=false
+    hostname-strict-https=true
+    
+    # Proxy
+    proxy=edge
+    
+    # Clustering
+    cache=ispn
+    cache-stack=kubernetes
+    
+    # Health
+    health-enabled=true
+    metrics-enabled=true
+    
+    # Logging
+    log-level=INFO
+    log-format=%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c] (%t) %s%e%n
+    
+  cache-ispn.xml: |
+    <?xml version="1.0" encoding="UTF-8"?>
+    <infinispan
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="urn:infinispan:config:14.0 https://infinispan.org/schemas/infinispan-config-14.0.xsd"
+        xmlns="urn:infinispan:config:14.0">
+        
+        <jgroups>
+            <stack name="kubernetes" extends="tcp">
+                <TCP bind_addr="${env.POD_IP}" bind_port="7800"/>
+                <dns.DNS_PING dns_query="keycloak-headless.keycloak.svc.cluster.local"/>
+            </stack>
+        </jgroups>
+        
+        <cache-container name="keycloak">
+            <transport lock-timeout="60000" stack="kubernetes"/>
+            
+            <local-cache name="realms">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <memory max-count="10000"/>
+            </local-cache>
+            
+            <local-cache name="users">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <memory max-count="10000"/>
+            </local-cache>
+            
+            <distributed-cache name="sessions" owners="2">
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            
+            <distributed-cache name="authenticationSessions" owners="2">
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            
+            <distributed-cache name="offlineSessions" owners="2">
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            
+            <distributed-cache name="clientSessions" owners="2">
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            
+            <distributed-cache name="offlineClientSessions" owners="2">
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            
+            <distributed-cache name="loginFailures" owners="2">
+                <expiration lifespan="-1"/>
+            </distributed-cache>
+            
+            <local-cache name="authorization">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <memory max-count="10000"/>
+            </local-cache>
+            
+            <replicated-cache name="work">
+                <expiration lifespan="-1"/>
+            </replicated-cache>
+            
+            <local-cache name="keys">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration max-idle="3600000"/>
+                <memory max-count="1000"/>
+            </local-cache>
+            
+            <distributed-cache name="actionTokens" owners="2">
+                <encoding>
+                    <key media-type="application/x-java-object"/>
+                    <value media-type="application/x-java-object"/>
+                </encoding>
+                <expiration max-idle="-1" lifespan="-1" interval="300000"/>
+                <memory max-count="-1"/>
+            </distributed-cache>
+        </cache-container>
+    </infinispan>
+---
+# Keycloak Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: keycloak
+  labels:
+    app: keycloak
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8443"
+        prometheus.io/path: "/metrics"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: keycloak
+                topologyKey: kubernetes.io/hostname
+      serviceAccountName: keycloak
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:23.0.0
+          args:
+            - start
+            - --optimized
+            - --cache-config-file=/opt/keycloak/conf/cache-ispn.xml
+          ports:
+            - containerPort: 8443
+              name: https
+            - containerPort: 7800
+              name: jgroups
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: KC_CACHE_CONFIG_FILE
+              value: /opt/keycloak/conf/cache-ispn.xml
+            - name: JAVA_OPTS_APPEND
+              value: "-Djgroups.dns.query=keycloak-headless.keycloak.svc.cluster.local"
+          envFrom:
+            - secretRef:
+                name: keycloak-secrets
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "1"
+            limits:
+              memory: "4Gi"
+              cpu: "2"
+          volumeMounts:
+            - name: config
+              mountPath: /opt/keycloak/conf/keycloak.conf
+              subPath: keycloak.conf
+            - name: config
+              mountPath: /opt/keycloak/conf/cache-ispn.xml
+              subPath: cache-ispn.xml
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: config
+          configMap:
+            name: keycloak-config
+        - name: certs
+          secret:
+            secretName: keycloak-tls
+---
+# Headless Service for clustering
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-headless
+  namespace: keycloak
+spec:
+  clusterIP: None
+  selector:
+    app: keycloak
+  ports:
+    - name: https
+      port: 8443
+    - name: jgroups
+      port: 7800
+---
+# Client Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  type: ClusterIP
+  selector:
+    app: keycloak
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+---
+# Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: keycloak
+  namespace: keycloak
+---
+# RBAC for Kubernetes discovery
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: keycloak-discovery
+  namespace: keycloak
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: keycloak-discovery
+  namespace: keycloak
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: keycloak-discovery
+subjects:
+  - kind: ServiceAccount
+    name: keycloak
+    namespace: keycloak
+---
+# HPA
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: keycloak-hpa
+  namespace: keycloak
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: keycloak
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: keycloak-pdb
+  namespace: keycloak
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: keycloak
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: keycloak-network-policy
+  namespace: keycloak
+spec:
+  podSelector:
+    matchLabels:
+      app: keycloak
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              keycloak-access: "true"
+        - podSelector:
+            matchLabels:
+              app: keycloak
+      ports:
+        - protocol: TCP
+          port: 8443
+        - protocol: TCP
+          port: 7800
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: keycloak
+      ports:
+        - protocol: TCP
+          port: 7800
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# Realm Configuration for Remittance Platform
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm-config
+  namespace: keycloak
+data:
+  remittance-realm.json: |
+    {
+      "realm": "remittance",
+      "enabled": true,
+      "sslRequired": "all",
+      "registrationAllowed": true,
+      "registrationEmailAsUsername": true,
+      "verifyEmail": true,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": true,
+      "editUsernameAllowed": false,
+      "bruteForceProtected": true,
+      "permanentLockout": false,
+      "maxFailureWaitSeconds": 900,
+      "minimumQuickLoginWaitSeconds": 60,
+      "waitIncrementSeconds": 60,
+      "quickLoginCheckMilliSeconds": 1000,
+      "maxDeltaTimeSeconds": 43200,
+      "failureFactor": 5,
+      "ssoSessionIdleTimeout": 1800,
+      "ssoSessionMaxLifespan": 36000,
+      "offlineSessionIdleTimeout": 2592000,
+      "accessTokenLifespan": 300,
+      "accessTokenLifespanForImplicitFlow": 900,
+      "accessCodeLifespan": 60,
+      "accessCodeLifespanUserAction": 300,
+      "accessCodeLifespanLogin": 1800,
+      "actionTokenGeneratedByAdminLifespan": 43200,
+      "actionTokenGeneratedByUserLifespan": 300,
+      "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and specialChars(1) and passwordHistory(5) and notUsername",
+      "eventsEnabled": true,
+      "eventsExpiration": 7776000,
+      "adminEventsEnabled": true,
+      "adminEventsDetailsEnabled": true,
+      "enabledEventTypes": [
+        "LOGIN", "LOGIN_ERROR", "LOGOUT", "LOGOUT_ERROR",
+        "REGISTER", "REGISTER_ERROR", "CODE_TO_TOKEN", "CODE_TO_TOKEN_ERROR",
+        "CLIENT_LOGIN", "CLIENT_LOGIN_ERROR", "REFRESH_TOKEN", "REFRESH_TOKEN_ERROR",
+        "VALIDATE_ACCESS_TOKEN", "VALIDATE_ACCESS_TOKEN_ERROR",
+        "INTROSPECT_TOKEN", "INTROSPECT_TOKEN_ERROR",
+        "UPDATE_PASSWORD", "UPDATE_PASSWORD_ERROR",
+        "SEND_RESET_PASSWORD", "SEND_RESET_PASSWORD_ERROR",
+        "RESET_PASSWORD", "RESET_PASSWORD_ERROR",
+        "REMOVE_TOTP", "UPDATE_TOTP", "VERIFY_EMAIL",
+        "CUSTOM_REQUIRED_ACTION", "CUSTOM_REQUIRED_ACTION_ERROR"
+      ],
+      "clients": [
+        {
+          "clientId": "remittance-pwa",
+          "enabled": true,
+          "publicClient": true,
+          "redirectUris": ["https://app.remittance.com/*", "http://localhost:3000/*"],
+          "webOrigins": ["https://app.remittance.com", "http://localhost:3000"],
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": false,
+          "protocol": "openid-connect",
+          "attributes": {
+            "pkce.code.challenge.method": "S256"
+          }
+        },
+        {
+          "clientId": "remittance-mobile",
+          "enabled": true,
+          "publicClient": true,
+          "redirectUris": ["com.remittance.app:/oauth2redirect/*"],
+          "standardFlowEnabled": true,
+          "directAccessGrantsEnabled": false,
+          "protocol": "openid-connect",
+          "attributes": {
+            "pkce.code.challenge.method": "S256"
+          }
+        },
+        {
+          "clientId": "remittance-api",
+          "enabled": true,
+          "publicClient": false,
+          "serviceAccountsEnabled": true,
+          "standardFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "protocol": "openid-connect"
+        }
+      ],
+      "roles": {
+        "realm": [
+          {"name": "user", "description": "Standard user role"},
+          {"name": "premium_user", "description": "Premium user with higher limits"},
+          {"name": "business_user", "description": "Business account user"},
+          {"name": "agent", "description": "Cash-in/cash-out agent"},
+          {"name": "admin", "description": "Platform administrator"},
+          {"name": "compliance_officer", "description": "Compliance and AML officer"},
+          {"name": "support", "description": "Customer support agent"}
+        ]
+      },
+      "requiredActions": [
+        {
+          "alias": "VERIFY_EMAIL",
+          "name": "Verify Email",
+          "providerId": "VERIFY_EMAIL",
+          "enabled": true,
+          "defaultAction": true,
+          "priority": 50
+        },
+        {
+          "alias": "CONFIGURE_TOTP",
+          "name": "Configure OTP",
+          "providerId": "CONFIGURE_TOTP",
+          "enabled": true,
+          "defaultAction": false,
+          "priority": 10
+        }
+      ],
+      "otpPolicyType": "totp",
+      "otpPolicyAlgorithm": "HmacSHA256",
+      "otpPolicyDigits": 6,
+      "otpPolicyPeriod": 30,
+      "otpPolicyLookAheadWindow": 1
+    }
+---
+# Prometheus ServiceMonitor
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: keycloak
+  namespace: keycloak
+  labels:
+    app: keycloak
+spec:
+  selector:
+    matchLabels:
+      app: keycloak
+  endpoints:
+    - port: https
+      interval: 30s
+      path: /metrics
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true
+---
+# Keycloak Alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: keycloak-alerts
+  namespace: keycloak
+spec:
+  groups:
+    - name: keycloak
+      rules:
+        - alert: KeycloakLoginFailuresHigh
+          expr: rate(keycloak_login_error_total[5m]) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak login failures are high"
+            description: "Login failure rate is {{ $value }} per second"
+        - alert: KeycloakDown
+          expr: up{job="keycloak"} == 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Keycloak is down"
+            description: "Keycloak instance {{ $labels.instance }} is not responding"
+        - alert: KeycloakSessionsHigh
+          expr: keycloak_sessions > 10000
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Keycloak active sessions are high"
+            description: "Keycloak has {{ $value }} active sessions"

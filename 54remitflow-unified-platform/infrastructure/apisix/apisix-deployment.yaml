@@ -1,0 +1,374 @@
+# APISIX Kubernetes Deployment
+# Production-grade API gateway deployment for Mojaloop and TigerBeetle
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apisix
+  labels:
+    app.kubernetes.io/name: apisix
+    app.kubernetes.io/component: api-gateway
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: apisix-config
+  namespace: apisix
+data:
+  config.yaml: |
+    apisix:
+      node_listen: 9080
+      enable_ipv6: false
+      enable_admin: true
+      admin_key:
+        - name: admin
+          key: edd1c9f034335f136f87ad84b625c8f1
+          role: admin
+      
+      ssl:
+        enable: true
+        listen_port: 9443
+        ssl_protocols: "TLSv1.2 TLSv1.3"
+    
+    nginx_config:
+      error_log: /dev/stderr
+      error_log_level: warn
+      http:
+        access_log: /dev/stdout
+        keepalive_timeout: 60s
+        client_max_body_size: 10m
+    
+    etcd:
+      host:
+        - "http://etcd:2379"
+      prefix: /apisix
+      timeout: 30
+    
+    plugins:
+      - jwt-auth
+      - key-auth
+      - limit-req
+      - limit-count
+      - limit-conn
+      - ip-restriction
+      - cors
+      - prometheus
+      - opentelemetry
+      - forward-auth
+      - opa
+      - csrf
+      - public-api
+    
+    plugin_attr:
+      prometheus:
+        export_uri: /apisix/prometheus/metrics
+        export_addr:
+          ip: 0.0.0.0
+          port: 9091
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apisix
+  namespace: apisix
+  labels:
+    app.kubernetes.io/name: apisix
+    app.kubernetes.io/component: api-gateway
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: apisix
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: apisix
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/apisix/prometheus/metrics"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - apisix
+                topologyKey: topology.kubernetes.io/zone
+      containers:
+        - name: apisix
+          image: apache/apisix:3.8.0-debian
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9080
+              protocol: TCP
+            - name: https
+              containerPort: 9443
+              protocol: TCP
+            - name: admin
+              containerPort: 9180
+              protocol: TCP
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /apisix/status
+              port: 9080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /apisix/status
+              port: 9080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /usr/local/apisix/conf/config.yaml
+              subPath: config.yaml
+          env:
+            - name: APISIX_STAND_ALONE
+              value: "false"
+      volumes:
+        - name: config
+          configMap:
+            name: apisix-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apisix-gateway
+  namespace: apisix
+  labels:
+    app.kubernetes.io/name: apisix
+    app.kubernetes.io/component: api-gateway
+spec:
+  type: LoadBalancer
+  ports:
+    - name: http
+      port: 80
+      targetPort: 9080
+      protocol: TCP
+    - name: https
+      port: 443
+      targetPort: 9443
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: apisix
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apisix-admin
+  namespace: apisix
+  labels:
+    app.kubernetes.io/name: apisix
+    app.kubernetes.io/component: admin
+spec:
+  type: ClusterIP
+  ports:
+    - name: admin
+      port: 9180
+      targetPort: 9180
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: apisix
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apisix-metrics
+  namespace: apisix
+  labels:
+    app.kubernetes.io/name: apisix
+    app.kubernetes.io/component: metrics
+spec:
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: apisix
+
+---
+# ETCD for APISIX configuration storage
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: etcd
+  namespace: apisix
+spec:
+  serviceName: etcd
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: etcd
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: etcd
+    spec:
+      containers:
+        - name: etcd
+          image: bitnami/etcd:3.5.12
+          ports:
+            - containerPort: 2379
+              name: client
+            - containerPort: 2380
+              name: peer
+          env:
+            - name: ALLOW_NONE_AUTHENTICATION
+              value: "yes"
+            - name: ETCD_ADVERTISE_CLIENT_URLS
+              value: "http://$(POD_NAME).etcd:2379"
+            - name: ETCD_LISTEN_CLIENT_URLS
+              value: "http://0.0.0.0:2379"
+            - name: ETCD_INITIAL_ADVERTISE_PEER_URLS
+              value: "http://$(POD_NAME).etcd:2380"
+            - name: ETCD_LISTEN_PEER_URLS
+              value: "http://0.0.0.0:2380"
+            - name: ETCD_INITIAL_CLUSTER
+              value: "etcd-0=http://etcd-0.etcd:2380,etcd-1=http://etcd-1.etcd:2380,etcd-2=http://etcd-2.etcd:2380"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /bitnami/etcd
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  namespace: apisix
+spec:
+  clusterIP: None
+  ports:
+    - name: client
+      port: 2379
+    - name: peer
+      port: 2380
+  selector:
+    app.kubernetes.io/name: etcd
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: apisix-hpa
+  namespace: apisix
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: apisix
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+# Pod Disruption Budget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: apisix-pdb
+  namespace: apisix
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: apisix
+
+---
+# Network Policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: apisix-network-policy
+  namespace: apisix
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: apisix
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 9080
+        - protocol: TCP
+          port: 9443
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9091
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 4000  # Mojaloop
+        - protocol: TCP
+          port: 8000  # Platform services
+        - protocol: TCP
+          port: 2379  # etcd

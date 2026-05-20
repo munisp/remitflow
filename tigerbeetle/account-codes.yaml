@@ -1,0 +1,96 @@
+# TigerBeetle Account Code Registry for RemitFlow
+# Account codes identify the type of ledger account.
+# Ledger IDs correspond to currency codes (NGN=566, USD=840, GBP=826, EUR=978, XOF=952, GHS=936)
+
+account_codes:
+  # User accounts
+  1001:
+    name: USER_WALLET_NGN
+    description: "User NGN wallet — debit on send, credit on receive"
+    ledger: 566  # NGN
+
+  1002:
+    name: USER_WALLET_USD
+    description: "User USD wallet"
+    ledger: 840
+
+  1003:
+    name: USER_WALLET_GBP
+    description: "User GBP wallet"
+    ledger: 826
+
+  1004:
+    name: USER_WALLET_EUR
+    description: "User EUR wallet"
+    ledger: 978
+
+  1005:
+    name: USER_WALLET_XOF
+    description: "User XOF wallet (West Africa)"
+    ledger: 952
+
+  # Float accounts
+  2001:
+    name: FLOAT_NGN
+    description: "RemitFlow float pool — NGN"
+    ledger: 566
+
+  2002:
+    name: FLOAT_USD
+    description: "RemitFlow float pool — USD"
+    ledger: 840
+
+  # Fee income accounts
+  3001:
+    name: FEE_INCOME_NGN
+    description: "Transfer fee income in NGN"
+    ledger: 566
+
+  3002:
+    name: FEE_INCOME_USD
+    description: "Transfer fee income in USD"
+    ledger: 840
+
+  # FX spread accounts
+  4001:
+    name: FX_SPREAD_NGN
+    description: "FX spread income — NGN side"
+    ledger: 566
+
+  # Correspondent nostro accounts
+  5001:
+    name: NOSTRO_USD_CITI
+    description: "Citibank USD nostro account"
+    ledger: 840
+
+  5002:
+    name: NOSTRO_GBP_BARCLAYS
+    description: "Barclays GBP nostro account"
+    ledger: 826
+
+  5003:
+    name: NOSTRO_EUR_DEUTSCHE
+    description: "Deutsche Bank EUR nostro account"
+    ledger: 978
+
+  5004:
+    name: NOSTRO_XOF_ECOBANK
+    description: "Ecobank XOF nostro account (West Africa)"
+    ledger: 952
+
+  # Agent float accounts
+  6001:
+    name: AGENT_FLOAT_NGN
+    description: "Agent network float — NGN"
+    ledger: 566
+
+  # Suspense accounts
+  9001:
+    name: SUSPENSE_IN_TRANSIT
+    description: "Funds in transit — pending settlement"
+    ledger: 840
+
+  9002:
+    name: SUSPENSE_PENDING_KYC
+    description: "Funds held pending KYC completion"
+    ledger: 566

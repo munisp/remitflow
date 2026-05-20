@@ -1,0 +1,1149 @@
+{
+  "backend_services": {
+    "total_services": 109,
+    "implemented_services": 109,
+    "implementation_rate": 100.0,
+    "services": {
+      "agent-ecommerce-platform": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 532,
+        "implemented": true
+      },
+      "agent-hierarchy-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "agent-performance": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 87,
+        "implemented": true
+      },
+      "agent-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "agent-training": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 87,
+        "implemented": true
+      },
+      "ai-ml-services": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "ai-orchestration": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 585,
+        "implemented": true
+      },
+      "amazon-ebay-integration": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 354,
+        "implemented": true
+      },
+      "amazon-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 240,
+        "implemented": true
+      },
+      "analytics-dashboard": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 260,
+        "implemented": true
+      },
+      "art-agent-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 485,
+        "implemented": true
+      },
+      "audit-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "backup-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "workflow-integration": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "business-intelligence": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 87,
+        "implemented": true
+      },
+      "cocoindex-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 424,
+        "implemented": true
+      },
+      "commission-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "communication-gateway": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "compliance-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "compliance-workflows": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "credit-scoring": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 672,
+        "implemented": true
+      },
+      "customer-analytics": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "customer-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 87,
+        "implemented": true
+      },
+      "data-warehouse": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 296,
+        "implemented": true
+      },
+      "database": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 331,
+        "implemented": true
+      },
+      "device-management": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 215,
+        "implemented": true
+      },
+      "discord-service": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "dispute-resolution": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 87,
+        "implemented": true
+      },
+      "document-management": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 323,
+        "implemented": true
+      },
+      "document-processing": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "ebay-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 240,
+        "implemented": true
+      },
+      "edge-computing": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 15,
+        "implemented": true
+      },
+      "edge-deployment": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 175,
+        "implemented": true
+      },
+      "email-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 219,
+        "implemented": true
+      },
+      "epr-kgqa-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 445,
+        "implemented": true
+      },
+      "etl-pipeline": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 128,
+        "implemented": true
+      },
+      "falkordb-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 464,
+        "implemented": true
+      },
+      "fraud-detection": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "gaming-integration": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 397,
+        "implemented": true
+      },
+      "gaming-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 154,
+        "implemented": true
+      },
+      "global-payment-gateway": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 97,
+        "implemented": true
+      },
+      "gnn-engine": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 244,
+        "implemented": true
+      },
+      "google-assistant-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 154,
+        "implemented": true
+      },
+      "hierarchy-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 188,
+        "implemented": true
+      },
+      "hybrid-engine": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "instagram-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 288,
+        "implemented": true
+      },
+      "integration-layer": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 150,
+        "implemented": true
+      },
+      "integration-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "inventory-management": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "jumia-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 240,
+        "implemented": true
+      },
+      "konga-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 240,
+        "implemented": true
+      },
+      "kyb-verification": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "kyc-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 580,
+        "implemented": true
+      },
+      "lakehouse-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "loyalty-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 87,
+        "implemented": true
+      },
+      "marketplace-integration": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 381,
+        "implemented": true
+      },
+      "messenger-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 288,
+        "implemented": true
+      },
+      "metaverse-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 434,
+        "implemented": true
+      },
+      "mfa": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 37,
+        "implemented": true
+      },
+      "middleware-integration": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "ml-engine": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 145,
+        "implemented": true
+      },
+      "multi-ocr-service": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "multilingual-integration-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 506,
+        "implemented": true
+      },
+      "notification-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "ocr-processing": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "offline-sync": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 216,
+        "implemented": true
+      },
+      "ollama-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 461,
+        "implemented": true
+      },
+      "onboarding-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "payout-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "pos-integration": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "promotion-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 87,
+        "implemented": true
+      },
+      "push-notification-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "qr-code-service": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "rbac": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "rcs-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 288,
+        "implemented": true
+      },
+      "reconciliation-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 87,
+        "implemented": true
+      },
+      "reporting-engine": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "risk-assessment": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 1115,
+        "implemented": true
+      },
+      "rule-engine": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 35,
+        "implemented": true
+      },
+      "scheduler-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "security-monitoring": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "settlement-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 87,
+        "implemented": true
+      },
+      "sms-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 207,
+        "implemented": true
+      },
+      "snapchat-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 288,
+        "implemented": true
+      },
+      "sync-manager": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "telegram-service": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "territory-management": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "tigerbeetle-sync": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "tigerbeetle-zig": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "tiktok-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 288,
+        "implemented": true
+      },
+      "transaction-history": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "translation-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 381,
+        "implemented": true
+      },
+      "twitter-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 288,
+        "implemented": true
+      },
+      "unified-analytics": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "unified-communication-hub": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "unified-communication-service": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "user-management": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "ussd-service": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "voice-ai-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 288,
+        "implemented": true
+      },
+      "voice-assistant-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 438,
+        "implemented": true
+      },
+      "websocket-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 438,
+        "implemented": true
+      },
+      "wechat-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 288,
+        "implemented": true
+      },
+      "whatsapp-ai-bot": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 467,
+        "implemented": true
+      },
+      "whatsapp-order-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 87,
+        "implemented": true
+      },
+      "whatsapp-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 154,
+        "implemented": true
+      },
+      "workflow-orchestration": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "workflow-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "zapier-integration": {
+        "has_main": true,
+        "has_requirements": false,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 155,
+        "implemented": true
+      },
+      "zapier-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 154,
+        "implemented": true
+      }
+    }
+  },
+  "ai_ml_services": {
+    "total": 5,
+    "implemented": 5,
+    "services": {
+      "cocoindex-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 424,
+        "implemented": true
+      },
+      "falkordb-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 464,
+        "implemented": true
+      },
+      "ollama-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 461,
+        "implemented": true
+      },
+      "epr-kgqa-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 445,
+        "implemented": true
+      },
+      "art-agent-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 485,
+        "implemented": true
+      }
+    }
+  },
+  "omnichannel_services": {
+    "total": 2,
+    "implemented": 2,
+    "services": {
+      "translation-service": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 381,
+        "implemented": true
+      },
+      "whatsapp-ai-bot": {
+        "has_main": true,
+        "has_requirements": true,
+        "has_fastapi": true,
+        "has_endpoints": true,
+        "lines_of_code": 467,
+        "implemented": true
+      }
+    }
+  },
+  "multilingual_service": {
+    "implemented": true,
+    "details": {
+      "has_main": true,
+      "has_requirements": true,
+      "has_fastapi": true,
+      "has_endpoints": true,
+      "lines_of_code": 506,
+      "implemented": true
+    }
+  },
+  "kyc_service": {
+    "implemented": true,
+    "details": {
+      "has_main": true,
+      "has_requirements": true,
+      "has_fastapi": true,
+      "has_endpoints": true,
+      "lines_of_code": 580,
+      "implemented": true,
+      "features": {
+        "nin_verification": true,
+        "bvn_verification": true,
+        "tier_system": true,
+        "biometric_verification": true
+      }
+    }
+  },
+  "frontend_apps": {
+    "total_apps": 24,
+    "implemented_apps": 23,
+    "apps": {
+      "admin-dashboard": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": false,
+        "implemented": true
+      },
+      "admin-portal": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "remittance-frontend": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "remittance-ui": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "agent-ecommerce-platform": {
+        "has_package_json": false,
+        "has_src": true,
+        "has_index_html": false,
+        "implemented": true
+      },
+      "agent-portal": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "agent-storefront": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "ai-ml-dashboard": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "analytics-dashboard": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "communication-dashboard": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "customer-portal": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "inventory-management": {
+        "has_package_json": false,
+        "has_src": true,
+        "has_index_html": false,
+        "implemented": true
+      },
+      "lakehouse-dashboard": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "mobile": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "mobile-app": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": false,
+        "implemented": true
+      },
+      "multi-channel-dashboard": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "offline-pwa": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "partner-portal": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "public": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "reporting-dashboard": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "src": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "storefront-templates": {
+        "has_package_json": false,
+        "has_src": false,
+        "has_index_html": true,
+        "implemented": false
+      },
+      "super-admin-portal": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      },
+      "web-app": {
+        "has_package_json": true,
+        "has_src": true,
+        "has_index_html": true,
+        "implemented": true
+      }
+    }
+  },
+  "multilingual_frontend": {
+    "implemented": true,
+    "features": {
+      "5_languages": true,
+      "translation_provider": true,
+      "use_translation_hook": true
+    },
+    "examples": {
+      "remittance": true,
+      "ecommerce": true,
+      "inventory": true
+    }
+  },
+  "kyc_frontend": {
+    "implemented": true,
+    "features": {
+      "multi_step_flow": true,
+      "nin_verification": true,
+      "bvn_verification": true,
+      "document_upload": true
+    }
+  }
+}

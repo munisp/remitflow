@@ -1,0 +1,366 @@
+version: '3.8'
+services:
+  mojaloop-switch:
+    image: mojaloop/central-ledger:latest
+    container_name: mojaloop-switch
+    ports:
+    - 3000:3000
+    - 3001:3001
+    environment:
+    - DATABASE_URL=postgresql://mojaloop:mojaloop_password@postgres:5432/mojaloop
+    - KAFKA_BROKER=kafka:9092
+    - REDIS_HOST=redis
+    - REDIS_PORT=6379
+    - LOG_LEVEL=info
+    - METRICS_ENABLED=true
+    - METRICS_PORT=9090
+    depends_on:
+    - postgres
+    - kafka
+    - redis
+    networks:
+    - mojaloop-network
+    healthcheck:
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:3000/health
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+  mojaloop-als:
+    image: mojaloop/account-lookup-service:latest
+    container_name: mojaloop-als
+    ports:
+    - 4001:4001
+    - 4002:4002
+    environment:
+    - DATABASE_URL=postgresql://mojaloop:mojaloop_password@postgres:5432/mojaloop
+    - CENTRAL_LEDGER_ENDPOINT=http://mojaloop-switch:3000
+    - LOG_LEVEL=info
+    depends_on:
+    - postgres
+    - mojaloop-switch
+    networks:
+    - mojaloop-network
+    healthcheck:
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:4001/health
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+  mojaloop-quoting:
+    image: mojaloop/quoting-service:latest
+    container_name: mojaloop-quoting
+    ports:
+    - 3002:3002
+    environment:
+    - DATABASE_URL=postgresql://mojaloop:mojaloop_password@postgres:5432/mojaloop
+    - KAFKA_BROKER=kafka:9092
+    - LOG_LEVEL=info
+    depends_on:
+    - postgres
+    - kafka
+    - mojaloop-switch
+    networks:
+    - mojaloop-network
+    healthcheck:
+      test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:3002/health
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+  postgres:
+    image: postgres:15-alpine
+    container_name: mojaloop-postgres
+    ports:
+    - 5433:5432
+    environment:
+    - POSTGRES_USER=mojaloop
+    - POSTGRES_PASSWORD=mojaloop_password
+    - POSTGRES_DB=mojaloop
+    - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+    - mojaloop-postgres-data:/var/lib/postgresql/data
+    - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+    - mojaloop-network
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - pg_isready -U mojaloop
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 4G
+        reservations:
+          cpus: '1.0'
+          memory: 2G
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+  redis:
+    image: redis:7-alpine
+    container_name: mojaloop-redis
+    ports:
+    - 6380:6379
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+    - mojaloop-redis-data:/data
+    networks:
+    - mojaloop-network
+    healthcheck:
+      test:
+      - CMD
+      - redis-cli
+      - ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: mojaloop-kafka
+    ports:
+    - 9093:9093
+    environment:
+    - KAFKA_BROKER_ID=1
+    - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+    - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9093
+    - KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+    - KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT
+    - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
+    - KAFKA_AUTO_CREATE_TOPICS_ENABLE=true
+    depends_on:
+    - zookeeper
+    networks:
+    - mojaloop-network
+    healthcheck:
+      test:
+      - CMD
+      - kafka-broker-api-versions
+      - --bootstrap-server
+      - localhost:9092
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: mojaloop-zookeeper
+    ports:
+    - 2182:2181
+    environment:
+    - ZOOKEEPER_CLIENT_PORT=2181
+    - ZOOKEEPER_TICK_TIME=2000
+    volumes:
+    - mojaloop-zookeeper-data:/var/lib/zookeeper/data
+    - mojaloop-zookeeper-logs:/var/lib/zookeeper/log
+    networks:
+    - mojaloop-network
+    healthcheck:
+      test:
+      - CMD
+      - echo
+      - ruok
+      - '|'
+      - nc
+      - localhost
+      - '2181'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mojaloop-prometheus
+    ports:
+    - 9091:9090
+    command:
+    - --config.file=/etc/prometheus/prometheus.yml
+    - --storage.tsdb.path=/prometheus
+    - --web.console.libraries=/usr/share/prometheus/console_libraries
+    - --web.console.templates=/usr/share/prometheus/consoles
+    volumes:
+    - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    - mojaloop-prometheus-data:/prometheus
+    networks:
+    - mojaloop-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit
+        1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mojaloop-grafana
+    ports:
+    - 3001:3000
+    environment:
+    - GF_SECURITY_ADMIN_USER=admin
+    - GF_SECURITY_ADMIN_PASSWORD=admin
+    - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+    - ../monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+    - ../monitoring/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
+    - mojaloop-grafana-data:/var/lib/grafana
+    depends_on:
+    - prometheus
+    networks:
+    - mojaloop-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+        labels: component,environment
+    healthcheck:
+      test:
+      - CMD-SHELL
+      - wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit
+        1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+networks:
+  mojaloop-network:
+    driver: bridge
+volumes:
+  mojaloop-postgres-data: null
+  mojaloop-redis-data: null
+  mojaloop-zookeeper-data: null
+  mojaloop-zookeeper-logs: null
+  mojaloop-prometheus-data: null
+  mojaloop-grafana-data: null

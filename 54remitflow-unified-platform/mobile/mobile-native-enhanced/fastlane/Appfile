@@ -1,0 +1,41 @@
+# Appfile - Fastlane App Configuration
+# Remittance Platform Mobile Application
+
+# iOS Configuration
+app_identifier("com.remittance.app")
+apple_id(ENV["APPLE_ID"])
+itc_team_id(ENV["ITC_TEAM_ID"])
+team_id(ENV["APPLE_TEAM_ID"])
+
+# Android Configuration
+json_key_file(ENV["GOOGLE_PLAY_JSON_KEY_PATH"])
+package_name("com.remittance.app")
+
+# For multiple app identifiers
+for_platform :ios do
+  for_lane :build_staging do
+    app_identifier("com.remittance.app.staging")
+  end
+  
+  for_lane :deploy_testflight do
+    app_identifier("com.remittance.app")
+  end
+  
+  for_lane :deploy_appstore do
+    app_identifier("com.remittance.app")
+  end
+end
+
+for_platform :android do
+  for_lane :build_staging do
+    package_name("com.remittance.app.staging")
+  end
+  
+  for_lane :deploy_internal do
+    package_name("com.remittance.app")
+  end
+  
+  for_lane :deploy_production do
+    package_name("com.remittance.app")
+  end
+end

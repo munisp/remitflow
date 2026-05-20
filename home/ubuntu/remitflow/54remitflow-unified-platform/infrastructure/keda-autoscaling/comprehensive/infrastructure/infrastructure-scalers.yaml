@@ -1,0 +1,193 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: redis-cache-scaler
+  namespace: remittance-platform
+  labels:
+    app: redis-cache
+    tier: infrastructure
+    component: cache
+spec:
+  scaleTargetRef:
+    name: redis-cache
+  pollingInterval: 30
+  cooldownPeriod: 180
+  minReplicaCount: 2
+  maxReplicaCount: 8
+  triggers:
+  # Cache Hit Rate (Scale up if hit rate drops)
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: cache_hit_rate
+      threshold: "0.8"
+      query: redis_cache_hits_total / (redis_cache_hits_total + redis_cache_misses_total)
+  
+  # Cache Memory Usage
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: cache_memory_usage
+      threshold: "0.85"
+      query: redis_memory_used_bytes / redis_memory_max_bytes
+  
+  # Cache Operations Rate
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: cache_operations_rate
+      threshold: "1000"
+      query: rate(redis_commands_total[1m])
+  
+  - type: cpu
+    metadata:
+      type: Utilization
+      value: "70"
+  - type: memory
+    metadata:
+      type: Utilization
+      value: "80"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: message-queue-scaler
+  namespace: remittance-platform
+  labels:
+    app: message-queue
+    tier: infrastructure
+    component: messaging
+spec:
+  scaleTargetRef:
+    name: message-queue
+  pollingInterval: 15
+  cooldownPeriod: 120
+  minReplicaCount: 2
+  maxReplicaCount: 10
+  triggers:
+  # Queue Length (Primary Trigger)
+  - type: redis
+    metadata:
+      address: redis:6379
+      listName: main_processing_queue
+      listLength: "100"
+  
+  # Message Processing Rate
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: message_processing_rate
+      threshold: "500"
+      query: rate(messages_processed_total[1m])
+  
+  # Dead Letter Queue Size
+  - type: redis
+    metadata:
+      address: redis:6379
+      listName: dead_letter_queue
+      listLength: "10"
+  
+  # Message Age (Scale up if messages are getting old)
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: message_age_seconds
+      threshold: "300"
+      query: max(message_age_seconds)
+  
+  - type: cpu
+    metadata:
+      type: Utilization
+      value: "75"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: file-storage-scaler
+  namespace: remittance-platform
+  labels:
+    app: file-storage
+    tier: infrastructure
+    component: storage
+spec:
+  scaleTargetRef:
+    name: file-storage
+  pollingInterval: 60
+  cooldownPeriod: 300
+  minReplicaCount: 1
+  maxReplicaCount: 5
+  triggers:
+  # File Upload Rate
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: file_upload_rate
+      threshold: "50"
+      query: rate(file_uploads_total[1m])
+  
+  # File Processing Queue
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: file_processing_queue
+      threshold: "20"
+      query: file_processing_queue_size
+  
+  # Storage I/O Operations
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: storage_io_rate
+      threshold: "1000"
+      query: rate(storage_io_operations_total[1m])
+  
+  - type: cpu
+    metadata:
+      type: Utilization
+      value: "70"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: backup-service-scaler
+  namespace: remittance-platform
+  labels:
+    app: backup-service
+    tier: infrastructure
+    component: backup
+spec:
+  scaleTargetRef:
+    name: backup-service
+  pollingInterval: 300
+  cooldownPeriod: 600
+  minReplicaCount: 1
+  maxReplicaCount: 3
+  triggers:
+  # Scheduled Backup Jobs
+  - type: cron
+    metadata:
+      timezone: UTC
+      start: "0 1 * * *"  # 1 AM daily backup
+      end: "0 5 * * *"    # 5 AM daily
+      desiredReplicas: "2"
+  
+  # Backup Queue Size
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: backup_queue_size
+      threshold: "5"
+      query: backup_jobs_pending
+  
+  # Data Volume to Backup
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus:9090
+      metricName: backup_data_volume
+      threshold: "100"
+      query: backup_data_volume_gb
+  
+  - type: cpu
+    metadata:
+      type: Utilization
+      value: "80"

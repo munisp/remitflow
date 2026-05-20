@@ -1,0 +1,143 @@
+# Permify RBAC/ABAC Policy Definitions — v200 Gap Features
+# Schema version: v200
+# Integrates with Keycloak roles via JWT claims
+
+schema: |
+  entity user {
+    relation role @role
+    relation kyc_tier @kyc_tier
+    relation aum_tier @aum_tier
+    relation corridor @corridor
+
+    permission can_send_west_africa = role.west_africa_sender or role.hnw_client or role.admin
+    permission can_send_immigrant_worker = role.immigrant_worker_sender or role.admin
+    permission can_access_hnw_pricing = role.hnw_client or role.hnw_rm or role.admin
+    permission can_access_hnw_dashboard = role.hnw_client or role.hnw_rm or role.admin
+    permission can_lock_fx_rate = role.hnw_client or role.hnw_rm or role.admin
+    permission can_manage_correspondents = role.correspondent_bank_admin or role.admin
+    permission can_view_correspondent_reports = role.correspondent_bank_admin or role.hnw_rm or role.admin
+    permission can_submit_sme_batch = role.sme_trade_user or role.admin
+    permission can_view_form_m = role.sme_trade_user or role.correspondent_bank_admin or role.admin
+    permission can_validate_form_m = role.sme_trade_user or role.admin
+    permission can_access_diaspora_usa_offers = role.diaspora_usa or role.admin
+    permission can_access_diaspora_eu_offers = role.diaspora_eu or role.admin
+    permission can_access_diaspora_canada_offers = role.diaspora_canada or role.admin
+    permission can_upgrade_kyc_tier = role.admin or role.compliance_officer
+    permission can_approve_rate_locks = role.hnw_rm or role.admin
+    permission can_set_negotiated_spread = role.hnw_rm or role.admin
+    permission can_view_lakehouse_analytics = role.analyst or role.admin or role.correspondent_bank_admin
+    permission can_view_cbn_reports = role.compliance_officer or role.admin
+  }
+
+  entity role {
+    relation admin @user
+    relation west_africa_sender @user
+    relation immigrant_worker_sender @user
+    relation hnw_client @user
+    relation hnw_rm @user
+    relation sme_trade_user @user
+    relation correspondent_bank_admin @user
+    relation diaspora_usa @user
+    relation diaspora_eu @user
+    relation diaspora_canada @user
+    relation compliance_officer @user
+    relation analyst @user
+  }
+
+  entity kyc_tier {
+    # tier1: Immigrant worker simplified KYC (NIN + selfie)
+    # tier2: Standard KYC (NIN + utility bill + BVN)
+    # tier3: Enhanced KYC (full documents + source of funds)
+    relation tier1 @user
+    relation tier2 @user
+    relation tier3 @user
+
+    permission can_send_up_to_500_usd = tier1 or tier2 or tier3
+    permission can_send_up_to_10000_usd = tier2 or tier3
+    permission can_send_above_10000_usd = tier3
+  }
+
+  entity aum_tier {
+    # mass_affluent: NGN 50M–200M
+    # hnw: NGN 200M–500M
+    # ultra_hnw: NGN 500M+
+    relation mass_affluent @user
+    relation hnw @user
+    relation ultra_hnw @user
+
+    permission spread_80bps = mass_affluent
+    permission spread_50bps = hnw
+    permission spread_30bps = ultra_hnw
+    permission spread_20bps = ultra_hnw
+  }
+
+  entity corridor {
+    # West African XOF corridors
+    relation togo @user
+    relation niger @user
+    relation mali @user
+    relation benin @user
+    relation ghana @user
+    # OECD corridors
+    relation uk @user
+    relation usa @user
+    relation canada @user
+    relation australia @user
+    relation india @user
+    relation uae @user
+    # Trade corridors
+    relation china @user
+
+    permission can_access = togo or niger or mali or benin or ghana or uk or usa or canada or australia or india or uae or china
+  }
+
+# ─── Attribute-Based Rules ────────────────────────────────────────────────────
+attribute_rules:
+  # HNW pricing: only available for users with AUM >= NGN 50M
+  hnw_pricing_access:
+    condition: "user.aum_ngn >= 50000000"
+    permission: can_access_hnw_pricing
+
+  # Immigrant worker monthly limit: USD 500
+  immigrant_worker_monthly_limit:
+    condition: "user.monthly_sent_usd <= 500"
+    permission: can_send_immigrant_worker
+
+  # SME batch: max 500 payments per batch
+  sme_batch_size:
+    condition: "batch.payment_count <= 500"
+    permission: can_submit_sme_batch
+
+  # Form M: required for trade payments >= USD 10,000
+  form_m_required:
+    condition: "payment.amount_usd >= 10000 AND payment.type == 'trade'"
+    permission: can_validate_form_m
+
+  # Rate lock: max USD 500k equivalent
+  rate_lock_max:
+    condition: "transfer.amount_ngn <= 810000000"
+    permission: can_lock_fx_rate
+
+  # Correspondent admin: must have MFA enabled
+  correspondent_admin_mfa:
+    condition: "user.mfa_enabled == true"
+    permission: can_manage_correspondents
+
+# ─── Role Hierarchy ──────────────────────────────────────────────────────────
+role_hierarchy:
+  admin:
+    inherits: [hnw_rm, correspondent_bank_admin, compliance_officer, analyst]
+  hnw_rm:
+    inherits: [hnw_client]
+  sme_trade_user:
+    inherits: []
+  immigrant_worker_sender:
+    inherits: []
+  west_africa_sender:
+    inherits: []
+  diaspora_usa:
+    inherits: []
+  diaspora_eu:
+    inherits: []
+  diaspora_canada:
+    inherits: []

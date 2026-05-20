@@ -1,0 +1,11 @@
+apiVersion: fluvio.infinyon.com/v1
+kind: FluvioCluster
+metadata:
+  name: remitflow-fluvio-cluster
+  namespace: fluvio
+spec:
+  replicas: 3
+  storage:
+    size: 100Gi
+  service:
+    type: ClusterIP

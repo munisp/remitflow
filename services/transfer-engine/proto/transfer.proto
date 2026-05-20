@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package transfer;
+option go_package = "remitflow/transfer-engine/proto";
+
+// ─── Transfer State Machine ───────────────────────────────────────────────────
+
+service TransferEngine {
+  rpc AdvanceState(AdvanceStateRequest) returns (AdvanceStateResponse);
+  rpc RunPipeline(RunPipelineRequest) returns (RunPipelineResponse);
+  rpc GetTransferStatus(GetTransferStatusRequest) returns (GetTransferStatusResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ─── Fraud Scorer ─────────────────────────────────────────────────────────────
+
+service FraudScorer {
+  rpc ScoreTransaction(ScoreRequest) returns (ScoreResponse);
+  rpc GetRules(GetRulesRequest) returns (GetRulesResponse);
+}
+
+// ─── Messages ─────────────────────────────────────────────────────────────────
+
+message AdvanceStateRequest {
+  string transfer_id    = 1;
+  int64  user_id        = 2;
+  string target_state   = 3;
+  string failure_reason = 4;
+  string partner_ref    = 5;
+  bool   manual_review  = 6;
+}
+
+message AdvanceStateResponse {
+  bool   success          = 1;
+  string previous_state   = 2;
+  string new_state        = 3;
+  string message          = 4;
+  bool   requires_review  = 5;
+  int64  estimated_ms     = 6;
+}
+
+message RunPipelineRequest {
+  string transfer_id  = 1;
+  int64  user_id      = 2;
+  double fraud_score  = 3;
+  repeated string aml_flags = 4;
+  int32  kyc_tier     = 5;
+  double amount_usd   = 6;
+}
+
+message RunPipelineResponse {
+  bool   started      = 1;
+  string pipeline_id  = 2;
+  string message      = 3;
+}
+
+message GetTransferStatusRequest {
+  string transfer_id = 1;
+}
+
+message GetTransferStatusResponse {
+  string transfer_id    = 1;
+  string current_state  = 2;
+  string state_label    = 3;
+  int64  updated_at     = 4;
+  repeated StateHistoryEntry history = 5;
+}
+
+message StateHistoryEntry {
+  string state      = 1;
+  string label      = 2;
+  int64  timestamp  = 3;
+  string message    = 4;
+}
+
+message ScoreRequest {
+  string transfer_id   = 1;
+  int64  user_id       = 2;
+  double amount_usd    = 3;
+  string source_country = 4;
+  string dest_country  = 5;
+  string payment_method = 6;
+  int32  hour_of_day   = 7;
+  bool   is_new_device = 8;
+  bool   is_new_beneficiary = 9;
+  int32  transfers_today = 10;
+}
+
+message ScoreResponse {
+  double score         = 1;  // 0.0 – 100.0
+  string risk_level    = 2;  // low | medium | high | critical
+  repeated string flags = 3;
+  bool   block         = 4;
+  bool   manual_review = 5;
+  string reason        = 6;
+}
+
+message GetRulesRequest {}
+message GetRulesResponse {
+  repeated FraudRule rules = 1;
+}
+
+message FraudRule {
+  string id          = 1;
+  string name        = 2;
+  string description = 3;
+  double weight      = 4;
+  bool   enabled     = 5;
+}
+
+message HealthCheckRequest {}
+message HealthCheckResponse {
+  string status   = 1;  // ok | degraded | down
+  string version  = 2;
+  int64  uptime_s = 3;
+}

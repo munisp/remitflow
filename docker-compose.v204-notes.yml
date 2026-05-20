@@ -1,0 +1,18 @@
+# docker-compose.v204.yml
+# v204 additions: Form M audit, HNW Stripe, BDC bulk approve
+# All v204 features use existing services from docker-compose.v200-gaps.yml
+# No new services required - update image tags to v204 and redeploy.
+#
+# New environment variables added in v204:
+#   STRIPE_SECRET_KEY (HNW checkout)
+#   STRIPE_WEBHOOK_SECRET (HNW checkout)
+#   VITE_STRIPE_PUBLISHABLE_KEY (HNW checkout)
+#
+# New API endpoints in v204:
+#   POST /api/trpc/hnwBanking.createHnwCheckout
+#   GET  /api/trpc/smeTrade.listFormMHistory
+#   GET  /api/trpc/smeTrade.listFormMDocumentsAdmin
+#   POST /api/trpc/smeTrade.updateFormMStatus
+#   GET  /api/trpc/smeTrade.getFormMDocument
+#   POST /api/trpc/cbnCompliance.bulkApproveBdcPartners
+#   POST /api/trpc/cbnCompliance.exportCbnFilingCsv

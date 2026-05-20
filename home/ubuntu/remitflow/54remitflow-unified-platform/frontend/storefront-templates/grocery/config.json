@@ -1,0 +1,35 @@
+{
+  "name": "Fresh Market",
+  "tagline": "Farm Fresh, Delivered Daily",
+  "description": "Grocery store template with subscription boxes, recipe suggestions, and same-day delivery",
+  "theme": {
+    "primary": "#10b981",
+    "secondary": "#f97316",
+    "accent": "#fbbf24",
+    "background": "#f0fdf4",
+    "text": "#1f2937"
+  },
+  "categories": [
+    "Fresh Produce",
+    "Meat & Poultry",
+    "Dairy & Eggs",
+    "Bakery",
+    "Pantry",
+    "Beverages",
+    "Household"
+  ],
+  "features": [
+    "same_day_delivery",
+    "subscription_boxes",
+    "recipe_suggestions",
+    "bulk_ordering",
+    "fresh_guarantee"
+  ],
+  "payment_methods": [
+    "qr_code",
+    "mobile_money",
+    "bank_transfer",
+    "card",
+    "cash_on_delivery"
+  ]
+}

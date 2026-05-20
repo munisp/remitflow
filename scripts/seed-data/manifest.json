@@ -1,0 +1,41 @@
+{
+  "version": "v88",
+  "generatedAt": "2026-04-20T22:17:21.466Z",
+  "files": {
+    "ml-metrics.json": {
+      "models": 4,
+      "description": "ML model performance metrics"
+    },
+    "smart-routing-rules.json": {
+      "rules": 5,
+      "description": "Smart routing configuration"
+    },
+    "lakehouse-records.json": {
+      "records": 23,
+      "description": "Lakehouse ETL pipeline records"
+    }
+  },
+  "externalServices": {
+    "qdrant": {
+      "url": "http://localhost:6333",
+      "collections": [
+        "transactions",
+        "beneficiaries",
+        "compliance_kb",
+        "fraud_patterns"
+      ]
+    },
+    "falkordb": {
+      "host": "localhost",
+      "port": 6379,
+      "graph": "remitflow"
+    },
+    "ollama": {
+      "url": "http://localhost:11434",
+      "models": [
+        "llama3.2",
+        "nomic-embed-text"
+      ]
+    }
+  }
+}

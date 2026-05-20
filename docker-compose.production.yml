@@ -1,0 +1,702 @@
+version: "3.9"
+
+# ============================================================================
+# RemitFlow v79 — Full Production Docker Compose
+# Includes: App, PostgreSQL, Redis, Kafka, Temporal, OpenSearch, Grafana,
+#           Prometheus, Alertmanager, all 10 microservices (Go/Rust/Python)
+# ============================================================================
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+x-restart: &default-restart
+  restart: unless-stopped
+
+x-healthcheck-defaults: &hc-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 3
+  start_period: 40s
+
+networks:
+  remitflow-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+  remitflow-public:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  kafka-data:
+  zookeeper-data:
+  temporal-data:
+  opensearch-data:
+  grafana-data:
+  prometheus-data:
+  tigerbeetle-data:
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    <<: *default-restart
+    environment:
+      POSTGRES_DB: remitflow
+      POSTGRES_USER: remitflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-remitflow_prod_2026}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - remitflow-internal
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "pg_isready -U remitflow -d remitflow"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+    logging: *default-logging
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    <<: *default-restart
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-remitflow_redis_2026}
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - remitflow-internal
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-remitflow_redis_2026}", "ping"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    logging: *default-logging
+
+  # ── Zookeeper (for Kafka) ───────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    <<: *default-restart
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_SYNC_LIMIT: 2
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    networks:
+      - remitflow-internal
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "echo ruok | nc localhost 2181 | grep imok"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    logging: *default-logging
+
+  # ── Kafka ───────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    <<: *default-restart
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_NUM_PARTITIONS: 6
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    ports:
+      - "29092:29092"
+    networks:
+      - remitflow-internal
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+    logging: *default-logging
+
+  # ── Kafka UI ────────────────────────────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    <<: *default-restart
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: remitflow-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    ports:
+      - "8080:8080"
+    networks:
+      - remitflow-internal
+      - remitflow-public
+    logging: *default-logging
+
+  # ── Temporal Server ─────────────────────────────────────────────────────────
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    <<: *default-restart
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_USER: remitflow
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-remitflow_prod_2026}
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/dynamicconfig/development-sql.yaml
+      ENABLE_ES: "false"
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+    volumes:
+      - temporal-data:/etc/temporal
+    ports:
+      - "7233:7233"
+    networks:
+      - remitflow-internal
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+    logging: *default-logging
+
+  # ── Temporal UI ─────────────────────────────────────────────────────────────
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    <<: *default-restart
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: "http://localhost:3000"
+    ports:
+      - "8088:8080"
+    networks:
+      - remitflow-internal
+      - remitflow-public
+    logging: *default-logging
+
+  # ── OpenSearch ──────────────────────────────────────────────────────────────
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    <<: *default-restart
+    environment:
+      cluster.name: remitflow-logs
+      node.name: opensearch-node1
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      DISABLE_SECURITY_PLUGIN: "true"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    networks:
+      - remitflow-internal
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\\|yellow\"'"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+    logging: *default-logging
+
+  # ── OpenSearch Dashboards ───────────────────────────────────────────────────
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.13.0
+    <<: *default-restart
+    depends_on:
+      - opensearch
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+    networks:
+      - remitflow-internal
+      - remitflow-public
+    logging: *default-logging
+
+  # ── TigerBeetle ─────────────────────────────────────────────────────────────
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.15.3
+    <<: *default-restart
+    command: ["start", "--addresses=0.0.0.0:3001", "/data/0_0.tigerbeetle"]
+    volumes:
+      - tigerbeetle-data:/data
+    ports:
+      - "3001:3001"
+    networks:
+      - remitflow-internal
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    logging: *default-logging
+
+  # ── Prometheus ──────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    <<: *default-restart
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - remitflow-internal
+      - remitflow-public
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    logging: *default-logging
+
+  # ── Alertmanager ────────────────────────────────────────────────────────────
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    <<: *default-restart
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    environment:
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-https://hooks.slack.com/services/PLACEHOLDER/PLACEHOLDER/PLACEHOLDER}
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports:
+      - "9093:9093"
+    networks:
+      - remitflow-internal
+    logging: *default-logging
+
+  # ── Grafana ─────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    <<: *default-restart
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-remitflow_grafana_2026}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_FEATURE_TOGGLES_ENABLE: publicDashboards
+      GF_SERVER_DOMAIN: ${GRAFANA_DOMAIN:-localhost}
+      GF_SMTP_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3030:3000"
+    networks:
+      - remitflow-internal
+      - remitflow-public
+    depends_on:
+      - prometheus
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.3"
+    logging: *default-logging
+
+  # ── Main App (Node.js) ──────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    <<: *default-restart
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      LOCAL_DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_prod_2026}@postgres:5432/remitflow
+      REDIS_URL: redis://:${REDIS_PASSWORD:-remitflow_redis_2026}@redis:6379
+      KAFKA_BROKERS: kafka:9092
+      TEMPORAL_ADDRESS: temporal:7233
+      OPENSEARCH_URL: http://opensearch:9200
+      TIGERBEETLE_ADDRESS: tigerbeetle:3001
+      JWT_SECRET: ${JWT_SECRET:-remitflow_jwt_secret_change_in_production_2026}
+      VITE_APP_ID: ${VITE_APP_ID:-remitflow}
+      OAUTH_SERVER_URL: ${OAUTH_SERVER_URL:-https://api.manus.im}
+      VITE_OAUTH_PORTAL_URL: ${VITE_OAUTH_PORTAL_URL:-https://manus.im}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      BUILT_IN_FORGE_API_KEY: ${BUILT_IN_FORGE_API_KEY}
+      BUILT_IN_FORGE_API_URL: ${BUILT_IN_FORGE_API_URL:-https://api.manus.im}
+    ports:
+      - "3000:3000"
+    networks:
+      - remitflow-internal
+      - remitflow-public
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "2.0"
+      replicas: 2
+    logging: *default-logging
+
+  # ── Go: NGX Price Feed ──────────────────────────────────────────────────────
+  ngx-price-feed:
+    build:
+      context: ./microservices/go-services/ngx-price-feed
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      PORT: "8081"
+      KAFKA_BROKERS: kafka:9092
+      REDIS_URL: redis://:${REDIS_PASSWORD:-remitflow_redis_2026}@redis:6379
+      SERVICE_API_KEY: ${MICROSERVICE_API_KEY:-remitflow_ms_key_2026}
+    ports:
+      - "8081:8081"
+    networks:
+      - remitflow-internal
+    depends_on:
+      - kafka
+      - redis
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8081/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.3"
+    logging: *default-logging
+
+  # ── Go: API Gateway ─────────────────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: ./microservices/go-services/api-gateway
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      PORT: "8082"
+      JWT_SECRET: ${JWT_SECRET:-remitflow_jwt_secret_change_in_production_2026}
+      UPSTREAM_URL: http://app:3000
+      SERVICE_API_KEY: ${MICROSERVICE_API_KEY:-remitflow_ms_key_2026}
+    ports:
+      - "8082:8082"
+    networks:
+      - remitflow-internal
+    depends_on:
+      - app
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8082/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.3"
+    logging: *default-logging
+
+  # ── Go: Corridor Pricing ────────────────────────────────────────────────────
+  corridor-pricing:
+    build:
+      context: ./microservices/go-services/corridor-pricing
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      PORT: "8083"
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_prod_2026}@postgres:5432/remitflow
+      REDIS_URL: redis://:${REDIS_PASSWORD:-remitflow_redis_2026}@redis:6379
+      SERVICE_API_KEY: ${MICROSERVICE_API_KEY:-remitflow_ms_key_2026}
+    ports:
+      - "8083:8083"
+    networks:
+      - remitflow-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8083/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.3"
+    logging: *default-logging
+
+  # ── Go: TigerBeetle Shadow ──────────────────────────────────────────────────
+  tigerbeetle-shadow:
+    build:
+      context: ./microservices/go-services/tigerbeetle-shadow
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      PORT: "8084"
+      TIGERBEETLE_ADDRESS: tigerbeetle:3001
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_prod_2026}@postgres:5432/remitflow
+      SERVICE_API_KEY: ${MICROSERVICE_API_KEY:-remitflow_ms_key_2026}
+    ports:
+      - "8084:8084"
+    networks:
+      - remitflow-internal
+    depends_on:
+      - tigerbeetle
+      - postgres
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8084/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.3"
+    logging: *default-logging
+
+  # ── Rust: FX Engine ─────────────────────────────────────────────────────────
+  fx-engine:
+    build:
+      context: ./microservices/rust-services/fx-engine
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      PORT: "8091"
+      REDIS_URL: redis://:${REDIS_PASSWORD:-remitflow_redis_2026}@redis:6379
+      KAFKA_BROKERS: kafka:9092
+      SERVICE_API_KEY: ${MICROSERVICE_API_KEY:-remitflow_ms_key_2026}
+    ports:
+      - "8091:8091"
+    networks:
+      - remitflow-internal
+    depends_on:
+      - redis
+      - kafka
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8091/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging: *default-logging
+
+  # ── Rust: TX Processor ──────────────────────────────────────────────────────
+  tx-processor:
+    build:
+      context: ./microservices/rust-services/tx-processor
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      PORT: "8092"
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_prod_2026}@postgres:5432/remitflow
+      KAFKA_BROKERS: kafka:9092
+      TIGERBEETLE_ADDRESS: tigerbeetle:3001
+      SERVICE_API_KEY: ${MICROSERVICE_API_KEY:-remitflow_ms_key_2026}
+    ports:
+      - "8092:8092"
+    networks:
+      - remitflow-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8092/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging: *default-logging
+
+  # ── Rust: Compliance Engine ─────────────────────────────────────────────────
+  compliance-engine:
+    build:
+      context: ./microservices/rust-services/compliance-engine
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      PORT: "8093"
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_prod_2026}@postgres:5432/remitflow
+      KAFKA_BROKERS: kafka:9092
+      OPENSEARCH_URL: http://opensearch:9200
+      SERVICE_API_KEY: ${MICROSERVICE_API_KEY:-remitflow_ms_key_2026}
+    ports:
+      - "8093:8093"
+    networks:
+      - remitflow-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8093/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging: *default-logging
+
+  # ── Python: Fraud Detection ─────────────────────────────────────────────────
+  fraud-detection:
+    build:
+      context: ./microservices/python-services/fraud-detection
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      PORT: "8101"
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_prod_2026}@postgres:5432/remitflow
+      KAFKA_BROKERS: kafka:9092
+      REDIS_URL: redis://:${REDIS_PASSWORD:-remitflow_redis_2026}@redis:6379
+      SERVICE_API_KEY: ${MICROSERVICE_API_KEY:-remitflow_ms_key_2026}
+      MODEL_RETRAIN_INTERVAL_HOURS: "24"
+    ports:
+      - "8101:8101"
+    networks:
+      - remitflow-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8101/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    logging: *default-logging
+
+  # ── Python: AML Compliance ──────────────────────────────────────────────────
+  aml-compliance:
+    build:
+      context: ./microservices/python-services/aml-compliance
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      PORT: "8102"
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_prod_2026}@postgres:5432/remitflow
+      KAFKA_BROKERS: kafka:9092
+      OPENSEARCH_URL: http://opensearch:9200
+      SERVICE_API_KEY: ${MICROSERVICE_API_KEY:-remitflow_ms_key_2026}
+      CTR_THRESHOLD_USD: "10000"
+      SAR_THRESHOLD_USD: "5000"
+    ports:
+      - "8102:8102"
+    networks:
+      - remitflow-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8102/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+    logging: *default-logging
+
+  # ── Python: Analytics Engine ────────────────────────────────────────────────
+  analytics-engine:
+    build:
+      context: ./microservices/python-services/analytics-engine
+      dockerfile: Dockerfile
+    <<: *default-restart
+    environment:
+      PORT: "8103"
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:-remitflow_prod_2026}@postgres:5432/remitflow
+      REDIS_URL: redis://:${REDIS_PASSWORD:-remitflow_redis_2026}@redis:6379
+      SERVICE_API_KEY: ${MICROSERVICE_API_KEY:-remitflow_ms_key_2026}
+    ports:
+      - "8103:8103"
+    networks:
+      - remitflow-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    logging: *default-logging

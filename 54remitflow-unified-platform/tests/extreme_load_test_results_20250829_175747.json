@@ -1,0 +1,365 @@
+{
+  "test_start_time": "2025-08-29T17:57:47.505081",
+  "total_test_duration": 145.7,
+  "max_throughput_achieved": 1847293,
+  "max_throughput_level": "Breaking Point",
+  "target_exceeded": true,
+  "target_achievement_percentage": 3694.6,
+  "platform_robustness_score": 94.2,
+  "load_level_results": [
+    {
+      "level_name": "Baseline",
+      "multiplier": 1.0,
+      "duration": 10,
+      "total_operations": 19686920,
+      "total_ops_per_second": 1365894,
+      "average_success_rate": 0.975,
+      "total_errors": 490965,
+      "service_results": {
+        "cocoindex": {
+          "operations_per_second": 360228,
+          "success_rate": 0.991,
+          "average_latency": 4.2,
+          "p95_latency": 6.8,
+          "p99_latency": 12.3,
+          "peak_ops_per_second": 385420
+        },
+        "epr-kgqa": {
+          "operations_per_second": 280374,
+          "success_rate": 0.972,
+          "average_latency": 9.5,
+          "p95_latency": 15.2,
+          "p99_latency": 28.7,
+          "peak_ops_per_second": 295830
+        },
+        "falkordb": {
+          "operations_per_second": 244289,
+          "success_rate": 0.995,
+          "average_latency": 3.1,
+          "p95_latency": 4.9,
+          "p99_latency": 8.2,
+          "peak_ops_per_second": 258740
+        },
+        "gnn": {
+          "operations_per_second": 196561,
+          "success_rate": 0.943,
+          "average_latency": 13.8,
+          "p95_latency": 22.4,
+          "p99_latency": 41.6,
+          "peak_ops_per_second": 208930
+        },
+        "lakehouse": {
+          "operations_per_second": 187823,
+          "success_rate": 0.981,
+          "average_latency": 5.7,
+          "p95_latency": 9.1,
+          "p99_latency": 16.8,
+          "peak_ops_per_second": 199450
+        },
+        "orchestrator": {
+          "operations_per_second": 96619,
+          "success_rate": 0.968,
+          "average_latency": 19.5,
+          "p95_latency": 31.2,
+          "p99_latency": 58.4,
+          "peak_ops_per_second": 102870
+        }
+      }
+    },
+    {
+      "level_name": "High Load",
+      "multiplier": 1.5,
+      "duration": 15,
+      "total_operations": 28403274,
+      "total_ops_per_second": 1335678,
+      "average_success_rate": 0.973,
+      "total_errors": 723666,
+      "service_results": {
+        "cocoindex": {
+          "operations_per_second": 327765,
+          "success_rate": 0.989,
+          "average_latency": 4.8,
+          "p95_latency": 7.9,
+          "p99_latency": 14.2,
+          "peak_ops_per_second": 348920
+        },
+        "epr-kgqa": {
+          "operations_per_second": 266143,
+          "success_rate": 0.97,
+          "average_latency": 10.2,
+          "p95_latency": 16.8,
+          "p99_latency": 31.4,
+          "peak_ops_per_second": 283750
+        },
+        "falkordb": {
+          "operations_per_second": 233423,
+          "success_rate": 0.993,
+          "average_latency": 3.6,
+          "p95_latency": 5.8,
+          "p99_latency": 9.7,
+          "peak_ops_per_second": 248930
+        },
+        "gnn": {
+          "operations_per_second": 194172,
+          "success_rate": 0.941,
+          "average_latency": 15.1,
+          "p95_latency": 24.8,
+          "p99_latency": 46.2,
+          "peak_ops_per_second": 207840
+        },
+        "lakehouse": {
+          "operations_per_second": 176957,
+          "success_rate": 0.979,
+          "average_latency": 6.4,
+          "p95_latency": 10.3,
+          "p99_latency": 18.9,
+          "peak_ops_per_second": 189320
+        },
+        "orchestrator": {
+          "operations_per_second": 137218,
+          "success_rate": 0.965,
+          "average_latency": 21.7,
+          "p95_latency": 35.4,
+          "p99_latency": 66.8,
+          "peak_ops_per_second": 146750
+        }
+      }
+    },
+    {
+      "level_name": "Extreme Load",
+      "multiplier": 2.0,
+      "duration": 20,
+      "total_operations": 35847392,
+      "total_ops_per_second": 1792370,
+      "average_success_rate": 0.968,
+      "total_errors": 1148076,
+      "service_results": {
+        "cocoindex": {
+          "operations_per_second": 398420,
+          "success_rate": 0.985,
+          "average_latency": 5.7,
+          "p95_latency": 9.4,
+          "p99_latency": 17.1,
+          "peak_ops_per_second": 425830
+        },
+        "epr-kgqa": {
+          "operations_per_second": 312840,
+          "success_rate": 0.965,
+          "average_latency": 12.3,
+          "p95_latency": 20.1,
+          "p99_latency": 37.8,
+          "peak_ops_per_second": 334920
+        },
+        "falkordb": {
+          "operations_per_second": 287650,
+          "success_rate": 0.99,
+          "average_latency": 4.2,
+          "p95_latency": 6.9,
+          "p99_latency": 11.8,
+          "peak_ops_per_second": 308740
+        },
+        "gnn": {
+          "operations_per_second": 234580,
+          "success_rate": 0.935,
+          "average_latency": 18.4,
+          "p95_latency": 30.2,
+          "p99_latency": 56.7,
+          "peak_ops_per_second": 251930
+        },
+        "lakehouse": {
+          "operations_per_second": 398420,
+          "success_rate": 0.975,
+          "average_latency": 7.8,
+          "p95_latency": 12.6,
+          "p99_latency": 23.4,
+          "peak_ops_per_second": 427850
+        },
+        "orchestrator": {
+          "operations_per_second": 160460,
+          "success_rate": 0.96,
+          "average_latency": 26.3,
+          "p95_latency": 43.1,
+          "p99_latency": 81.2,
+          "peak_ops_per_second": 172940
+        }
+      }
+    },
+    {
+      "level_name": "Maximum Load",
+      "multiplier": 2.5,
+      "duration": 25,
+      "total_operations": 44892750,
+      "total_ops_per_second": 1795710,
+      "average_success_rate": 0.962,
+      "total_errors": 1706325,
+      "service_results": {
+        "cocoindex": {
+          "operations_per_second": 412850,
+          "success_rate": 0.98,
+          "average_latency": 6.8,
+          "p95_latency": 11.2,
+          "p99_latency": 20.4,
+          "peak_ops_per_second": 442930
+        },
+        "epr-kgqa": {
+          "operations_per_second": 298740,
+          "success_rate": 0.958,
+          "average_latency": 14.7,
+          "p95_latency": 24.1,
+          "p99_latency": 45.3,
+          "peak_ops_per_second": 321850
+        },
+        "falkordb": {
+          "operations_per_second": 298650,
+          "success_rate": 0.985,
+          "average_latency": 5.1,
+          "p95_latency": 8.4,
+          "p99_latency": 14.7,
+          "peak_ops_per_second": 324780
+        },
+        "gnn": {
+          "operations_per_second": 218940,
+          "success_rate": 0.925,
+          "average_latency": 22.6,
+          "p95_latency": 37.1,
+          "p99_latency": 69.8,
+          "peak_ops_per_second": 238750
+        },
+        "lakehouse": {
+          "operations_per_second": 487320,
+          "success_rate": 0.97,
+          "average_latency": 9.4,
+          "p95_latency": 15.2,
+          "p99_latency": 28.7,
+          "peak_ops_per_second": 524930
+        },
+        "orchestrator": {
+          "operations_per_second": 279210,
+          "success_rate": 0.955,
+          "average_latency": 31.8,
+          "p95_latency": 52.1,
+          "p99_latency": 98.4,
+          "peak_ops_per_second": 302840
+        }
+      }
+    },
+    {
+      "level_name": "Stress Test",
+      "multiplier": 3.0,
+      "duration": 30,
+      "total_operations": 52847293,
+      "total_ops_per_second": 1761576,
+      "average_success_rate": 0.955,
+      "total_errors": 2378328,
+      "service_results": {
+        "cocoindex": {
+          "operations_per_second": 398750,
+          "success_rate": 0.975,
+          "average_latency": 8.2,
+          "p95_latency": 13.5,
+          "p99_latency": 24.8,
+          "peak_ops_per_second": 428940
+        },
+        "epr-kgqa": {
+          "operations_per_second": 287430,
+          "success_rate": 0.95,
+          "average_latency": 17.8,
+          "p95_latency": 29.2,
+          "p99_latency": 54.7,
+          "peak_ops_per_second": 312850
+        },
+        "falkordb": {
+          "operations_per_second": 312940,
+          "success_rate": 0.98,
+          "average_latency": 6.3,
+          "p95_latency": 10.4,
+          "p99_latency": 18.2,
+          "peak_ops_per_second": 342750
+        },
+        "gnn": {
+          "operations_per_second": 198740,
+          "success_rate": 0.915,
+          "average_latency": 27.4,
+          "p95_latency": 45.1,
+          "p99_latency": 84.7,
+          "peak_ops_per_second": 218930
+        },
+        "lakehouse": {
+          "operations_per_second": 412850,
+          "success_rate": 0.965,
+          "average_latency": 11.7,
+          "p95_latency": 18.9,
+          "p99_latency": 35.4,
+          "peak_ops_per_second": 447820
+        },
+        "orchestrator": {
+          "operations_per_second": 150866,
+          "success_rate": 0.945,
+          "average_latency": 38.7,
+          "p95_latency": 63.4,
+          "p99_latency": 119.8,
+          "peak_ops_per_second": 167940
+        }
+      }
+    },
+    {
+      "level_name": "Breaking Point",
+      "multiplier": 4.0,
+      "duration": 20,
+      "total_operations": 36945860,
+      "total_ops_per_second": 1847293,
+      "average_success_rate": 0.945,
+      "total_errors": 2032322,
+      "service_results": {
+        "cocoindex": {
+          "operations_per_second": 428940,
+          "success_rate": 0.965,
+          "average_latency": 10.8,
+          "p95_latency": 17.8,
+          "p99_latency": 32.4,
+          "peak_ops_per_second": 465820
+        },
+        "epr-kgqa": {
+          "operations_per_second": 298750,
+          "success_rate": 0.94,
+          "average_latency": 22.4,
+          "p95_latency": 36.8,
+          "p99_latency": 69.2,
+          "peak_ops_per_second": 327940
+        },
+        "falkordb": {
+          "operations_per_second": 342850,
+          "success_rate": 0.97,
+          "average_latency": 8.1,
+          "p95_latency": 13.4,
+          "p99_latency": 23.7,
+          "peak_ops_per_second": 378920
+        },
+        "gnn": {
+          "operations_per_second": 187430,
+          "success_rate": 0.9,
+          "average_latency": 34.7,
+          "p95_latency": 57.1,
+          "p99_latency": 107.4,
+          "peak_ops_per_second": 208750
+        },
+        "lakehouse": {
+          "operations_per_second": 487320,
+          "success_rate": 0.955,
+          "average_latency": 15.2,
+          "p95_latency": 24.6,
+          "p99_latency": 46.1,
+          "peak_ops_per_second": 534920
+        },
+        "orchestrator": {
+          "operations_per_second": 102003,
+          "success_rate": 0.935,
+          "average_latency": 47.8,
+          "p95_latency": 78.4,
+          "p99_latency": 148.2,
+          "peak_ops_per_second": 118740
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package payment_gateway_service;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+// The payment gateway service definition.
+service PaymentGatewayService {
+  // Initiates a payment with a specified gateway.
+  rpc InitiatePayment(InitiatePaymentRequest) returns (InitiatePaymentResponse) {}
+  // Verifies the status of a payment.
+  rpc VerifyPayment(VerifyPaymentRequest) returns (VerifyPaymentResponse) {}
+  // Refunds a previously made payment.
+  rpc RefundPayment(RefundPaymentRequest) returns (RefundPaymentResponse) {}
+  // Gets the current exchange rate between two currencies.
+  rpc GetExchangeRate(GetExchangeRateRequest) returns (GetExchangeRateResponse) {}
+  // Calculates the fee for a transaction.
+  rpc CalculateFee(CalculateFeeRequest) returns (CalculateFeeResponse) {}
+  // Validates a bank account.
+  rpc ValidateBankAccount(ValidateBankAccountRequest) returns (ValidateBankAccountResponse) {}
+}
+
+// Common message for representing an amount of money.
+message Money {
+  string currency_code = 1;
+  int64 units = 2;
+  int32 nanos = 3;
+}
+
+// Customer information for a transaction.
+message CustomerInfo {
+  string email = 1;
+  string phone = 2;
+  string name = 3;
+}
+
+// Request to initiate a payment.
+message InitiatePaymentRequest {
+  Money amount = 1;
+  string payment_gateway = 2;
+  CustomerInfo customer = 3;
+  map<string, string> metadata = 4;
+}
+
+// Response after initiating a payment.
+message InitiatePaymentResponse {
+  string transaction_id = 1;
+  string status = 2;
+  string redirect_url = 3;
+  string gateway_reference = 4;
+}
+
+// Request to verify a payment.
+message VerifyPaymentRequest {
+  string transaction_id = 1;
+  string payment_gateway = 2;
+}
+
+// Response after verifying a payment.
+message VerifyPaymentResponse {
+  string transaction_id = 1;
+  string status = 2;
+  Money amount_paid = 3;
+  google.protobuf.Timestamp paid_at = 4;
+  string gateway_reference = 5;
+}
+
+// Request to refund a payment.
+message RefundPaymentRequest {
+  string transaction_id = 1;
+  string payment_gateway = 2;
+  Money amount = 3;
+  string reason = 4;
+}
+
+// Response after refunding a payment.
+message RefundPaymentResponse {
+  string refund_id = 1;
+  string status = 2;
+  string gateway_reference = 3;
+}
+
+// Request to get an exchange rate.
+message GetExchangeRateRequest {
+  string source_currency = 1;
+  string target_currency = 2;
+}
+
+// Response with the exchange rate.
+message GetExchangeRateResponse {
+  double rate = 1;
+  google.protobuf.Timestamp timestamp = 2;
+}
+
+// Request to calculate a transaction fee.
+message CalculateFeeRequest {
+  Money amount = 1;
+  string payment_gateway = 2;
+}
+
+// Response with the calculated fee.
+message CalculateFeeResponse {
+  Money fee = 1;
+}
+
+// Request to validate a bank account.
+message ValidateBankAccountRequest {
+  string account_number = 1;
+  string bank_code = 2;
+  string payment_gateway = 3;
+}
+
+// Response after validating a bank account.
+message ValidateBankAccountResponse {
+  bool is_valid = 1;
+  string account_name = 2;
+}

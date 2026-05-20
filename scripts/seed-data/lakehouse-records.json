@@ -1,0 +1,245 @@
+[
+  {
+    "layer": "bronze",
+    "table": "raw_transactions",
+    "recordCount": 39924,
+    "fileSizeBytes": 1243980,
+    "ingestionTime": "2026-04-20T22:17:21.465Z",
+    "source": "file_upload",
+    "status": "completed",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "bronze",
+    "table": "raw_fx_rates",
+    "recordCount": 27517,
+    "fileSizeBytes": 2928160,
+    "ingestionTime": "2026-04-20T21:17:21.465Z",
+    "source": "postgres_cdc",
+    "status": "completed",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "bronze",
+    "table": "raw_compliance_events",
+    "recordCount": 48318,
+    "fileSizeBytes": 2208825,
+    "ingestionTime": "2026-04-20T20:17:21.465Z",
+    "source": "kafka",
+    "status": "completed",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "bronze",
+    "table": "raw_compliance_events",
+    "recordCount": 10995,
+    "fileSizeBytes": 4738027,
+    "ingestionTime": "2026-04-20T19:17:21.465Z",
+    "source": "api_webhook",
+    "status": "completed",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "bronze",
+    "table": "raw_transactions",
+    "recordCount": 38415,
+    "fileSizeBytes": 134079,
+    "ingestionTime": "2026-04-20T18:17:21.465Z",
+    "source": "file_upload",
+    "status": "completed",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "bronze",
+    "table": "raw_fx_rates",
+    "recordCount": 28285,
+    "fileSizeBytes": 1692739,
+    "ingestionTime": "2026-04-20T17:17:21.465Z",
+    "source": "api_webhook",
+    "status": "completed",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "bronze",
+    "table": "raw_compliance_events",
+    "recordCount": 47140,
+    "fileSizeBytes": 4499798,
+    "ingestionTime": "2026-04-20T16:17:21.465Z",
+    "source": "file_upload",
+    "status": "completed",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "bronze",
+    "table": "raw_transactions",
+    "recordCount": 35062,
+    "fileSizeBytes": 2741323,
+    "ingestionTime": "2026-04-20T15:17:21.465Z",
+    "source": "kafka",
+    "status": "completed",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "bronze",
+    "table": "raw_transactions",
+    "recordCount": 2081,
+    "fileSizeBytes": 385429,
+    "ingestionTime": "2026-04-20T14:17:21.465Z",
+    "source": "kafka",
+    "status": "completed",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "bronze",
+    "table": "raw_compliance_events",
+    "recordCount": 29752,
+    "fileSizeBytes": 3365299,
+    "ingestionTime": "2026-04-20T13:17:21.465Z",
+    "source": "kafka",
+    "status": "completed",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "silver",
+    "table": "users_enriched",
+    "recordCount": 41451,
+    "fileSizeBytes": 3149162,
+    "ingestionTime": "2026-04-20T22:17:21.465Z",
+    "source": "bronze_etl",
+    "status": "completed",
+    "qualityScore": 0.9865038955980525,
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "silver",
+    "table": "transactions_clean",
+    "recordCount": 13145,
+    "fileSizeBytes": 3496101,
+    "ingestionTime": "2026-04-20T20:17:21.465Z",
+    "source": "bronze_etl",
+    "status": "completed",
+    "qualityScore": 0.9849631787698099,
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "silver",
+    "table": "compliance_scored",
+    "recordCount": 36866,
+    "fileSizeBytes": 1553766,
+    "ingestionTime": "2026-04-20T18:17:21.465Z",
+    "source": "bronze_etl",
+    "status": "completed",
+    "qualityScore": 0.9644451075297081,
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "silver",
+    "table": "users_enriched",
+    "recordCount": 24941,
+    "fileSizeBytes": 1358432,
+    "ingestionTime": "2026-04-20T16:17:21.465Z",
+    "source": "bronze_etl",
+    "status": "completed",
+    "qualityScore": 0.9696688987096488,
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "silver",
+    "table": "transactions_clean",
+    "recordCount": 40670,
+    "fileSizeBytes": 3116086,
+    "ingestionTime": "2026-04-20T14:17:21.465Z",
+    "source": "bronze_etl",
+    "status": "completed",
+    "qualityScore": 0.993405997385229,
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "silver",
+    "table": "compliance_scored",
+    "recordCount": 25375,
+    "fileSizeBytes": 4321105,
+    "ingestionTime": "2026-04-20T12:17:21.465Z",
+    "source": "bronze_etl",
+    "status": "completed",
+    "qualityScore": 0.9531459097379893,
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "silver",
+    "table": "users_enriched",
+    "recordCount": 33278,
+    "fileSizeBytes": 3835192,
+    "ingestionTime": "2026-04-20T10:17:21.465Z",
+    "source": "bronze_etl",
+    "status": "completed",
+    "qualityScore": 0.9885442798096493,
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "silver",
+    "table": "users_enriched",
+    "recordCount": 21216,
+    "fileSizeBytes": 1673654,
+    "ingestionTime": "2026-04-20T08:17:21.465Z",
+    "source": "bronze_etl",
+    "status": "completed",
+    "qualityScore": 0.9532833825775171,
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "gold",
+    "table": "fraud_model_features",
+    "recordCount": 2871,
+    "fileSizeBytes": 136687,
+    "ingestionTime": "2026-04-20T22:17:21.465Z",
+    "source": "silver_aggregation",
+    "status": "completed",
+    "businessValue": "critical",
+    "partitionKey": "dt=2026-04-20"
+  },
+  {
+    "layer": "gold",
+    "table": "daily_volume_by_corridor",
+    "recordCount": 2455,
+    "fileSizeBytes": 395349,
+    "ingestionTime": "2026-04-19T22:17:21.465Z",
+    "source": "silver_aggregation",
+    "status": "completed",
+    "businessValue": "critical",
+    "partitionKey": "dt=2026-04-19"
+  },
+  {
+    "layer": "gold",
+    "table": "daily_volume_by_corridor",
+    "recordCount": 2384,
+    "fileSizeBytes": 411197,
+    "ingestionTime": "2026-04-18T22:17:21.465Z",
+    "source": "silver_aggregation",
+    "status": "completed",
+    "businessValue": "critical",
+    "partitionKey": "dt=2026-04-18"
+  },
+  {
+    "layer": "gold",
+    "table": "fraud_model_features",
+    "recordCount": 3144,
+    "fileSizeBytes": 164788,
+    "ingestionTime": "2026-04-17T22:17:21.465Z",
+    "source": "silver_aggregation",
+    "status": "completed",
+    "businessValue": "high",
+    "partitionKey": "dt=2026-04-17"
+  },
+  {
+    "layer": "gold",
+    "table": "daily_volume_by_corridor",
+    "recordCount": 1518,
+    "fileSizeBytes": 269311,
+    "ingestionTime": "2026-04-16T22:17:21.465Z",
+    "source": "silver_aggregation",
+    "status": "completed",
+    "businessValue": "high",
+    "partitionKey": "dt=2026-04-16"
+  }
+]

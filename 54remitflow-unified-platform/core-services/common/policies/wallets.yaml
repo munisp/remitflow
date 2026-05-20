@@ -1,0 +1,196 @@
+# Wallet Service Policies
+# Controls access to wallet operations with context-aware authorization
+
+# Users can view their own wallet
+- id: wallet_view_own
+  description: "Users can view their own wallet balance and history"
+  subjects:
+    roles: ["user"]
+  actions: ["wallet:view", "wallet:balance", "wallet:history"]
+  resources:
+    type: "wallet"
+  conditions:
+    - type: owner_match
+  effect: allow
+  priority: 5
+  redactions:
+    - "internal_flags"
+    - "risk_score"
+    - "freeze_reason"
+
+# Support can view wallet info with redactions
+- id: wallet_view_support
+  description: "Support can view wallet info with some redactions"
+  subjects:
+    roles: ["support"]
+  actions: ["wallet:view", "wallet:balance", "wallet:history"]
+  resources:
+    type: "wallet"
+  conditions:
+    - type: tenant_match
+      allow_null: true
+  effect: allow
+  priority: 10
+  redactions:
+    - "linked_bank_accounts.account_number"
+    - "linked_cards.card_number"
+
+# Compliance can view full wallet details
+- id: wallet_view_compliance
+  description: "Compliance can view full wallet details"
+  subjects:
+    roles: ["compliance", "admin"]
+  actions: ["wallet:view", "wallet:balance", "wallet:history", "wallet:audit"]
+  resources:
+    type: "wallet"
+  conditions:
+    - type: tenant_match
+      allow_null: true
+  effect: allow
+  priority: 20
+  redactions: []
+
+# Users can fund their own wallet
+- id: wallet_fund_own
+  description: "Users can fund their own wallet"
+  subjects:
+    roles: ["user"]
+  actions: ["wallet:fund", "wallet:deposit"]
+  resources:
+    type: "wallet"
+  conditions:
+    - type: owner_match
+  effect: allow
+  priority: 5
+
+# Users can withdraw from their own wallet
+- id: wallet_withdraw_own
+  description: "Users can withdraw from their own wallet"
+  subjects:
+    roles: ["user"]
+  actions: ["wallet:withdraw"]
+  resources:
+    type: "wallet"
+  conditions:
+    - type: owner_match
+  effect: allow
+  priority: 5
+
+# High-value withdrawals require additional verification
+- id: wallet_withdraw_high_value
+  description: "High-value withdrawals (>2M NGN) require compliance review"
+  subjects:
+    roles: ["user"]
+  actions: ["wallet:withdraw"]
+  resources:
+    type: "wallet"
+  conditions:
+    - type: amount_gte
+      value: 2000000
+  effect: allow
+  priority: 15
+  required_approvals: ["compliance_review"]
+
+# Only compliance can freeze wallets
+- id: wallet_freeze_compliance
+  description: "Only compliance can freeze wallets"
+  subjects:
+    roles: ["compliance", "admin"]
+  actions: ["wallet:freeze", "wallet:suspend"]
+  resources:
+    type: "wallet"
+  conditions:
+    - type: tenant_match
+      allow_null: true
+  effect: allow
+  priority: 25
+
+# Only admin can unfreeze wallets
+- id: wallet_unfreeze_admin
+  description: "Only admin can unfreeze wallets"
+  subjects:
+    roles: ["admin"]
+  actions: ["wallet:unfreeze", "wallet:reactivate"]
+  resources:
+    type: "wallet"
+  effect: allow
+  priority: 30
+
+# Block support from freezing/unfreezing
+- id: wallet_freeze_deny_support
+  description: "Support cannot freeze or unfreeze wallets"
+  subjects:
+    roles: ["support"]
+  actions: ["wallet:freeze", "wallet:unfreeze", "wallet:suspend", "wallet:reactivate"]
+  resources:
+    type: "wallet"
+  effect: deny
+  priority: 35
+
+# Only compliance can adjust wallet limits
+- id: wallet_limits_compliance
+  description: "Only compliance can adjust wallet limits"
+  subjects:
+    roles: ["compliance", "admin"]
+  actions: ["wallet:adjust_limits", "wallet:override_limits"]
+  resources:
+    type: "wallet"
+  conditions:
+    - type: tenant_match
+      allow_null: true
+  effect: allow
+  priority: 25
+
+# Service-to-service wallet operations
+- id: wallet_service_operations
+  description: "Internal services can perform wallet operations"
+  subjects:
+    roles: ["service"]
+  actions: ["wallet:debit", "wallet:credit", "wallet:reserve", "wallet:release"]
+  resources:
+    type: "wallet"
+  effect: allow
+  priority: 50
+
+# Limit override policies
+- id: limit_override_compliance
+  description: "Compliance can override transaction limits"
+  subjects:
+    roles: ["compliance", "admin"]
+  actions: ["limits:override", "limits:increase"]
+  resources:
+    type: "limits"
+  conditions:
+    - type: tenant_match
+      allow_null: true
+  effect: allow
+  priority: 25
+
+# High-value limit overrides require admin
+- id: limit_override_high_value_admin
+  description: "High-value limit overrides (>10M NGN) require admin"
+  subjects:
+    roles: ["admin"]
+  actions: ["limits:override"]
+  resources:
+    type: "limits"
+  conditions:
+    - type: amount_gte
+      value: 10000000
+  effect: allow
+  priority: 35
+
+# Block compliance from high-value limit overrides
+- id: limit_override_high_value_deny_compliance
+  description: "Compliance cannot override limits above 10M NGN"
+  subjects:
+    roles: ["compliance"]
+    exclude_roles: ["admin"]
+  actions: ["limits:override"]
+  resources:
+    type: "limits"
+  conditions:
+    - type: amount_gte
+      value: 10000000
+  effect: deny
+  priority: 40

@@ -1,0 +1,66 @@
+# Initial requirements.txt for Data Processing Service
+
+
+
+
+Flask
+Flask-Cors
+
+
+
+Flask-SQLAlchemy
+redis
+
+
+
+scikit-learn
+tensorflow
+torch
+
+
+
+marshmallow
+celery
+flask-swagger-ui
+python-dotenv
+# Optional for GNN
+torch_geometric
+# Optional for advanced data processing
+geopy
+geopandas
+psycopg2-binary
+
+
+
+marshmallow
+celery
+flask-swagger-ui
+python-dotenv
+joblib
+scipy
+# Optional for GNN
+torch_geometric
+# Optional for advanced data processing
+geopy
+geopandas
+psycopg2-binary
+# Optional for SHAP
+shap
+# Optional for Prophet
+# Optional for Prophet
+# prophet
+# pystan<3.0
+# Optional for NLTK
+nltk
+
+
+
+pandas
+scipy
+scikit-learn
+matplotlib
+prometheus_client
+werkzeug
+click
+
+

@@ -1,0 +1,614 @@
+# RemitFlow v76 — Kubernetes Manifests for Polyglot Microservices
+# Apply: kubectl apply -f k8s/microservices-v76.yaml
+
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remitflow
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    version: "v76"
+
+---
+# ─── Go: NGX Price Feed ──────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ngx-price-feed
+  namespace: remitflow
+  labels:
+    app: ngx-price-feed
+    language: go
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ngx-price-feed
+  template:
+    metadata:
+      labels:
+        app: ngx-price-feed
+        language: go
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: ngx-price-feed
+          image: remitflow/ngx-price-feed:v76
+          ports:
+            - containerPort: 8081
+          env:
+            - name: PORT
+              value: "8081"
+            - name: GIN_MODE
+              value: "release"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ngx-price-feed
+  namespace: remitflow
+spec:
+  selector:
+    app: ngx-price-feed
+  ports:
+    - port: 8081
+      targetPort: 8081
+
+---
+# ─── Go: API Gateway ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: remitflow
+  labels:
+    app: api-gateway
+    language: go
+    version: "1.0.0"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+        language: go
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: api-gateway
+          image: remitflow/api-gateway:v76
+          ports:
+            - containerPort: 8082
+          env:
+            - name: PORT
+              value: "8082"
+            - name: GIN_MODE
+              value: "release"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: JWT_SECRET
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: remitflow
+spec:
+  selector:
+    app: api-gateway
+  ports:
+    - port: 8082
+      targetPort: 8082
+
+---
+# ─── Go: Corridor Pricing ────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: corridor-pricing
+  namespace: remitflow
+  labels:
+    app: corridor-pricing
+    language: go
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: corridor-pricing
+  template:
+    metadata:
+      labels:
+        app: corridor-pricing
+        language: go
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: corridor-pricing
+          image: remitflow/corridor-pricing:v76
+          ports:
+            - containerPort: 8083
+          env:
+            - name: PORT
+              value: "8083"
+            - name: GIN_MODE
+              value: "release"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8083
+            initialDelaySeconds: 10
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: corridor-pricing
+  namespace: remitflow
+spec:
+  selector:
+    app: corridor-pricing
+  ports:
+    - port: 8083
+      targetPort: 8083
+
+---
+# ─── Rust: FX Engine ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fx-engine
+  namespace: remitflow
+  labels:
+    app: fx-engine
+    language: rust
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fx-engine
+  template:
+    metadata:
+      labels:
+        app: fx-engine
+        language: rust
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: fx-engine
+          image: remitflow/fx-engine:v76
+          ports:
+            - containerPort: 8084
+          env:
+            - name: PORT
+              value: "8084"
+            - name: RUST_LOG
+              value: "info"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8084
+            initialDelaySeconds: 15
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fx-engine
+  namespace: remitflow
+spec:
+  selector:
+    app: fx-engine
+  ports:
+    - port: 8084
+      targetPort: 8084
+
+---
+# ─── Rust: TX Processor ──────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tx-processor
+  namespace: remitflow
+  labels:
+    app: tx-processor
+    language: rust
+    version: "1.0.0"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: tx-processor
+  template:
+    metadata:
+      labels:
+        app: tx-processor
+        language: rust
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: tx-processor
+          image: remitflow/tx-processor:v76
+          ports:
+            - containerPort: 8085
+          env:
+            - name: PORT
+              value: "8085"
+            - name: RUST_LOG
+              value: "info"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8085
+            initialDelaySeconds: 15
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tx-processor
+  namespace: remitflow
+spec:
+  selector:
+    app: tx-processor
+  ports:
+    - port: 8085
+      targetPort: 8085
+
+---
+# ─── Rust: Compliance Engine ─────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compliance-engine
+  namespace: remitflow
+  labels:
+    app: compliance-engine
+    language: rust
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: compliance-engine
+  template:
+    metadata:
+      labels:
+        app: compliance-engine
+        language: rust
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: compliance-engine
+          image: remitflow/compliance-engine:v76
+          ports:
+            - containerPort: 8086
+          env:
+            - name: PORT
+              value: "8086"
+            - name: RUST_LOG
+              value: "info"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              memory: "64Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8086
+            initialDelaySeconds: 15
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compliance-engine
+  namespace: remitflow
+spec:
+  selector:
+    app: compliance-engine
+  ports:
+    - port: 8086
+      targetPort: 8086
+
+---
+# ─── Python: Fraud Detection ─────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fraud-detection
+  namespace: remitflow
+  labels:
+    app: fraud-detection
+    language: python
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fraud-detection
+  template:
+    metadata:
+      labels:
+        app: fraud-detection
+        language: python
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: fraud-detection
+          image: remitflow/fraud-detection:v76
+          ports:
+            - containerPort: 8087
+          env:
+            - name: PORT
+              value: "8087"
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8087
+            initialDelaySeconds: 30
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fraud-detection
+  namespace: remitflow
+spec:
+  selector:
+    app: fraud-detection
+  ports:
+    - port: 8087
+      targetPort: 8087
+
+---
+# ─── Python: AML Compliance ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aml-compliance
+  namespace: remitflow
+  labels:
+    app: aml-compliance
+    language: python
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aml-compliance
+  template:
+    metadata:
+      labels:
+        app: aml-compliance
+        language: python
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: aml-compliance
+          image: remitflow/aml-compliance:v76
+          ports:
+            - containerPort: 8088
+          env:
+            - name: PORT
+              value: "8088"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8088
+            initialDelaySeconds: 20
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aml-compliance
+  namespace: remitflow
+spec:
+  selector:
+    app: aml-compliance
+  ports:
+    - port: 8088
+      targetPort: 8088
+
+---
+# ─── Python: Analytics Engine ────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: analytics-engine
+  namespace: remitflow
+  labels:
+    app: analytics-engine
+    language: python
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: analytics-engine
+  template:
+    metadata:
+      labels:
+        app: analytics-engine
+        language: python
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: analytics-engine
+          image: remitflow/analytics-engine:v76
+          ports:
+            - containerPort: 8089
+          env:
+            - name: PORT
+              value: "8089"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8089
+            initialDelaySeconds: 20
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics-engine
+  namespace: remitflow
+spec:
+  selector:
+    app: analytics-engine
+  ports:
+    - port: 8089
+      targetPort: 8089
+
+---
+# ─── HPA for high-traffic services ──────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-gateway-hpa
+  namespace: remitflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-gateway
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tx-processor-hpa
+  namespace: remitflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: tx-processor
+  minReplicas: 3
+  maxReplicas: 15
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65

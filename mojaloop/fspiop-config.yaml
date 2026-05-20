@@ -1,0 +1,67 @@
+# Mojaloop FSPIOP API Configuration for RemitFlow
+# Implements ISO 20022 pacs.008 / pacs.002 message mapping
+
+fspiop:
+  version: "1.1"
+  dfsp_id: "remitflow-dfsp"
+  hub_endpoint: "${MOJALOOP_HUB_URL:-http://mojaloop-simulator:8444}"
+
+  # JWS signing for production
+  jws:
+    enabled: false  # Set to true in production
+    signing_key_path: "/secrets/mojaloop-jws-private.pem"
+    verification_keys_path: "/secrets/mojaloop-jws-public-keys/"
+
+  # mTLS for production
+  mtls:
+    enabled: false  # Set to true in production
+    cert_path: "/secrets/mojaloop-client.crt"
+    key_path: "/secrets/mojaloop-client.key"
+    ca_path: "/secrets/mojaloop-ca.crt"
+
+  # Supported corridors via Mojaloop
+  corridors:
+    - id: NG_GH
+      from_currency: NGN
+      to_currency: GHS
+      scheme: GhIPSS
+      description: "Nigeria to Ghana via GhIPSS/Mojaloop"
+
+    - id: NG_KE
+      from_currency: NGN
+      to_currency: KES
+      scheme: PesaLink
+      description: "Nigeria to Kenya via PesaLink/Mojaloop"
+
+    - id: NG_TZ
+      from_currency: NGN
+      to_currency: TZS
+      scheme: TIPS
+      description: "Nigeria to Tanzania via TIPS/Mojaloop"
+
+    - id: NG_UG
+      from_currency: NGN
+      to_currency: UGX
+      scheme: UgandaIPS
+      description: "Nigeria to Uganda via Uganda IPS/Mojaloop"
+
+    - id: NG_ZA
+      from_currency: NGN
+      to_currency: ZAR
+      scheme: SADC-RTGS
+      description: "Nigeria to South Africa via SADC-RTGS"
+
+  # Message timeout settings
+  timeouts:
+    party_lookup_ms: 30000
+    quote_ms: 30000
+    transfer_ms: 30000
+    bulk_transfer_ms: 120000
+
+  # Callback endpoints (RemitFlow receives these)
+  callbacks:
+    parties: "/api/mojaloop/parties"
+    quotes: "/api/mojaloop/quotes"
+    transfers: "/api/mojaloop/transfers"
+    bulk_transfers: "/api/mojaloop/bulk-transfers"
+    transaction_requests: "/api/mojaloop/transaction-requests"

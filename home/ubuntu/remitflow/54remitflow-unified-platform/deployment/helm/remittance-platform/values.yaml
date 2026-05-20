@@ -1,0 +1,196 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# RemitFlow Platform — Helm Values
+# IMPORTANT: All secrets below are EMPTY by default.
+# Override with --set secrets.xxx="value" or via a sealed-secrets values file.
+# NEVER commit actual secret values to version control.
+# ─────────────────────────────────────────────────────────────────────────────
+
+global:
+  environment: production
+  domain: remitflow.com
+  imageRegistry: docker.io
+  imagePullSecrets: []
+
+image:
+  registry: docker.io
+  repository: remitflow
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+postgresql:
+  enabled: true
+  auth:
+    username: remittance_admin
+    password: ""
+    database: remittance_prod
+  primary:
+    persistence:
+      enabled: true
+      size: 100Gi
+      storageClass: standard
+    resources:
+      requests:
+        memory: 2Gi
+        cpu: 1000m
+      limits:
+        memory: 4Gi
+        cpu: 2000m
+
+redis:
+  enabled: true
+  auth:
+    enabled: true
+    password: ""
+  master:
+    persistence:
+      enabled: true
+      size: 10Gi
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 500m
+      limits:
+        memory: 1Gi
+        cpu: 1000m
+
+kafka:
+  enabled: true
+  replicaCount: 3
+  auth:
+    clientProtocol: sasl
+    sasl:
+      mechanism: plain
+      users:
+        - remittance
+      passwords: []
+  persistence:
+    enabled: true
+    size: 100Gi
+  resources:
+    requests:
+      memory: 2Gi
+      cpu: 1000m
+    limits:
+      memory: 4Gi
+      cpu: 2000m
+
+temporal:
+  enabled: true
+  server:
+    replicaCount: 3
+    resources:
+      requests:
+        memory: 2Gi
+        cpu: 1000m
+      limits:
+        memory: 4Gi
+        cpu: 2000m
+
+api:
+  replicaCount: 3
+  image:
+    repository: remitflow/api
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: 512Mi
+      cpu: 500m
+    limits:
+      memory: 1Gi
+      cpu: 1000m
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+pwa:
+  replicaCount: 2
+  image:
+    repository: remitflow/pwa
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      memory: 128Mi
+      cpu: 100m
+    limits:
+      memory: 256Mi
+      cpu: 250m
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+
+backup:
+  enabled: true
+  schedule: "0 2 * * *"
+  image: postgres:15-alpine
+  s3Bucket: ""
+  s3Region: us-east-1
+  retentionDays: 30
+
+ingress:
+  enabled: true
+  className: nginx
+  host: app.remitflow.com
+  apiHost: api.remitflow.com
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+  tls:
+    enabled: true
+    secretName: remitflow-tls
+
+monitoring:
+  prometheus:
+    enabled: true
+  grafana:
+    enabled: true
+    adminPassword: ""
+
+vault:
+  enabled: true
+  addr: "http://vault:8200"
+  token: ""
+
+secrets:
+  postgresPassword: ""
+  redisPassword: ""
+  jwtSecretKey: ""
+  encryptionKey: ""
+  sentryDsn: ""
+  wiseApiKey: ""
+  remitlyApiKey: ""
+  stripeApiKey: ""
+  paystackSecretKey: ""
+  flutterwaveSecretKey: ""
+  twilioAccountSid: ""
+  twilioAuthToken: ""
+  sendgridApiKey: ""
+  firebaseServerKey: ""
+  circleApiKey: ""
+  infuraProjectId: ""
+  alchemyApiKey: ""
+  africasTalkingApiKey: ""
+  africasTalkingUsername: ""
+  interswitchClientId: ""
+  nibssApiKey: ""
+  paystackWebhookSecret: ""
+  flutterwaveWebhookSecret: ""
+  stripeWebhookSecret: ""
+  wiseWebhookSecret: ""
+  awsAccessKeyId: ""
+  awsSecretAccessKey: ""

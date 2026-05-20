@@ -1,0 +1,648 @@
+# APISIX Route Definitions — v200 Gap Microservices
+# All routes include: JWT authentication, rate limiting, CORS, and request logging
+# Base URL pattern: /api/v1/{service-name}/{endpoint}
+
+routes:
+  # ─── Go XOF Adapter (West African Corridors) ───────────────────────────────
+  - id: xof-adapter-quote
+    uri: /api/v1/xof/quote
+    methods: [POST]
+    upstream:
+      nodes:
+        go-xof-adapter:8095: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 100
+        burst: 50
+        key: consumer_name
+      cors:
+        allow_origins: "*"
+        allow_methods: "POST,OPTIONS"
+        allow_headers: "Authorization,Content-Type"
+      request-id:
+        header_name: X-Request-ID
+      prometheus: {}
+
+  - id: xof-adapter-submit
+    uri: /api/v1/xof/submit
+    methods: [POST]
+    upstream:
+      nodes:
+        go-xof-adapter:8095: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 20
+        burst: 10
+        key: consumer_name
+      cors:
+        allow_origins: "*"
+        allow_methods: "POST,OPTIONS"
+        allow_headers: "Authorization,Content-Type"
+
+  - id: xof-adapter-status
+    uri: /api/v1/xof/status/*
+    methods: [GET]
+    upstream:
+      nodes:
+        go-xof-adapter:8095: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 200
+        burst: 100
+        key: consumer_name
+
+  # ─── Go Correspondent Manager ───────────────────────────────────────────────
+  - id: correspondent-list
+    uri: /api/v1/correspondents
+    methods: [GET]
+    upstream:
+      nodes:
+        go-correspondent-manager:8096: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 50
+        burst: 20
+        key: consumer_name
+      # Admin-only: require correspondent_bank_admin role
+      opa:
+        host: http://permify:3476
+        policy: remitflow/can_manage_correspondents
+
+  - id: correspondent-create
+    uri: /api/v1/correspondents
+    methods: [POST]
+    upstream:
+      nodes:
+        go-correspondent-manager:8096: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 10
+        burst: 5
+        key: consumer_name
+      opa:
+        host: http://permify:3476
+        policy: remitflow/can_manage_correspondents
+
+  - id: clearing-line-create
+    uri: /api/v1/clearing-line
+    methods: [POST]
+    upstream:
+      nodes:
+        go-correspondent-manager:8096: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 10
+        burst: 5
+        key: consumer_name
+
+  # ─── Go SME Trade Service ────────────────────────────────────────────────────
+  - id: sme-trade-quote
+    uri: /api/v1/sme/quote
+    methods: [POST]
+    upstream:
+      nodes:
+        go-sme-trade-service:8097: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 100
+        burst: 50
+        key: consumer_name
+      cors:
+        allow_origins: "*"
+        allow_methods: "POST,OPTIONS"
+        allow_headers: "Authorization,Content-Type"
+
+  - id: sme-bulk-batch
+    uri: /api/v1/sme/bulk-batch
+    methods: [POST, GET]
+    upstream:
+      nodes:
+        go-sme-trade-service:8097: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 10
+        burst: 5
+        key: consumer_name
+
+  - id: sme-form-m
+    uri: /api/v1/sme/form-m
+    methods: [POST, GET]
+    upstream:
+      nodes:
+        go-sme-trade-service:8097: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 20
+        burst: 10
+        key: consumer_name
+
+  # ─── Go HNW Routing ──────────────────────────────────────────────────────────
+  - id: hnw-quote
+    uri: /api/v1/hnw/quote
+    methods: [POST]
+    upstream:
+      nodes:
+        go-hnw-routing:8098: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 50
+        burst: 25
+        key: consumer_name
+      opa:
+        host: http://permify:3476
+        policy: remitflow/can_access_hnw_pricing
+
+  - id: hnw-rate-lock
+    uri: /api/v1/hnw/rate-lock
+    methods: [POST]
+    upstream:
+      nodes:
+        go-hnw-routing:8098: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 10
+        burst: 5
+        key: consumer_name
+
+  - id: hnw-transfer
+    uri: /api/v1/hnw/transfer
+    methods: [POST]
+    upstream:
+      nodes:
+        go-hnw-routing:8098: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 10
+        burst: 5
+        key: consumer_name
+
+  # ─── Rust Immigrant Worker KYC ───────────────────────────────────────────────
+  - id: immigrant-kyc-verify
+    uri: /api/v1/immigrant-kyc/verify
+    methods: [POST]
+    upstream:
+      nodes:
+        rust-immigrant-worker-kyc:8099: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 20
+        burst: 10
+        key: consumer_name
+
+  - id: immigrant-kyc-check-limit
+    uri: /api/v1/immigrant-kyc/check-limit
+    methods: [POST]
+    upstream:
+      nodes:
+        rust-immigrant-worker-kyc:8099: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 200
+        burst: 100
+        key: consumer_name
+
+  # ─── Rust HNW FX Engine ──────────────────────────────────────────────────────
+  - id: hnw-fx-price
+    uri: /api/v1/hnw-fx/price
+    methods: [POST]
+    upstream:
+      nodes:
+        rust-hnw-fx-engine:8100: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 100
+        burst: 50
+        key: consumer_name
+
+  - id: hnw-fx-rate-lock
+    uri: /api/v1/hnw-fx/rate-lock
+    methods: [POST]
+    upstream:
+      nodes:
+        rust-hnw-fx-engine:8100: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 20
+        burst: 10
+        key: consumer_name
+
+  # ─── Rust SME Bulk Processor ─────────────────────────────────────────────────
+  - id: sme-bulk-submit
+    uri: /api/v1/sme-bulk/batch
+    methods: [POST]
+    upstream:
+      nodes:
+        rust-sme-bulk-processor:8101: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 5
+        burst: 2
+        key: consumer_name
+
+  - id: sme-bulk-status
+    uri: /api/v1/sme-bulk/batch/*
+    methods: [GET]
+    upstream:
+      nodes:
+        rust-sme-bulk-processor:8101: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 100
+        burst: 50
+        key: consumer_name
+
+  # ─── Python SME Compliance ───────────────────────────────────────────────────
+  - id: sme-compliance-validate
+    uri: /api/v1/sme-compliance/validate-payment
+    methods: [POST]
+    upstream:
+      nodes:
+        python-sme-compliance:8102: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 50
+        burst: 25
+        key: consumer_name
+
+  - id: sme-compliance-form-m
+    uri: /api/v1/sme-compliance/validate-form-m
+    methods: [POST]
+    upstream:
+      nodes:
+        python-sme-compliance:8102: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 20
+        burst: 10
+        key: consumer_name
+
+  # ─── Python Corridor ML ──────────────────────────────────────────────────────
+  - id: corridor-ml-score
+    uri: /api/v1/corridor-ml/score
+    methods: [POST]
+    upstream:
+      nodes:
+        python-corridor-ml:8103: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 100
+        burst: 50
+        key: consumer_name
+
+  - id: corridor-ml-recommend
+    uri: /api/v1/corridor-ml/recommend
+    methods: [POST]
+    upstream:
+      nodes:
+        python-corridor-ml:8103: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 50
+        burst: 25
+        key: consumer_name
+
+  # ─── Python Lakehouse Corridors ──────────────────────────────────────────────
+  - id: lakehouse-analytics
+    uri: /api/v1/lakehouse/analytics/*
+    methods: [GET]
+    upstream:
+      nodes:
+        python-lakehouse-corridors:8104: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 20
+        burst: 10
+        key: consumer_name
+
+  - id: lakehouse-cbn-report
+    uri: /api/v1/lakehouse/cbn-report
+    methods: [GET]
+    upstream:
+      nodes:
+        python-lakehouse-corridors:8104: 1
+      type: roundrobin
+    plugins:
+      jwt-auth:
+        header: Authorization
+      limit-req:
+        rate: 5
+        burst: 2
+        key: consumer_name
+
+# ─── Health Check Routes (no auth) ───────────────────────────────────────────
+  - id: v200-health-checks
+    uri: /api/v1/health/*
+    methods: [GET]
+    upstream:
+      nodes:
+        go-xof-adapter:8095: 1
+      type: roundrobin
+    plugins:
+      limit-req:
+        rate: 100
+        burst: 50
+        key: remote_addr
+
+
+- id: route_go_apisix_config
+  uri: /api/go-apisix-config/*
+  name: go-apisix-config
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "go-apisix-config:8090": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_go_bricspay_adapter
+  uri: /api/go-bricspay-adapter/*
+  name: go-bricspay-adapter
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "go-bricspay-adapter:8091": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_go_dapr_service
+  uri: /api/go-dapr-service/*
+  name: go-dapr-service
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "go-dapr-service:8092": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_go_ghipss_adapter
+  uri: /api/go-ghipss-adapter/*
+  name: go-ghipss-adapter
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "go-ghipss-adapter:8093": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_go_papss_service
+  uri: /api/go-papss-service/*
+  name: go-papss-service
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "go-papss-service:8094": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_python_africbdc_adapter
+  uri: /api/python-africbdc-adapter/*
+  name: python-africbdc-adapter
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "python-africbdc-adapter:8095": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_rust_device_fingerprint
+  uri: /api/rust-device-fingerprint/*
+  name: rust-device-fingerprint
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "rust-device-fingerprint:8096": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_rust_mbridge_adapter
+  uri: /api/rust-mbridge-adapter/*
+  name: rust-mbridge-adapter
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "rust-mbridge-adapter:8097": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_shared_middleware
+  uri: /api/shared-middleware/*
+  name: shared-middleware
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "shared-middleware:8098": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_universal_fx
+  uri: /api/universal-fx/*
+  name: universal-fx
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "universal-fx:8099": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_outbound_swift
+  uri: /api/outbound-swift/*
+  name: outbound-swift
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "outbound-swift:8100": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_float_income
+  uri: /api/float-income/*
+  name: float-income
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "float-income:8101": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on
+
+- id: route_revenue_analytics
+  uri: /api/revenue-analytics/*
+  name: revenue-analytics
+  methods: [GET, POST, PUT, DELETE, PATCH]
+  upstream:
+    type: roundrobin
+    nodes:
+      "revenue-analytics:8102": 1
+  plugins:
+    jwt-auth: {}
+    limit-req:
+      rate: 100
+      burst: 50
+      key: remote_addr
+    opentelemetry:
+      sampler:
+        name: always_on

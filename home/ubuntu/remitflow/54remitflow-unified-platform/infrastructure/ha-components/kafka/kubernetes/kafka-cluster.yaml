@@ -1,0 +1,583 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kafka-system
+  labels:
+    name: kafka-system
+    app.kubernetes.io/name: kafka
+    app.kubernetes.io/component: messaging
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-config
+  namespace: kafka-system
+  labels:
+    app: kafka
+data:
+  server.properties: |
+    # Apache Kafka High-Availability Configuration for Remittance Platform
+    broker.id=${KAFKA_BROKER_ID}
+    listeners=PLAINTEXT://0.0.0.0:9092,SSL://0.0.0.0:9093,SASL_SSL://0.0.0.0:9094
+    advertised.listeners=PLAINTEXT://${KAFKA_ADVERTISED_HOST}:9092,SSL://${KAFKA_ADVERTISED_HOST}:9093,SASL_SSL://${KAFKA_ADVERTISED_HOST}:9094
+    listener.security.protocol.map=PLAINTEXT:PLAINTEXT,SSL:SSL,SASL_SSL:SASL_SSL
+    
+    # Performance optimizations for Nigerian banking workloads
+    num.network.threads=8
+    num.io.threads=16
+    socket.send.buffer.bytes=102400
+    socket.receive.buffer.bytes=102400
+    socket.request.max.bytes=104857600
+    
+    # Log configuration
+    log.dirs=/var/kafka-logs
+    num.partitions=12
+    num.recovery.threads.per.data.dir=2
+    
+    # Replication settings for HA
+    offsets.topic.replication.factor=3
+    transaction.state.log.replication.factor=3
+    transaction.state.log.min.isr=2
+    default.replication.factor=3
+    min.insync.replicas=2
+    
+    # Retention policies for banking compliance
+    log.retention.hours=168
+    log.retention.bytes=1073741824
+    log.segment.bytes=1073741824
+    log.retention.check.interval.ms=300000
+    
+    # Zookeeper connection
+    zookeeper.connect=zookeeper-service:2181/kafka
+    zookeeper.connection.timeout.ms=18000
+    
+    # Security settings
+    ssl.keystore.location=/opt/kafka/config/ssl/kafka.server.keystore.jks
+    ssl.keystore.password=${SSL_KEYSTORE_PASSWORD}
+    ssl.key.password=${SSL_KEY_PASSWORD}
+    ssl.truststore.location=/opt/kafka/config/ssl/kafka.server.truststore.jks
+    ssl.truststore.password=${SSL_TRUSTSTORE_PASSWORD}
+    ssl.client.auth=required
+    
+    # SASL configuration
+    sasl.enabled.mechanisms=SCRAM-SHA-512
+    sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+    security.inter.broker.protocol=SASL_SSL
+    
+    # Performance optimizations
+    num.replica.fetchers=4
+    replica.lag.time.max.ms=30000
+    replica.socket.receive.buffer.bytes=65536
+    compression.type=lz4
+    batch.size=65536
+    linger.ms=5
+    buffer.memory=134217728
+    enable.idempotence=true
+    acks=all
+    retries=2147483647
+    max.in.flight.requests.per.connection=5
+    
+    # Nigerian network optimizations
+    request.timeout.ms=60000
+    session.timeout.ms=30000
+    fetch.max.bytes=52428800
+    replica.fetch.max.bytes=52428800
+    
+    # Log compaction for banking data
+    log.cleanup.policy=compact
+    log.cleaner.enable=true
+    log.cleaner.threads=2
+    
+    # Prevent unclean leader election
+    unclean.leader.election.enable=false
+    
+    # Resource quotas
+    quota.producer.default=10485760
+    quota.consumer.default=10485760
+    
+    # Monitoring
+    jmx.port=9999
+    metric.reporters=org.apache.kafka.common.metrics.JmxReporter
+    metrics.sample.window.ms=30000
+    metrics.num.samples=2
+    
+    # HA settings
+    controlled.shutdown.enable=true
+    controlled.shutdown.max.retries=3
+    controlled.shutdown.retry.backoff.ms=5000
+    leader.imbalance.per.broker.percentage=10
+    leader.imbalance.check.interval.seconds=300
+    
+    # Banking compliance
+    auto.create.topics.enable=false
+    log.preallocate=true
+    log.index.interval.bytes=4096
+    log.segment.delete.delay.ms=60000
+
+  log4j.properties: |
+    log4j.rootLogger=INFO, stdout, kafkaAppender
+    
+    log4j.appender.stdout=org.apache.log4j.ConsoleAppender
+    log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
+    log4j.appender.stdout.layout.ConversionPattern=[%d] %p %m (%c)%n
+    
+    log4j.appender.kafkaAppender=org.apache.log4j.DailyRollingFileAppender
+    log4j.appender.kafkaAppender.DatePattern='.'yyyy-MM-dd-HH
+    log4j.appender.kafkaAppender.File=/var/log/kafka/server.log
+    log4j.appender.kafkaAppender.layout=org.apache.log4j.PatternLayout
+    log4j.appender.kafkaAppender.layout.ConversionPattern=[%d] %p %m (%c)%n
+    
+    # Banking compliance logging
+    log4j.logger.kafka.controller=INFO
+    log4j.logger.kafka.log.LogCleaner=INFO
+    log4j.logger.state.change.logger=INFO
+    log4j.logger.kafka.authorizer.logger=INFO
+    log4j.logger.kafka.request.logger=INFO, requestAppender
+    log4j.additivity.kafka.request.logger=false
+    log4j.logger.kafka.security=INFO
+    
+    log4j.appender.requestAppender=org.apache.log4j.DailyRollingFileAppender
+    log4j.appender.requestAppender.DatePattern='.'yyyy-MM-dd-HH
+    log4j.appender.requestAppender.File=/var/log/kafka/kafka-request.log
+    log4j.appender.requestAppender.layout=org.apache.log4j.PatternLayout
+    log4j.appender.requestAppender.layout.ConversionPattern=[%d] %p %m (%c)%n
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kafka-ssl-secrets
+  namespace: kafka-system
+type: Opaque
+data:
+  # Base64 encoded SSL certificates and passwords
+  # These should be generated and managed by your certificate management system
+  ssl-keystore-password: YmFua2luZy1uZXR3b3JrLXNzbC1wYXNzd29yZA==
+  ssl-key-password: YmFua2luZy1uZXR3b3JrLXNzbC1wYXNzd29yZA==
+  ssl-truststore-password: YmFua2luZy1uZXR3b3JrLXNzbC1wYXNzd29yZA==
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: kafka-system
+  labels:
+    app: kafka
+spec:
+  clusterIP: None
+  ports:
+  - name: plaintext
+    port: 9092
+    targetPort: 9092
+  - name: ssl
+    port: 9093
+    targetPort: 9093
+  - name: sasl-ssl
+    port: 9094
+    targetPort: 9094
+  - name: jmx
+    port: 9999
+    targetPort: 9999
+  selector:
+    app: kafka
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-service
+  namespace: kafka-system
+  labels:
+    app: kafka
+spec:
+  type: ClusterIP
+  ports:
+  - name: plaintext
+    port: 9092
+    targetPort: 9092
+  - name: ssl
+    port: 9093
+    targetPort: 9093
+  - name: sasl-ssl
+    port: 9094
+    targetPort: 9094
+  - name: jmx
+    port: 9999
+    targetPort: 9999
+  selector:
+    app: kafka
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: kafka-system
+  labels:
+    app: kafka
+spec:
+  serviceName: kafka-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - kafka
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: kafka
+        image: confluentinc/cp-kafka:7.4.0
+        ports:
+        - containerPort: 9092
+          name: plaintext
+        - containerPort: 9093
+          name: ssl
+        - containerPort: 9094
+          name: sasl-ssl
+        - containerPort: 9999
+          name: jmx
+        env:
+        - name: KAFKA_BROKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.annotations['kafka.io/broker-id']
+        - name: KAFKA_ADVERTISED_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: SSL_KEYSTORE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: kafka-ssl-secrets
+              key: ssl-keystore-password
+        - name: SSL_KEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: kafka-ssl-secrets
+              key: ssl-key-password
+        - name: SSL_TRUSTSTORE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: kafka-ssl-secrets
+              key: ssl-truststore-password
+        - name: KAFKA_HEAP_OPTS
+          value: "-Xmx4G -Xms4G"
+        - name: KAFKA_JVM_PERFORMANCE_OPTS
+          value: "-server -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -Djava.awt.headless=true"
+        - name: KAFKA_LOG4J_OPTS
+          value: "-Dlog4j.configuration=file:/opt/kafka/config/log4j.properties"
+        volumeMounts:
+        - name: kafka-config
+          mountPath: /opt/kafka/config/server.properties
+          subPath: server.properties
+        - name: kafka-config
+          mountPath: /opt/kafka/config/log4j.properties
+          subPath: log4j.properties
+        - name: kafka-data
+          mountPath: /var/kafka-logs
+        - name: kafka-logs
+          mountPath: /var/log/kafka
+        - name: ssl-certs
+          mountPath: /opt/kafka/config/ssl
+          readOnly: true
+        resources:
+          requests:
+            memory: "6Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+        livenessProbe:
+          tcpSocket:
+            port: 9092
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 9092
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - sh
+              - -c
+              - "kafka-server-stop.sh"
+      initContainers:
+      - name: init-broker-id
+        image: busybox:1.35
+        command:
+        - sh
+        - -c
+        - |
+          BROKER_ID=$(echo $HOSTNAME | sed 's/kafka-//')
+          echo "Setting broker ID to: $BROKER_ID"
+          kubectl annotate pod $HOSTNAME kafka.io/broker-id=$BROKER_ID --overwrite
+        env:
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+      volumes:
+      - name: kafka-config
+        configMap:
+          name: kafka-config
+      - name: ssl-certs
+        secret:
+          secretName: kafka-ssl-secrets
+      - name: kafka-logs
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: kafka-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 100Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: zookeeper-service
+  namespace: kafka-system
+  labels:
+    app: zookeeper
+spec:
+  clusterIP: None
+  ports:
+  - name: client
+    port: 2181
+    targetPort: 2181
+  - name: follower
+    port: 2888
+    targetPort: 2888
+  - name: election
+    port: 3888
+    targetPort: 3888
+  selector:
+    app: zookeeper
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: zookeeper
+  namespace: kafka-system
+  labels:
+    app: zookeeper
+spec:
+  serviceName: zookeeper-service
+  replicas: 3
+  selector:
+    matchLabels:
+      app: zookeeper
+  template:
+    metadata:
+      labels:
+        app: zookeeper
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - zookeeper
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: zookeeper
+        image: confluentinc/cp-zookeeper:7.4.0
+        ports:
+        - containerPort: 2181
+          name: client
+        - containerPort: 2888
+          name: follower
+        - containerPort: 3888
+          name: election
+        env:
+        - name: ZOOKEEPER_SERVER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.annotations['zookeeper.io/server-id']
+        - name: ZOOKEEPER_CLIENT_PORT
+          value: "2181"
+        - name: ZOOKEEPER_TICK_TIME
+          value: "2000"
+        - name: ZOOKEEPER_INIT_LIMIT
+          value: "10"
+        - name: ZOOKEEPER_SYNC_LIMIT
+          value: "5"
+        - name: ZOOKEEPER_SERVERS
+          value: "zookeeper-0.zookeeper-service:2888:3888;zookeeper-1.zookeeper-service:2888:3888;zookeeper-2.zookeeper-service:2888:3888"
+        - name: ZOOKEEPER_AUTOPURGE_SNAP_RETAIN_COUNT
+          value: "3"
+        - name: ZOOKEEPER_AUTOPURGE_PURGE_INTERVAL
+          value: "24"
+        - name: ZOOKEEPER_MAX_CLIENT_CNXNS
+          value: "60"
+        - name: ZOOKEEPER_HEAP_OPTS
+          value: "-Xmx2G -Xms2G"
+        - name: ZOOKEEPER_JVM_FLAGS
+          value: "-XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35"
+        volumeMounts:
+        - name: zookeeper-data
+          mountPath: /var/lib/zookeeper/data
+        - name: zookeeper-logs
+          mountPath: /var/lib/zookeeper/log
+        resources:
+          requests:
+            memory: "3Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - "echo ruok | nc localhost 2181 | grep imok"
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - "echo ruok | nc localhost 2181 | grep imok"
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      initContainers:
+      - name: init-server-id
+        image: busybox:1.35
+        command:
+        - sh
+        - -c
+        - |
+          SERVER_ID=$(echo $HOSTNAME | sed 's/zookeeper-//')
+          SERVER_ID=$((SERVER_ID + 1))
+          echo "Setting server ID to: $SERVER_ID"
+          kubectl annotate pod $HOSTNAME zookeeper.io/server-id=$SERVER_ID --overwrite
+          echo $SERVER_ID > /var/lib/zookeeper/data/myid
+        env:
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        volumeMounts:
+        - name: zookeeper-data
+          mountPath: /var/lib/zookeeper/data
+  volumeClaimTemplates:
+  - metadata:
+      name: zookeeper-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 20Gi
+  - metadata:
+      name: zookeeper-logs
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kafka-pdb
+  namespace: kafka-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: kafka
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zookeeper-pdb
+  namespace: kafka-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: zookeeper
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kafka-network-policy
+  namespace: kafka-system
+spec:
+  podSelector:
+    matchLabels:
+      app: kafka
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: remittance-system
+    - podSelector:
+        matchLabels:
+          app: zookeeper
+    ports:
+    - protocol: TCP
+      port: 9092
+    - protocol: TCP
+      port: 9093
+    - protocol: TCP
+      port: 9094
+    - protocol: TCP
+      port: 9999
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: zookeeper
+    ports:
+    - protocol: TCP
+      port: 2181
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
+

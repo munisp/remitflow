@@ -1,0 +1,388 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tigerbeetle-system
+  labels:
+    name: tigerbeetle-system
+    app.kubernetes.io/name: tigerbeetle
+    app.kubernetes.io/component: ledger
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tigerbeetle-config
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle
+data:
+  # TigerBeetle cluster configuration for Remittance Platform
+  # High-performance financial ledger with strict consistency guarantees
+  cluster-id: "0"
+  replica-count: "3"
+  
+  # Performance tuning for Nigerian banking workloads
+  cache-grid-bytes: "4294967296"  # 4GB cache
+  
+  # Network configuration
+  client-addresses: "0.0.0.0:3000"
+  
+  # Replication settings for HA
+  # TigerBeetle uses viewstamped replication for consensus
+  # Requires 2f+1 replicas to tolerate f failures
+  
+  startup-script: |
+    #!/bin/bash
+    set -e
+    
+    REPLICA_ID=$(echo $HOSTNAME | sed 's/tigerbeetle-//')
+    DATA_DIR="/var/lib/tigerbeetle"
+    
+    # Generate addresses for all replicas
+    ADDRESSES=""
+    for i in $(seq 0 2); do
+      if [ -n "$ADDRESSES" ]; then
+        ADDRESSES="${ADDRESSES},"
+      fi
+      ADDRESSES="${ADDRESSES}tigerbeetle-${i}.tigerbeetle-headless.tigerbeetle-system.svc.cluster.local:3001"
+    done
+    
+    echo "Starting TigerBeetle replica $REPLICA_ID"
+    echo "Cluster addresses: $ADDRESSES"
+    
+    # Initialize data file if not exists
+    if [ ! -f "$DATA_DIR/0_${REPLICA_ID}.tigerbeetle" ]; then
+      echo "Formatting TigerBeetle data file..."
+      tigerbeetle format --cluster=0 --replica=$REPLICA_ID --replica-count=3 "$DATA_DIR/0_${REPLICA_ID}.tigerbeetle"
+    fi
+    
+    # Start TigerBeetle
+    exec tigerbeetle start --addresses=$ADDRESSES "$DATA_DIR/0_${REPLICA_ID}.tigerbeetle"
+
+---
+# NOTE: Secrets are managed by External Secrets Operator
+# See: infrastructure/ha-components/secret-management/kubernetes/platform-secrets.yaml
+# The ExternalSecret 'tigerbeetle-secrets' in namespace 'tigerbeetle-system' will create
+# a Kubernetes Secret with the following keys:
+#   - tls-cert: TLS certificate for inter-replica communication
+#   - tls-key: TLS private key
+#   - ca-cert: CA certificate for verification
+#
+# Required AWS Secrets Manager entries:
+#   - remittance/tigerbeetle/tls (with properties: cert, key, ca-cert)
+#
+# To deploy without External Secrets (development only), create a Secret manually:
+# kubectl create secret generic tigerbeetle-secrets \
+#   --namespace=tigerbeetle-system \
+#   --from-file=tls-cert=./certs/tls.crt \
+#   --from-file=tls-key=./certs/tls.key \
+#   --from-file=ca-cert=./certs/ca.crt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle-headless
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle
+spec:
+  clusterIP: None
+  ports:
+  - name: client
+    port: 3000
+    targetPort: 3000
+  - name: replication
+    port: 3001
+    targetPort: 3001
+  selector:
+    app: tigerbeetle
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigerbeetle-service
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle
+  annotations:
+    service.kubernetes.io/topology-aware-hints: "auto"
+spec:
+  type: ClusterIP
+  ports:
+  - name: client
+    port: 3000
+    targetPort: 3000
+  selector:
+    app: tigerbeetle
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: tigerbeetle
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle
+spec:
+  serviceName: tigerbeetle-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: tigerbeetle
+  template:
+    metadata:
+      labels:
+        app: tigerbeetle
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - tigerbeetle
+            topologyKey: kubernetes.io/hostname
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values:
+                - m5.xlarge
+                - m5.2xlarge
+                - r5.xlarge
+                - r5.2xlarge
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: tigerbeetle
+        image: ghcr.io/tigerbeetle/tigerbeetle:latest
+        ports:
+        - containerPort: 3000
+          name: client
+        - containerPort: 3001
+          name: replication
+        env:
+        - name: REPLICA_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        command:
+        - /bin/sh
+        - -c
+        - |
+          REPLICA_ID=$(echo $HOSTNAME | sed 's/tigerbeetle-//')
+          DATA_DIR="/var/lib/tigerbeetle"
+          
+          # Generate addresses for all replicas
+          ADDRESSES=""
+          for i in $(seq 0 2); do
+            if [ -n "$ADDRESSES" ]; then
+              ADDRESSES="${ADDRESSES},"
+            fi
+            ADDRESSES="${ADDRESSES}tigerbeetle-${i}.tigerbeetle-headless.tigerbeetle-system.svc.cluster.local:3001"
+          done
+          
+          echo "Starting TigerBeetle replica $REPLICA_ID"
+          echo "Cluster addresses: $ADDRESSES"
+          
+          # Initialize data file if not exists
+          if [ ! -f "$DATA_DIR/0_${REPLICA_ID}.tigerbeetle" ]; then
+            echo "Formatting TigerBeetle data file..."
+            tigerbeetle format --cluster=0 --replica=$REPLICA_ID --replica-count=3 "$DATA_DIR/0_${REPLICA_ID}.tigerbeetle"
+          fi
+          
+          # Start TigerBeetle
+          exec tigerbeetle start --addresses=$ADDRESSES "$DATA_DIR/0_${REPLICA_ID}.tigerbeetle"
+        volumeMounts:
+        - name: tigerbeetle-data
+          mountPath: /var/lib/tigerbeetle
+        resources:
+          requests:
+            memory: "8Gi"
+            cpu: "2"
+          limits:
+            memory: "16Gi"
+            cpu: "4"
+        livenessProbe:
+          tcpSocket:
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 3000
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - "sleep 10"
+      - name: metrics-exporter
+        image: prom/node-exporter:v1.6.1
+        ports:
+        - containerPort: 9090
+          name: metrics
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+  volumeClaimTemplates:
+  - metadata:
+      name: tigerbeetle-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: fast-ssd
+      resources:
+        requests:
+          storage: 100Gi
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: tigerbeetle-pdb
+  namespace: tigerbeetle-system
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: tigerbeetle
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: tigerbeetle-network-policy
+  namespace: tigerbeetle-system
+spec:
+  podSelector:
+    matchLabels:
+      app: tigerbeetle
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: remittance-system
+    ports:
+    - protocol: TCP
+      port: 3000
+  - from:
+    - podSelector:
+        matchLabels:
+          app: tigerbeetle
+    ports:
+    - protocol: TCP
+      port: 3001
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: tigerbeetle
+    ports:
+    - protocol: TCP
+      port: 3001
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: UDP
+      port: 53
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: tigerbeetle-hpa
+  namespace: tigerbeetle-system
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: tigerbeetle
+  minReplicas: 3
+  maxReplicas: 3
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tigerbeetle-monitor
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle
+spec:
+  selector:
+    matchLabels:
+      app: tigerbeetle
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: tigerbeetle-alerts
+  namespace: tigerbeetle-system
+  labels:
+    app: tigerbeetle
+spec:
+  groups:
+  - name: tigerbeetle.rules
+    rules:
+    - alert: TigerBeetleReplicaDown
+      expr: up{job="tigerbeetle"} == 0
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: "TigerBeetle replica is down"
+        description: "TigerBeetle replica {{ $labels.instance }} has been down for more than 1 minute."
+    - alert: TigerBeetleHighLatency
+      expr: histogram_quantile(0.99, rate(tigerbeetle_request_duration_seconds_bucket[5m])) > 0.1
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "TigerBeetle high latency detected"
+        description: "TigerBeetle P99 latency is above 100ms for more than 5 minutes."
+    - alert: TigerBeetleDiskUsageHigh
+      expr: (node_filesystem_size_bytes{mountpoint="/var/lib/tigerbeetle"} - node_filesystem_free_bytes{mountpoint="/var/lib/tigerbeetle"}) / node_filesystem_size_bytes{mountpoint="/var/lib/tigerbeetle"} > 0.85
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: "TigerBeetle disk usage is high"
+        description: "TigerBeetle disk usage is above 85%."

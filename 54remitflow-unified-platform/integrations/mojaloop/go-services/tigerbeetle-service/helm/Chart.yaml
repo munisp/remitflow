@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tigerbeetle
+description: TigerBeetle Helm chart for Nigerian Remittance Platform
+type: application
+version: 1.0.0
+appVersion: "0.15.0"

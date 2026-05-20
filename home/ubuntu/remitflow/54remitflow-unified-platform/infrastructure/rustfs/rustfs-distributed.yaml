@@ -1,0 +1,155 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rustfs-distributed
+  namespace: rustfs
+  labels:
+    app.kubernetes.io/name: rustfs-distributed
+    app.kubernetes.io/component: object-storage
+spec:
+  serviceName: rustfs-distributed-headless
+  replicas: 4
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rustfs-distributed
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rustfs-distributed
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9000"
+        prometheus.io/path: "/minio/v2/metrics/cluster"
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/name
+                      operator: In
+                      values:
+                        - rustfs-distributed
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: rustfs
+          image: rustfs/rustfs:latest
+          args:
+            - server
+            - --console-address
+            - ":9001"
+            - http://rustfs-distributed-{0...3}.rustfs-distributed-headless.rustfs.svc.cluster.local/data
+          ports:
+            - name: api
+              containerPort: 9000
+              protocol: TCP
+            - name: console
+              containerPort: 9001
+              protocol: TCP
+          env:
+            - name: RUSTFS_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_ROOT_USER
+            - name: RUSTFS_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rustfs-credentials
+                  key: RUSTFS_ROOT_PASSWORD
+            - name: RUSTFS_BROWSER
+              value: "on"
+            - name: RUSTFS_PROMETHEUS_AUTH_TYPE
+              value: "public"
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 100Gi
+        storageClassName: standard
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs-distributed
+  namespace: rustfs
+  labels:
+    app.kubernetes.io/name: rustfs-distributed
+spec:
+  type: ClusterIP
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+    - name: console
+      port: 9001
+      targetPort: 9001
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: rustfs-distributed
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustfs-distributed-headless
+  namespace: rustfs
+  labels:
+    app.kubernetes.io/name: rustfs-distributed
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+  selector:
+    app.kubernetes.io/name: rustfs-distributed
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rustfs-distributed-pdb
+  namespace: rustfs
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rustfs-distributed

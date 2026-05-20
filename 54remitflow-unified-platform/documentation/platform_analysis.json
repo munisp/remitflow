@@ -1,0 +1,413 @@
+{
+  "stats": {
+    "total_files": 2763,
+    "total_dirs": 972,
+    "total_size": 97415138,
+    "by_category": {
+      "root": {
+        "files": 156,
+        "size": 10123036
+      },
+      "backend": {
+        "files": 587,
+        "size": 33222356
+      },
+      "frontend": {
+        "files": 1167,
+        "size": 7671857
+      },
+      "mobile": {
+        "files": 11,
+        "size": 119510
+      },
+      "deployment": {
+        "files": 81,
+        "size": 986292
+      },
+      "tests": {
+        "files": 12,
+        "size": 68896
+      },
+      "remittance-frontend": {
+        "files": 57,
+        "size": 252236
+      },
+      "remittance-source": {
+        "files": 211,
+        "size": 19547977
+      },
+      "data-platform": {
+        "files": 9,
+        "size": 288028
+      },
+      "database": {
+        "files": 16,
+        "size": 470439
+      },
+      "infrastructure": {
+        "files": 87,
+        "size": 1119935
+      },
+      "integration": {
+        "files": 1,
+        "size": 15545
+      },
+      "mobile-apps": {
+        "files": 6,
+        "size": 40062
+      },
+      "policy-document-manager": {
+        "files": 54,
+        "size": 192585
+      },
+      "services": {
+        "files": 279,
+        "size": 21273603
+      },
+      "simulation": {
+        "files": 6,
+        "size": 556067
+      },
+      "testing": {
+        "files": 16,
+        "size": 1446435
+      },
+      "monitoring": {
+        "files": 5,
+        "size": 17115
+      },
+      "helm": {
+        "files": 2,
+        "size": 3164
+      }
+    },
+    "file_types": {
+      ".md": 102,
+      ".yml": 56,
+      ".png": 12,
+      ".txt": 169,
+      ".example": 2,
+      ".go": 207,
+      ".mod": 92,
+      "no_ext": 51,
+      ".sum": 8,
+      ".py": 575,
+      ".conf": 15,
+      ".sql": 22,
+      ".enhanced": 2,
+      ".qr": 2,
+      ".pos": 2,
+      ".device": 2,
+      ".json": 103,
+      ".checkout_flow": 1,
+      ".product_catalog": 1,
+      ".order_management": 1,
+      ".inventory_sync": 1,
+      ".email": 1,
+      ".push_notification": 1,
+      ".backup": 12,
+      ".zig": 8,
+      ".js": 80,
+      ".yaml": 84,
+      ".db": 3,
+      ".ts": 173,
+      ".ico": 14,
+      ".html": 34,
+      ".zip": 1,
+      ".jsx": 733,
+      ".css": 41,
+      ".svg": 13,
+      ".tsx": 89,
+      ".local": 1,
+      ".sh": 34,
+      ".perm": 3,
+      ".rego": 1,
+      ".ini": 5,
+      ".toml": 1,
+      ".properties": 1,
+      ".csv": 4
+    }
+  },
+  "mobile_analysis": {
+    "mobile-native-enhanced": {
+      "exists": true,
+      "total_files": 49,
+      "ts_files": 41,
+      "tsx_files": 4,
+      "features": {
+        "security": 8,
+        "performance": 5,
+        "advanced": 5,
+        "analytics": 3,
+        "developing-countries": 11
+      }
+    },
+    "mobile-pwa": {
+      "exists": true,
+      "total_files": 47,
+      "ts_files": 42,
+      "tsx_files": 4,
+      "features": {
+        "security": 10,
+        "performance": 6,
+        "advanced": 5,
+        "analytics": 3,
+        "developing-countries": 2
+      }
+    },
+    "mobile-hybrid": {
+      "exists": true,
+      "total_files": 42,
+      "ts_files": 37,
+      "tsx_files": 4,
+      "features": {
+        "security": 9,
+        "performance": 6,
+        "advanced": 5,
+        "analytics": 3,
+        "developing-countries": 1
+      }
+    },
+    "mobile-app": {
+      "exists": true,
+      "total_files": 110,
+      "ts_files": 41,
+      "tsx_files": 60,
+      "features": {}
+    },
+    "mobile-app-complete": {
+      "exists": true,
+      "total_files": 3,
+      "ts_files": 1,
+      "tsx_files": 1,
+      "features": {}
+    }
+  },
+  "backend_services": {
+    "edge-services": {
+      "files": 31,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "edge-ai": {
+      "files": 4,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "dapr": {
+      "files": 3,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "core": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "apisix": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "go-services": {
+      "files": 87,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "python-services": {
+      "files": 45,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "tigerbeetle-integration": {
+      "files": 8,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "integration": {
+      "files": 5,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "keycloak": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "permify": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "python-ai": {
+      "files": 6,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "python-ml": {
+      "files": 31,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "redis": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "streaming": {
+      "files": 4,
+      "dockerfile": false,
+      "requirements": true,
+      "go_mod": false,
+      "package_json": false
+    },
+    "temporal": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "tigerbeetle-api": {
+      "files": 3,
+      "dockerfile": true,
+      "requirements": true,
+      "go_mod": false,
+      "package_json": false
+    },
+    "tigerbeetle-zig": {
+      "files": 3,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "business-rules-engine": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "iso20022-compliance": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "enhanced-ai-ml": {
+      "files": 4,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "pos-geotagging": {
+      "files": 12,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": true,
+      "package_json": false
+    },
+    "document-analysis": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "policy-engine": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "pos-management": {
+      "files": 6,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": true,
+      "package_json": false
+    },
+    "video-kyc": {
+      "files": 9,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "edge-computing": {
+      "files": 2,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "compression": {
+      "files": 2,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "offline-storage": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "power-management": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "network-resilience": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    },
+    "api-gateway": {
+      "files": 1,
+      "dockerfile": false,
+      "requirements": false,
+      "go_mod": false,
+      "package_json": false
+    }
+  },
+  "duplicate_count": 422
+}

@@ -1,0 +1,166 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database for Temporal persistence
+  postgresql:
+    image: postgres:15-alpine
+    container_name: temporal-postgresql
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    ports:
+      - "5432:5432"
+    volumes:
+      - temporal-postgres-data:/var/lib/postgresql/data
+      - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+    networks:
+      - temporal-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Temporal server
+  temporal:
+    image: temporalio/auto-setup:1.22.4
+    container_name: temporal-server
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      - DB=postgresql12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - ENABLE_ES=false
+      - ES_SEEDS=elasticsearch
+      - ES_VERSION=v7
+    ports:
+      - "7233:7233"
+      - "7234:7234"
+      - "7235:7235"
+      - "7239:7239"
+    volumes:
+      - ../config:/etc/temporal/config/dynamicconfig
+    networks:
+      - temporal-network
+    healthcheck:
+      test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    labels:
+      kompose.service.type: clusterip
+      kompose.volume.type: configMap
+
+  # Temporal Admin Tools
+  temporal-admin-tools:
+    image: temporalio/admin-tools:1.22.4
+    container_name: temporal-admin-tools
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+    stdin_open: true
+    tty: true
+    networks:
+      - temporal-network
+
+  # Temporal Web UI
+  temporal-ui:
+    image: temporalio/ui:2.21.3
+    container_name: temporal-ui
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:3000
+    ports:
+      - "8080:8080"
+    networks:
+      - temporal-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Elasticsearch for advanced visibility (optional but recommended)
+  elasticsearch:
+    image: elasticsearch:7.17.10
+    container_name: temporal-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - temporal-es-data:/usr/share/elasticsearch/data
+    networks:
+      - temporal-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: temporal-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - temporal-prometheus-data:/prometheus
+    networks:
+      - temporal-network
+    depends_on:
+      - temporal
+
+  # Grafana for metrics visualization
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: temporal-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ../monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+      - ../monitoring/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
+      - ../monitoring/dashboards:/var/lib/grafana/dashboards
+      - temporal-grafana-data:/var/lib/grafana
+    networks:
+      - temporal-network
+    depends_on:
+      - prometheus
+
+networks:
+  temporal-network:
+    driver: bridge
+
+volumes:
+  temporal-postgres-data:
+    driver: local
+  temporal-es-data:
+    driver: local
+  temporal-prometheus-data:
+    driver: local
+  temporal-grafana-data:
+    driver: local
+

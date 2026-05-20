@@ -1,0 +1,84 @@
+# Temporal Dynamic Configuration for Development with SQL
+
+# Workflow execution limits
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true
+    constraints: {}
+
+# Workflow history limits
+history.maxAutoResetPoints:
+  - value: 20
+    constraints: {}
+
+# Workflow task timeout
+frontend.defaultWorkflowTaskTimeout:
+  - value: "10s"
+    constraints: {}
+
+# Workflow execution timeout
+frontend.defaultWorkflowExecutionTimeout:
+  - value: "24h"
+    constraints: {}
+
+# Workflow run timeout
+frontend.defaultWorkflowRunTimeout:
+  - value: "24h"
+    constraints: {}
+
+# Retention period for closed workflows
+system.defaultWorkflowRetentionPeriod:
+  - value: "7d"
+    constraints: {}
+
+# Maximum retention period
+system.maxWorkflowRetentionPeriod:
+  - value: "30d"
+    constraints: {}
+
+# Visibility configuration
+system.advancedVisibilityWritingMode:
+  - value: "dual"
+    constraints: {}
+
+# Task queue limits
+matching.numTaskqueueReadPartitions:
+  - value: 4
+    constraints: {}
+
+matching.numTaskqueueWritePartitions:
+  - value: 4
+    constraints: {}
+
+# History service limits
+history.historyCountLimitError:
+  - value: 50000
+    constraints: {}
+
+history.historyCountLimitWarn:
+  - value: 10000
+    constraints: {}
+
+# Blob size limits
+limit.blobSize.error:
+  - value: 2097152  # 2MB
+    constraints: {}
+
+limit.blobSize.warn:
+  - value: 524288   # 512KB
+    constraints: {}
+
+# Maximum concurrent workflow executions per namespace
+system.maxConcurrentWorkflowTaskExecutionSize:
+  - value: 1000
+    constraints: {}
+
+# Enable metrics
+system.enableMetrics:
+  - value: true
+    constraints: {}
+
+# Metrics port
+system.metricsPort:
+  - value: 9090
+    constraints: {}
+

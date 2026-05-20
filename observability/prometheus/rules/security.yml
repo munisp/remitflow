@@ -1,0 +1,165 @@
+# ============================================================
+# RemitFlow — Security & WAF Prometheus Alert Rules
+# Covers: open-appsec WAF blocks, CSP violations, APISIX rate limits,
+#         authentication failures, fraud detection events
+# ============================================================
+
+groups:
+  # ── WAF / open-appsec Alerts ─────────────────────────────────────────────
+  - name: waf_security
+    interval: 30s
+    rules:
+      - alert: WAFBlockRateHigh
+        expr: rate(apisix_http_status{status="403",route=~"remitflow.*"}[5m]) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          service: openappsec
+          team: security
+        annotations:
+          summary: "High WAF block rate on {{ $labels.route }}"
+          description: "open-appsec is blocking >0.5 req/s on route {{ $labels.route }}. Possible attack in progress. Current rate: {{ $value | humanize }} req/s"
+          runbook_url: "https://docs.remitflow.io/runbooks/waf-high-block-rate"
+
+      - alert: WAFBlockRateCritical
+        expr: rate(apisix_http_status{status="403",route=~"remitflow.*"}[5m]) > 5
+        for: 1m
+        labels:
+          severity: critical
+          service: openappsec
+          team: security
+        annotations:
+          summary: "CRITICAL WAF block rate — possible DDoS/attack on {{ $labels.route }}"
+          description: "open-appsec is blocking >5 req/s. Likely active attack. Route: {{ $labels.route }}. Rate: {{ $value | humanize }} req/s"
+          runbook_url: "https://docs.remitflow.io/runbooks/waf-critical-block-rate"
+
+      - alert: OpenAppsecAgentDown
+        expr: up{job="openappsec-agent"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: openappsec
+          team: security
+        annotations:
+          summary: "open-appsec WAF agent is DOWN"
+          description: "The open-appsec WAF agent is not responding. All traffic is unprotected. Immediate action required."
+          runbook_url: "https://docs.remitflow.io/runbooks/openappsec-down"
+
+  # ── APISIX Gateway Alerts ─────────────────────────────────────────────────
+  - name: apisix_gateway
+    interval: 30s
+    rules:
+      - alert: APISIXDown
+        expr: up{job="apisix"} == 0
+        for: 30s
+        labels:
+          severity: critical
+          service: apisix
+          team: platform
+        annotations:
+          summary: "APISIX API Gateway is DOWN"
+          description: "The APISIX gateway is not responding. All external traffic is blocked. Immediate action required."
+          runbook_url: "https://docs.remitflow.io/runbooks/apisix-down"
+
+      - alert: APISIXHighLatency
+        expr: histogram_quantile(0.99, rate(apisix_http_latency_bucket{type="request"}[5m])) > 2000
+        for: 5m
+        labels:
+          severity: warning
+          service: apisix
+          team: platform
+        annotations:
+          summary: "APISIX p99 latency > 2s on {{ $labels.route }}"
+          description: "99th percentile request latency is {{ $value | humanizeDuration }} on route {{ $labels.route }}. Investigate upstream or WAF processing overhead."
+
+      - alert: APISIXRateLimitExceeded
+        expr: rate(apisix_http_status{status="429"}[5m]) > 1
+        for: 2m
+        labels:
+          severity: warning
+          service: apisix
+          team: security
+        annotations:
+          summary: "Rate limit exceeded — possible brute force or abuse"
+          description: "APISIX is returning 429 at {{ $value | humanize }} req/s. Route: {{ $labels.route }}. May indicate brute force or credential stuffing."
+
+  # ── CSP Violation Alerts ──────────────────────────────────────────────────
+  - name: csp_violations
+    interval: 60s
+    rules:
+      - alert: CSPViolationBurst
+        expr: increase(remitflow_csp_violations_total[5m]) > 10
+        for: 1m
+        labels:
+          severity: warning
+          service: remitflow-app
+          team: security
+        annotations:
+          summary: "CSP violation burst detected (>10 in 5 min)"
+          description: "{{ $value }} CSP violations reported in the last 5 minutes. May indicate XSS injection attempt or misconfigured resource. Check /api/csp-report logs."
+          runbook_url: "https://docs.remitflow.io/runbooks/csp-violation"
+
+      - alert: CSPViolationCritical
+        expr: increase(remitflow_csp_violations_total[1m]) > 50
+        for: 30s
+        labels:
+          severity: critical
+          service: remitflow-app
+          team: security
+        annotations:
+          summary: "CRITICAL CSP violation spike — possible XSS attack"
+          description: "{{ $value }} CSP violations in 1 minute. This volume suggests an active XSS injection attack. Investigate immediately."
+
+  # ── Authentication Security Alerts ───────────────────────────────────────
+  - name: auth_security
+    interval: 30s
+    rules:
+      - alert: AuthFailureRateHigh
+        expr: rate(remitflow_auth_failures_total[5m]) > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          service: remitflow-app
+          team: security
+        annotations:
+          summary: "High authentication failure rate"
+          description: "Authentication failures at {{ $value | humanize }} req/s. Possible credential stuffing or brute force attack."
+          runbook_url: "https://docs.remitflow.io/runbooks/auth-brute-force"
+
+      - alert: AccountLockoutBurst
+        expr: increase(remitflow_account_lockouts_total[10m]) > 5
+        for: 1m
+        labels:
+          severity: warning
+          service: remitflow-app
+          team: security
+        annotations:
+          summary: "Multiple account lockouts in 10 minutes"
+          description: "{{ $value }} accounts locked out in 10 minutes. Possible coordinated brute force attack."
+
+  # ── Stripe / Payment Security Alerts ─────────────────────────────────────
+  - name: payment_security
+    interval: 60s
+    rules:
+      - alert: StripeWebhookAuthFailure
+        expr: increase(remitflow_stripe_webhook_auth_failures_total[5m]) > 3
+        for: 1m
+        labels:
+          severity: critical
+          service: stripe-webhook
+          team: security
+        annotations:
+          summary: "Stripe webhook signature verification failures"
+          description: "{{ $value }} Stripe webhook HMAC verification failures in 5 minutes. Possible webhook spoofing attempt."
+          runbook_url: "https://docs.remitflow.io/runbooks/stripe-webhook-security"
+
+      - alert: StripeWebhookNonStripeIP
+        expr: increase(remitflow_stripe_webhook_blocked_ip_total[5m]) > 0
+        for: 30s
+        labels:
+          severity: critical
+          service: stripe-webhook
+          team: security
+        annotations:
+          summary: "Stripe webhook request from non-Stripe IP blocked"
+          description: "{{ $value }} Stripe webhook requests blocked from non-Stripe IPs in 5 minutes. Possible webhook spoofing."

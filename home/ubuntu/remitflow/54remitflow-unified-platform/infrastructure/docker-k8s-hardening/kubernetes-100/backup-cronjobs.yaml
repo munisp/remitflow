@@ -1,0 +1,442 @@
+---
+# Backup Storage PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-storage-pvc
+  namespace: production
+  labels:
+    app: backup
+    component: storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs-storage
+  resources:
+    requests:
+      storage: 500Gi
+
+---
+# PostgreSQL Backup CronJob (Temporal)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: temporal-postgres-backup
+  namespace: production
+  labels:
+    app: temporal
+    component: backup
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: temporal
+            component: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: postgres-backup
+            image: postgres:15-alpine
+            env:
+            - name: PGHOST
+              value: "temporal-postgresql"
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-postgres-secret
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-postgres-secret
+                  key: password
+            - name: PGDATABASE
+              value: "temporal"
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              BACKUP_FILE="/backups/temporal/backup-$(date +%Y%m%d-%H%M%S).sql.gz"
+              mkdir -p /backups/temporal
+              
+              echo "Starting backup at $(date)"
+              pg_dump -h $PGHOST -U $PGUSER $PGDATABASE | gzip > $BACKUP_FILE
+              
+              echo "Backup completed: $BACKUP_FILE"
+              ls -lh $BACKUP_FILE
+              
+              # Cleanup old backups (keep 30 days)
+              find /backups/temporal -name "backup-*.sql.gz" -mtime +30 -delete
+              echo "Old backups cleaned up"
+              
+              # Verify backup
+              if [ -f "$BACKUP_FILE" ] && [ -s "$BACKUP_FILE" ]; then
+                echo "Backup verification: SUCCESS"
+                exit 0
+              else
+                echo "Backup verification: FAILED"
+                exit 1
+              fi
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backups
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+              limits:
+                cpu: 2000m
+                memory: 2Gi
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: backup-storage-pvc
+
+---
+# PostgreSQL Backup CronJob (Keycloak)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: keycloak-postgres-backup
+  namespace: production
+  labels:
+    app: keycloak
+    component: backup
+spec:
+  schedule: "0 3 * * *"  # Daily at 3 AM
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: keycloak
+            component: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: postgres-backup
+            image: postgres:15-alpine
+            env:
+            - name: PGHOST
+              value: "keycloak-postgres"
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-postgres-secret
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-postgres-secret
+                  key: password
+            - name: PGDATABASE
+              value: "keycloak"
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              BACKUP_FILE="/backups/keycloak/backup-$(date +%Y%m%d-%H%M%S).sql.gz"
+              mkdir -p /backups/keycloak
+              
+              echo "Starting backup at $(date)"
+              pg_dump -h $PGHOST -U $PGUSER $PGDATABASE | gzip > $BACKUP_FILE
+              
+              echo "Backup completed: $BACKUP_FILE"
+              ls -lh $BACKUP_FILE
+              
+              # Cleanup old backups (keep 30 days)
+              find /backups/keycloak -name "backup-*.sql.gz" -mtime +30 -delete
+              echo "Old backups cleaned up"
+              
+              # Verify backup
+              if [ -f "$BACKUP_FILE" ] && [ -s "$BACKUP_FILE" ]; then
+                echo "Backup verification: SUCCESS"
+                exit 0
+              else
+                echo "Backup verification: FAILED"
+                exit 1
+              fi
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backups
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+              limits:
+                cpu: 2000m
+                memory: 2Gi
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: backup-storage-pvc
+
+---
+# PostgreSQL Backup CronJob (Mojaloop)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mojaloop-postgres-backup
+  namespace: production
+  labels:
+    app: mojaloop
+    component: backup
+spec:
+  schedule: "0 4 * * *"  # Daily at 4 AM
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: mojaloop
+            component: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: postgres-backup
+            image: postgres:15-alpine
+            env:
+            - name: PGHOST
+              value: "mojaloop-postgres"
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: mojaloop-postgres-secret
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mojaloop-postgres-secret
+                  key: password
+            - name: PGDATABASE
+              value: "mojaloop"
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              BACKUP_FILE="/backups/mojaloop/backup-$(date +%Y%m%d-%H%M%S).sql.gz"
+              mkdir -p /backups/mojaloop
+              
+              echo "Starting backup at $(date)"
+              pg_dump -h $PGHOST -U $PGUSER $PGDATABASE | gzip > $BACKUP_FILE
+              
+              echo "Backup completed: $BACKUP_FILE"
+              ls -lh $BACKUP_FILE
+              
+              # Cleanup old backups (keep 30 days)
+              find /backups/mojaloop -name "backup-*.sql.gz" -mtime +30 -delete
+              echo "Old backups cleaned up"
+              
+              # Verify backup
+              if [ -f "$BACKUP_FILE" ] && [ -s "$BACKUP_FILE" ]; then
+                echo "Backup verification: SUCCESS"
+                exit 0
+              else
+                echo "Backup verification: FAILED"
+                exit 1
+              fi
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backups
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+              limits:
+                cpu: 2000m
+                memory: 2Gi
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: backup-storage-pvc
+
+---
+# etcd Backup CronJob (APISIX)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup
+  namespace: production
+  labels:
+    app: apisix
+    component: backup
+spec:
+  schedule: "*/6 * * * *"  # Every 6 hours
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: apisix
+            component: backup
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: etcd-backup
+            image: quay.io/coreos/etcd:v3.5.11
+            env:
+            - name: ETCDCTL_API
+              value: "3"
+            - name: ETCD_ENDPOINTS
+              value: "https://etcd-0.etcd:2379,https://etcd-1.etcd:2379,https://etcd-2.etcd:2379"
+            command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              BACKUP_FILE="/backups/etcd/backup-$(date +%Y%m%d-%H%M%S).db"
+              mkdir -p /backups/etcd
+              
+              echo "Starting etcd backup at $(date)"
+              etcdctl --endpoints=$ETCD_ENDPOINTS \
+                --cacert=/certs/ca.crt \
+                --cert=/certs/client.crt \
+                --key=/certs/client.key \
+                snapshot save $BACKUP_FILE
+              
+              echo "Backup completed: $BACKUP_FILE"
+              ls -lh $BACKUP_FILE
+              
+              # Verify snapshot
+              etcdctl snapshot status $BACKUP_FILE
+              
+              # Cleanup old backups (keep 7 days for etcd)
+              find /backups/etcd -name "backup-*.db" -mtime +7 -delete
+              echo "Old backups cleaned up"
+            volumeMounts:
+            - name: backup-storage
+              mountPath: /backups
+            - name: etcd-certs
+              mountPath: /certs
+              readOnly: true
+            resources:
+              requests:
+                cpu: 500m
+                memory: 512Mi
+              limits:
+                cpu: 1000m
+                memory: 1Gi
+          volumes:
+          - name: backup-storage
+            persistentVolumeClaim:
+              claimName: backup-storage-pvc
+          - name: etcd-certs
+            secret:
+              secretName: etcd-certs
+
+---
+# Volume Snapshot Class
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: csi-snapclass
+  labels:
+    component: storage
+driver: csi.storage.k8s.io
+deletionPolicy: Retain
+parameters:
+  snapshot-type: "incremental"
+
+---
+# Backup Monitoring Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: backup-monitor
+  namespace: production
+  labels:
+    app: backup
+    component: monitoring
+spec:
+  selector:
+    app: backup
+    component: monitoring
+  ports:
+  - port: 9090
+    targetPort: 9090
+    name: metrics
+
+---
+# Backup Restore Documentation ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-restore-procedures
+  namespace: production
+  labels:
+    app: backup
+    component: documentation
+data:
+  restore-postgres.sh: |
+    #!/bin/bash
+    # PostgreSQL Restore Procedure
+    # Usage: ./restore-postgres.sh <backup-file> <database-name>
+    
+    BACKUP_FILE=$1
+    DATABASE=$2
+    
+    if [ -z "$BACKUP_FILE" ] || [ -z "$DATABASE" ]; then
+      echo "Usage: $0 <backup-file> <database-name>"
+      exit 1
+    fi
+    
+    echo "Restoring $DATABASE from $BACKUP_FILE"
+    
+    # Drop existing database (WARNING: DATA LOSS)
+    psql -h $PGHOST -U $PGUSER -c "DROP DATABASE IF EXISTS $DATABASE;"
+    
+    # Create new database
+    psql -h $PGHOST -U $PGUSER -c "CREATE DATABASE $DATABASE;"
+    
+    # Restore from backup
+    gunzip -c $BACKUP_FILE | psql -h $PGHOST -U $PGUSER -d $DATABASE
+    
+    echo "Restore completed"
+  
+  restore-etcd.sh: |
+    #!/bin/bash
+    # etcd Restore Procedure
+    # Usage: ./restore-etcd.sh <snapshot-file>
+    
+    SNAPSHOT_FILE=$1
+    
+    if [ -z "$SNAPSHOT_FILE" ]; then
+      echo "Usage: $0 <snapshot-file>"
+      exit 1
+    fi
+    
+    echo "Restoring etcd from $SNAPSHOT_FILE"
+    
+    # Stop etcd cluster
+    kubectl scale statefulset etcd --replicas=0 -n production
+    
+    # Restore snapshot
+    etcdctl snapshot restore $SNAPSHOT_FILE \
+      --data-dir=/var/lib/etcd \
+      --initial-cluster=etcd-0=https://etcd-0.etcd:2380,etcd-1=https://etcd-1.etcd:2380,etcd-2=https://etcd-2.etcd:2380 \
+      --initial-advertise-peer-urls=https://etcd-0.etcd:2380 \
+      --name=etcd-0
+    
+    # Start etcd cluster
+    kubectl scale statefulset etcd --replicas=3 -n production
+    
+    echo "Restore completed"
+

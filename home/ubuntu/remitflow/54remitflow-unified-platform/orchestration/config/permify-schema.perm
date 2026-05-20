@@ -1,0 +1,379 @@
+// Permify Authorization Schema for Nigerian Remittance Platform
+// Version: 1.0
+// Date: 2025-11-12
+
+// ===================================================================
+// ENTITIES
+// ===================================================================
+
+// User entity
+entity user {}
+
+// Organization entity
+entity organization {
+    // Relations
+    relation admin: user
+    relation member: user
+    relation viewer: user
+    
+    // Permissions
+    permission view = viewer or member or admin
+    permission manage = admin
+    permission invite_member = admin
+}
+
+// Transaction entity
+entity transaction {
+    // Relations
+    relation owner: user
+    relation approver: user
+    relation organization: organization
+    
+    // Permissions
+    permission view = owner or approver or organization.admin
+    permission execute = owner and check_transaction_limits(request.context)
+    permission approve = approver and check_approval_authority(request.context)
+    permission cancel = owner or organization.admin
+}
+
+// Account entity (wallet, savings, investment)
+entity account {
+    // Relations
+    relation owner: user
+    relation co_owner: user
+    relation viewer: user
+    relation organization: organization
+    
+    // Permissions
+    permission view = owner or co_owner or viewer or organization.member
+    permission deposit = owner or co_owner
+    permission withdraw = owner and check_withdrawal_limits(request.context)
+    permission close = owner or organization.admin
+    permission transfer = owner and check_transfer_limits(request.context)
+}
+
+// Financial Product entity (savings, investment, loan, insurance)
+entity financial_product {
+    // Relations
+    relation owner: user
+    relation provider: organization
+    relation approver: user
+    
+    // Permissions
+    permission view = owner or provider.member
+    permission purchase = check_eligibility(request.context)
+    permission redeem = owner and check_redemption_rules(request.context)
+    permission cancel = owner or provider.admin
+    permission modify = owner and check_modification_rules(request.context)
+}
+
+// Beneficiary entity
+entity beneficiary {
+    // Relations
+    relation owner: user
+    relation verified_by: user
+    
+    // Permissions
+    permission view = owner
+    permission add = check_beneficiary_limits(request.context)
+    permission remove = owner
+    permission transfer_to = owner and verified_by
+}
+
+// Card entity
+entity card {
+    // Relations
+    relation owner: user
+    relation account: account
+    
+    // Permissions
+    permission view = owner or account.owner
+    permission use = owner and check_card_status(request.context)
+    permission freeze = owner or account.owner
+    permission unfreeze = owner or account.owner
+    permission close = owner or account.owner
+}
+
+// Dispute entity
+entity dispute {
+    // Relations
+    relation initiator: user
+    relation assignee: user
+    relation transaction: transaction
+    
+    // Permissions
+    permission view = initiator or assignee or transaction.owner
+    permission create = transaction.owner
+    permission resolve = assignee
+    permission escalate = initiator or assignee
+}
+
+// KYC Document entity
+entity kyc_document {
+    // Relations
+    relation owner: user
+    relation reviewer: user
+    
+    // Permissions
+    permission view = owner or reviewer
+    permission upload = owner and check_kyc_tier(request.context)
+    permission approve = reviewer
+    permission reject = reviewer
+}
+
+// ===================================================================
+// RULES (Context-based authorization logic)
+// ===================================================================
+
+// Transaction Limits
+rule check_transaction_limits(context) {
+    // Get user's KYC tier
+    let kyc_tier = context.kyc_tier
+    
+    // Get transaction amount
+    let amount = context.amount
+    
+    // Get currency
+    let currency = context.currency
+    
+    // Define limits per KYC tier (in NGN equivalent)
+    let limits = {
+        "basic": 50000,
+        "standard": 500000,
+        "enhanced": 5000000,
+        "premium": 50000000
+    }
+    
+    // Check if amount is within limit
+    return amount <= limits[kyc_tier]
+}
+
+// Withdrawal Limits
+rule check_withdrawal_limits(context) {
+    let kyc_tier = context.kyc_tier
+    let amount = context.amount
+    let daily_withdrawn = context.daily_withdrawn
+    
+    let daily_limits = {
+        "basic": 50000,
+        "standard": 500000,
+        "enhanced": 2000000,
+        "premium": 10000000
+    }
+    
+    return (amount + daily_withdrawn) <= daily_limits[kyc_tier]
+}
+
+// Transfer Limits
+rule check_transfer_limits(context) {
+    let kyc_tier = context.kyc_tier
+    let amount = context.amount
+    let transfer_type = context.transfer_type
+    
+    // International transfers require enhanced KYC
+    if transfer_type == "international" {
+        return kyc_tier in ["enhanced", "premium"]
+    }
+    
+    // Crypto transfers require premium KYC
+    if transfer_type == "crypto" {
+        return kyc_tier == "premium"
+    }
+    
+    // Domestic transfers allowed for all tiers
+    return check_transaction_limits(context)
+}
+
+// Approval Authority
+rule check_approval_authority(context) {
+    let amount = context.amount
+    let approver_level = context.approver_level
+    
+    // Approval limits based on approver level
+    let approval_limits = {
+        "supervisor": 1000000,
+        "manager": 5000000,
+        "director": 20000000,
+        "ceo": 100000000
+    }
+    
+    return amount <= approval_limits[approver_level]
+}
+
+// Eligibility for Financial Products
+rule check_eligibility(context) {
+    let product_type = context.product_type
+    let kyc_tier = context.kyc_tier
+    let age = context.age
+    let income_range = context.income_range
+    
+    // Savings - available to all
+    if product_type == "savings" {
+        return kyc_tier in ["basic", "standard", "enhanced", "premium"]
+    }
+    
+    // Investment - requires enhanced KYC and minimum age
+    if product_type == "investment" {
+        return kyc_tier in ["enhanced", "premium"] and age >= 18
+    }
+    
+    // Loan - requires enhanced KYC, minimum age, and income verification
+    if product_type == "loan" {
+        return kyc_tier in ["enhanced", "premium"] and 
+               age >= 21 and 
+               income_range in ["medium", "high"]
+    }
+    
+    // Insurance - requires standard KYC
+    if product_type == "insurance" {
+        return kyc_tier in ["standard", "enhanced", "premium"] and age >= 18
+    }
+    
+    return false
+}
+
+// Redemption Rules
+rule check_redemption_rules(context) {
+    let product_type = context.product_type
+    let holding_period_days = context.holding_period_days
+    let minimum_holding_period = context.minimum_holding_period
+    
+    // Check minimum holding period
+    if holding_period_days < minimum_holding_period {
+        return false
+    }
+    
+    // Investment products may have lock-in periods
+    if product_type == "investment" {
+        return holding_period_days >= 30  // 30-day minimum
+    }
+    
+    return true
+}
+
+// Modification Rules
+rule check_modification_rules(context) {
+    let product_type = context.product_type
+    let modification_type = context.modification_type
+    
+    // Savings accounts can be modified anytime
+    if product_type == "savings" {
+        return true
+    }
+    
+    // Investment products have restrictions
+    if product_type == "investment" {
+        // Can't modify during lock-in period
+        return modification_type != "withdraw"
+    }
+    
+    // Loan modifications require approval
+    if product_type == "loan" {
+        return false  // Requires separate approval workflow
+    }
+    
+    return true
+}
+
+// Beneficiary Limits
+rule check_beneficiary_limits(context) {
+    let kyc_tier = context.kyc_tier
+    let current_beneficiary_count = context.current_beneficiary_count
+    
+    let beneficiary_limits = {
+        "basic": 5,
+        "standard": 20,
+        "enhanced": 50,
+        "premium": 100
+    }
+    
+    return current_beneficiary_count < beneficiary_limits[kyc_tier]
+}
+
+// Card Status Check
+rule check_card_status(context) {
+    let card_status = context.card_status
+    let card_balance = context.card_balance
+    
+    // Card must be active and have sufficient balance
+    return card_status == "active" and card_balance > 0
+}
+
+// KYC Tier Check
+rule check_kyc_tier(context) {
+    let current_tier = context.current_kyc_tier
+    let target_tier = context.target_kyc_tier
+    
+    let tier_hierarchy = ["basic", "standard", "enhanced", "premium"]
+    
+    // Can only upgrade, not downgrade
+    let current_index = tier_hierarchy.indexOf(current_tier)
+    let target_index = tier_hierarchy.indexOf(target_tier)
+    
+    return target_index > current_index
+}
+
+// AML Risk Check
+rule check_aml_risk(context) {
+    let aml_score = context.aml_score
+    let transaction_type = context.transaction_type
+    
+    // High-risk transactions blocked if AML score > 0.8
+    if aml_score > 0.8 {
+        return false
+    }
+    
+    // Medium-risk transactions require manual review
+    if aml_score > 0.5 and transaction_type == "international" {
+        return false  // Requires manual approval
+    }
+    
+    return true
+}
+
+// Country Restrictions
+rule check_country_restrictions(context) {
+    let destination_country = context.destination_country
+    
+    // Sanctioned countries
+    let restricted_countries = ["KP", "IR", "SY", "CU", "SD"]
+    
+    return not (destination_country in restricted_countries)
+}
+
+// Business Hours Check
+rule check_business_hours(context) {
+    let current_hour = context.current_hour
+    let day_of_week = context.day_of_week
+    
+    // Monday-Friday, 8 AM - 6 PM
+    if day_of_week in [1, 2, 3, 4, 5] {
+        return current_hour >= 8 and current_hour < 18
+    }
+    
+    // Saturday, 9 AM - 2 PM
+    if day_of_week == 6 {
+        return current_hour >= 9 and current_hour < 14
+    }
+    
+    // Sunday - closed
+    return false
+}
+
+// Velocity Check (transaction frequency)
+rule check_velocity(context) {
+    let transactions_last_hour = context.transactions_last_hour
+    let transactions_last_day = context.transactions_last_day
+    
+    // Maximum 10 transactions per hour
+    if transactions_last_hour >= 10 {
+        return false
+    }
+    
+    // Maximum 50 transactions per day
+    if transactions_last_day >= 50 {
+        return false
+    }
+    
+    return true
+}

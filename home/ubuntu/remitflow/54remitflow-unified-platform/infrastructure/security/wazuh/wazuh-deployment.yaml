@@ -1,0 +1,819 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wazuh
+  labels:
+    name: wazuh
+    component: siem
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wazuh-manager-config
+  namespace: wazuh
+data:
+  ossec.conf: |
+    <ossec_config>
+      <global>
+        <jsonout_output>yes</jsonout_output>
+        <alerts_log>yes</alerts_log>
+        <logall>no</logall>
+        <logall_json>no</logall_json>
+        <email_notification>no</email_notification>
+        <smtp_server>localhost</smtp_server>
+        <email_from>wazuh@remittance.com</email_from>
+        <email_to>security@remittance.com</email_to>
+        <hostname>wazuh-manager</hostname>
+        <email_maxperhour>12</email_maxperhour>
+        <email_log_source>alerts.log</email_log_source>
+        <agents_disconnection_time>10m</agents_disconnection_time>
+        <agents_disconnection_alert_time>0</agents_disconnection_alert_time>
+      </global>
+
+      <alerts>
+        <log_alert_level>3</log_alert_level>
+        <email_alert_level>12</email_alert_level>
+      </alerts>
+
+      <remote>
+        <connection>secure</connection>
+        <port>1514</port>
+        <protocol>tcp</protocol>
+        <queue_size>131072</queue_size>
+      </remote>
+
+      <logging>
+        <log_format>plain</log_format>
+      </logging>
+
+      <rootcheck>
+        <disabled>no</disabled>
+        <check_files>yes</check_files>
+        <check_trojans>yes</check_trojans>
+        <check_dev>yes</check_dev>
+        <check_sys>yes</check_sys>
+        <check_pids>yes</check_pids>
+        <check_ports>yes</check_ports>
+        <check_if>yes</check_if>
+        <frequency>43200</frequency>
+        <rootkit_files>/var/ossec/etc/rootcheck/rootkit_files.txt</rootkit_files>
+        <rootkit_trojans>/var/ossec/etc/rootcheck/rootkit_trojans.txt</rootkit_trojans>
+        <system_audit>/var/ossec/etc/rootcheck/system_audit_rcl.txt</system_audit>
+        <system_audit>/var/ossec/etc/rootcheck/system_audit_ssh.txt</system_audit>
+        <system_audit>/var/ossec/etc/rootcheck/cis_debian_linux_rcl.txt</system_audit>
+        <skip_nfs>yes</skip_nfs>
+      </rootcheck>
+
+      <wodle name="cis-cat">
+        <disabled>yes</disabled>
+        <timeout>1800</timeout>
+        <interval>1d</interval>
+        <scan-on-start>yes</scan-on-start>
+        <java_path>wodles/java</java_path>
+        <ciscat_path>wodles/ciscat</ciscat_path>
+      </wodle>
+
+      <wodle name="osquery">
+        <disabled>yes</disabled>
+        <run_daemon>yes</run_daemon>
+        <log_path>/var/log/osquery/osqueryd.results.log</log_path>
+        <config_path>/etc/osquery/osquery.conf</config_path>
+        <add_labels>yes</add_labels>
+      </wodle>
+
+      <wodle name="syscollector">
+        <disabled>no</disabled>
+        <interval>1h</interval>
+        <scan_on_start>yes</scan_on_start>
+        <hardware>yes</hardware>
+        <os>yes</os>
+        <network>yes</network>
+        <packages>yes</packages>
+        <ports all="no">yes</ports>
+        <processes>yes</processes>
+      </wodle>
+
+      <wodle name="vulnerability-detector">
+        <disabled>no</disabled>
+        <interval>5m</interval>
+        <ignore_time>6h</ignore_time>
+        <run_on_start>yes</run_on_start>
+        <provider name="canonical">
+          <enabled>yes</enabled>
+          <os>trusty</os>
+          <os>xenial</os>
+          <os>bionic</os>
+          <os>focal</os>
+          <os>jammy</os>
+          <update_interval>1h</update_interval>
+        </provider>
+        <provider name="debian">
+          <enabled>yes</enabled>
+          <os_version>7</os_version>
+          <os_version>8</os_version>
+          <os_version>9</os_version>
+          <os_version>10</os_version>
+          <os_version>11</os_version>
+          <update_interval>1h</update_interval>
+        </provider>
+        <provider name="redhat">
+          <enabled>yes</enabled>
+          <os_version>5</os_version>
+          <os_version>6</os_version>
+          <os_version>7</os_version>
+          <os_version>8</os_version>
+          <os_version>9</os_version>
+          <update_interval>1h</update_interval>
+        </provider>
+      </wodle>
+
+      <sca>
+        <enabled>yes</enabled>
+        <scan_on_start>yes</scan_on_start>
+        <interval>12h</interval>
+        <skip_nfs>yes</skip_nfs>
+      </sca>
+
+      <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/ossec/logs/active-responses.log</location>
+      </localfile>
+
+      <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/log/messages</location>
+      </localfile>
+
+      <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/log/auth.log</location>
+      </localfile>
+
+      <localfile>
+        <log_format>syslog</log_format>
+        <location>/var/log/syslog</location>
+      </localfile>
+
+      <localfile>
+        <log_format>command</log_format>
+        <command>df -P</command>
+        <frequency>360</frequency>
+      </localfile>
+
+      <localfile>
+        <log_format>full_command</log_format>
+        <command>netstat -tulpn | sed 's/\([[:alnum:]]\+\)\ \+[[:digit:]]\+\ \+[[:digit:]]\+\ \+\(.*\):\([[:digit:]]*\)\ \+\(.*\):\([[:digit:]]*\)\ \+\([[:alpha:]]\+\)\ \+\([[:digit:]]*\/[[:alnum:]\-]*\).*/\1 \2 \3 \4 \5 \6 \7/' | sort -k 6 -g</command>
+        <alias>netstat listening ports</alias>
+        <frequency>360</frequency>
+      </localfile>
+
+      <localfile>
+        <log_format>full_command</log_format>
+        <command>last -n 20</command>
+        <frequency>360</frequency>
+      </localfile>
+
+      <rule_dir>ruleset/rules</rule_dir>
+      <include>rules/0010-rules_config.xml</include>
+      <include>rules/0015-ossec_rules.xml</include>
+      <include>rules/0016-wazuh_rules.xml</include>
+      <include>rules/0020-syslog_rules.xml</include>
+      <include>rules/0025-sendmail_rules.xml</include>
+      <include>rules/0030-postfix_rules.xml</include>
+      <include>rules/0035-sshd_rules.xml</include>
+      <include>rules/0040-imapd_rules.xml</include>
+      <include>rules/0045-mailscanner_rules.xml</include>
+      <include>rules/0050-ms-exchange_rules.xml</include>
+      <include>rules/0055-sendmail_rules.xml</include>
+      <include>rules/0060-courier_rules.xml</include>
+      <include>rules/0065-ftpd_rules.xml</include>
+      <include>rules/0070-suhosin_rules.xml</include>
+      <include>rules/0075-oracledb_rules.xml</include>
+      <include>rules/0080-mysql_rules.xml</include>
+      <include>rules/0085-postgresql_rules.xml</include>
+      <include>rules/0090-postfix_rules.xml</include>
+      <include>rules/0095-spamd_rules.xml</include>
+      <include>rules/0100-fortigate_rules.xml</include>
+      <include>rules/0105-pix_rules.xml</include>
+      <include>rules/0110-netscreenfw_rules.xml</include>
+      <include>rules/0115-cisco-ios_rules.xml</include>
+      <include>rules/0120-checkpoint_rules.xml</include>
+      <include>rules/0125-solaris_rules.xml</include>
+      <include>rules/0130-bsd_rules.xml</include>
+      <include>rules/0135-hpux_rules.xml</include>
+      <include>rules/0140-aix_rules.xml</include>
+      <include>rules/0145-netbsd_rules.xml</include>
+      <include>rules/0150-freebsd_rules.xml</include>
+      <include>rules/0155-openbsd_rules.xml</include>
+      <include>rules/0160-linux_rules.xml</include>
+      <include>rules/0165-windows_rules.xml</include>
+      <include>rules/0170-ms-se_rules.xml</include>
+      <include>rules/0175-policy_rules.xml</include>
+      <include>rules/0180-policy_rules.xml</include>
+      <include>rules/0185-policy_rules.xml</include>
+      <include>rules/0190-policy_rules.xml</include>
+      <include>rules/0195-policy_rules.xml</include>
+      <include>rules/0200-policy_rules.xml</include>
+      <include>rules/0205-policy_rules.xml</include>
+      <include>rules/0210-policy_rules.xml</include>
+      <include>rules/0215-policy_rules.xml</include>
+      <include>rules/0220-policy_rules.xml</include>
+      <include>rules/0225-policy_rules.xml</include>
+      <include>rules/0230-policy_rules.xml</include>
+      <include>rules/0235-policy_rules.xml</include>
+      <include>rules/0240-policy_rules.xml</include>
+      <include>rules/0245-policy_rules.xml</include>
+      <include>rules/0250-policy_rules.xml</include>
+      <include>rules/0255-policy_rules.xml</include>
+      <include>rules/0260-policy_rules.xml</include>
+      <include>rules/0265-policy_rules.xml</include>
+      <include>rules/0270-policy_rules.xml</include>
+      <include>rules/0275-policy_rules.xml</include>
+      <include>rules/0280-policy_rules.xml</include>
+      <include>rules/0285-policy_rules.xml</include>
+      <include>rules/0290-policy_rules.xml</include>
+      <include>rules/0295-policy_rules.xml</include>
+      <include>rules/0300-policy_rules.xml</include>
+      <include>rules/0305-policy_rules.xml</include>
+      <include>rules/0310-policy_rules.xml</include>
+      <include>rules/0315-policy_rules.xml</include>
+      <include>rules/0320-policy_rules.xml</include>
+      <include>rules/0325-policy_rules.xml</include>
+      <include>rules/0330-policy_rules.xml</include>
+      <include>rules/0335-policy_rules.xml</include>
+      <include>rules/0340-policy_rules.xml</include>
+      <include>rules/0345-policy_rules.xml</include>
+      <include>rules/0350-policy_rules.xml</include>
+      <include>rules/0355-policy_rules.xml</include>
+      <include>rules/0360-policy_rules.xml</include>
+      <include>rules/0365-policy_rules.xml</include>
+      <include>rules/0370-policy_rules.xml</include>
+      <include>rules/0375-policy_rules.xml</include>
+      <include>rules/0380-policy_rules.xml</include>
+      <include>rules/0385-policy_rules.xml</include>
+      <include>rules/0390-policy_rules.xml</include>
+      <include>rules/0395-policy_rules.xml</include>
+      <include>rules/0400-policy_rules.xml</include>
+      <include>rules/0405-policy_rules.xml</include>
+      <include>rules/0410-policy_rules.xml</include>
+      <include>rules/0415-policy_rules.xml</include>
+      <include>rules/0420-policy_rules.xml</include>
+      <include>rules/0425-policy_rules.xml</include>
+      <include>rules/0430-policy_rules.xml</include>
+      <include>rules/0435-policy_rules.xml</include>
+      <include>rules/0440-policy_rules.xml</include>
+      <include>rules/0445-policy_rules.xml</include>
+      <include>rules/0450-policy_rules.xml</include>
+      <include>rules/0455-policy_rules.xml</include>
+      <include>rules/0460-policy_rules.xml</include>
+      <include>rules/0465-policy_rules.xml</include>
+      <include>rules/0470-policy_rules.xml</include>
+      <include>rules/0475-policy_rules.xml</include>
+      <include>rules/0480-policy_rules.xml</include>
+      <include>rules/0485-policy_rules.xml</include>
+      <include>rules/0490-policy_rules.xml</include>
+      <include>rules/0495-policy_rules.xml</include>
+      <include>rules/0500-policy_rules.xml</include>
+      <include>rules/0505-policy_rules.xml</include>
+      <include>rules/0510-policy_rules.xml</include>
+      <include>rules/0515-policy_rules.xml</include>
+      <include>rules/0520-policy_rules.xml</include>
+      <include>rules/0525-policy_rules.xml</include>
+      <include>rules/0530-policy_rules.xml</include>
+      <include>rules/0535-policy_rules.xml</include>
+      <include>rules/0540-policy_rules.xml</include>
+      <include>rules/0545-policy_rules.xml</include>
+      <include>rules/0550-policy_rules.xml</include>
+      <include>rules/0555-policy_rules.xml</include>
+      <include>rules/0560-policy_rules.xml</include>
+      <include>rules/0565-policy_rules.xml</include>
+      <include>rules/0570-policy_rules.xml</include>
+      <include>rules/0575-policy_rules.xml</include>
+      <include>rules/0580-policy_rules.xml</include>
+      <include>rules/0585-policy_rules.xml</include>
+      <include>rules/0590-policy_rules.xml</include>
+      <include>rules/0595-policy_rules.xml</include>
+      <include>rules/0600-policy_rules.xml</include>
+      <include>rules/0605-policy_rules.xml</include>
+      <include>rules/0610-policy_rules.xml</include>
+      <include>rules/0615-policy_rules.xml</include>
+      <include>rules/0620-policy_rules.xml</include>
+      <include>rules/0625-policy_rules.xml</include>
+      <include>rules/0630-policy_rules.xml</include>
+      <include>rules/0635-policy_rules.xml</include>
+      <include>rules/0640-policy_rules.xml</include>
+      <include>rules/0645-policy_rules.xml</include>
+      <include>rules/0650-policy_rules.xml</include>
+      <include>rules/0655-policy_rules.xml</include>
+      <include>rules/0660-policy_rules.xml</include>
+      <include>rules/0665-policy_rules.xml</include>
+      <include>rules/0670-policy_rules.xml</include>
+      <include>rules/0675-policy_rules.xml</include>
+      <include>rules/0680-policy_rules.xml</include>
+      <include>rules/0685-policy_rules.xml</include>
+      <include>rules/0690-policy_rules.xml</include>
+      <include>rules/0695-policy_rules.xml</include>
+      <include>rules/0700-policy_rules.xml</include>
+      <include>rules/0705-policy_rules.xml</include>
+      <include>rules/0710-policy_rules.xml</include>
+      <include>rules/0715-policy_rules.xml</include>
+      <include>rules/0720-policy_rules.xml</include>
+      <include>rules/0725-policy_rules.xml</include>
+      <include>rules/0730-policy_rules.xml</include>
+      <include>rules/0735-policy_rules.xml</include>
+      <include>rules/0740-policy_rules.xml</include>
+      <include>rules/0745-policy_rules.xml</include>
+      <include>rules/0750-policy_rules.xml</include>
+      <include>rules/0755-policy_rules.xml</include>
+      <include>rules/0760-policy_rules.xml</include>
+      <include>rules/0765-policy_rules.xml</include>
+      <include>rules/0770-policy_rules.xml</include>
+      <include>rules/0775-policy_rules.xml</include>
+      <include>rules/0780-policy_rules.xml</include>
+      <include>rules/0785-policy_rules.xml</include>
+      <include>rules/0790-policy_rules.xml</include>
+      <include>rules/0795-policy_rules.xml</include>
+      <include>rules/0800-policy_rules.xml</include>
+      <include>rules/0805-policy_rules.xml</include>
+      <include>rules/0810-policy_rules.xml</include>
+      <include>rules/0815-policy_rules.xml</include>
+      <include>rules/0820-policy_rules.xml</include>
+      <include>rules/0825-policy_rules.xml</include>
+      <include>rules/0830-policy_rules.xml</include>
+      <include>rules/0835-policy_rules.xml</include>
+      <include>rules/0840-policy_rules.xml</include>
+      <include>rules/0845-policy_rules.xml</include>
+      <include>rules/0850-policy_rules.xml</include>
+      <include>rules/0855-policy_rules.xml</include>
+      <include>rules/0860-policy_rules.xml</include>
+      <include>rules/0865-policy_rules.xml</include>
+      <include>rules/0870-policy_rules.xml</include>
+      <include>rules/0875-policy_rules.xml</include>
+      <include>rules/0880-policy_rules.xml</include>
+      <include>rules/0885-policy_rules.xml</include>
+      <include>rules/0890-policy_rules.xml</include>
+      <include>rules/0895-policy_rules.xml</include>
+      <include>rules/0900-policy_rules.xml</include>
+
+      <decoder_dir>ruleset/decoders</decoder_dir>
+      <include>decoders/0005-wazuh_decoders.xml</include>
+      <include>decoders/0010-active-response_decoders.xml</include>
+      <include>decoders/0015-agent-upgrade_decoders.xml</include>
+      <include>decoders/0020-agent_decoders.xml</include>
+      <include>decoders/0025-apache_decoders.xml</include>
+      <include>decoders/0030-arpwatch_decoders.xml</include>
+      <include>decoders/0035-asterisk_decoders.xml</include>
+      <include>decoders/0040-auditd_decoders.xml</include>
+      <include>decoders/0045-aws_decoders.xml</include>
+      <include>decoders/0050-barracuda_decoders.xml</include>
+      <include>decoders/0055-bind_decoders.xml</include>
+      <include>decoders/0060-checkpoint_decoders.xml</include>
+      <include>decoders/0065-cisco-ios_decoders.xml</include>
+      <include>decoders/0070-cisco-pix_decoders.xml</include>
+      <include>decoders/0075-clamd_decoders.xml</include>
+      <include>decoders/0080-courier_decoders.xml</include>
+      <include>decoders/0085-cron_decoders.xml</include>
+      <include>decoders/0090-cyrus-imapd_decoders.xml</include>
+      <include>decoders/0095-dhcpd_decoders.xml</include>
+      <include>decoders/0100-dovecot_decoders.xml</include>
+      <include>decoders/0105-dropbear_decoders.xml</include>
+      <include>decoders/0110-exim_decoders.xml</include>
+      <include>decoders/0115-firewalld_decoders.xml</include>
+      <include>decoders/0120-fortigate_decoders.xml</include>
+      <include>decoders/0125-ftpd_decoders.xml</include>
+      <include>decoders/0130-gpasswd_decoders.xml</include>
+      <include>decoders/0135-groupadd_decoders.xml</include>
+      <include>decoders/0140-groupdel_decoders.xml</include>
+      <include>decoders/0145-groupmod_decoders.xml</include>
+      <include>decoders/0150-hordeimp_decoders.xml</include>
+      <include>decoders/0155-hostapd_decoders.xml</include>
+      <include>decoders/0160-imapd_decoders.xml</include>
+      <include>decoders/0165-iptables_decoders.xml</include>
+      <include>decoders/0170-junos_decoders.xml</include>
+      <include>decoders/0175-kernel_decoders.xml</include>
+      <include>decoders/0180-maild_decoders.xml</include>
+      <include>decoders/0185-mailscanner_decoders.xml</include>
+      <include>decoders/0190-mcafee_decoders.xml</include>
+      <include>decoders/0195-ms-exchange_decoders.xml</include>
+      <include>decoders/0200-ms-se_decoders.xml</include>
+      <include>decoders/0205-mysql_decoders.xml</include>
+      <include>decoders/0210-named_decoders.xml</include>
+      <include>decoders/0215-netscreenfw_decoders.xml</include>
+      <include>decoders/0220-nginx_decoders.xml</include>
+      <include>decoders/0225-nmapd_decoders.xml</include>
+      <include>decoders/0230-nsd_decoders.xml</include>
+      <include>decoders/0235-openldap_decoders.xml</include>
+      <include>decoders/0240-openvpn_decoders.xml</include>
+      <include>decoders/0245-oracledb_decoders.xml</include>
+      <include>decoders/0250-ossec_decoders.xml</include>
+      <include>decoders/0255-pam_decoders.xml</include>
+      <include>decoders/0260-php_decoders.xml</include>
+      <include>decoders/0265-pix_decoders.xml</include>
+      <include>decoders/0270-postfix_decoders.xml</include>
+      <include>decoders/0275-postgresql_decoders.xml</include>
+      <include>decoders/0280-proftpd_decoders.xml</include>
+      <include>decoders/0285-pure-ftpd_decoders.xml</include>
+      <include>decoders/0290-racoon_decoders.xml</include>
+      <include>decoders/0295-redis_decoders.xml</include>
+      <include>decoders/0300-roundcube_decoders.xml</include>
+      <include>decoders/0305-rsyslog_decoders.xml</include>
+      <include>decoders/0310-sendmail_decoders.xml</include>
+      <include>decoders/0315-serv-u_decoders.xml</include>
+      <include>decoders/0320-smbd_decoders.xml</include>
+      <include>decoders/0325-smf-sav_decoders.xml</include>
+      <include>decoders/0330-spamd_decoders.xml</include>
+      <include>decoders/0335-squid_decoders.xml</include>
+      <include>decoders/0340-sshd_decoders.xml</include>
+      <include>decoders/0345-su_decoders.xml</include>
+      <include>decoders/0350-sudo_decoders.xml</include>
+      <include>decoders/0355-suhosin_decoders.xml</include>
+      <include>decoders/0360-symantec-ems_decoders.xml</include>
+      <include>decoders/0365-symantec-ws_decoders.xml</include>
+      <include>decoders/0370-syslog_decoders.xml</include>
+      <include>decoders/0375-systemd_decoders.xml</include>
+      <include>decoders/0380-telnetd_decoders.xml</include>
+      <include>decoders/0385-trend-osce_decoders.xml</include>
+      <include>decoders/0390-useradd_decoders.xml</include>
+      <include>decoders/0395-userdel_decoders.xml</include>
+      <include>decoders/0400-usermod_decoders.xml</include>
+      <include>decoders/0405-vsftpd_decoders.xml</include>
+      <include>decoders/0410-web_decoders.xml</include>
+      <include>decoders/0415-windows_decoders.xml</include>
+      <include>decoders/0420-wuftpd_decoders.xml</include>
+
+      <list>etc/lists/audit-keys</list>
+      <list>etc/lists/amazon/aws-eventnames</list>
+      <list>etc/lists/security-eventchannel</list>
+
+      <command>
+        <name>disable-account</name>
+        <executable>disable-account</executable>
+        <timeout_allowed>yes</timeout_allowed>
+      </command>
+
+      <command>
+        <name>restart-wazuh</name>
+        <executable>restart-wazuh</executable>
+      </command>
+
+      <command>
+        <name>firewall-drop</name>
+        <executable>firewall-drop</executable>
+        <timeout_allowed>yes</timeout_allowed>
+      </command>
+
+      <command>
+        <name>host-deny</name>
+        <executable>host-deny</executable>
+        <timeout_allowed>yes</timeout_allowed>
+      </command>
+
+      <command>
+        <name>route-null</name>
+        <executable>route-null</executable>
+        <timeout_allowed>yes</timeout_allowed>
+      </command>
+
+      <command>
+        <name>win_route-null</name>
+        <executable>route-null.exe</executable>
+        <timeout_allowed>yes</timeout_allowed>
+      </command>
+
+      <command>
+        <name>netsh</name>
+        <executable>netsh.exe</executable>
+        <timeout_allowed>yes</timeout_allowed>
+      </command>
+
+      <active-response>
+        <disabled>no</disabled>
+        <command>host-deny</command>
+        <location>local</location>
+        <rules_id>5720</rules_id>
+        <timeout>600</timeout>
+      </active-response>
+
+      <active-response>
+        <disabled>no</disabled>
+        <command>firewall-drop</command>
+        <location>local</location>
+        <rules_id>5720</rules_id>
+        <timeout>600</timeout>
+      </active-response>
+
+    </ossec_config>
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wazuh-manager
+  namespace: wazuh
+spec:
+  serviceName: wazuh-manager
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wazuh-manager
+  template:
+    metadata:
+      labels:
+        app: wazuh-manager
+    spec:
+      containers:
+      - name: wazuh-manager
+        image: wazuh/wazuh-manager:4.7.0
+        ports:
+        - containerPort: 1514
+          name: agents-events
+        - containerPort: 1515
+          name: agents-auth
+        - containerPort: 514
+          name: syslog
+        - containerPort: 55000
+          name: api
+        env:
+        - name: WAZUH_MANAGER_SERVICE_NAME
+          value: "wazuh-manager"
+        - name: WAZUH_CLUSTER_NODE_NAME
+          value: "wazuh-manager"
+        - name: WAZUH_CLUSTER_NODE_TYPE
+          value: "master"
+        - name: WAZUH_CLUSTER_KEY
+          value: "c98b62a9b6169ac5f67dae55ae4a9088"
+        - name: WAZUH_CLUSTER_NODES
+          value: "wazuh-manager"
+        - name: WAZUH_CLUSTER_PORT
+          value: "1516"
+        - name: WAZUH_CLUSTER_BIND_ADDR
+          value: "0.0.0.0"
+        - name: WAZUH_CLUSTER_DISABLED
+          value: "no"
+        - name: WAZUH_API_GENERATE_CERTS
+          value: "true"
+        - name: WAZUH_API_SECURE_PROTOCOL
+          value: "https"
+        - name: WAZUH_API_PORT
+          value: "55000"
+        volumeMounts:
+        - name: config
+          mountPath: /wazuh-config-mount/etc/ossec.conf
+          subPath: ossec.conf
+        - name: wazuh-manager-data
+          mountPath: /var/ossec/data
+        - name: wazuh-manager-logs
+          mountPath: /var/ossec/logs
+        - name: wazuh-manager-queue
+          mountPath: /var/ossec/queue
+        - name: wazuh-manager-var-multigroups
+          mountPath: /var/ossec/var/multigroups
+        - name: wazuh-manager-integrations
+          mountPath: /var/ossec/integrations
+        - name: wazuh-manager-active-response
+          mountPath: /var/ossec/active-response/bin
+        - name: wazuh-manager-agentless
+          mountPath: /var/ossec/agentless
+        - name: wazuh-manager-wodles
+          mountPath: /var/ossec/wodles
+        - name: filebeat-etc
+          mountPath: /etc/filebeat
+        - name: filebeat-var
+          mountPath: /var/lib/filebeat
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1"
+          limits:
+            memory: "4Gi"
+            cpu: "2"
+        livenessProbe:
+          exec:
+            command:
+            - /var/ossec/bin/wazuh-control
+            - status
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+            - /var/ossec/bin/wazuh-control
+            - status
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: wazuh-manager-config
+  volumeClaimTemplates:
+  - metadata:
+      name: wazuh-manager-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 50Gi
+  - metadata:
+      name: wazuh-manager-logs
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 100Gi
+  - metadata:
+      name: wazuh-manager-queue
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 10Gi
+  - metadata:
+      name: wazuh-manager-var-multigroups
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 1Gi
+  - metadata:
+      name: wazuh-manager-integrations
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 1Gi
+  - metadata:
+      name: wazuh-manager-active-response
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 1Gi
+  - metadata:
+      name: wazuh-manager-agentless
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 1Gi
+  - metadata:
+      name: wazuh-manager-wodles
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 1Gi
+  - metadata:
+      name: filebeat-etc
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 1Gi
+  - metadata:
+      name: filebeat-var
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: "fast-ssd"
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-manager
+  namespace: wazuh
+spec:
+  selector:
+    app: wazuh-manager
+  ports:
+  - name: agents-events
+    port: 1514
+    targetPort: 1514
+    protocol: TCP
+  - name: agents-auth
+    port: 1515
+    targetPort: 1515
+    protocol: TCP
+  - name: syslog
+    port: 514
+    targetPort: 514
+    protocol: UDP
+  - name: api
+    port: 55000
+    targetPort: 55000
+    protocol: TCP
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wazuh-dashboard
+  namespace: wazuh
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wazuh-dashboard
+  template:
+    metadata:
+      labels:
+        app: wazuh-dashboard
+    spec:
+      containers:
+      - name: wazuh-dashboard
+        image: wazuh/wazuh-dashboard:4.7.0
+        ports:
+        - containerPort: 5601
+          name: dashboard
+        env:
+        - name: INDEXER_URL
+          value: "https://opensearch-cluster:9200"
+        - name: WAZUH_API_URL
+          value: "https://wazuh-manager:55000"
+        - name: API_USERNAME
+          value: "wazuh-wui"
+        - name: API_PASSWORD
+          value: "MyS3cr37P450r.*-"
+        - name: DASHBOARD_USERNAME
+          value: "opensearch-dashboardsserver"
+        - name: DASHBOARD_PASSWORD
+          value: "opensearch-dashboardsserver"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+        livenessProbe:
+          httpGet:
+            path: /status
+            port: 5601
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /status
+            port: 5601
+          initialDelaySeconds: 30
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wazuh-dashboard
+  namespace: wazuh
+spec:
+  selector:
+    app: wazuh-dashboard
+  ports:
+  - name: dashboard
+    port: 5601
+    targetPort: 5601
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wazuh-ingress
+  namespace: wazuh
+  annotations:
+    kubernetes.io/ingress.class: "openappsec"
+    openappsec.io/waf-enabled: "true"
+    openappsec.io/api-protection: "false"
+spec:
+  tls:
+  - hosts:
+    - wazuh.remittance.local
+    secretName: wazuh-tls
+  rules:
+  - host: wazuh.remittance.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: wazuh-dashboard
+            port:
+              number: 5601
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: wazuh-tls
+  namespace: wazuh
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t  # Base64 encoded certificate
+  tls.key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t  # Base64 encoded private key
+

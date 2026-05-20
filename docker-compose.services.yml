@@ -1,0 +1,365 @@
+version: "3.9"
+# ── RemitFlow — Microservices Stack ──────────────────────────────────────────
+# Go, Python, and Rust microservices
+#
+# Usage:
+#   docker compose -f docker-compose.middleware.yml -f docker-compose.services.yml up -d
+#   docker compose -f docker-compose.services.yml up -d --build
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ── Go: FX Rate Engine ────────────────────────────────────────────────────
+  fx-engine:
+    build:
+      context: ./services/fx-engine
+      dockerfile: Dockerfile
+    image: remitflow/fx-engine:latest
+    container_name: remitflow_fx_engine
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      PORT: "8081"
+      REDIS_URL: "redis:6379"
+      REDIS_PASSWORD: "remitflow_redis_secret"
+      KAFKA_BROKERS: "kafka:29092"
+      GIN_MODE: release
+      LOG_LEVEL: info
+      OPEN_EXCHANGE_RATES_APP_ID: "${OPEN_EXCHANGE_RATES_APP_ID:-demo}"
+      EXCHANGE_RATE_API_KEY: "${EXCHANGE_RATE_API_KEY:-demo}"
+    depends_on:
+      - redis
+      - kafka
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  # ── Go: Mojaloop Connector ────────────────────────────────────────────────
+  mojaloop-connector:
+    build:
+      context: ./services/mojaloop-connector
+      dockerfile: Dockerfile
+    image: remitflow/mojaloop-connector:latest
+    container_name: remitflow_mojaloop_connector
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    environment:
+      PORT: "8085"
+      KAFKA_BROKERS: "kafka:29092"
+      MOJALOOP_HUB_URL: "${MOJALOOP_HUB_URL:-http://mojaloop-central-ledger:3001}"
+      FSPIOP_SOURCE: "remitflow"
+      LOG_LEVEL: info
+    depends_on:
+      - kafka
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8085/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  # ── Go: TigerBeetle Ledger Service ───────────────────────────────────────
+  ledger-service:
+    build:
+      context: ./services/ledger-service
+      dockerfile: Dockerfile
+    image: remitflow/ledger-service:latest
+    container_name: remitflow_ledger_service
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      PORT: "8086"
+      TIGERBEETLE_ADDRESSES: "tigerbeetle:3000"
+      KAFKA_BROKERS: "kafka:29092"
+      LOG_LEVEL: info
+    depends_on:
+      - kafka
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8086/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  # ── Python: Kafka Event Processor ────────────────────────────────────────
+  kafka-processor:
+    build:
+      context: ./services/kafka-processor
+      dockerfile: Dockerfile
+    image: remitflow/kafka-processor:latest
+    container_name: remitflow_kafka_processor
+    restart: unless-stopped
+    ports:
+      - "8087:8087"
+    environment:
+      PORT: "8087"
+      KAFKA_BROKERS: "kafka:29092"
+      KAFKA_GROUP_ID: "remitflow-processor"
+      OPENSEARCH_URL: "http://opensearch:9200"
+      DATABASE_URL: "${DATABASE_URL}"
+      LOG_LEVEL: INFO
+    depends_on:
+      - kafka
+      - opensearch
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8087/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  # ── Python: OpenSearch Indexer ────────────────────────────────────────────
+  search-indexer:
+    build:
+      context: ./services/search-indexer
+      dockerfile: Dockerfile
+    image: remitflow/search-indexer:latest
+    container_name: remitflow_search_indexer
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      PORT: "8088"
+      OPENSEARCH_URL: "http://opensearch:9200"
+      DATABASE_URL: "${DATABASE_URL}"
+      KAFKA_BROKERS: "kafka:29092"
+      LOG_LEVEL: INFO
+    depends_on:
+      - opensearch
+      - kafka
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  # ── Python: Lakehouse ETL ─────────────────────────────────────────────────
+  lakehouse-etl:
+    build:
+      context: ./services/lakehouse-etl
+      dockerfile: Dockerfile
+    image: remitflow/lakehouse-etl:latest
+    container_name: remitflow_lakehouse_etl
+    restart: unless-stopped
+    ports:
+      - "8089:8089"
+    environment:
+      PORT: "8089"
+      DATABASE_URL: "${DATABASE_URL}"
+      MINIO_ENDPOINT: "minio:9000"
+      MINIO_ACCESS_KEY: "remitflow_minio"
+      MINIO_SECRET_KEY: "remitflow_minio_secret"
+      ICEBERG_WAREHOUSE: "s3://remitflow-lakehouse/warehouse"
+      KAFKA_BROKERS: "kafka:29092"
+      LOG_LEVEL: INFO
+    depends_on:
+      - minio
+      - kafka
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8089/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  # ── Python: Temporal Workflows ────────────────────────────────────────────
+  temporal-workflows:
+    build:
+      context: ./services/temporal-workflows
+      dockerfile: Dockerfile
+    image: remitflow/temporal-workflows:latest
+    container_name: remitflow_temporal_workflows
+    restart: unless-stopped
+    ports:
+      - "8093:8093"
+    environment:
+      PORT: "8093"
+      TEMPORAL_HOST: "temporal:7233"
+      TEMPORAL_NAMESPACE: "remitflow"
+      DATABASE_URL: "${DATABASE_URL}"
+      KAFKA_BROKERS: "kafka:29092"
+      LOG_LEVEL: INFO
+    depends_on:
+      - temporal
+      - kafka
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8093/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  # ── Rust: Risk Engine ─────────────────────────────────────────────────────
+  risk-engine:
+    build:
+      context: ./services/risk-engine
+      dockerfile: Dockerfile
+    image: remitflow/risk-engine:latest
+    container_name: remitflow_risk_engine
+    restart: unless-stopped
+    ports:
+      - "8091:8091"
+    environment:
+      PORT: "8091"
+      KAFKA_BROKERS: "kafka:29092"
+      REDIS_URL: "redis://redis:6379"
+      REDIS_PASSWORD: "remitflow_redis_secret"
+      RUST_LOG: info
+    depends_on:
+      - kafka
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  # ── Rust: Rate Limiter ────────────────────────────────────────────────────
+  rate-limiter:
+    build:
+      context: ./services/rate-limiter
+      dockerfile: Dockerfile
+    image: remitflow/rate-limiter:latest
+    container_name: remitflow_rate_limiter
+    restart: unless-stopped
+    ports:
+      - "8092:8092"
+    environment:
+      PORT: "8092"
+      REDIS_URL: "redis://redis:6379"
+      REDIS_PASSWORD: "remitflow_redis_secret"
+      RUST_LOG: info
+      DEFAULT_LIMIT: "100"
+      DEFAULT_WINDOW_SECS: "60"
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  # ── Existing Services (from docker-compose.yml) ───────────────────────────
+  fraud-ml:
+    build:
+      context: ./services/fraud-ml
+      dockerfile: Dockerfile
+    image: remitflow/fraud-ml:latest
+    container_name: remitflow_fraud_ml
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      PORT: "8082"
+      KAFKA_BROKERS: "kafka:29092"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  aml-engine:
+    build:
+      context: ./services/aml-engine
+      dockerfile: Dockerfile
+    image: remitflow/aml-engine:latest
+    container_name: remitflow_aml_engine
+    restart: unless-stopped
+    ports:
+      - "8083:8083"
+    environment:
+      PORT: "8083"
+      KAFKA_BROKERS: "kafka:29092"
+      REDIS_URL: "redis://redis:6379"
+      REDIS_PASSWORD: "remitflow_redis_secret"
+      RUST_LOG: info
+    depends_on:
+      - kafka
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - remitflow_middleware
+      - remitflow_net
+    logging: *default-logging
+
+  # ── External network reference ────────────────────────────────────────────
+  redis:
+    extends:
+      file: docker-compose.middleware.yml
+      service: redis
+
+  kafka:
+    extends:
+      file: docker-compose.middleware.yml
+      service: kafka
+
+  opensearch:
+    extends:
+      file: docker-compose.middleware.yml
+      service: opensearch
+
+  temporal:
+    extends:
+      file: docker-compose.middleware.yml
+      service: temporal
+
+  minio:
+    extends:
+      file: docker-compose.middleware.yml
+      service: minio
+
+networks:
+  remitflow_middleware:
+    external: true
+    name: remitflow_middleware
+  remitflow_net:
+    driver: bridge
+    name: remitflow_net

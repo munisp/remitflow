@@ -1,0 +1,242 @@
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: remittance-config
+  namespace: remittance
+spec:
+  tracing:
+    samplingRate: "1"
+    zipkin:
+      endpointAddress: "http://jaeger-collector:14268/api/traces"
+  metric:
+    enabled: true
+  secrets:
+    scopes:
+      - storeName: "kubernetes"
+        defaultAccess: "allow"
+        deniedSecrets: ["super-secret"]
+  accessControl:
+    defaultAction: "allow"
+    trustDomain: "remittance"
+    policies:
+    - appId: "agent-management"
+      defaultAction: "allow"
+      trustDomain: "remittance"
+      namespace: "remittance"
+      operations:
+      - name: "/api/v1/agents"
+        httpVerb: ["GET", "POST"]
+        action: "allow"
+      - name: "/api/v1/agents/*"
+        httpVerb: ["GET", "PUT", "DELETE"]
+        action: "allow"
+    - appId: "transaction-processing"
+      defaultAction: "allow"
+      trustDomain: "remittance"
+      namespace: "remittance"
+      operations:
+      - name: "/api/v1/transactions"
+        httpVerb: ["POST"]
+        action: "allow"
+      - name: "/api/v1/transactions/*"
+        httpVerb: ["GET"]
+        action: "allow"
+  nameResolution:
+    component: "mdns"
+    version: "v1"
+    configuration:
+      selfRegister: true
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+  namespace: remittance
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+  - name: redisHost
+    value: redis-master:6379
+  - name: redisPassword
+    secretKeyRef:
+      name: redis-secret
+      key: password
+  - name: enableTLS
+    value: "false"
+  - name: maxRetries
+    value: "3"
+  - name: maxRetryBackoff
+    value: "2s"
+  scopes:
+  - agent-management
+  - transaction-processing
+  - commission-settlement
+  - cash-management
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: pubsub
+  namespace: remittance
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+  - name: brokers
+    value: "remittance-kafka-bootstrap:9092"
+  - name: consumerGroup
+    value: "remittance-group"
+  - name: clientID
+    value: "remittance-client"
+  - name: authType
+    value: "none"
+  - name: maxMessageBytes
+    value: "1024000"
+  - name: version
+    value: "2.8.0"
+  scopes:
+  - agent-management
+  - transaction-processing
+  - commission-settlement
+  - fraud-detection
+  - audit-service
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: secretstore
+  namespace: remittance
+spec:
+  type: secretstores.kubernetes
+  version: v1
+  metadata:
+  - name: vaultKubernetesMountPath
+    value: "kubernetes"
+  - name: vaultServerURL
+    value: "https://vault:8200"
+  - name: vaultKubernetesRole
+    value: "remittance"
+  scopes:
+  - agent-management
+  - transaction-processing
+  - commission-settlement
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: bindings-kafka
+  namespace: remittance
+spec:
+  type: bindings.kafka
+  version: v1
+  metadata:
+  - name: brokers
+    value: "remittance-kafka-bootstrap:9092"
+  - name: topics
+    value: "transactions,agent-events,fraud-alerts"
+  - name: consumerGroup
+    value: "remittance-bindings"
+  - name: publishTopic
+    value: "agent-events"
+  - name: authType
+    value: "none"
+  scopes:
+  - transaction-processing
+  - fraud-detection
+---
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: postgres-binding
+  namespace: remittance
+spec:
+  type: bindings.postgres
+  version: v1
+  metadata:
+  - name: url
+    secretKeyRef:
+      name: postgres-secret
+      key: connectionString
+  - name: maxConns
+    value: "20"
+  - name: maxIdleConns
+    value: "10"
+  - name: connMaxLifetime
+    value: "5m"
+  scopes:
+  - agent-management
+  - transaction-processing
+  - commission-settlement
+---
+apiVersion: dapr.io/v1alpha1
+kind: Resiliency
+metadata:
+  name: remittance-resiliency
+  namespace: remittance
+spec:
+  policies:
+    retries:
+      DefaultRetryPolicy:
+        policy: constant
+        duration: 5s
+        maxRetries: 3
+      TransactionRetryPolicy:
+        policy: exponential
+        maxInterval: 15s
+        maxRetries: 5
+    timeouts:
+      DefaultTimeoutPolicy:
+        response: 30s
+      TransactionTimeoutPolicy:
+        response: 10s
+    circuitBreakers:
+      DefaultCircuitBreakerPolicy:
+        maxRequests: 1
+        interval: 8s
+        timeout: 45s
+        trip: consecutiveFailures >= 5
+      TransactionCircuitBreakerPolicy:
+        maxRequests: 3
+        interval: 10s
+        timeout: 60s
+        trip: consecutiveFailures >= 3
+  targets:
+    apps:
+      agent-management:
+        retry: DefaultRetryPolicy
+        timeout: DefaultTimeoutPolicy
+        circuitBreaker: DefaultCircuitBreakerPolicy
+      transaction-processing:
+        retry: TransactionRetryPolicy
+        timeout: TransactionTimeoutPolicy
+        circuitBreaker: TransactionCircuitBreakerPolicy
+    components:
+      statestore:
+        outbound:
+          retry: DefaultRetryPolicy
+          timeout: DefaultTimeoutPolicy
+          circuitBreaker: DefaultCircuitBreakerPolicy
+      pubsub:
+        outbound:
+          retry: DefaultRetryPolicy
+          timeout: DefaultTimeoutPolicy
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-secret
+  namespace: remittance
+type: Opaque
+data:
+  password: YWdlbnQtYmFua2luZy1yZWRpcw==  # base64 encoded password
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+  namespace: remittance
+type: Opaque
+data:
+  connectionString: cG9zdGdyZXNxbDovL3VzZXI6cGFzc3dvcmRAcG9zdGdyZXM6NTQzMi9hZ2VudF9iYW5raW5n  # base64 encoded connection string
+

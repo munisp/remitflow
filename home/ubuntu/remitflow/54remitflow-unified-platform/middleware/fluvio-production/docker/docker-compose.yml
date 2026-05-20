@@ -1,0 +1,144 @@
+version: '3.8'
+
+services:
+  fluvio-sc:
+    image: infinyon/fluvio:latest
+    container_name: fluvio-sc
+    hostname: fluvio-sc
+    command: cluster start --sc
+    ports:
+      - "9003:9003"  # SC port
+      - "9005:9005"  # Public SC port
+    environment:
+      - RUST_LOG=info
+      - FLUVIO_SC_PRIVATE_HOST=fluvio-sc
+      - FLUVIO_SC_PUBLIC_HOST=localhost
+      - FLUVIO_SC_PORT=9003
+    volumes:
+      - fluvio-sc-data:/home/fluvio/.fluvio
+    networks:
+      - fluvio-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "fluvio", "version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  fluvio-spu-1:
+    image: infinyon/fluvio:latest
+    container_name: fluvio-spu-1
+    hostname: fluvio-spu-1
+    command: cluster start --spu --spu-id 1
+    ports:
+      - "9010:9010"  # SPU port
+    environment:
+      - RUST_LOG=info
+      - FLUVIO_SPU_ID=1
+      - FLUVIO_SPU_PRIVATE_HOST=fluvio-spu-1
+      - FLUVIO_SPU_PUBLIC_HOST=localhost
+      - FLUVIO_SPU_PORT=9010
+      - FLUVIO_SC_HOST=fluvio-sc
+      - FLUVIO_SC_PORT=9003
+    volumes:
+      - fluvio-spu-1-data:/home/fluvio/.fluvio
+    networks:
+      - fluvio-network
+    depends_on:
+      - fluvio-sc
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "fluvio", "version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  fluvio-spu-2:
+    image: infinyon/fluvio:latest
+    container_name: fluvio-spu-2
+    hostname: fluvio-spu-2
+    command: cluster start --spu --spu-id 2
+    ports:
+      - "9011:9011"  # SPU port
+    environment:
+      - RUST_LOG=info
+      - FLUVIO_SPU_ID=2
+      - FLUVIO_SPU_PRIVATE_HOST=fluvio-spu-2
+      - FLUVIO_SPU_PUBLIC_HOST=localhost
+      - FLUVIO_SPU_PORT=9011
+      - FLUVIO_SC_HOST=fluvio-sc
+      - FLUVIO_SC_PORT=9003
+    volumes:
+      - fluvio-spu-2-data:/home/fluvio/.fluvio
+    networks:
+      - fluvio-network
+    depends_on:
+      - fluvio-sc
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "fluvio", "version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  fluvio-producer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.producer
+    container_name: fluvio-producer
+    environment:
+      - FLUVIO_CLUSTER_URL=fluvio-sc:9003
+      - FLUVIO_PROFILE=docker
+      - FLUVIO_PRODUCER_BATCH_SIZE=100
+      - FLUVIO_PRODUCER_FLUSH_INTERVAL=1.0
+      - FLUVIO_METRICS_ENABLED=true
+      - FLUVIO_METRICS_PORT=9091
+    ports:
+      - "9091:9091"  # Metrics port
+    networks:
+      - fluvio-network
+    depends_on:
+      - fluvio-sc
+      - fluvio-spu-1
+      - fluvio-spu-2
+    restart: unless-stopped
+
+  fluvio-consumer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.consumer
+    container_name: fluvio-consumer
+    environment:
+      - FLUVIO_CLUSTER_URL=fluvio-sc:9003
+      - FLUVIO_PROFILE=docker
+      - FLUVIO_CONSUMER_GROUP_ID=remittance-group
+      - FLUVIO_CONSUMER_AUTO_COMMIT=true
+      - FLUVIO_METRICS_ENABLED=true
+      - FLUVIO_METRICS_PORT=9092
+    ports:
+      - "9092:9092"  # Metrics port
+    networks:
+      - fluvio-network
+    depends_on:
+      - fluvio-sc
+      - fluvio-spu-1
+      - fluvio-spu-2
+    restart: unless-stopped
+
+volumes:
+  fluvio-sc-data:
+    driver: local
+  fluvio-spu-1-data:
+    driver: local
+  fluvio-spu-2-data:
+    driver: local
+
+networks:
+  fluvio-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16

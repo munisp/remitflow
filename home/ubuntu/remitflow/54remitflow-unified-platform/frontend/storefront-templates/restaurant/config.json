@@ -1,0 +1,35 @@
+{
+  "name": "Mama's Kitchen",
+  "tagline": "Homemade Meals, Delivered Fresh",
+  "description": "Restaurant template with menu builder, table reservations, and meal subscriptions",
+  "theme": {
+    "primary": "#dc2626",
+    "secondary": "#f59e0b",
+    "accent": "#fbbf24",
+    "background": "#fef2f2",
+    "text": "#1f2937"
+  },
+  "categories": [
+    "Main Dishes",
+    "Soups",
+    "Sides",
+    "Drinks",
+    "Desserts",
+    "Breakfast",
+    "Lunch Specials"
+  ],
+  "features": [
+    "table_reservations",
+    "meal_subscriptions",
+    "dietary_filters",
+    "calorie_counter",
+    "chef_specials"
+  ],
+  "payment_methods": [
+    "qr_code",
+    "mobile_money",
+    "bank_transfer",
+    "card",
+    "cash_on_delivery"
+  ]
+}

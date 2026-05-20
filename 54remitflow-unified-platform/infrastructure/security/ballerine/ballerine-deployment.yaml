@@ -1,0 +1,693 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: workflow-orchestration
+  labels:
+    name: workflow-orchestration
+    component: kyb-verification
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: temporal-config
+  namespace: workflow-orchestration
+data:
+  config.json: |
+    {
+      "app": {
+        "name": "Remittance Platform KYB Service",
+        "version": "1.0.0",
+        "environment": "production",
+        "port": 3000,
+        "cors": {
+          "origin": ["https://app.remittance.local", "http://localhost:3000"],
+          "credentials": true
+        }
+      },
+      "database": {
+        "type": "postgresql",
+        "host": "postgresql",
+        "port": 5432,
+        "username": "${TEMPORAL_DB_USER}",
+        "password": "${TEMPORAL_DB_PASSWORD}",
+        "database": "temporal",
+        "synchronize": false,
+        "logging": false,
+        "ssl": false,
+        "entities": ["dist/**/*.entity.js"],
+        "migrations": ["dist/migrations/*.js"],
+        "cli": {
+          "migrationsDir": "src/migrations"
+        }
+      },
+      "redis": {
+        "host": "redis-master",
+        "port": 6379,
+        "password": "remittance-redis",
+        "db": 2
+      },
+      "auth": {
+        "jwt": {
+          "secret": "${JWT_SECRET}",
+          "expiresIn": "24h"
+        },
+        "keycloak": {
+          "realm": "remittance",
+          "authServerUrl": "http://keycloak:8080",
+          "clientId": "workflow-kyb",
+          "clientSecret": "${KEYCLOAK_CLIENT_SECRET}"
+        }
+      },
+      "workflows": {
+        "kyb": {
+          "enabled": true,
+          "autoApprove": false,
+          "requireManualReview": true,
+          "documentTypes": [
+            "business_registration",
+            "tax_certificate",
+            "bank_statement",
+            "utility_bill",
+            "director_id",
+            "memorandum_of_association"
+          ],
+          "verificationSteps": [
+            "document_collection",
+            "ocr_extraction",
+            "registry_verification",
+            "risk_assessment",
+            "manual_review",
+            "decision"
+          ],
+          "riskFactors": [
+            "pep_check",
+            "sanctions_check",
+            "adverse_media",
+            "business_age",
+            "industry_risk",
+            "geographic_risk"
+          ]
+        }
+      },
+      "integrations": {
+        "ocr": {
+          "provider": "got-ocr",
+          "endpoint": "http://got-ocr-service:8080",
+          "apiKey": "got-ocr-api-key-123"
+        },
+        "registry": {
+          "providers": [
+            {
+              "name": "companies_house",
+              "country": "UK",
+              "endpoint": "https://api.companieshouse.gov.uk",
+              "apiKey": "companies-house-api-key"
+            },
+            {
+              "name": "business_registry_za",
+              "country": "ZA",
+              "endpoint": "https://eservices.cipc.co.za",
+              "apiKey": "cipc-api-key"
+            },
+            {
+              "name": "business_registry_ng",
+              "country": "NG",
+              "endpoint": "https://search.cac.gov.ng",
+              "apiKey": "cac-api-key"
+            },
+            {
+              "name": "business_registry_ke",
+              "country": "KE",
+              "endpoint": "https://ecitizen.go.ke",
+              "apiKey": "ecitizen-api-key"
+            }
+          ]
+        },
+        "sanctions": {
+          "providers": [
+            {
+              "name": "ofac",
+              "endpoint": "https://sanctionslistservice.ofac.treas.gov",
+              "updateInterval": "daily"
+            },
+            {
+              "name": "un_sanctions",
+              "endpoint": "https://scsanctions.un.org",
+              "updateInterval": "daily"
+            },
+            {
+              "name": "eu_sanctions",
+              "endpoint": "https://webgate.ec.europa.eu/fsd/fsf",
+              "updateInterval": "daily"
+            }
+          ]
+        },
+        "pep": {
+          "provider": "worldcheck",
+          "endpoint": "https://api.worldcheck.com",
+          "apiKey": "worldcheck-api-key"
+        },
+        "adverse_media": {
+          "provider": "dow_jones",
+          "endpoint": "https://api.dowjones.com",
+          "apiKey": "dow-jones-api-key"
+        }
+      },
+      "storage": {
+        "provider": "s3",
+        "bucket": "remittance-kyb-documents",
+        "region": "us-east-1",
+        "accessKeyId": "minio-access-key",
+        "secretAccessKey": "minio-secret-key",
+        "endpoint": "http://minio:9000",
+        "forcePathStyle": true
+      },
+      "notifications": {
+        "email": {
+          "provider": "smtp",
+          "host": "smtp.remittance.com",
+          "port": 587,
+          "secure": false,
+          "auth": {
+            "user": "kyb@remittance.com",
+            "pass": "smtp-password"
+          }
+        },
+        "webhook": {
+          "enabled": true,
+          "endpoints": [
+            {
+              "name": "agent_management",
+              "url": "http://agent-management:8080/webhooks/kyb",
+              "events": ["kyb.completed", "kyb.rejected", "kyb.requires_review"]
+            }
+          ]
+        }
+      },
+      "compliance": {
+        "retention": {
+          "documents": "7y",
+          "logs": "5y",
+          "decisions": "10y"
+        },
+        "encryption": {
+          "algorithm": "AES-256-GCM",
+          "keyRotation": "90d"
+        },
+        "audit": {
+          "enabled": true,
+          "logLevel": "detailed",
+          "destinations": ["database", "syslog"]
+        }
+      },
+      "monitoring": {
+        "metrics": {
+          "enabled": true,
+          "port": 9090,
+          "path": "/metrics"
+        },
+        "health": {
+          "enabled": true,
+          "path": "/health"
+        },
+        "logging": {
+          "level": "info",
+          "format": "json",
+          "destinations": ["console", "file"]
+        }
+      }
+    }
+  
+  workflow-config.json: |
+    {
+      "workflows": [
+        {
+          "id": "kyb-standard",
+          "name": "Standard KYB Verification",
+          "description": "Standard Know Your Business verification workflow",
+          "version": "1.0",
+          "states": [
+            {
+              "id": "document_collection",
+              "name": "Document Collection",
+              "type": "manual",
+              "description": "Collect required business documents",
+              "requiredDocuments": [
+                "business_registration",
+                "tax_certificate",
+                "bank_statement",
+                "director_id"
+              ],
+              "transitions": [
+                {
+                  "to": "ocr_extraction",
+                  "condition": "all_documents_uploaded"
+                }
+              ]
+            },
+            {
+              "id": "ocr_extraction",
+              "name": "OCR Data Extraction",
+              "type": "automated",
+              "description": "Extract data from uploaded documents using OCR",
+              "processor": "got-ocr",
+              "transitions": [
+                {
+                  "to": "registry_verification",
+                  "condition": "extraction_successful"
+                },
+                {
+                  "to": "manual_review",
+                  "condition": "extraction_failed"
+                }
+              ]
+            },
+            {
+              "id": "registry_verification",
+              "name": "Business Registry Verification",
+              "type": "automated",
+              "description": "Verify business details against official registries",
+              "verifications": [
+                "company_registration",
+                "director_verification",
+                "business_status"
+              ],
+              "transitions": [
+                {
+                  "to": "risk_assessment",
+                  "condition": "verification_passed"
+                },
+                {
+                  "to": "manual_review",
+                  "condition": "verification_failed"
+                }
+              ]
+            },
+            {
+              "id": "risk_assessment",
+              "name": "Risk Assessment",
+              "type": "automated",
+              "description": "Assess business and director risks",
+              "checks": [
+                "sanctions_screening",
+                "pep_screening",
+                "adverse_media_check",
+                "industry_risk_assessment",
+                "geographic_risk_assessment"
+              ],
+              "transitions": [
+                {
+                  "to": "auto_approve",
+                  "condition": "low_risk"
+                },
+                {
+                  "to": "manual_review",
+                  "condition": "medium_risk or high_risk"
+                }
+              ]
+            },
+            {
+              "id": "manual_review",
+              "name": "Manual Review",
+              "type": "manual",
+              "description": "Manual review by compliance officer",
+              "assignee": "compliance_officer",
+              "sla": "24h",
+              "transitions": [
+                {
+                  "to": "approved",
+                  "condition": "reviewer_approves"
+                },
+                {
+                  "to": "rejected",
+                  "condition": "reviewer_rejects"
+                },
+                {
+                  "to": "additional_info_required",
+                  "condition": "more_info_needed"
+                }
+              ]
+            },
+            {
+              "id": "additional_info_required",
+              "name": "Additional Information Required",
+              "type": "manual",
+              "description": "Request additional information from applicant",
+              "transitions": [
+                {
+                  "to": "manual_review",
+                  "condition": "info_provided"
+                },
+                {
+                  "to": "rejected",
+                  "condition": "timeout_exceeded"
+                }
+              ]
+            },
+            {
+              "id": "auto_approve",
+              "name": "Auto Approved",
+              "type": "automated",
+              "description": "Automatically approved based on risk assessment",
+              "final": true
+            },
+            {
+              "id": "approved",
+              "name": "Approved",
+              "type": "final",
+              "description": "KYB verification approved",
+              "final": true
+            },
+            {
+              "id": "rejected",
+              "name": "Rejected",
+              "type": "final",
+              "description": "KYB verification rejected",
+              "final": true
+            }
+          ],
+          "rules": [
+            {
+              "id": "auto_approve_rule",
+              "condition": "risk_score < 30 and all_verifications_passed",
+              "action": "auto_approve"
+            },
+            {
+              "id": "manual_review_rule",
+              "condition": "risk_score >= 30 or any_verification_failed",
+              "action": "manual_review"
+            },
+            {
+              "id": "high_risk_rule",
+              "condition": "risk_score >= 70",
+              "action": "escalate_to_senior_reviewer"
+            }
+          ]
+        }
+      ]
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-frontend
+  namespace: workflow-orchestration
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: temporal-frontend
+  template:
+    metadata:
+      labels:
+        app: temporal-frontend
+    spec:
+      containers:
+      - name: temporal
+        image: temporalio/server:1.24.2
+        ports:
+        - containerPort: 7233
+          name: grpc
+        - containerPort: 7235
+          name: metrics
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: PORT
+          value: "3000"
+        - name: DATABASE_URL
+          value: "postgresql://${TEMPORAL_DB_USER}:${TEMPORAL_DB_PASSWORD}@postgresql:5432/temporal"
+        - name: REDIS_URL
+          value: "redis://:remittance-redis@redis-master:6379/2"
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: temporal-db-credentials
+              key: JWT_SECRET
+        - name: KEYCLOAK_REALM
+          value: "remittance"
+        - name: KEYCLOAK_AUTH_SERVER_URL
+          value: "http://keycloak:8080"
+        - name: KEYCLOAK_CLIENT_ID
+          value: "workflow-kyb"
+        - name: KEYCLOAK_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: temporal-db-credentials
+              key: KEYCLOAK_CLIENT_SECRET
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 7233
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 7233
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: config
+        configMap:
+          name: temporal-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal-ui
+  namespace: workflow-orchestration
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: temporal-ui
+  template:
+    metadata:
+      labels:
+        app: temporal-ui
+    spec:
+      containers:
+      - name: temporal-ui
+        image: temporalio/ui:2.26.2
+        ports:
+        - containerPort: 8080
+          name: grpc
+        env:
+        - name: REACT_APP_API_URL
+          value: "temporal-frontend:7233"
+        - name: REACT_APP_KEYCLOAK_URL
+          value: "https://keycloak.remittance.local"
+        - name: REACT_APP_KEYCLOAK_REALM
+          value: "remittance"
+        - name: REACT_APP_KEYCLOAK_CLIENT_ID
+          value: "workflow-kyb"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: got-ocr-service
+  namespace: workflow-orchestration
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: got-ocr-service
+  template:
+    metadata:
+      labels:
+        app: got-ocr-service
+    spec:
+      containers:
+      - name: got-ocr
+        image: ucas-haoranwei/got-ocr2.0:latest
+        ports:
+        - containerPort: 8080
+          name: grpc
+        env:
+        - name: MODEL_PATH
+          value: "/models/got-ocr2.0"
+        - name: DEVICE
+          value: "cpu"
+        - name: MAX_WORKERS
+          value: "4"
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 120
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 60
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-frontend
+  namespace: workflow-orchestration
+spec:
+  selector:
+    app: temporal-frontend
+  ports:
+  - name: grpc
+    port: 7233
+    targetPort: 3000
+  - name: metrics
+    port: 7235
+    targetPort: 9090
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal-ui
+  namespace: workflow-orchestration
+spec:
+  selector:
+    app: temporal-ui
+  ports:
+  - name: grpc
+    port: 8080
+    targetPort: 3001
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: got-ocr-service
+  namespace: workflow-orchestration
+spec:
+  selector:
+    app: got-ocr-service
+  ports:
+  - name: grpc
+    port: 8080
+    targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: temporal-api-ingress
+  namespace: workflow-orchestration
+  annotations:
+    kubernetes.io/ingress.class: "openappsec"
+    openappsec.io/waf-enabled: "true"
+    openappsec.io/api-protection: "true"
+spec:
+  tls:
+  - hosts:
+    - temporal-api.remittance.local
+    secretName: temporal-api-tls
+  rules:
+  - host: temporal-api.remittance.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: temporal-frontend
+            port:
+              number: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: temporal-ui-ingress
+  namespace: workflow-orchestration
+  annotations:
+    kubernetes.io/ingress.class: "openappsec"
+    openappsec.io/waf-enabled: "true"
+    openappsec.io/api-protection: "false"
+spec:
+  tls:
+  - hosts:
+    - temporal-ui.remittance.local
+    secretName: temporal-ui-tls
+  rules:
+  - host: temporal-ui.remittance.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: temporal-ui
+            port:
+              number: 3001
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-api-tls
+  namespace: workflow-orchestration
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t  # Base64 encoded certificate
+  tls.key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t  # Base64 encoded private key
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-ui-tls
+  namespace: workflow-orchestration
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t  # Base64 encoded certificate
+  tls.key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t  # Base64 encoded private key
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: temporal-metrics
+  namespace: workflow-orchestration
+spec:
+  selector:
+    matchLabels:
+      app: temporal-frontend
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+

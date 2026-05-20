@@ -1,0 +1,108 @@
+{
+  "title": "RemitFlow — Platform Overview",
+  "uid": "remitflow-overview",
+  "version": 1,
+  "schemaVersion": 38,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "HTTP Requests / min",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "sum(rate(remitflow_http_requests_total[1m])) * 60",
+          "legendFormat": "req/min"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Transfers (total)",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "remitflow_transfer_total",
+          "legendFormat": "total"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Transfer Success Rate",
+      "type": "gauge",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "remitflow_transfer_success / clamp_min(remitflow_transfer_total, 1) * 100",
+          "legendFormat": "success %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "yellow", "value": 90 },
+              { "color": "green", "value": 98 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Fraud Alerts Raised",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "remitflow_fraud_alerts_raised",
+          "legendFormat": "alerts"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "HTTP Request Rate by Path",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "sum by (path) (rate(remitflow_http_requests_total[5m]))",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Transfer Processing Latency (p95)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "remitflow_transfer_processing_p95_ms",
+          "legendFormat": "p95 ms"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "KYC Submissions",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(remitflow_kyc_submissions_total[5m]) * 300",
+          "legendFormat": "submissions/5m"
+        }
+      ]
+    }
+  ]
+}

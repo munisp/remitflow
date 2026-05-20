@@ -1,0 +1,316 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apisix
+
+---
+# etcd TLS Secrets
+apiVersion: v1
+kind: Secret
+metadata:
+  name: etcd-certs
+  namespace: apisix
+type: Opaque
+data:
+  # Base64 encoded certificates (replace with actual certificates)
+  ca.pem: LS0tLS1CRUdJTi... # base64 encoded CA certificate
+  etcd-server.pem: LS0tLS1CRUdJTi... # base64 encoded server certificate
+  etcd-server-key.pem: LS0tLS1CRUdJTi... # base64 encoded server key
+  etcd-peer.pem: LS0tLS1CRUdJTi... # base64 encoded peer certificate
+  etcd-peer-key.pem: LS0tLS1CRUdJTi... # base64 encoded peer key
+  etcd-client.pem: LS0tLS1CRUdJTi... # base64 encoded client certificate
+  etcd-client-key.pem: LS0tLS1CRUdJTi... # base64 encoded client key
+
+---
+# etcd Authentication Secret
+apiVersion: v1
+kind: Secret
+metadata:
+  name: etcd-auth
+  namespace: apisix
+type: Opaque
+stringData:
+  root-password: "changeme123"  # Change in production
+
+---
+# etcd StatefulSet (Secure 3-node cluster)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: etcd
+  namespace: apisix
+spec:
+  serviceName: etcd
+  replicas: 3
+  selector:
+    matchLabels:
+      app: etcd
+  template:
+    metadata:
+      labels:
+        app: etcd
+    spec:
+      containers:
+      - name: etcd
+        image: bitnami/etcd:3.5.11
+        ports:
+        - containerPort: 2379
+          name: client
+        - containerPort: 2380
+          name: peer
+        env:
+        # Authentication
+        - name: ALLOW_NONE_AUTHENTICATION
+          value: "no"
+        - name: ETCD_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: etcd-auth
+              key: root-password
+        - name: ETCD_AUTH_TOKEN
+          value: "simple"
+        
+        # Cluster Configuration
+        - name: ETCD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: ETCD_INITIAL_CLUSTER
+          value: "etcd-0=https://etcd-0.etcd:2380,etcd-1=https://etcd-1.etcd:2380,etcd-2=https://etcd-2.etcd:2380"
+        - name: ETCD_INITIAL_CLUSTER_STATE
+          value: "new"
+        - name: ETCD_INITIAL_CLUSTER_TOKEN
+          value: "etcd-cluster-1"
+        
+        # Client URLs (HTTPS)
+        - name: ETCD_ADVERTISE_CLIENT_URLS
+          value: "https://$(ETCD_NAME).etcd:2379"
+        - name: ETCD_LISTEN_CLIENT_URLS
+          value: "https://0.0.0.0:2379"
+        
+        # Peer URLs (HTTPS)
+        - name: ETCD_INITIAL_ADVERTISE_PEER_URLS
+          value: "https://$(ETCD_NAME).etcd:2380"
+        - name: ETCD_LISTEN_PEER_URLS
+          value: "https://0.0.0.0:2380"
+        
+        # TLS Configuration - Client
+        - name: ETCD_CERT_FILE
+          value: "/certs/etcd-server.pem"
+        - name: ETCD_KEY_FILE
+          value: "/certs/etcd-server-key.pem"
+        - name: ETCD_TRUSTED_CA_FILE
+          value: "/certs/ca.pem"
+        - name: ETCD_CLIENT_CERT_AUTH
+          value: "true"
+        
+        # TLS Configuration - Peer
+        - name: ETCD_PEER_CERT_FILE
+          value: "/certs/etcd-peer.pem"
+        - name: ETCD_PEER_KEY_FILE
+          value: "/certs/etcd-peer-key.pem"
+        - name: ETCD_PEER_TRUSTED_CA_FILE
+          value: "/certs/ca.pem"
+        - name: ETCD_PEER_CLIENT_CERT_AUTH
+          value: "true"
+        
+        # Performance Tuning
+        - name: ETCD_QUOTA_BACKEND_BYTES
+          value: "8589934592"  # 8GB
+        - name: ETCD_AUTO_COMPACTION_MODE
+          value: "periodic"
+        - name: ETCD_AUTO_COMPACTION_RETENTION
+          value: "1h"
+        - name: ETCD_SNAPSHOT_COUNT
+          value: "10000"
+        - name: ETCD_MAX_REQUEST_BYTES
+          value: "33554432"  # 32MB
+        - name: ETCD_HEARTBEAT_INTERVAL
+          value: "100"
+        - name: ETCD_ELECTION_TIMEOUT
+          value: "1000"
+        
+        # Logging
+        - name: ETCD_LOG_LEVEL
+          value: "info"
+        - name: ETCD_LOGGER
+          value: "zap"
+        
+        volumeMounts:
+        - name: etcd-data
+          mountPath: /bitnami/etcd
+        - name: etcd-certs
+          mountPath: /certs
+          readOnly: true
+        
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - |
+              etcdctl --endpoints=https://localhost:2379 \
+                --cacert=/certs/ca.pem \
+                --cert=/certs/etcd-client.pem \
+                --key=/certs/etcd-client-key.pem \
+                endpoint health
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - |
+              etcdctl --endpoints=https://localhost:2379 \
+                --cacert=/certs/ca.pem \
+                --cert=/certs/etcd-client.pem \
+                --key=/certs/etcd-client-key.pem \
+                endpoint health
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+      
+      volumes:
+      - name: etcd-certs
+        secret:
+          secretName: etcd-certs
+          defaultMode: 0400
+  
+  volumeClaimTemplates:
+  - metadata:
+      name: etcd-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 20Gi
+      storageClassName: standard
+
+---
+# etcd Headless Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+  namespace: apisix
+spec:
+  clusterIP: None
+  ports:
+  - port: 2379
+    name: client
+    targetPort: 2379
+  - port: 2380
+    name: peer
+    targetPort: 2380
+  selector:
+    app: etcd
+
+---
+# etcd Client Service (for external access)
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd-client
+  namespace: apisix
+spec:
+  type: ClusterIP
+  ports:
+  - port: 2379
+    name: client
+    targetPort: 2379
+  selector:
+    app: etcd
+
+---
+# etcd Backup CronJob
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup
+  namespace: apisix
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: backup
+            image: bitnami/etcd:3.5.11
+            command:
+            - /bin/sh
+            - -c
+            - |
+              BACKUP_FILE=/backup/etcd-$(date +%Y%m%d-%H%M%S).db
+              etcdctl --endpoints=https://etcd-0.etcd:2379 \
+                --cacert=/certs/ca.pem \
+                --cert=/certs/etcd-client.pem \
+                --key=/certs/etcd-client-key.pem \
+                snapshot save $BACKUP_FILE
+              echo "Backup completed: $BACKUP_FILE"
+              # Keep last 30 days
+              find /backup -name "etcd-*.db" -mtime +30 -delete
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            - name: etcd-certs
+              mountPath: /certs
+              readOnly: true
+          restartPolicy: OnFailure
+          volumes:
+          - name: backup
+            persistentVolumeClaim:
+              claimName: etcd-backup-pvc
+          - name: etcd-certs
+            secret:
+              secretName: etcd-certs
+
+---
+# etcd Backup PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: etcd-backup-pvc
+  namespace: apisix
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: standard
+
+---
+# etcd Monitoring ServiceMonitor (for Prometheus Operator)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: etcd
+  namespace: apisix
+spec:
+  selector:
+    matchLabels:
+      app: etcd
+  endpoints:
+  - port: client
+    interval: 30s
+    scheme: https
+    tlsConfig:
+      caFile: /etc/prometheus/secrets/etcd-certs/ca.pem
+      certFile: /etc/prometheus/secrets/etcd-certs/etcd-client.pem
+      keyFile: /etc/prometheus/secrets/etcd-certs/etcd-client-key.pem
+

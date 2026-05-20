@@ -1,0 +1,442 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keda
+  labels:
+    name: keda
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/name: keda-operator
+    app.kubernetes.io/part-of: keda-operator
+    app.kubernetes.io/version: 2.12.0
+  name: keda-operator
+  namespace: keda
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: keda-operator
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - configmaps/status
+  - events
+  - leases
+  - limitranges
+  - nodes
+  - pods
+  - secrets
+  - serviceaccounts
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - events
+  - secrets
+  verbs:
+  - create
+  - delete
+  - patch
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - delete
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - deployments/finalizers
+  - deployments/status
+  - replicasets
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments/scale
+  - statefulsets/scale
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - autoscaling
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - keda.sh
+  resources:
+  - clustertriggerauthentications
+  - clustertriggerauthentications/status
+  - scaledjobs
+  - scaledjobs/finalizers
+  - scaledjobs/status
+  - scaledobjects
+  - scaledobjects/finalizers
+  - scaledobjects/status
+  - triggerauthentications
+  - triggerauthentications/status
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: keda-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: keda-operator
+subjects:
+- kind: ServiceAccount
+  name: keda-operator
+  namespace: keda
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: keda-operator
+    app.kubernetes.io/component: operator
+    app.kubernetes.io/name: keda-operator
+    app.kubernetes.io/part-of: keda-operator
+    app.kubernetes.io/version: 2.12.0
+  name: keda-operator
+  namespace: keda
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keda-operator
+  template:
+    metadata:
+      labels:
+        app: keda-operator
+        app.kubernetes.io/component: operator
+        app.kubernetes.io/name: keda-operator
+        app.kubernetes.io/part-of: keda-operator
+        app.kubernetes.io/version: 2.12.0
+    spec:
+      automountServiceAccountToken: true
+      containers:
+      - args:
+        - --leader-elect
+        - --zap-log-level=info
+        - --zap-encoder=console
+        - --zap-time-encoding=rfc3339
+        command:
+        - /manager
+        env:
+        - name: WATCH_NAMESPACE
+          value: ""
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: OPERATOR_NAME
+          value: keda-operator
+        - name: KEDA_HTTP_DEFAULT_TIMEOUT
+          value: "3000"
+        image: ghcr.io/kedacore/keda:2.12.0
+        imagePullPolicy: Always
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8081
+          initialDelaySeconds: 25
+          periodSeconds: 10
+        name: keda-operator
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 8081
+          name: http-healthz
+          protocol: TCP
+        - containerPort: 8443
+          name: https
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1000Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1001
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - mountPath: /certs
+          name: certificates
+          readOnly: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: keda-operator
+      volumes:
+      - name: certificates
+        secret:
+          defaultMode: 420
+          secretName: kedaorg-certs
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: metrics-server
+    app.kubernetes.io/name: keda-metrics-apiserver
+    app.kubernetes.io/part-of: keda-operator
+    app.kubernetes.io/version: 2.12.0
+  name: keda-metrics-apiserver
+  namespace: keda
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: keda-metrics-apiserver
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - nodes
+  - nodes/stats
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - replicasets
+  - statefulsets
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - keda.sh
+  resources:
+  - scaledobjects
+  - scaledjobs
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: keda-metrics-apiserver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: keda-metrics-apiserver
+subjects:
+- kind: ServiceAccount
+  name: keda-metrics-apiserver
+  namespace: keda
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: keda-metrics-apiserver
+    app.kubernetes.io/component: metrics-server
+    app.kubernetes.io/name: keda-metrics-apiserver
+    app.kubernetes.io/part-of: keda-operator
+    app.kubernetes.io/version: 2.12.0
+  name: keda-metrics-apiserver
+  namespace: keda
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keda-metrics-apiserver
+  template:
+    metadata:
+      labels:
+        app: keda-metrics-apiserver
+        app.kubernetes.io/component: metrics-server
+        app.kubernetes.io/name: keda-metrics-apiserver
+        app.kubernetes.io/part-of: keda-operator
+        app.kubernetes.io/version: 2.12.0
+    spec:
+      automountServiceAccountToken: true
+      containers:
+      - args:
+        - /usr/local/bin/keda-adapter
+        - --secure-port=6443
+        - --logtostderr=true
+        - --v=0
+        env:
+        - name: WATCH_NAMESPACE
+          value: ""
+        image: ghcr.io/kedacore/keda-metrics-apiserver:2.12.0
+        imagePullPolicy: Always
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 6443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+        name: keda-metrics-apiserver
+        ports:
+        - containerPort: 6443
+          name: https
+          protocol: TCP
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 6443
+            scheme: HTTPS
+          initialDelaySeconds: 5
+        resources:
+          limits:
+            cpu: 1000m
+            memory: 1000Mi
+          requests:
+            cpu: 100m
+            memory: 100Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 1001
+          seccompProfile:
+            type: RuntimeDefault
+        volumeMounts:
+        - mountPath: /tmp
+          name: temp-vol
+      nodeSelector:
+        kubernetes.io/os: linux
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: keda-metrics-apiserver
+      volumes:
+      - emptyDir: {}
+        name: temp-vol
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: keda-metrics-apiserver
+    app.kubernetes.io/component: metrics-server
+    app.kubernetes.io/name: keda-metrics-apiserver
+    app.kubernetes.io/part-of: keda-operator
+    app.kubernetes.io/version: 2.12.0
+  name: keda-metrics-apiserver
+  namespace: keda
+spec:
+  ports:
+  - name: https
+    port: 443
+    protocol: TCP
+    targetPort: 6443
+  - name: http
+    port: 80
+    protocol: TCP
+    targetPort: 8080
+  selector:
+    app: keda-metrics-apiserver
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  labels:
+    app.kubernetes.io/component: metrics-server
+    app.kubernetes.io/name: keda-metrics-apiserver
+    app.kubernetes.io/part-of: keda-operator
+    app.kubernetes.io/version: 2.12.0
+  name: v1beta1.external.metrics.k8s.io
+spec:
+  group: external.metrics.k8s.io
+  groupPriorityMinimum: 100
+  service:
+    name: keda-metrics-apiserver
+    namespace: keda
+  version: v1beta1
+  versionPriority: 100
+
