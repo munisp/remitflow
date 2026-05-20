@@ -183,7 +183,7 @@ export const accountOpeningGateRouter = router({
           "fixed_deposit", "corporate_account",
         ]),
         currency: z.string().length(3).default("NGN"),
-        metadata: z.record(z.string()).optional(),
+        metadata: z.record(z.string(), z.string()).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -546,7 +546,7 @@ export const enhancedKybRouter = router({
             }),
           },
           "default",
-          null
+          undefined
         );
         if (result) return result;
       } catch {
@@ -676,7 +676,8 @@ function detectCircularOwnership(edges: Array<{ from: string; to: string }>): bo
   function hasCycle(node: string): boolean {
     visited.add(node);
     recursionStack.add(node);
-    for (const neighbor of graph.get(node) || []) {
+    const neighbors: string[] = Array.from(graph.get(node) || []);
+    for (const neighbor of neighbors) {
       if (!visited.has(neighbor) && hasCycle(neighbor)) return true;
       if (recursionStack.has(neighbor)) return true;
     }
@@ -684,7 +685,8 @@ function detectCircularOwnership(edges: Array<{ from: string; to: string }>): bo
     return false;
   }
 
-  for (const node of graph.keys()) {
+  const nodes = Array.from(graph.keys());
+  for (const node of nodes) {
     if (!visited.has(node) && hasCycle(node)) return true;
   }
   return false;
@@ -755,7 +757,8 @@ function calculateMaxDepth(edges: Array<{ from: string; to: string }>): number {
       }
     }
   }
-  for (const root of graph.keys()) {
+  const roots = Array.from(graph.keys());
+  for (const root of roots) {
     dfs(root, 0, new Set([root]));
   }
   return maxDepth;

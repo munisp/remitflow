@@ -282,6 +282,15 @@ import {
   kycEventConsumerRouter,
   cbnTierLimitsRouter,
 } from "./routers/kycProductionGate";
+import {
+  pepScreeningRouter,
+  adverseMediaRouter,
+  continuousMonitoringRouter,
+  reKYCSchedulerRouter,
+  kycSelfServiceRouter,
+  kycDataQualityRouter,
+  kycAnalyticsRouter,
+} from "./routers/kycEnhanced";
 import { logger } from './_core/logger';
 
 
@@ -6477,5 +6486,12 @@ Case: #${input.caseId}`,
   goaml: goamlRouter,
   kycEventConsumer: kycEventConsumerRouter,
   cbnTierLimits: cbnTierLimitsRouter,
+  pepScreening: pepScreeningRouter,
+  adverseMedia: adverseMediaRouter,
+  continuousMonitoring: continuousMonitoringRouter,
+  reKYCScheduler: reKYCSchedulerRouter,
+  kycSelfService: kycSelfServiceRouter,
+  kycDataQuality: kycDataQualityRouter,
+  kycAnalytics: kycAnalyticsRouter,
 });
 export type AppRouter = typeof appRouter;

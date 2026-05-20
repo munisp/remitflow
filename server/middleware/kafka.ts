@@ -46,12 +46,16 @@ export interface TransactionEvent {
 }
 
 export interface KYCEvent {
-  eventType: "submitted" | "approved" | "rejected" | "tier_upgraded";
+  eventType: "submitted" | "approved" | "rejected" | "tier_upgraded"
+    | "account.opened" | "account.application.created" | "kyc.verification.required"
+    | "account.kyc.verified" | "kyb.verification.required";
   userId: number | string;
-  kycTier: number;
+  kycTier?: number;
   previousTier?: number;
   reason?: string;
-  timestamp: string;
+  tier?: string;
+  metadata?: Record<string, unknown>;
+  timestamp?: string;
 }
 
 export interface FXRateEvent {
