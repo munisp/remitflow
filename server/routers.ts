@@ -595,7 +595,7 @@ export const appRouter = router({
       const { getStripe } = await import("./stripe");
       const stripe = getStripe();
       // Use origin from input (frontend passes window.location.origin) or fall back to request header
-      const origin = input.origin ?? (ctx.req.headers.origin as string | undefined) ?? "https://remitflow.manus.space";
+      const origin = input.origin ?? (ctx.req.headers.origin as string | undefined) ?? process.env.APP_URL ?? "https://remitflow.example.com";
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ["card"],
         line_items: [{ price_data: { currency: input.currency, product_data: { name: `RemitFlow ${input.walletCurrency} Wallet Top-up`, description: `Add funds to your ${input.walletCurrency} wallet` }, unit_amount: input.amount }, quantity: 1 }],
@@ -622,8 +622,12 @@ export const appRouter = router({
         body: "grant_type=client_credentials",
       });
       if (!authRes.ok) {
-        // Sandbox mode: return mock checkout URL
+        if (process.env.NODE_ENV === "production") {
+          logger.error({ status: authRes.status }, "[PayPal] OAuth authentication failed in production — cannot process payment");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Payment processor authentication failed" });
+        }
         const mockOrderId = `PAYPAL-SANDBOX-${Date.now()}`;
+        logger.warn("[PayPal] OAuth failed — returning sandbox mock (development mode)");
         return { success: true, orderId: mockOrderId, approvalUrl: `https://www.sandbox.paypal.com/checkoutnow?token=${mockOrderId}`, sandboxMode: true };
       }
       const auth = await authRes.json() as { access_token: string };
@@ -647,8 +651,12 @@ export const appRouter = router({
       amount: z.number().positive(),
     })).mutation(async ({ ctx, input }) => {
       const { ENV } = await import("./_core/env.js");
-      // In sandbox mode, simulate capture
+      // In sandbox mode, simulate capture (production: fail loudly)
       if (ENV.paypalClientId.startsWith("AZDx") || input.orderId.startsWith("PAYPAL-SANDBOX")) {
+        if (process.env.NODE_ENV === "production") {
+          logger.error("[PayPal] Sandbox client ID or order ID detected in production — refusing capture");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Payment processor misconfigured for production" });
+        }
         const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         const [walletPaypalSandbox] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.walletCurrency))).limit(1);
         let newBalance: string;
@@ -707,7 +715,11 @@ export const appRouter = router({
       const txRef = `REMIT-FLW-${ctx.user.id}-${Date.now()}`;
       const isSandbox = ENV.flutterwaveSecretKey.includes("SANDBOX") || ENV.flutterwaveSecretKey.includes("TEST");
       if (isSandbox) {
-        // Return mock Flutterwave payment link
+        if (process.env.NODE_ENV === "production") {
+          logger.error("[Flutterwave] Sandbox/test key detected in production — cannot process real payments");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Payment processor misconfigured for production" });
+        }
+        logger.warn("[Flutterwave] Using sandbox mode (development)");
         return {
           success: true,
           paymentLink: `https://checkout.flutterwave.com/v3/hosted/pay/sandbox_${txRef}`,
@@ -740,7 +752,10 @@ export const appRouter = router({
       const { ENV } = await import("./_core/env.js");
       const isSandbox = ENV.flutterwaveSecretKey.includes("SANDBOX") || ENV.flutterwaveSecretKey.includes("TEST");
       if (isSandbox) {
-        // Simulate successful verification in sandbox
+        if (process.env.NODE_ENV === "production") {
+          logger.error("[Flutterwave] Sandbox/test key detected in production — refusing to simulate verification");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Payment processor misconfigured for production" });
+        }
         const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         const [walletFlwSandbox] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.walletCurrency))).limit(1);
         let newBalance: string;
@@ -1833,8 +1848,11 @@ export const appRouter = router({
         };
       } catch (err: any) {
         if (err instanceof TRPCError) throw err;
-        // Graceful fallback: return mock OCR fields so the UI still works in dev
-        logger.warn({ errMsg: err.message }, "[KYC] FastAPI service unavailable, using mock extraction:");
+        if (process.env.NODE_ENV === "production") {
+          logger.error({ errMsg: err.message }, "[KYC] OCR service unavailable in production — cannot process document");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "KYC document processing service unavailable" });
+        }
+        logger.warn({ errMsg: err.message }, "[KYC] FastAPI service unavailable — returning mock (dev mode)");
         return {
           success: true,
           source: "mock" as const,
@@ -2741,7 +2759,7 @@ export const appRouter = router({
         .where(and(eq(cbdcWallets.userId, ctx.user.id), eq(cbdcWallets.currency, input.currency))).limit(1);
       const walletAddress = wallet?.walletAddress ?? `cbdc:${ctx.user.id}:${input.currency}`;
       // Build deep-link URL so QR codes can be scanned by any device
-      const origin = (ctx.req.headers.origin as string | undefined) ?? 'https://remitflow.manus.space';
+      const origin = (ctx.req.headers.origin as string | undefined) ?? 'https://remitflow.example.com';
       const deepLinkParams = new URLSearchParams({
         wallet: walletAddress,
         amount: String(input.amount),
@@ -5637,12 +5655,12 @@ Case: #${input.caseId}`,
         const { shareLinkClient } = await import("./services/share-link-client.js");
         try {
           return await shareLinkClient.generate({
-            ...input, baseUrl: "https://remitflow.manus.space",
+            ...input, baseUrl: process.env.APP_URL ?? "https://remitflow.example.com",
             createdBy: ctx.user.id.toString(),
           });
         } catch {
           const slug = `${input.resourceType.slice(0,3)}-${input.resourceId.slice(0,8)}`;
-          const shortUrl = `https://remitflow.manus.space/share/${slug}`;
+          const shortUrl = `https://remitflow.example.com/share/${slug}`;
           return {
             id: `fallback-${Date.now()}`, slug, shortUrl, ogUrl: shortUrl,
             shareUrls: {

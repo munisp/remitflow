@@ -855,7 +855,7 @@ export const flutterwaveTopupRouter = router({
             customizations: {
               title: "RemitFlow Wallet Top-up",
               description: `Add $${input.amountUsd} to your RemitFlow wallet`,
-              logo: "https://remitflow.manus.space/logo.png",
+              logo: "https://remitflow.example.com/logo.png",
             },
           }),
         });

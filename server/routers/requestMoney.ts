@@ -30,7 +30,7 @@ export const requestMoneyRouter = router({
         status: "pending",
         expiresAt,
       }).returning();
-      const paymentLink = `${ctx.req.headers.origin || "https://remitflow.manus.space"}/pay/${token}`;
+      const paymentLink = `${ctx.req.headers.origin || process.env.APP_URL ?? "https://remitflow.example.com"}/pay/${token}`;
       return { id: req.id, token, paymentLink, expiresAt };
     }),
 
@@ -126,7 +126,7 @@ export const requestMoneyRouter = router({
         status: "pending",
         expiresAt,
       } as any).returning();
-      const paymentLink = `https://remitflow.manus.space/pay/${token}`;
+      const paymentLink = `https://remitflow.example.com/pay/${token}`;
       const senderName = (ctx.user as any).name ?? "Someone";
       const amountStr = input.amount ? `${input.currency} ${input.amount.toFixed(2)}` : "an amount";
       const emailSent = await sendEmail({

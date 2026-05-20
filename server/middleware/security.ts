@@ -220,9 +220,8 @@ export function corsConfig(allowedOrigins: string[] = []) {
     const isAllowed =
       allowedOrigins.length === 0 ||
       allowedOrigins.includes(origin) ||
-      origin.endsWith(".manus.space") ||
-      origin.endsWith(".manus.computer") ||
-      origin.startsWith("http://localhost");
+      origin.endsWith(`.${process.env.REMITFLOW_PRODUCTION_DOMAIN?.split('.').slice(-2).join('.') ?? "example.com"}`) ||
+      (!process.env.NODE_ENV || process.env.NODE_ENV !== "production") && origin.startsWith("http://localhost");
 
     if (isAllowed && origin) {
       res.setHeader("Access-Control-Allow-Origin", origin);

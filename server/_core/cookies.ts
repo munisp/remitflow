@@ -27,10 +27,11 @@ export function getSessionCookieOptions(
   // The Manus sandbox proxy always serves HTTPS externally but may not forward
   // x-forwarded-proto reliably. Force secure=true for known sandbox/production hostnames.
   const hostname = req.hostname ?? "";
+  const productionDomain = process.env.REMITFLOW_PRODUCTION_DOMAIN ?? "";
   const isManagedProxy =
-    hostname.includes("manus.computer") ||
-    hostname.includes("manus.space") ||
-    hostname.includes("remitflow.app");
+    hostname.includes("remitflow.app") ||
+    (productionDomain && hostname.includes(productionDomain)) ||
+    process.env.NODE_ENV === "production";
 
   const isSecure = isSecureRequest(req) || isManagedProxy;
 

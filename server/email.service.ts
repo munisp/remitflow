@@ -277,7 +277,7 @@ export function buildDocumentExpiryReminderEmail(opts: {
   appUrl?: string;
 }): { subject: string; html: string; text: string } {
   const { userName, documentName, documentCategory, daysLeft, expiresAt } = opts;
-  const url = opts.appUrl ?? process.env.APP_URL ?? "https://remitflow.manus.space";
+  const url = opts.appUrl ?? process.env.APP_URL ?? "https://remitflow.example.com";
   const expiryStr = expiresAt.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
   const urgencyColor = daysLeft <= 1 ? "#dc2626" : daysLeft <= 3 ? "#ea580c" : daysLeft <= 7 ? "#d97706" : "#6366f1";
   const urgencyLabel = daysLeft <= 0 ? "EXPIRED" : daysLeft === 1 ? "EXPIRES TOMORROW" : `EXPIRES IN ${daysLeft} DAYS`;

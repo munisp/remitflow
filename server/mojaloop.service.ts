@@ -35,7 +35,7 @@ const MOJALOOP_BASE_URL = mojaloopEnv("MOJALOOP_SWITCH_URL", "https://sandbox.mo
 const MOJALOOP_FSP_ID = mojaloopEnv("MOJALOOP_FSP_ID", "remitflow-fsp");
 const MOJALOOP_API_KEY = mojaloopEnv("MOJALOOP_API_KEY", "remitflow-sandbox-key");
 const MOJALOOP_CALLBACK_URL =
-  process.env.MOJALOOP_CALLBACK_URL ?? "https://remitflow.manus.space/api/mojaloop/callback";
+  process.env.MOJALOOP_CALLBACK_URL ?? "https://remitflow.example.com/api/mojaloop/callback";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface MojaloopParty {
@@ -149,11 +149,14 @@ export async function lookupParty(
     return { found: false, error: `Lookup failed with status ${resp.status}` };
   } catch (err: any) {
     if (err instanceof CircuitOpenError) {
-      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — skipping party lookup:');
+      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — skipping party lookup');
     } else {
-      logger.warn({ data: err.message }, '[Mojaloop] Party lookup failed, using mock:');
+      logger.warn({ data: err.message }, '[Mojaloop] Party lookup failed');
     }
-    // Graceful fallback for sandbox/dev environments
+    if (IS_PRODUCTION) {
+      return { found: false, error: `Mojaloop party lookup failed: ${err.message}` };
+    }
+    // Graceful fallback for development environments only
     return {
       found: true,
       party: {
@@ -240,9 +243,12 @@ export async function requestQuote(params: {
     throw new Error(`Quote request failed: ${resp.status}`);
   } catch (err: any) {
     if (err instanceof CircuitOpenError) {
-      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — using mock quote:');
+      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — quote unavailable');
     } else {
-      logger.warn({ data: err.message }, '[Mojaloop] Quote request failed, using mock:');
+      logger.warn({ data: err.message }, '[Mojaloop] Quote request failed');
+    }
+    if (IS_PRODUCTION) {
+      throw new Error(`Mojaloop quote request failed: ${err.message}`);
     }
     const expiration = new Date(Date.now() + 60000).toISOString();
     return {
@@ -321,11 +327,18 @@ export async function initiateTransfer(params: {
     };
   } catch (err: any) {
     if (err instanceof CircuitOpenError) {
-      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — using sandbox mock transfer:');
+      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — transfer unavailable');
     } else {
-      logger.warn({ data: err.message }, '[Mojaloop] Transfer failed, using sandbox mock:');
+      logger.warn({ data: err.message }, '[Mojaloop] Transfer initiation failed');
     }
-    // Sandbox mock: simulate successful transfer
+    if (IS_PRODUCTION) {
+      return {
+        transferId,
+        transferState: "ABORTED",
+        errorInformation: { errorCode: "5000", errorDescription: `Mojaloop transfer failed: ${err.message}` },
+      };
+    }
+    // Dev/sandbox fallback only
     return {
       transferId,
       transferState: "COMMITTED",
@@ -355,7 +368,10 @@ export async function getTransferStatus(transferId: string): Promise<MojaloopTra
     return { transferId, transferState: "ABORTED", errorInformation: { errorCode: String(resp.status), errorDescription: "Status check failed" } };
   } catch (err: any) {
     if (err instanceof CircuitOpenError) {
-      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — returning mock status:');
+      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — status unavailable');
+    }
+    if (IS_PRODUCTION) {
+      return { transferId, transferState: "ABORTED", errorInformation: { errorCode: "5000", errorDescription: `Status check failed: ${err.message}` } };
     }
     return { transferId, transferState: "COMMITTED", completedTimestamp: new Date().toISOString() };
   }

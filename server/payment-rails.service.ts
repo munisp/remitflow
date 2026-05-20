@@ -608,8 +608,8 @@ export async function mpesaInitiateTransfer(req: RailTransferRequest): Promise<R
       PartyA: process.env.MPESA_SHORTCODE ?? "174379",
       PartyB: req.recipientId.replace(/[^0-9+]/g, ""), // MSISDN
       Remarks: req.purpose ?? "RemitFlow Transfer",
-      QueueTimeOutURL: process.env.MPESA_TIMEOUT_URL ?? "https://remitflow.manus.space/api/mpesa/timeout",
-      ResultURL: process.env.MPESA_RESULT_URL ?? "https://remitflow.manus.space/api/mpesa/result",
+      QueueTimeOutURL: process.env.MPESA_TIMEOUT_URL ?? "https://remitflow.example.com/api/mpesa/timeout",
+      ResultURL: process.env.MPESA_RESULT_URL ?? "https://remitflow.example.com/api/mpesa/result",
       Occasion: req.reference ?? originatorConversationId,
     };
     const mpesaUrl = requireEnvOrWarn("MPESA_API_URL", "https://sandbox.safaricom.co.ke/mpesa/b2c/v3/paymentrequest");

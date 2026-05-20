@@ -32,10 +32,11 @@ import { Request, Response, NextFunction, Express, RequestHandler } from "expres
 import { logger } from './_core/logger';
 
 // ─── ALLOWED ORIGINS ─────────────────────────────────────────────────────────
-// Production domain — set REMITFLOW_PRODUCTION_DOMAIN env var after purchasing
-// your custom domain via Manus Settings → Domains → Purchase New Domain.
-// Default: remitflow.manus.space (Manus-hosted subdomain)
-const PRODUCTION_DOMAIN = process.env.REMITFLOW_PRODUCTION_DOMAIN || "remitflow.manus.space";
+// Production domain — MUST be set via REMITFLOW_PRODUCTION_DOMAIN in production.
+const PRODUCTION_DOMAIN = process.env.REMITFLOW_PRODUCTION_DOMAIN || "remitflow.example.com";
+if (process.env.NODE_ENV === "production" && !process.env.REMITFLOW_PRODUCTION_DOMAIN) {
+  logger.error("[Security] REMITFLOW_PRODUCTION_DOMAIN is not set — using placeholder. CORS may reject valid origins.");
+}
 export const ALLOWED_ORIGINS: (string | RegExp)[] = [
   "http://localhost:3000",
   "http://localhost:5173",
@@ -106,8 +107,8 @@ export const helmetMiddleware = helmet({
         "data:",
         "blob:",
         "https:",
-        "https://*.manus.space",
-        "https://*.manus.computer",
+        `https://${PRODUCTION_DOMAIN}`,
+        `https://*.${PRODUCTION_DOMAIN}`,
       ],
       connectSrc: [
         "'self'",

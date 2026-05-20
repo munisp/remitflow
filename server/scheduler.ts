@@ -536,7 +536,7 @@ async function sendKycExpiryReminders(): Promise<void> {
           html: `<p>Dear ${doc.userName ?? 'Valued Customer'},</p>
 <p>Your <strong>${doc.docType.replace('_', ' ')}</strong> document on file with RemitFlow will expire on <strong>${doc.expiresAt!.toLocaleDateString()}</strong> (${daysLeft} day${daysLeft !== 1 ? 's' : ''} from now).</p>
 <p>To avoid service interruption, please log in and upload a new document before the expiry date.</p>
-<p><a href="${process.env.APP_URL ?? 'https://remitflow.manus.space'}/kyc">Update your KYC documents →</a></p>
+<p><a href="${process.env.APP_URL ?? 'https://remitflow.example.com'}/kyc">Update your KYC documents →</a></p>
 <p>Thank you,<br/>The RemitFlow Compliance Team</p>`,
           text: `Your ${doc.docType} expires in ${daysLeft} day(s) on ${doc.expiresAt!.toLocaleDateString()}. Please log in to update your KYC documents.`,
         });
