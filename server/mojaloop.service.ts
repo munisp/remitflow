@@ -18,12 +18,22 @@ import { circuitBreakers, CircuitOpenError } from "./services/circuitBreaker";
 import { logger } from './_core/logger';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
-const MOJALOOP_BASE_URL =
-  process.env.MOJALOOP_SWITCH_URL ?? "https://sandbox.mojaloop.io";
-const MOJALOOP_FSP_ID =
-  process.env.MOJALOOP_FSP_ID ?? "remitflow-fsp";
-const MOJALOOP_API_KEY =
-  process.env.MOJALOOP_API_KEY ?? "remitflow-sandbox-key";
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
+function mojaloopEnv(name: string, sandboxFallback: string): string {
+  const val = process.env[name];
+  if (val) return val;
+  if (IS_PRODUCTION) {
+    logger.error({ variable: name }, `[Mojaloop] CRITICAL: Missing ${name} in production — Mojaloop rail will be unavailable`);
+    return "";
+  }
+  logger.warn({ variable: name }, `[Mojaloop] Using sandbox fallback for ${name} (development mode)`);
+  return sandboxFallback;
+}
+
+const MOJALOOP_BASE_URL = mojaloopEnv("MOJALOOP_SWITCH_URL", "https://sandbox.mojaloop.io");
+const MOJALOOP_FSP_ID = mojaloopEnv("MOJALOOP_FSP_ID", "remitflow-fsp");
+const MOJALOOP_API_KEY = mojaloopEnv("MOJALOOP_API_KEY", "remitflow-sandbox-key");
 const MOJALOOP_CALLBACK_URL =
   process.env.MOJALOOP_CALLBACK_URL ?? "https://remitflow.manus.space/api/mojaloop/callback";
 

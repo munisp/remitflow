@@ -15,7 +15,13 @@
     "tsBuildInfoFile": "./node_modules/typescript/tsbuildinfo",
     "noEmit": true,
     "module": "ESNext",
-    "strict": false,
+    "strict": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "strictBindCallApply": true,
+    "strictPropertyInitialization": true,
+    "noImplicitThis": true,
+    "alwaysStrict": true,
     "lib": [
       "esnext",
       "dom",
@@ -40,6 +46,6 @@
         "./shared/*"
       ]
     },
-    "noImplicitAny": false
+    "noImplicitAny": true
   }
 }

@@ -15,6 +15,7 @@
 
 import crypto from "crypto";
 import { circuitBreakers } from "./services/circuitBreaker.js";
+import { logger } from "./_core/logger.js";
 
 // ─── Rail Identifiers ─────────────────────────────────────────────────────────
 export type PaymentRail =
@@ -90,26 +91,47 @@ export const RAIL_CORRIDORS: Record<
   },
 };
 
+// ─── Environment Mode ─────────────────────────────────────────────────────────
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
+function requireEnv(name: string, fallback?: string): string {
+  const val = process.env[name];
+  if (val) return val;
+  if (!IS_PRODUCTION && fallback) return fallback;
+  throw new Error(`[PaymentRails] Missing required environment variable: ${name}. Set it in production or use NODE_ENV=development for sandbox fallbacks.`);
+}
+
+function requireEnvOrWarn(name: string, sandboxFallback: string): string {
+  const val = process.env[name];
+  if (val) return val;
+  if (IS_PRODUCTION) {
+    logger.error({ variable: name }, `[PaymentRails] CRITICAL: Missing ${name} in production — rail will be unavailable`);
+    return "";
+  }
+  logger.warn({ variable: name }, `[PaymentRails] Using sandbox fallback for ${name} (development mode)`);
+  return sandboxFallback;
+}
+
 // ─── Base Config ──────────────────────────────────────────────────────────────
 const RAILS_CONFIG = {
   cips: {
-    baseUrl: process.env.CIPS_API_URL ?? "https://sandbox.cips.com.cn/api/v2",
-    participantId: process.env.CIPS_PARTICIPANT_ID ?? "REMITFLOW001",
-    apiKey: process.env.CIPS_API_KEY ?? "cips-sandbox-key-001",
+    baseUrl: requireEnvOrWarn("CIPS_API_URL", "https://sandbox.cips.com.cn/api/v2"),
+    participantId: requireEnvOrWarn("CIPS_PARTICIPANT_ID", "REMITFLOW001"),
+    apiKey: requireEnvOrWarn("CIPS_API_KEY", "cips-sandbox-key-001"),
     certPath: process.env.CIPS_CERT_PATH ?? "/certs/cips-client.pem",
   },
   upi: {
-    baseUrl: process.env.UPI_API_URL ?? "https://api.npci.org.in/upi/v2",
-    vpa: process.env.UPI_VPA ?? "remitflow@icici",
-    merchantId: process.env.UPI_MERCHANT_ID ?? "REMITFLOW001",
-    apiKey: process.env.UPI_API_KEY ?? "upi-sandbox-key-001",
+    baseUrl: requireEnvOrWarn("UPI_API_URL", "https://api.npci.org.in/upi/v2"),
+    vpa: requireEnvOrWarn("UPI_VPA", "remitflow@icici"),
+    merchantId: requireEnvOrWarn("UPI_MERCHANT_ID", "REMITFLOW001"),
+    apiKey: requireEnvOrWarn("UPI_API_KEY", "upi-sandbox-key-001"),
   },
   pix: {
-    baseUrl: process.env.PIX_API_URL ?? "https://pix.sandbox.bcb.gov.br/v2",
-    ispb: process.env.PIX_ISPB ?? "12345678",
-    clientId: process.env.PIX_CLIENT_ID ?? "remitflow-pix-client",
-    clientSecret: process.env.PIX_CLIENT_SECRET ?? "pix-sandbox-secret-001",
-    pixKey: process.env.PIX_KEY ?? "remitflow@pix.com.br",
+    baseUrl: requireEnvOrWarn("PIX_API_URL", "https://pix.sandbox.bcb.gov.br/v2"),
+    ispb: requireEnvOrWarn("PIX_ISPB", "12345678"),
+    clientId: requireEnvOrWarn("PIX_CLIENT_ID", "remitflow-pix-client"),
+    clientSecret: requireEnvOrWarn("PIX_CLIENT_SECRET", "pix-sandbox-secret-001"),
+    pixKey: requireEnvOrWarn("PIX_KEY", "remitflow@pix.com.br"),
   },
 };
 
@@ -427,9 +449,9 @@ export async function sepaInitiateTransfer(req: RailTransferRequest): Promise<Ra
         },
       },
     };
-    const sepaUrl = process.env.SEPA_API_URL ?? "https://sandbox.sepa-inst.eu/api/v1";
-    const sepaKey = process.env.SEPA_API_KEY ?? "sepa-sandbox-key-001";
-    if (process.env.SEPA_SANDBOX_MODE !== "false") {
+    const sepaUrl = requireEnvOrWarn("SEPA_API_URL", "https://sandbox.sepa-inst.eu/api/v1");
+    const sepaKey = requireEnvOrWarn("SEPA_API_KEY", "sepa-sandbox-key-001");
+    if (!IS_PRODUCTION && process.env.SEPA_SANDBOX_MODE !== "false") {
       return {
         success: true,
         externalRef: msgId,
@@ -513,9 +535,9 @@ export async function swiftInitiateTransfer(req: RailTransferRequest): Promise<R
       cdtrAgt: { finInstnId: { bicfi: req.recipientBank ?? "DEUTDEDB" } },
       rmtInf: { ustrd: req.purpose ?? "RemitFlow gpi Transfer" },
     };
-    const swiftUrl = process.env.SWIFT_API_URL ?? "https://sandbox.swift.com/swift-apitracker-pilot/v4";
-    const swiftKey = process.env.SWIFT_API_KEY ?? "swift-sandbox-key-001";
-    if (process.env.SWIFT_SANDBOX_MODE !== "false") {
+    const swiftUrl = requireEnvOrWarn("SWIFT_API_URL", "https://sandbox.swift.com/swift-apitracker-pilot/v4");
+    const swiftKey = requireEnvOrWarn("SWIFT_API_KEY", "swift-sandbox-key-001");
+    if (!IS_PRODUCTION && process.env.SWIFT_SANDBOX_MODE !== "false") {
       return {
         success: true,
         externalRef: uetr,
@@ -580,7 +602,7 @@ export async function mpesaInitiateTransfer(req: RailTransferRequest): Promise<R
     // M-Pesa B2C (Business to Customer) payload
     const payload = {
       InitiatorName: process.env.MPESA_INITIATOR_NAME ?? "RemitFlowAPI",
-      SecurityCredential: process.env.MPESA_SECURITY_CREDENTIAL ?? "sandbox-credential",
+      SecurityCredential: requireEnvOrWarn("MPESA_SECURITY_CREDENTIAL", "sandbox-credential"),
       CommandID: "BusinessPayment",
       Amount: Math.round(req.amount),
       PartyA: process.env.MPESA_SHORTCODE ?? "174379",
@@ -590,9 +612,9 @@ export async function mpesaInitiateTransfer(req: RailTransferRequest): Promise<R
       ResultURL: process.env.MPESA_RESULT_URL ?? "https://remitflow.manus.space/api/mpesa/result",
       Occasion: req.reference ?? originatorConversationId,
     };
-    const mpesaUrl = process.env.MPESA_API_URL ?? "https://sandbox.safaricom.co.ke/mpesa/b2c/v3/paymentrequest";
-    const mpesaToken = process.env.MPESA_ACCESS_TOKEN ?? "sandbox-token";
-    if (process.env.MPESA_SANDBOX_MODE !== "false") {
+    const mpesaUrl = requireEnvOrWarn("MPESA_API_URL", "https://sandbox.safaricom.co.ke/mpesa/b2c/v3/paymentrequest");
+    const mpesaToken = requireEnvOrWarn("MPESA_ACCESS_TOKEN", "sandbox-token");
+    if (!IS_PRODUCTION && process.env.MPESA_SANDBOX_MODE !== "false") {
       return {
         success: true,
         externalRef: originatorConversationId,
@@ -651,10 +673,10 @@ export async function mpesaLookupMsisdn(msisdn: string): Promise<RailLookupResul
 export async function wiseInitiateTransfer(req: RailTransferRequest): Promise<RailTransferResult> {
   const clientGeneratedId = `WISE${Date.now()}${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
   try {
-    const wiseUrl = process.env.WISE_API_URL ?? "https://api.sandbox.transferwise.tech";
-    const wiseKey = process.env.WISE_API_KEY ?? "wise-sandbox-key-001";
-    const profileId = process.env.WISE_PROFILE_ID ?? "12345678";
-    if (process.env.WISE_SANDBOX_MODE !== "false") {
+    const wiseUrl = requireEnvOrWarn("WISE_API_URL", "https://api.sandbox.transferwise.tech");
+    const wiseKey = requireEnvOrWarn("WISE_API_KEY", "wise-sandbox-key-001");
+    const profileId = requireEnvOrWarn("WISE_PROFILE_ID", "12345678");
+    if (!IS_PRODUCTION && process.env.WISE_SANDBOX_MODE !== "false") {
       return {
         success: true,
         externalRef: clientGeneratedId,

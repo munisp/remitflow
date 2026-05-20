@@ -34,11 +34,15 @@ export async function getDb() {
         const probe = postgres(url, { max: 1, connect_timeout: 3 });
         await probe`SELECT 1`;
         await probe.end();
+        const poolMax = parseInt(process.env.DB_POOL_MAX || "50", 10);
+        const poolIdleTimeout = parseInt(process.env.DB_POOL_IDLE_TIMEOUT || "30", 10);
+        const poolMaxLifetime = parseInt(process.env.DB_POOL_MAX_LIFETIME || "1800", 10);
         _client = postgres(url, {
-          max: 10,
-          idle_timeout: 30,    // close idle connections after 30s
-          max_lifetime: 1800,  // recycle connections every 30 min
-          connect_timeout: 10, // fail fast if DB is unreachable
+          max: poolMax,                       // production: 50 connections per instance (configurable via DB_POOL_MAX)
+          idle_timeout: poolIdleTimeout,      // close idle connections after 30s
+          max_lifetime: poolMaxLifetime,      // recycle connections every 30 min
+          connect_timeout: 10,                // fail fast if DB is unreachable
+          prepare: true,                      // use prepared statements for query plan caching
         });
         _db = drizzle(_client);
         logger.info("[Database] Connected:", url.replace(/:[^:@]+@/, ":***@").split("?")[0]);
