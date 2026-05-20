@@ -72,7 +72,7 @@ export default function EducationPayments() {
           </CardContent>
         </Card>
         <div className="space-y-4">
-          {quoteQuery.data&&(
+          {quoteQuery.data?(
             <Card>
               <CardHeader><CardTitle className="text-base">Live Quote</CardTitle></CardHeader>
               <CardContent className="space-y-2 text-sm">
@@ -83,8 +83,8 @@ export default function EducationPayments() {
                 <Badge className="mt-2" variant="outline">Education corridor — reduced spread</Badge>
               </CardContent>
             </Card>
-          )}
-          {crossSellQuery.data&&(
+          ):null}
+          {crossSellQuery.data?(
             <Card className="border-blue-200 dark:border-blue-800">
               <CardHeader><CardTitle className="text-base text-blue-700 dark:text-blue-300">Recommended for You</CardTitle></CardHeader>
               <CardContent className="text-sm space-y-2">
@@ -93,7 +93,7 @@ export default function EducationPayments() {
                 <p className="text-xs text-muted-foreground">Est. LTV: ${(crossSellQuery.data as any)?.expected_ltv_usd?.toFixed(0)}</p>
               </CardContent>
             </Card>
-          )}
+          ):null}
         </div>
       </div>
     </div>

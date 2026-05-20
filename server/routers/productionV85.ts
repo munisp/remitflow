@@ -167,7 +167,7 @@ export const complianceAlertsRouter = router({
       // Compute priority score: severity (0-30) + age bonus (0-20) + deadline proximity (0-50)
       const SEVERITY_SCORE: Record<string, number> = { critical: 30, high: 20, medium: 10, low: 5 };
       const now = Date.now();
-      return rows.map(r => {
+      return rows.map((r: any) => {
         const severityPts = SEVERITY_SCORE[r.severity] ?? 0;
         const ageDays = (now - new Date(r.createdAt).getTime()) / (1000 * 60 * 60 * 24);
         const agePts = Math.min(20, Math.floor(ageDays / 3) * 2); // +2 per 3 days, max 20
@@ -570,7 +570,7 @@ export const complianceAlertsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const now = new Date();
-      const sarRef = `BULK-SAR-${crypto.randomBytes(4).toString('hex').toUpperCase()}-${now.getFullYear()}`;
+      const sarRef = `BULK-SAR-${randomBytes(4).toString('hex').toUpperCase()}-${now.getFullYear()}`;
       const results: { id: number; sarReference: string }[] = [];
       for (const alertId of input.alertIds) {
         const [updated] = await db.update(complianceAlerts)
@@ -859,7 +859,7 @@ export const feeEngineRouter = router({
       if (db) {
         const rules = await db.select().from(feeRules)
           .where(and(eq(feeRules.corridor, corridor), eq(feeRules.isActive, true)));
-        rule = rules.find(r => {
+        rule = rules.find((r: any) => {
           const min = parseFloat(r.minAmount ?? "0");
           const max = r.maxAmount ? parseFloat(r.maxAmount) : Infinity;
           return input.amount >= min && input.amount <= max;
@@ -1134,7 +1134,7 @@ export const adminBulkRouter = router({
       }).from(users).limit(1000);
       if (input.format === "csv") {
         const header = "id,name,email,role,kycTier,createdAt";
-        const lines = rows.map(r => `${r.id},"${r.name ?? ""}","${r.email ?? ""}",${r.role},${r.kycTier},${r.createdAt}`);
+        const lines = rows.map((r: any) => `${r.id},"${r.name ?? ""}","${r.email ?? ""}",${r.role},${r.kycTier},${r.createdAt}`);
         return { data: [header, ...lines].join("\n"), count: rows.length, format: "csv" };
       }
       return { data: JSON.stringify(rows, null, 2), count: rows.length, format: "json" };

@@ -124,13 +124,13 @@ export default function SystemConfigAdmin() {
     // Filter by tab/prefix
     const currentGroup = CONFIG_GROUPS.find(g => g.id === activeTab);
     if (currentGroup && currentGroup.prefix) {
-      result = result.filter(c => c.key.startsWith(currentGroup.prefix));
+      result = result.filter((c: any) => c.key.startsWith(currentGroup.prefix));
     }
     
     // Filter by search
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
-      result = result.filter(c => 
+      result = result.filter((c: any) => 
         c.key.toLowerCase().includes(query) || 
         c.description.toLowerCase().includes(query)
       );
@@ -324,7 +324,7 @@ export default function SystemConfigAdmin() {
                             </TableCell>
                           </TableRow>
                         ) : (
-                          filteredConfigs.map((config) => (
+                          filteredConfigs.map((config: any) => (
                             <TableRow key={config.key} className="group">
                               <TableCell className="font-mono text-sm font-medium">
                                 {config.key}

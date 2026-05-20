@@ -125,7 +125,7 @@ export default function WebhookRetryPage() {
                   <th className="p-3 text-left w-8">
                     <input type="checkbox" className="rounded"
                       checked={selectedIds.length === deliveries.length && deliveries.length > 0}
-                      onChange={(e) => setSelectedIds(e.target.checked ? deliveries.map((d) => d.id) : [])} />
+                      onChange={(e) => setSelectedIds(e.target.checked ? deliveries.map((d: any) => d.id) : [])} />
                   </th>
                   <th className="p-3 text-left">ID</th>
                   <th className="p-3 text-left">Event Type</th>
@@ -141,7 +141,7 @@ export default function WebhookRetryPage() {
                   <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
                 ) : deliveries.length === 0 ? (
                   <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">No deliveries found</td></tr>
-                ) : deliveries.map((d) => (
+                ) : deliveries.map((d: any) => (
                   <tr key={d.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                     <td className="p-3">
                       <input type="checkbox" className="rounded" checked={selectedIds.includes(d.id)}

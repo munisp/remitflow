@@ -149,7 +149,7 @@ export default function ComplianceScoringPage() {
                     <CheckCircle className="w-8 h-8 mx-auto mb-2 text-green-400 opacity-50" />
                     No compliance cases found
                   </td></tr>
-                ) : (casesQuery.data?.cases ?? []).map((c) => (
+                ) : (casesQuery.data?.cases ?? []).map((c: any) => (
                   <tr key={c.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                     <td className="p-3 font-mono text-xs text-muted-foreground">#{c.id}</td>
                     <td className="p-3 text-sm">User #{c.userId}</td>

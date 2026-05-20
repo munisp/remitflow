@@ -192,7 +192,7 @@ export default function AdminHome() {
                 </div>
               ) : (
                 <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
-                  {data?.recentActivity?.map((item) => (
+                  {data?.recentActivity?.map((item: any) => (
                     <div key={item.id} className="flex items-start gap-3 p-2 rounded-lg hover:bg-muted/40 transition-colors">
                       <SeverityBadge severity={item.severity ?? "info"} />
                       <div className="flex-1 min-w-0">

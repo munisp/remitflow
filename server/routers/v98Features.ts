@@ -256,7 +256,7 @@ export const v98Router = router({
 
         if (input.format === "csv") {
           const headers = ["ID", "Date", "Type", "Status", "From Amount", "From Currency", "To Amount", "To Currency", "FX Rate", "Fee", "Recipient", "Reference", "Description"];
-          const rows = txns.map(t => [
+          const rows = txns.map((t: any) => [
             t.id,
             new Date(t.createdAt).toISOString(),
             t.type,
@@ -271,7 +271,7 @@ export const v98Router = router({
             t.reference ?? "",
             (t.description ?? "").replace(/,/g, ";"),
           ]);
-          csvContent = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+          csvContent = [headers.join(","), ...rows.map((r: any) => r.join(","))].join("\n");
         }
 
         // Record export request
@@ -356,7 +356,7 @@ export const v98Router = router({
           ))
           .limit(50);
 
-        const knownIps = new Set(existingIps.map(r => r.ip));
+        const knownIps = new Set(existingIps.map((r: any) => r.ip));
         const isNewIp = !knownIps.has(input.ipAddress);
         const isSuspicious = isNewIp && knownIps.size > 0;
         const suspiciousReason = isSuspicious ? "login_from_new_ip" : undefined;
@@ -703,7 +703,7 @@ export const v98Router = router({
           ))
           .limit(20);
 
-        const recentUsdTotal = recentTxns.reduce((s, t) =>
+        const recentUsdTotal = recentTxns.reduce((s: any, t: any) =>
           s + toUsd(Number(t.fromAmount), t.fromCurrency), 0);
 
         const flagReason = amountUsd >= CTR_THRESHOLD_USD
@@ -969,7 +969,7 @@ export const v98Router = router({
           .limit(1000);
 
         const headers = ["ID", "Name", "Email", "Phone", "Role", "KYC Tier", "Created", "Last Login"];
-        const csvRows = rows.map(r => [
+        const csvRows = rows.map((r: any) => [
           r.id,
           (r.name ?? "").replace(/,/g, ";"),
           (r.email ?? "").replace(/,/g, ";"),
@@ -980,12 +980,12 @@ export const v98Router = router({
           r.lastSignedIn ? new Date(r.lastSignedIn).toISOString() : "",
         ]);
 
-        const csv = [headers.join(","), ...csvRows.map(r => r.join(","))].join("\n");
+        const csv = [headers.join(","), ...csvRows.map((r: any) => r.join(","))].join("\n");
 
         await db.insert(bulkUserActionLog).values({
           adminId: ctx.user.id,
           action: "export_csv",
-          targetUserIds: rows.map(r => r.id) as any,
+          targetUserIds: rows.map((r: any) => r.id) as any,
           affectedCount: rows.length,
           status: "completed",
         });
@@ -1101,7 +1101,7 @@ export const v98Router = router({
             .groupBy(referrals.referrerId, users.name, users.avatar)
             .orderBy(desc(count()))
             .limit(input.limit);
-          return rows.map((r) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), category: "referrals" }));
+          return rows.map((r: any) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), category: "referrals" }));
         }
 
         if (input.category === "community") {
@@ -1122,7 +1122,7 @@ export const v98Router = router({
             .groupBy(communityActivityFeed.userId, users.name, users.avatar)
             .orderBy(desc(count()))
             .limit(input.limit);
-          return rows.filter(r => r.userId).map((r) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), likes: Number(r.likes), category: "community" }));
+          return rows.filter((r: any) => r.userId).map((r: any) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), likes: Number(r.likes), category: "community" }));
         }
 
         // transfers leaderboard
@@ -1140,7 +1140,7 @@ export const v98Router = router({
           .groupBy(transactions.userId, users.name, users.avatar)
           .orderBy(desc(sql`SUM(CAST(${transactions.fromAmount} AS DECIMAL))`))
           .limit(input.limit);
-        return rows.map((r) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), totalAmount: Number(r.totalAmount), category: "transfers" }));
+        return rows.map((r: any) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), totalAmount: Number(r.totalAmount), category: "transfers" }));
       }),
   }),
 
@@ -1220,7 +1220,7 @@ export const v98Router = router({
           ))
           .orderBy(desc(transactions.createdAt))
           .limit(input?.limit ?? 50);
-        return rows.map(r => ({
+        return rows.map((r: any) => ({
           id: r.id,
           transactionId: r.id,
           type: "missing_fee",
@@ -1406,7 +1406,7 @@ export const v98Router = router({
       if (failed.length > 0) {
         await db.update(stripeWebhookRetryLog)
           .set({ status: "pending" })
-          .where(inArray(stripeWebhookRetryLog.id, failed.map(r => r.id)));
+          .where(inArray(stripeWebhookRetryLog.id, failed.map((r: any) => r.id)));
       }
       return { queued: failed.length };
     }),
@@ -1510,7 +1510,7 @@ export const v98Router = router({
           .groupBy(transactions.fromCurrency, transactions.toCurrency)
           .orderBy(desc(sql`SUM(CAST(${transactions.fromAmount} AS DECIMAL))`))
           .limit(input.limit);
-        return rows.map(r => ({ ...r, volume: Number(r.volume), txCount: Number(r.txCount) }));
+        return rows.map((r: any) => ({ ...r, volume: Number(r.volume), txCount: Number(r.txCount) }));
       }),
     userGrowth: adminProcedure
       .input(z.object({ period: z.enum(["7d", "30d", "90d", "1y"]).default("30d") }))

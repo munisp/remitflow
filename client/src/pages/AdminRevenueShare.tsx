@@ -81,7 +81,7 @@ export default function AdminRevenueShare() {
     if (!reports?.reports) return;
     const csv = [
       ["Tenant", "Period", "Volume", "Fee Revenue", "Partner Earnings", "Platform Earnings", "Status"],
-      ...reports.reports.map(r => [
+      ...reports.reports.map((r: any) => [
         r.tenantName || r.tenantId,
         `${MONTH_NAMES[(r.periodMonth || 1) - 1]} ${r.periodYear}`,
         r.totalVolume, r.totalFeeRevenue, r.partnerEarnings, r.platformEarnings, r.status,

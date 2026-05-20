@@ -111,7 +111,7 @@ export const splitBillRouter = router({
 
     // For each group, get participant counts
     const result = await Promise.all(
-      groups.map(async (g) => {
+      groups.map(async (g: any) => {
         const participants = await db
           .select({ id: splitBillParticipants.id, status: splitBillParticipants.status })
           .from(splitBillParticipants)
@@ -119,7 +119,7 @@ export const splitBillRouter = router({
         return {
           ...g,
           participants: participants.length,
-          paid: participants.filter((p) => p.status === "paid").length,
+          paid: participants.filter((p: any) => p.status === "paid").length,
         };
       })
     );

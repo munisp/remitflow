@@ -115,7 +115,7 @@ export default function TenantConfigPage() {
             <Building2 className="w-12 h-12 mx-auto mb-3 opacity-30" />
             <p>No tenants found</p>
           </div>
-        ) : tenants.map((t) => (
+        ) : tenants.map((t: any) => (
           <Card key={t.id} className="bg-card border-border hover:border-primary/50 transition-colors">
             <CardHeader className="pb-2">
               <div className="flex items-start justify-between">

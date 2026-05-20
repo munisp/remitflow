@@ -56,7 +56,7 @@ export const partnerPayoutsRouter = router({
       db.select({ total: count() }).from(partnerPayouts).where(where),
     ]);
     return {
-      payouts: rows.map(r => ({ ...r.payout, tenantName: r.tenantName })),
+      payouts: rows.map((r: any) => ({ ...r.payout, tenantName: r.tenantName })),
       total: totalRows[0]?.total ?? 0,
     };
   }),
@@ -391,7 +391,7 @@ export const complianceWatchlistRouter = router({
     const matches = await db.select().from(complianceWatchlist)
       .where(sql`${complianceWatchlist.name} ILIKE ${`%${input.name}%`}`)
       .limit(10);
-    const maxRisk = matches.reduce((max, m) => Math.max(max, m.riskScore), 0);
+    const maxRisk = matches.reduce((max: any, m: any) => Math.max(max, m.riskScore), 0);
     const status = maxRisk >= 80 ? "blocked" : maxRisk >= 50 ? "flagged" : "clear";
     return { matches, riskScore: maxRisk, status };
   }),
@@ -465,7 +465,7 @@ export const paymentGatewayLogsRouter = router({
       db.select({ total: count() }).from(paymentGatewayLogs).where(where),
     ]);
     return {
-      logs: rows.map(r => ({ ...r.log, userName: r.userName, userEmail: r.userEmail })),
+      logs: rows.map((r: any) => ({ ...r.log, userName: r.userName, userEmail: r.userEmail })),
       total: totalRows[0]?.total ?? 0,
     };
   }),
@@ -540,7 +540,7 @@ export const notificationPrefsRouter = router({
       "fxAlert", "kyc", "security", "referral", "partner", "system", "promotion",
     ];
     return ALL_CATEGORIES.map(cat => {
-      const found = rows.find(r => r.category === cat);
+      const found = rows.find((r: any) => r.category === cat);
       return found ?? {
         userId: ctx.user.id, category: cat,
         emailEnabled: cat !== "promotion",

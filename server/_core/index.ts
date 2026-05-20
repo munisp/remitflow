@@ -698,7 +698,7 @@ async function startServer() {
 
       // Get current FX rates
       const rates = await db.select().from(fxRateCache);
-      const rateMap = new Map(rates.map(r => [`${r.fromCurrency}_${r.toCurrency}`, r.rate]));
+      const rateMap = new Map(rates.map((r: any) => [`${r.fromCurrency}_${r.toCurrency}`, r.rate]));
 
       let triggered = 0;
       for (const alert of pendingAlerts) {

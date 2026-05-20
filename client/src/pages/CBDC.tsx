@@ -118,7 +118,7 @@ function MyQrDisplay({ currency, onClose }: { currency: string; onClose: () => v
   const handleGenerate = () => {
     generateMutation.mutate({
       currency: selectedCurrency,
-      amount: amount ? parseFloat(amount) : undefined,
+      amount: amount ? parseFloat(amount) : 0,
       purpose: purpose || undefined,
     });
   };

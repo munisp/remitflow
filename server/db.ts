@@ -518,7 +518,7 @@ export async function getLockoutTrends(days = 30): Promise<Array<{ date: string;
     .where(sql`${userLockouts.updatedAt} >= ${since}`)
     .groupBy(sql`DATE(${userLockouts.lockedAt})`)
     .orderBy(sql`DATE(${userLockouts.lockedAt}) ASC`);
-  return rows.filter((r) => r.date !== null) as Array<{ date: string; lockouts: number; attempts: number }>;
+  return rows.filter((r: any) => r.date !== null) as Array<{ date: string; lockouts: number; attempts: number }>;
 }
 
 // ─── v152: Self-service unlock flow ─────────────────────────────────────────

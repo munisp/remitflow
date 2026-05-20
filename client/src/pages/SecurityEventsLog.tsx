@@ -53,7 +53,7 @@ export default function SecurityEventsLog() {
   function exportCSV() {
     if (!events?.length) return;
     const header = "id,userId,eventType,severity,ipAddress,location,createdAt";
-    const rows = events.map(e => `${e.id},${e.userId ?? ""},${e.eventType},${e.severity},"${e.ipAddress ?? ""}","${e.location ?? ""}","${new Date(e.createdAt).toISOString()}"`);
+    const rows = events.map((e: any) => `${e.id},${e.userId ?? ""},${e.eventType},${e.severity},"${e.ipAddress ?? ""}","${e.location ?? ""}","${new Date(e.createdAt).toISOString()}"`);
     const csv = [header, ...rows].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
@@ -127,7 +127,7 @@ export default function SecurityEventsLog() {
         <Card><CardContent className="py-16 text-center text-muted-foreground"><Shield className="w-12 h-12 mx-auto mb-3 opacity-30" /><p>No security events found</p></CardContent></Card>
       ) : (
         <div className="space-y-2">
-          {events.map(event => (
+          {events.map((event: any) => (
             <div key={event.id} className={`flex items-start gap-3 p-3 rounded-lg border ${SEVERITY_COLORS[event.severity] ?? "bg-muted"}`}>
               <div className="mt-0.5">{SEVERITY_ICONS[event.severity] ?? <Info className="w-4 h-4" />}</div>
               <div className="flex-1 min-w-0">

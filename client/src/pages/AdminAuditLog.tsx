@@ -183,7 +183,7 @@ export default function AdminAuditLog() {
             </div>
           ) : (
             <div className="divide-y">
-              {data.logs.map((log) => (
+              {data.logs.map((log: any) => (
                 <div key={log.id} className="p-4 hover:bg-muted/20 transition-colors">
                   <div className="flex items-start gap-3">
                     <div className="mt-0.5 shrink-0">

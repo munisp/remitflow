@@ -77,7 +77,7 @@ export default function TransferAuditTrail() {
           <div className="relative">
             <div className="absolute left-5 top-0 bottom-0 w-0.5 bg-border" />
             <div className="space-y-4">
-              {trail.map((entry, idx) => (
+              {trail.map((entry: any, idx: any) => (
                 <div key={entry.id} className="relative flex gap-4 pl-12">
                   <div className={`absolute left-3.5 w-3 h-3 rounded-full border-2 border-background ${idx === trail.length - 1 ? "bg-primary" : "bg-muted-foreground"}`} style={{ top: "14px" }} />
                   <Card className="flex-1">

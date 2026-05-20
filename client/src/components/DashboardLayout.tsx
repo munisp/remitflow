@@ -421,7 +421,7 @@ const MAX_WIDTH = 480;
 
 // ─── ONBOARDING STEPS ─────────────────────────────────────────────────────────
 function getOnboardingSteps(
-  user: { kycTier?: string; email?: string | null } | null
+  user: { kycTier?: string | null; email?: string | null } | null
 ) {
   if (!user) return [];
   return [
@@ -596,7 +596,7 @@ function CommandPalette({
 function OnboardingProgress({
   user,
 }: {
-  user: { kycTier?: string; email?: string | null } | null;
+  user: { kycTier?: string | null; email?: string | null } | null;
 }) {
   const [, setLocation] = useLocation();
   const [dismissed, setDismissed] = useState(

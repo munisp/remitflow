@@ -150,7 +150,7 @@ export const floatIncomeRouter = router({
       // Derive from treasury_positions (current balances projected backwards)
       const positions = await db.select().from(treasuryPositions);
       const currencies = input.currency
-        ? positions.filter(p => p.currency === input.currency)
+        ? positions.filter((p: any) => p.currency === input.currency)
         : positions;
 
       const records = [];

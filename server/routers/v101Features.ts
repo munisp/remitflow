@@ -113,12 +113,12 @@ const multiCurrencyWalletV2Router = router({
     const walletRows = await db.select().from(wallets).where(eq(wallets.userId, ctx.user.id));
     const fxRateRows = await db.select().from(fxRateHistory).where(eq(fxRateHistory.toCurrency, "USD")).limit(50);
     const rateMap: Record<string, number> = {};
-    fxRateRows.forEach(r => { rateMap[r.fromCurrency] = Number(r.rate); });
-    const enriched = walletRows.map(w => ({
+    fxRateRows.forEach((r: any) => { rateMap[r.fromCurrency] = Number(r.rate); });
+    const enriched = walletRows.map((w: any) => ({
       ...w,
       usdEquivalent: rateMap[w.currency] ? Number(w.balance) / rateMap[w.currency] : null,
     }));
-    const totalUSD = enriched.reduce((s, w) => s + (w.usdEquivalent ?? 0), 0);
+    const totalUSD = enriched.reduce((s: any, w: any) => s + (w.usdEquivalent ?? 0), 0);
     return { wallets: enriched, totalUsdEquivalent: Math.round(totalUSD * 100) / 100, currency: "USD", updatedAt: new Date() };
   }),
   convert: auditedProcedure
@@ -214,7 +214,7 @@ const settlementNettingRouter = router({
       totalReceived: sql<number>`SUM(CASE WHEN ${transactions.status} = 'completed' THEN ${transactions.toAmount} ELSE 0 END)`,
       txCount: count(),
     }).from(transactions).groupBy(transactions.fromCurrency);
-    return rows.map(r => ({
+    return rows.map((r: any) => ({
       currency: r.currency,
       grossSent: Number(r.totalSent) / 100,
       grossReceived: Number(r.totalReceived) / 100,
@@ -249,7 +249,7 @@ const liquidityStressTestingRouter = router({
       const positions = await db.select().from(treasuryPositions).limit(50);
       const shockFactors = { mild: 0.05, moderate: 0.15, severe: 0.30, extreme: 0.50 };
       const shock = shockFactors[input.scenario];
-      const results = positions.map(p => ({
+      const results = positions.map((p: any) => ({
         currency: p.currency,
         currentBalance: Number(p.balance) / 100,
         stressedBalance: Number(p.balance) / 100 * (1 - shock),
@@ -257,7 +257,7 @@ const liquidityStressTestingRouter = router({
         shortfall: Math.max(0, (Number(p.lockedBalance) / 100) - (Number(p.availableBalance) / 100 * (1 - shock))),
         survivalDays: Math.floor((Number(p.availableBalance) / 100 * (1 - shock)) / Math.max(1, Number(p.balance) / 100 * 0.02)),
       }));
-      const totalShortfall = results.reduce((s, r) => s + r.shortfall, 0);
+      const totalShortfall = results.reduce((s: any, r: any) => s + r.shortfall, 0);
       return { scenario: input.scenario, shockFactor: shock * 100 + "%", positions: results, totalShortfall: Math.round(totalShortfall * 100) / 100, passed: totalShortfall === 0, testedAt: new Date() };
     }),
   getHistoricalScenarios: protectedProcedure.query(() => {
@@ -278,7 +278,7 @@ const paymentOrchestrationV2Router = router({
       const corridorRows = await db.select().from(corridorMarginHistory)
         .where(like(corridorMarginHistory.corridorId, `%${input.fromCurrency}%`))
         .limit(10);
-      const routes = corridorRows.length > 0 ? corridorRows.map((c, i) => ({
+      const routes = corridorRows.length > 0 ? corridorRows.map((c: any, i: any) => ({
         routeId: `ROUTE-${c.id}-${i}`,
         provider: c.corridorName ?? `Provider ${i+1}`,
         estimatedTime: `${Math.floor((Date.now() % 24) + 1)}h`,
@@ -319,7 +319,7 @@ const amlBatchEngineRouter = router({
         .from(transactions).orderBy(desc(transactions.createdAt)).limit(input.batchSize);
       const flagged: number[] = [];
       const cleared: number[] = [];
-      txRows.forEach(tx => {
+      txRows.forEach((tx: any) => {
         // Deterministic risk score — no random noise
         const amountScore = Number(tx.fromAmount) > 1000000 ? 50 : Number(tx.fromAmount) > 500000 ? 30 : Number(tx.fromAmount) > 100000 ? 15 : 0;
         const currencyScore = ["NGN", "USD"].includes(tx.fromCurrency ?? "") && Number(tx.fromAmount) > 500000 ? 15 : 0;
@@ -375,7 +375,7 @@ const merchantKYBRouter = router({
     const db = await getDb();
     const rows = await db.select({ status: sql<string>`${kycDocuments.status}`, count: count() }).from(kycDocuments).groupBy(sql`${kycDocuments.status}`);
     const stats: Record<string, number> = {};
-    rows.forEach(r => { stats[r.status] = r.count; });
+    rows.forEach((r: any) => { stats[r.status] = r.count; });
     return { pending: stats.pending ?? 0, approved: stats.approved ?? 0, rejected: stats.rejected ?? 0, total: Object.values(stats).reduce((a, b) => a + b, 0) };
   }),
 });
@@ -393,7 +393,7 @@ const loyaltyGamificationRouter = router({
         txCount: count(),
       }).from(transactions).where(and(gte(transactions.createdAt, cutoff), eq(transactions.status, "completed")))
         .groupBy(transactions.userId).orderBy(desc(sql`SUM(${transactions.fromAmount})`)).limit(input.limit);
-      return rows.map((r, i) => ({ rank: i + 1, userId: r.userId, totalVolume: Number(r.totalVolume) / 100, txCount: r.txCount, points: Math.floor(Number(r.totalVolume) / 1000), tier: Number(r.totalVolume) > 10000000 ? "platinum" : Number(r.totalVolume) > 1000000 ? "gold" : Number(r.totalVolume) > 100000 ? "silver" : "bronze" }));
+      return rows.map((r: any, i: any) => ({ rank: i + 1, userId: r.userId, totalVolume: Number(r.totalVolume) / 100, txCount: r.txCount, points: Math.floor(Number(r.totalVolume) / 1000), tier: Number(r.totalVolume) > 10000000 ? "platinum" : Number(r.totalVolume) > 1000000 ? "gold" : Number(r.totalVolume) > 100000 ? "silver" : "bronze" }));
     }),
   getChallenges: publicProcedure.query(() => {
     return [
@@ -479,7 +479,7 @@ const documentOCRRouter = router({
     const db = await getDb();
     const rows = await db.select({ status: sql<string>`${kycDocuments.status}`, count: count() }).from(kycDocuments).groupBy(sql`${kycDocuments.status}`);
     const stats: Record<string, number> = {};
-    rows.forEach(r => { stats[r.status] = r.count; });
+    rows.forEach((r: any) => { stats[r.status] = r.count; });
     return { queued: stats.pending ?? 0, processed: stats.approved ?? 0, rejected: stats.rejected ?? 0, avgProcessingTime: "1.2s", ocrAccuracy: "94.7%", lastUpdated: new Date() };
   }),
 });
@@ -495,7 +495,7 @@ const swiftGPITrackerV2Router = router({
       const rows = await db.select().from(transactions).where(and(...conditions)).orderBy(desc(transactions.createdAt)).limit(input.limit).offset(input.offset);
       const [total] = await db.select({ count: count() }).from(transactions).where(and(...conditions));
       return {
-        payments: rows.map(tx => ({
+        payments: rows.map((tx: any) => ({
           ...tx,
           uetr: randomUUID(),
           gpiStatus: tx.status === "completed" ? "ACSC" : tx.status === "processing" ? "ACSP" : tx.status === "failed" ? "RJCT" : "PDNG",
@@ -578,7 +578,7 @@ const treasuryALMRouter = router({
   getPositions: protectedProcedure.query(async () => {
     const db = await getDb();
     const rows = await db.select().from(treasuryPositions).orderBy(desc(treasuryPositions.balance)).limit(50);
-    return rows.map(p => ({
+    return rows.map((p: any) => ({
       ...p,
       balance: Number(p.balance) / 100,
       lockedBalance: Number(p.lockedBalance) / 100,
@@ -616,7 +616,7 @@ const realTimeFXStreamRouter = router({
     .query(async ({ input }) => {
       const db = await getDb();
       const rows = await db.select().from(fxRateHistory).orderBy(desc(fxRateHistory.recordedAt)).limit(100);
-      const filtered = input.currencies ? rows.filter(r => input.currencies!.includes(r.fromCurrency) || input.currencies!.includes(r.toCurrency)) : rows;
+      const filtered = input.currencies ? rows.filter((r: any) => input.currencies!.includes(r.fromCurrency) || input.currencies!.includes(r.toCurrency)) : rows;
       return { rates: filtered, fetchedAt: new Date(), source: "RemitFlow FX Engine v101" };
     }),
   getRateHistory: publicProcedure
@@ -637,7 +637,7 @@ const realTimeFXStreamRouter = router({
   getVolatilityIndex: publicProcedure.query(async () => {
     const db = await getDb();
     const rows = await db.select({ fromCurrency: fxRateHistory.fromCurrency, toCurrency: fxRateHistory.toCurrency }).from(fxRateHistory).limit(20);
-    return rows.map(r => ({
+    return rows.map((r: any) => ({
       pair: `${r.fromCurrency}/${r.toCurrency}`,
       volatility: Math.round(Math.abs(Math.sin(Date.now() * 0.00001)) * 15 + 2) / 100,
       trend: (Date.now() % 2) === 0 ? "up" : "down",
@@ -679,7 +679,7 @@ const temporalWorkflowsRouter = router({
       const db = await getDb();
       const rows = await db.select({ id: transactions.id, status: transactions.status, fromAmount: transactions.fromAmount, fromCurrency: transactions.fromCurrency, createdAt: transactions.createdAt, updatedAt: transactions.updatedAt })
         .from(transactions).orderBy(desc(transactions.createdAt)).limit(input.limit);
-      return rows.map(tx => ({
+      return rows.map((tx: any) => ({
         workflowId: `WF-TX-${tx.id}`,
         workflowType: "TransferSaga",
         status: tx.status === "completed" ? "COMPLETED" : tx.status === "failed" ? "FAILED" : tx.status === "processing" ? "RUNNING" : "PENDING",
@@ -692,7 +692,7 @@ const temporalWorkflowsRouter = router({
     const db = await getDb();
     const rows = await db.select({ status: sql<string>`${transactions.status}`, count: count() }).from(transactions).groupBy(sql`${transactions.status}`);
     const stats: Record<string, number> = {};
-    rows.forEach(r => { stats[r.status] = r.count; });
+    rows.forEach((r: any) => { stats[r.status] = r.count; });
     return {
       running: stats.processing ?? 0,
       completed: stats.completed ?? 0,

@@ -346,7 +346,7 @@ function RunDetailDialog({ runId, onRefresh }: { runId: number; onRefresh: () =>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {data.items.map(({ item, employee }) => (
+                  {data.items.map(({ item, employee }: { item: any; employee: any }) => (
                     <TableRow key={item.id}>
                       <TableCell className="font-medium">{employee?.firstName} {employee?.lastName}</TableCell>
                       <TableCell>
@@ -423,12 +423,12 @@ export default function GlobalPayroll() {
     onError: (e) => toast.error("Error"),
   });
 
-  const selectedCompany = companies?.find((c) => c.id === selectedCompanyId);
+  const selectedCompany = companies?.find((c: any) => c.id === selectedCompanyId);
 
   const jurisdictionBreakdown = useMemo(() => {
     if (!employees) return [];
     const map: Record<string, number> = {};
-    employees.forEach((e) => { map[e.jurisdiction] = (map[e.jurisdiction] ?? 0) + 1; });
+    employees.forEach((e: any) => { map[e.jurisdiction] = (map[e.jurisdiction] ?? 0) + 1; });
     return Object.entries(map).map(([code, count]) => ({
       ...JURISDICTIONS.find((j) => j.code === code),
       count,
@@ -492,7 +492,7 @@ export default function GlobalPayroll() {
         {/* Company Selector */}
         {companies && companies.length > 0 && (
           <div className="flex gap-3 overflow-x-auto pb-1">
-            {companies.map((c) => (
+            {companies.map((c: any) => (
               <button
                 key={c.id}
                 onClick={() => setSelectedCompanyId(c.id)}
@@ -586,7 +586,7 @@ export default function GlobalPayroll() {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {employees.map((emp) => {
+                          {employees.map((emp: any) => {
                             const jur = JURISDICTIONS.find((j) => j.code === emp.jurisdiction);
                             return (
                               <TableRow key={emp.id}>
@@ -650,7 +650,7 @@ export default function GlobalPayroll() {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {runs.map((run) => {
+                          {runs.map((run: any) => {
                             const sc = RUN_STATUS_CONFIG[run.status] ?? RUN_STATUS_CONFIG.draft;
                             return (
                               <TableRow key={run.id}>

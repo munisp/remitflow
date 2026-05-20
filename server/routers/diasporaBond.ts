@@ -186,10 +186,10 @@ export const diasporaBondRouter = router({
       const bonds = await db.select().from(diasporaBonds).orderBy(desc(diasporaBonds.createdAt));
 
       return bonds
-        .filter((b) => input.status === "all" || b.status === input.status)
-        .filter((b) => !input.issuingCountry || b.issuingCountry === input.issuingCountry)
-        .filter((b) => !input.minYield || Number(b.couponRate) >= input.minYield)
-        .filter((b) => !input.maxTenor || Number(b.tenorYears) <= input.maxTenor);
+        .filter((b: any) => input.status === "all" || b.status === input.status)
+        .filter((b: any) => !input.issuingCountry || b.issuingCountry === input.issuingCountry)
+        .filter((b: any) => !input.minYield || Number(b.couponRate) >= input.minYield)
+        .filter((b: any) => !input.maxTenor || Number(b.tenorYears) <= input.maxTenor);
     }),
 
   getBond: protectedProcedure
@@ -424,7 +424,7 @@ export const diasporaBondRouter = router({
 
     // Enrich with current pricing
     const enriched = await Promise.all(
-      subs.map(async ({ subscription, bond }) => {
+      subs.map(async ({ subscription, bond }: { subscription: any; bond: any }) => {
         if (!bond) return { subscription, bond, currentValue: Number(subscription.principalUsd), pnl: 0 };
         const pricing = await getBondPrice(bond);
         const currentValue = Number(subscription.units) * pricing.dirtyPrice;
@@ -470,8 +470,8 @@ export const diasporaBondRouter = router({
         .orderBy(desc(bondCouponPayments.scheduledDate));
 
       const totalReceived = coupons
-        .filter((c) => c.status === "paid")
-        .reduce((s, c) => s + Number(c.grossAmount), 0);
+        .filter((c: any) => c.status === "paid")
+        .reduce((s: any, c: any) => s + Number(c.grossAmount), 0);
 
       return { subscription: sub, coupons, totalReceived };
     }),
@@ -567,9 +567,9 @@ export const diasporaBondRouter = router({
         .orderBy(desc(bondSecondaryOrders.createdAt));
 
       return orders
-        .filter((o) => !input.bondId || o.order.bondId === input.bondId)
-        .filter((o) => input.side === "all" || o.order.side === input.side)
-        .map((o) => ({
+        .filter((o: any) => !input.bondId || o.order.bondId === input.bondId)
+        .filter((o: any) => input.side === "all" || o.order.side === input.side)
+        .map((o: any) => ({
           ...o.order,
           bondName: o.bond?.bondName,
           issuerName: o.bond?.issuerName,
@@ -648,7 +648,7 @@ export const diasporaBondRouter = router({
         .from(bondSecondaryOrders)
         .leftJoin(diasporaBonds, eq(bondSecondaryOrders.bondId, diasporaBonds.id))
         .where(eq(bondSecondaryOrders.id, input.orderId))
-        .then((rows) => rows);
+        .then((rows: any) => rows);
 
       if (!order) throw new TRPCError({ code: "NOT_FOUND" });
       if (order.order.status !== "open") {

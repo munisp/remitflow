@@ -145,11 +145,11 @@ export const abTestingRouter = router({
       const assignments = await db.select().from(abAssignments).where(eq(abAssignments.experimentId, input.experimentId));
       const variants = exp.variants as Array<{ id: string; name: string; weight: number }>;
       const results = variants.map(v => {
-        const variantAssignments = assignments.filter(a => a.variantId === v.id).length;
-        const variantEvents = events.filter(e => e.variantId === v.id);
-        const impressions = variantEvents.filter(e => e.eventType === "impression").length;
-        const conversions = variantEvents.filter(e => e.eventType === "conversion").length;
-        const clicks = variantEvents.filter(e => e.eventType === "click").length;
+        const variantAssignments = assignments.filter((a: any) => a.variantId === v.id).length;
+        const variantEvents = events.filter((e: any) => e.variantId === v.id);
+        const impressions = variantEvents.filter((e: any) => e.eventType === "impression").length;
+        const conversions = variantEvents.filter((e: any) => e.eventType === "conversion").length;
+        const clicks = variantEvents.filter((e: any) => e.eventType === "click").length;
         return {
           variantId: v.id,
           variantName: v.name,
@@ -177,8 +177,8 @@ export const referralBonusRouter = router({
       const rows = await db.select().from(referralBonuses)
         .where(eq(referralBonuses.referrerId, ctx.user.id))
         .orderBy(desc(referralBonuses.createdAt));
-      const totalEarned = rows.filter(r => r.status === "paid").reduce((s, r) => s + Number(r.referrerBonus ?? 0), 0);
-      const pendingAmount = rows.filter(r => r.status === "pending").reduce((s, r) => s + Number(r.referrerBonus ?? 0), 0);
+      const totalEarned = rows.filter((r: any) => r.status === "paid").reduce((s: any, r: any) => s + Number(r.referrerBonus ?? 0), 0);
+      const pendingAmount = rows.filter((r: any) => r.status === "pending").reduce((s: any, r: any) => s + Number(r.referrerBonus ?? 0), 0);
       return { bonuses: rows, totalEarned, pendingAmount };
     }),
 
@@ -229,7 +229,7 @@ export const referralBonusRouter = router({
       .groupBy(referralBonuses.referrerId, users.name, users.email)
       .orderBy(desc(sql`SUM(CAST(${referralBonuses.referrerBonus} AS DECIMAL))`))
       .limit(20);
-    const leaders = rows.map((r, idx) => ({
+    const leaders = rows.map((r: any, idx: any) => ({
       rank: idx + 1,
       userId: r.referrerId,
       name: r.name ?? r.email ?? `User #${r.referrerId}`,
@@ -252,7 +252,7 @@ export const documentVaultRouter = router({
         .where(eq(documentVaultTable.userId, ctx.user.id))
         .orderBy(desc(documentVaultTable.createdAt));
       const filtered = input?.category
-        ? rows.filter(r => r.category === input.category)
+        ? rows.filter((r: any) => r.category === input.category)
         : rows;
       return { documents: filtered };
     }),
@@ -369,7 +369,7 @@ export const documentVaultRouter = router({
         .orderBy(documentVaultTable.expiresAt);
       const now = new Date();
       return {
-        documents: rows.map(d => ({
+        documents: rows.map((d: any) => ({
           ...d,
           daysLeft: d.expiresAt ? Math.ceil((d.expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)) : null,
         })),
@@ -514,9 +514,9 @@ export const rateAlertHistoryRouter = router({
     const rows = await db.select().from(rateAlertHistory).where(eq(rateAlertHistory.userId, ctx.user.id));
     return {
       total: rows.length,
-      triggered: rows.filter(r => r.status === "triggered").length,
-      snoozed: rows.filter(r => r.status === "snoozed").length,
-      dismissed: rows.filter(r => r.status === "dismissed").length,
+      triggered: rows.filter((r: any) => r.status === "triggered").length,
+      snoozed: rows.filter((r: any) => r.status === "snoozed").length,
+      dismissed: rows.filter((r: any) => r.status === "dismissed").length,
     };
   }),
 });

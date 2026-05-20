@@ -26,7 +26,7 @@ import { getNodeAutoInstrumentations } from "@opentelemetry/auto-instrumentation
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
-import { Resource } from "@opentelemetry/resources";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
   ATTR_SERVICE_NAME,
   ATTR_SERVICE_VERSION,
@@ -51,7 +51,7 @@ if (ENVIRONMENT !== "production") {
 
 // ─── Resource ────────────────────────────────────────────────────────────────
 
-const resource = new Resource({
+const resource = resourceFromAttributes({
   [ATTR_SERVICE_NAME]: SERVICE_NAME,
   [ATTR_SERVICE_VERSION]: SERVICE_VERSION,
   [ATTR_DEPLOYMENT_ENVIRONMENT_NAME]: ENVIRONMENT,
@@ -106,8 +106,11 @@ const sdk = new NodeSDK({
   instrumentations: [
     getNodeAutoInstrumentations({
       "@opentelemetry/instrumentation-http": {
-        ignoreIncomingPaths: [/\/health$/, /\/metrics$/, /\/favicon\.ico$/],
-        requestHook: (span, request) => {
+        ignoreIncomingRequestHook: (req: any) => {
+          const url = req.url ?? '';
+          return /\/health$|\/metrics$|\/favicon\.ico$/.test(url);
+        },
+        requestHook: (span: any, request: any) => {
           // Add RemitFlow-specific attributes
           if ("headers" in request && request.headers) {
             const reqId = (request.headers as Record<string, string | string[] | undefined>)["x-request-id"];
@@ -121,10 +124,7 @@ const sdk = new NodeSDK({
       "@opentelemetry/instrumentation-pg": {
         enhancedDatabaseReporting: true,
       },
-      "@opentelemetry/instrumentation-redis-4": {
-        enabled: true,
-      },
-      "@opentelemetry/instrumentation-fetch": {
+      "@opentelemetry/instrumentation-undici": {
         enabled: true,
       },
       // Disable noisy filesystem instrumentation
@@ -171,7 +171,7 @@ export function withSpan<T>(
   attributes: Record<string, string | number | boolean> = {},
   fn: () => Promise<T>,
 ): Promise<T> {
-  return tracer.startActiveSpan(name, async (span) => {
+  return tracer.startActiveSpan(name, async (span: any) => {
     try {
       for (const [k, v] of Object.entries(attributes)) {
         span.setAttribute(k, v);

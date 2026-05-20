@@ -104,12 +104,12 @@ export default function RecipientOnboarding() {
               <span className="text-muted-foreground">Channel</span><span className="font-medium capitalize">{channel}</span>
               <span className="text-muted-foreground">BVN</span><span className="font-medium">{"*".repeat(7)+bvn.slice(-4)}</span>
             </div>
-            {crossSellQuery.data&&(
+            {crossSellQuery.data?(
               <div className="p-3 bg-muted rounded-lg text-sm">
                 <p className="font-medium">Recommended: {(crossSellQuery.data as any)?.recommended_product}</p>
                 <p className="text-muted-foreground text-xs mt-1">{(crossSellQuery.data as any)?.next_best_action}</p>
               </div>
-            )}
+            ):null}
             <div className="flex gap-3">
               <Button variant="outline" onClick={()=>setStep(2)}>Back</Button>
               <Button className="flex-1" disabled={addBeneficiaryMutation.isPending} onClick={() => addBeneficiaryMutation.mutate({ name: `${firstName} ${lastName}`, phone, country: state, currency: "NGN" })}>

@@ -166,7 +166,7 @@ export default function TransactionExport() {
             </div>
           ) : (
             <div className="space-y-2">
-              {exports.map((exp) => (
+              {exports.map((exp: any) => (
                 <div key={exp.id} className="flex items-center justify-between p-3 border rounded-lg hover:bg-muted/30 transition-colors">
                   <div className="flex items-center gap-3">
                     <span className="text-2xl">{FORMAT_ICONS[exp.format] ?? "📁"}</span>

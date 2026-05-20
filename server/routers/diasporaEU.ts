@@ -139,9 +139,9 @@ export const diasporaEURouter = router({
       .where(and(eq(transfers.userId, ctx.user.id), eq(transfers.corridorCode, "IT")));
     return {
       totalTransfers: italyTransfers.length,
-      totalAmountEur: italyTransfers.reduce((s, t) => s + parseFloat(t.amountForeign ?? "0"), 0),
+      totalAmountEur: italyTransfers.reduce((s: any, t: any) => s + parseFloat(t.amountForeign ?? "0"), 0),
       avgAmountEur: italyTransfers.length > 0
-        ? italyTransfers.reduce((s, t) => s + parseFloat(t.amountForeign ?? "0"), 0) / italyTransfers.length
+        ? italyTransfers.reduce((s: any, t: any) => s + parseFloat(t.amountForeign ?? "0"), 0) / italyTransfers.length
         : 0,
     };
   }),
@@ -150,7 +150,7 @@ export const diasporaEURouter = router({
     const db = await getDb();
     const claimed = await db.select().from(diasporaOfferClaims)
       .where(and(eq(diasporaOfferClaims.userId, ctx.user.id), eq(diasporaOfferClaims.diasporaRegion, "eu")));
-    const claimedTypes = new Set(claimed.map(c => c.offerType));
+    const claimedTypes = new Set(claimed.map((c: any) => c.offerType));
 
     const offers = [
       {

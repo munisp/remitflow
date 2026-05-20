@@ -66,9 +66,9 @@ export const posAgentCashFlowRouter = router({
       )
       .catch(() => []);
 
-    const todayVolume = todayTxs.reduce((s, t) => s + Number(t.amount ?? 0), 0);
+    const todayVolume = todayTxs.reduce((s: any, t: any) => s + Number(t.amount ?? 0), 0);
     const commissionRate = Number(agent?.commissionRate ?? 1.5);
-    const todayCommission = todayTxs.reduce((s, t) => s + Number(t.amount ?? 0) * commissionRate / 100, 0);
+    const todayCommission = todayTxs.reduce((s: any, t: any) => s + Number(t.amount ?? 0) * commissionRate / 100, 0);
 
     // All-time stats
     const [totalCustomers] = await db
@@ -330,7 +330,7 @@ export const posAgentCashFlowRouter = router({
       .limit(100)
       .catch(() => []);
 
-    return rows.map(r => {
+    return rows.map((r: any) => {
       let meta: any = {};
       try { meta = JSON.parse(r.metadata as string ?? "{}"); } catch {}
       return {
@@ -368,7 +368,7 @@ export const transfersListRouter = router({
         .offset(input.offset)
         .catch(() => []);
 
-      const transfers = rows.map(r => {
+      const transfers = rows.map((r: any) => {
         let meta: any = {};
         try { meta = JSON.parse(r.metadata as string ?? "{}"); } catch {}
         return {
@@ -445,7 +445,7 @@ export const transfersListRouter = router({
           ? `"${s.replace(/"/g, '""')}"` : s;
       };
 
-      const csvRows = rows.map(r => {
+      const csvRows = rows.map((r: any) => {
         let meta: any = {};
         try { meta = JSON.parse(r.metadata as string ?? "{}"); } catch {}
         return [

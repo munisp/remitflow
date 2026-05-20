@@ -459,7 +459,7 @@ export const kycLifecycleRouter = router({
           .limit(input.limit).offset(input.offset),
         db.select({ total: count() }).from(kycLifecycle).where(where),
       ]);
-      return { lifecycles: rows.map(r => ({ ...r.lifecycle, userName: r.userName, userEmail: r.userEmail })), total: totalRows[0]?.total ?? 0 };
+      return { lifecycles: rows.map((r: any) => ({ ...r.lifecycle, userName: r.userName, userEmail: r.userEmail })), total: totalRows[0]?.total ?? 0 };
     }),
 
   // Get lifecycle history for a user
@@ -635,11 +635,11 @@ export const featureFlagEvaluationRouter = router({
       const userOverrides = await db.select({ flagId: userFeatureFlags.flagId, enabled: userFeatureFlags.enabled })
         .from(userFeatureFlags)
         .where(eq(userFeatureFlags.userId, ctx.user.id));
-      const overrideMap = new Map(userOverrides.map(o => [o.flagId, o.enabled]));
+      const overrideMap = new Map(userOverrides.map((o: any) => [o.flagId, o.enabled]));
 
       const result: Record<string, boolean> = {};
       for (const key of input.keys) {
-        const flag = flags.find(f => f.key === key);
+        const flag = flags.find((f: any) => f.key === key);
         if (!flag) { result[key] = false; continue; }
         if (overrideMap.has(flag.id)) { result[key] = Boolean(overrideMap.get(flag.id)); continue; }
         if (!flag.defaultEnabled) { result[key] = false; continue; }
@@ -858,7 +858,7 @@ export const webhookRetryRouter = router({
     const rows = await db.select({ status: webhookRetryQueue.status, count: count() })
       .from(webhookRetryQueue)
       .groupBy(webhookRetryQueue.status);
-    return Object.fromEntries(rows.map(r => [r.status, r.count]));
+    return Object.fromEntries(rows.map((r: any) => [r.status, r.count]));
   }),
 });
 
@@ -960,7 +960,7 @@ export const apiKeyRotationRouter = router({
         .orderBy(desc(apiKeyUsageLogs.createdAt))
         .limit(1000);
       const byEndpoint = new Map<string, number>();
-      logs.forEach(l => { byEndpoint.set(l.endpoint, (byEndpoint.get(l.endpoint) ?? 0) + 1); });
+      logs.forEach((l: any) => { byEndpoint.set(l.endpoint, (byEndpoint.get(l.endpoint) ?? 0) + 1); });
       return {
         total: logs.length,
         byEndpoint: Array.from(byEndpoint.entries()).map(([endpoint, count]) => ({ endpoint, count })).sort((a, b) => b.count - a.count),

@@ -229,7 +229,7 @@ export default function ContractorPayments() {
                   <SelectTrigger className="w-48"><SelectValue placeholder="All contractors" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All contractors</SelectItem>
-                    {contractors?.map(c => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
+                    {contractors?.map((c: any) => <SelectItem key={c.id} value={String(c.id)}>{c.name}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
@@ -244,7 +244,7 @@ export default function ContractorPayments() {
                 </div>
               ) : (
                 <div className="divide-y">
-                  {invoices?.map(inv => (
+                  {invoices?.map((inv: any) => (
                     <div key={inv.id} className="py-3 flex items-center justify-between gap-4">
                       <div className="flex-1 min-w-0">
                         <p className="font-medium text-sm truncate">{inv.description}</p>
@@ -289,7 +289,7 @@ export default function ContractorPayments() {
                 </div>
               ) : (
                 <div className="divide-y">
-                  {contractors?.map(c => (
+                  {contractors?.map((c: any) => (
                     <div key={c.id} className="py-3 flex items-center justify-between">
                       <div>
                         <p className="font-medium text-sm">{c.name}</p>

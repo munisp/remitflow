@@ -156,7 +156,7 @@ function ValidationDetail({ result }: { result: Record<string, unknown> | null }
           </p>
           <p className="text-xs text-blue-700">Reviewed: {new Date(review.reviewed_at as string).toLocaleString()}</p>
           <p className="text-xs text-blue-700">Decision: <strong>{String(review.new_status).toUpperCase()}</strong></p>
-          {review.note && <p className="text-xs text-blue-700 mt-1 italic">"{String(review.note)}"</p>}
+          {review.note ? <p className="text-xs text-blue-700 mt-1 italic">"{String(review.note)}"</p> : null}
         </div>
       )}
     </div>
@@ -187,9 +187,9 @@ export default function SmeTradeFormMHistory() {
   const total = data?.total ?? 0;
   const totalPages = Math.ceil(total / LIMIT);
 
-  const validatedCount = rows.filter(r => r.status === "validated" || r.status === "approved").length;
-  const rejectedCount = rows.filter(r => r.status === "rejected").length;
-  const pendingCount = rows.filter(r => r.status === "pending").length;
+  const validatedCount = rows.filter((r: any) => r.status === "validated" || r.status === "approved").length;
+  const rejectedCount = rows.filter((r: any) => r.status === "rejected").length;
+  const pendingCount = rows.filter((r: any) => r.status === "pending").length;
 
   return (
     <div className="p-6 space-y-6 max-w-6xl mx-auto">
@@ -338,7 +338,7 @@ export default function SmeTradeFormMHistory() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {rows.map((row) => {
+                  {rows.map((row: any) => {
                     const valResult = row.pythonValidationResult as Record<string, unknown> | null;
                     const corridorCode = valResult?.corridor_code ?? "—";
                     const valueUsd = valResult?.value_usd ?? 0;

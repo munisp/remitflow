@@ -257,10 +257,10 @@ export const paymentMethodsExtRouter = router({
       db.select().from(xofPayoutAccounts).where(eq(xofPayoutAccounts.userId, ctx.user.id)),
     ]);
     return {
-      ach: ach.map(a => ({ ...a, type: "ach" as const })),
-      sepa: sepa.map(s => ({ ...s, type: "sepa" as const })),
-      interac: interac.map(i => ({ ...i, type: "interac" as const })),
-      xof: xof.map(x => ({ ...x, type: "xof" as const })),
+      ach: ach.map((a: any) => ({ ...a, type: "ach" as const })),
+      sepa: sepa.map((s: any) => ({ ...s, type: "sepa" as const })),
+      interac: interac.map((i: any) => ({ ...i, type: "interac" as const })),
+      xof: xof.map((x: any) => ({ ...x, type: "xof" as const })),
       total: ach.length + sepa.length + interac.length + xof.length,
     };
   }),
@@ -306,7 +306,7 @@ export const hnwExtRouter = router({
     const items = await db.select().from(hnwPortfolios)
       .where(eq(hnwPortfolios.hnwProfileId, profile.id))
       .orderBy(desc(hnwPortfolios.currentValueUsd));
-    const totalValueUsd = items.reduce((sum, i) => sum + Number(i.currentValueUsd ?? 0), 0);
+    const totalValueUsd = items.reduce((sum: any, i: any) => sum + Number(i.currentValueUsd ?? 0), 0);
     return { items, totalValueUsd };
   }),
 
@@ -577,9 +577,9 @@ export const railOpsRouter = router({
       rails: statuses,
       summary: {
         total: statuses.length,
-        healthy: statuses.filter(s => s.status === "healthy").length,
-        degraded: statuses.filter(s => s.status === "degraded").length,
-        down: statuses.filter(s => s.status === "down").length,
+        healthy: statuses.filter((s: any) => s.status === "healthy").length,
+        degraded: statuses.filter((s: any) => s.status === "degraded").length,
+        down: statuses.filter((s: any) => s.status === "down").length,
       },
     };
   }),
@@ -825,7 +825,7 @@ export const complianceExtRouter = router({
   getEcowasCheckStats: adminProcedure.query(async () => {
     const db = await getDb();
     const checks = await db.select().from(ecowasComplianceChecks);
-    const passed = checks.filter(c => c.result === 'pass' || c.result === 'passed');
+    const passed = checks.filter((c: any) => c.result === 'pass' || c.result === 'passed');
     return {
       total: checks.length,
       passed: passed.length,
@@ -1019,12 +1019,12 @@ export const crossSellExtRouter = router({
       if (o.status === "accepted") byType[t].accepted++;
       if (o.status === "dismissed") byType[t].dismissed++;
     }
-    const accepted = offers.filter(o => o.status === "accepted").length;
+    const accepted = offers.filter((o: any) => o.status === "accepted").length;
     return {
       total: offers.length,
       accepted,
-      dismissed: offers.filter(o => o.status === "dismissed").length,
-      pending: offers.filter(o => o.status === "pending" || o.status === "shown").length,
+      dismissed: offers.filter((o: any) => o.status === "dismissed").length,
+      pending: offers.filter((o: any) => o.status === "pending" || o.status === "shown").length,
       conversionRate: offers.length ? (accepted / offers.length) * 100 : 0,
       byOfferType: Object.entries(byType).map(([type, stats]) => ({ type, ...stats })),
     };
@@ -1044,7 +1044,7 @@ export const outboundExtRouter = router({
         EDU: 10000, MED: 15000, TRV: 4000, REM: 50000,
         SME: 200000, HNW: 500000, INV: 100000, DIVI: 200000,
       };
-      return records.map(r => ({
+      return records.map((r: any) => ({
         ...r,
         limitUsd: CBN_LIMITS[r.purposeCode] ?? 50000,
         remainingUsd: Math.max(0, (CBN_LIMITS[r.purposeCode] ?? 50000) - Number(r.usedUsd ?? 0)),
@@ -1057,11 +1057,11 @@ export const outboundExtRouter = router({
     const year = new Date().getFullYear();
     const records = await db.select().from(outboundAnnualUsage)
       .where(and(eq(outboundAnnualUsage.userId, ctx.user.id), eq(outboundAnnualUsage.calendarYear, year)));
-    const totalUsed = records.reduce((s, r) => s + Number(r.usedUsd ?? 0), 0);
+    const totalUsed = records.reduce((s: any, r: any) => s + Number(r.usedUsd ?? 0), 0);
     return {
       year,
       totalUsedUsd: totalUsed,
-      purposeCodes: records.map(r => ({ code: r.purposeCode, usedUsd: Number(r.usedUsd ?? 0) })),
+      purposeCodes: records.map((r: any) => ({ code: r.purposeCode, usedUsd: Number(r.usedUsd ?? 0) })),
     };
   }),
 
@@ -1124,9 +1124,9 @@ export const agentCashInRouter = router({
     const db = await getDb();
     const txns = await db.select().from(agentCashinTransactions)
       .where(eq(agentCashinTransactions.agentId, ctx.user.id));
-    const totalNgn = txns.reduce((s, t) => s + Number(t.amountNgn ?? 0), 0);
-    const totalFees = txns.reduce((s, t) => s + Number(t.agentFeeNgn ?? 0), 0);
-    const completed = txns.filter(t => t.status === "completed");
+    const totalNgn = txns.reduce((s: any, t: any) => s + Number(t.amountNgn ?? 0), 0);
+    const totalFees = txns.reduce((s: any, t: any) => s + Number(t.agentFeeNgn ?? 0), 0);
+    const completed = txns.filter((t: any) => t.status === "completed");
     return {
       totalTransactions: txns.length,
       completedTransactions: completed.length,
@@ -1174,7 +1174,7 @@ export const pushPrefsRouter = router({
     ];
     const prefsMap: Record<string, boolean> = {};
     for (const key of DEFAULT_KEYS) {
-      const existing = prefs.find(p => p.preferenceKey === key);
+      const existing = prefs.find((p: any) => p.preferenceKey === key);
       prefsMap[key] = existing ? existing.isEnabled : key !== "promotional";
     }
     return prefsMap;
@@ -1372,10 +1372,10 @@ export const swiftTxRouter = router({
   getSwiftStats: adminProcedure.query(async () => {
     const db = await getDb();
     const txns = await db.select().from(swiftTransactions);
-    const settled = txns.filter(t => t.status === "settled");
-    const pending = txns.filter(t => ["pending", "processing"].includes(t.status ?? ""));
-    const failed = txns.filter(t => t.status === "failed");
-    const totalVolume = settled.reduce((s, t) => s + Number(t.amount ?? 0), 0);
+    const settled = txns.filter((t: any) => t.status === "settled");
+    const pending = txns.filter((t: any) => ["pending", "processing"].includes(t.status ?? ""));
+    const failed = txns.filter((t: any) => t.status === "failed");
+    const totalVolume = settled.reduce((s: any, t: any) => s + Number(t.amount ?? 0), 0);
     return {
       total: txns.length,
       settled: settled.length,

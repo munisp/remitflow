@@ -761,8 +761,8 @@ export const adminInviteCodesRouter = router({
         totalTenants: Number(totalTenants.count),
         activeTenants: Number(activeTenants.count),
       },
-      codePerformance: codePerformance.map(c => ({ ...c, usedCount: Number(c.usedCount), maxUses: Number(c.maxUses) })),
-      funnel: funnelRaw.map(f => ({ ...f, count: Number(f.count) })),
+      codePerformance: codePerformance.map((c: any) => ({ ...c, usedCount: Number(c.usedCount), maxUses: Number(c.maxUses) })),
+      funnel: funnelRaw.map((f: any) => ({ ...f, count: Number(f.count) })),
       recentActivity,
     };
   }),
@@ -883,7 +883,7 @@ export const travelRuleDbRouter = router({
         .limit(input.limit).offset(offset);
       const [{ total }] = await db.select({ total: sql<number>`count(*)` })
         .from(travelRuleRecords).where(eq(travelRuleRecords.userId, ctx.user.id));
-      return { records: records.map(r => ({ ...r, amount: Number(r.amount) })), total: Number(total) };
+      return { records: records.map((r: any) => ({ ...r, amount: Number(r.amount) })), total: Number(total) };
     }),
 
   create: protectedProcedure

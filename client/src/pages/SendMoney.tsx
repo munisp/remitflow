@@ -145,7 +145,7 @@ export default function SendMoney() {
     onError: (err) => toast.error(err.message),
   });
 
-  const filtered = (beneficiaries ?? []).filter(r =>
+  const filtered = (beneficiaries ?? []).filter((r: any) =>
     r.name.toLowerCase().includes(search.toLowerCase()) ||
     (r.accountNumber ?? "").includes(search) ||
     (r.country ?? "").toLowerCase().includes(search.toLowerCase())
@@ -385,7 +385,7 @@ export default function SendMoney() {
                   <p className="text-sm">Add a recipient to get started.</p>
                 </div>
               )}
-              {filtered.map(r => (
+              {filtered.map((r: any) => (
                 <button key={r.id} onClick={() => { setSelected(r); goToStep("amount"); }} className="w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left hover:border-primary hover:bg-primary/5">
                   <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary to-violet-600 flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
                     {r.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase()}

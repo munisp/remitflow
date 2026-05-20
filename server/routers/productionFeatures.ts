@@ -265,11 +265,11 @@ export const agentNetworkRouter = router({
       if (!db) return { agents: [], total: 0 };
       const rows = await db.execute(sql`
         SELECT * FROM agent_network
-        WHERE (${input.country ?? null} IS NULL OR country = ${input.country ?? null})
-        AND (${input.city ?? null} IS NULL OR city ILIKE ${'%' + (input.city ?? '') + '%'})
-        AND (${input.status ?? null} IS NULL OR status = ${input.status ?? null})
-        AND (${input.search ?? null} IS NULL OR name ILIKE ${'%' + (input.search ?? '') + '%'} OR address ILIKE ${'%' + (input.search ?? '') + '%'})
-        ORDER BY name ASC LIMIT ${input.limit} OFFSET ${input.offset}
+        WHERE (${input!.country ?? null} IS NULL OR country = ${input!.country ?? null})
+        AND (${input!.city ?? null} IS NULL OR city ILIKE ${'%' + (input!.city ?? '') + '%'})
+        AND (${input!.status ?? null} IS NULL OR status = ${input!.status ?? null})
+        AND (${input!.search ?? null} IS NULL OR name ILIKE ${'%' + (input!.search ?? '') + '%'} OR address ILIKE ${'%' + (input!.search ?? '') + '%'})
+        ORDER BY name ASC LIMIT ${input!.limit} OFFSET ${input!.offset}
       `) as any[];
       const countRows = await db.execute(sql`SELECT COUNT(*) as cnt FROM agent_network`) as any[];
       return { agents: rows, total: Number(countRows[0]?.cnt ?? 0) };
@@ -660,9 +660,9 @@ export const apiChangelogRouter = router({
       ];
 
       const filtered = changelog
-        .filter(c => !input.version || c.version === input.version)
-        .filter(c => !input.type || c.type === input.type)
-        .slice(input.offset, input.offset + input.limit);
+        .filter(c => !input!.version || c.version === input!.version)
+        .filter(c => !input!.type || c.type === input!.type)
+        .slice(input!.offset, input!.offset + input!.limit);
 
       return { entries: filtered, total: changelog.length };
     }),

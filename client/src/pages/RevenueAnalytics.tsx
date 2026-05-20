@@ -134,7 +134,7 @@ export default function RevenueAnalytics() {
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
-              {(topCorridors ?? []).slice(0, 8).map((c, i) => (
+              {(topCorridors ?? []).slice(0, 8).map((c: any, i: any) => (
                 <div key={`${c.fromCurrency}-${c.toCurrency}`} className="flex items-center justify-between p-2 rounded hover:bg-muted/30 transition-colors">
                   <div className="flex items-center gap-2">
                     <span className="text-muted-foreground text-xs w-5">{i + 1}.</span>

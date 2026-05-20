@@ -89,7 +89,7 @@ export default function AdminDigitalAgreements() {
     onError: (e) => toast.error(e.message),
   });
 
-  const filtered = list?.items.filter(a =>
+  const filtered = list?.items.filter((a: any) =>
     !search || a.partnerName.toLowerCase().includes(search.toLowerCase()) ||
     a.partnerEmail.toLowerCase().includes(search.toLowerCase()) ||
     a.partnerCompany?.toLowerCase().includes(search.toLowerCase())
@@ -164,7 +164,7 @@ export default function AdminDigitalAgreements() {
             </div>
 
             <div className="space-y-2 max-h-[600px] overflow-y-auto">
-              {filtered.map(agreement => (
+              {filtered.map((agreement: any) => (
                 <Card
                   key={agreement.id}
                   className={`cursor-pointer transition-all hover:shadow-md ${selectedId === agreement.id ? "ring-2 ring-primary" : ""}`}
@@ -302,7 +302,7 @@ export default function AdminDigitalAgreements() {
                       {detail.signatures?.length === 0 ? (
                         <div className="text-center text-muted-foreground py-6 text-sm">No signatures yet</div>
                       ) : (
-                        detail.signatures?.map(sig => (
+                        detail.signatures?.map((sig: any) => (
                           <div key={sig.id} className="border rounded-lg p-3 space-y-1 text-sm">
                             <div className="flex items-center justify-between">
                               <div className="font-medium">{sig.signerName}</div>
@@ -325,7 +325,7 @@ export default function AdminDigitalAgreements() {
 
                     <TabsContent value="audit" className="mt-4">
                       <div className="space-y-2 max-h-80 overflow-y-auto">
-                        {auditTrail?.auditTrail?.map((entry, i) => (
+                        {auditTrail?.auditTrail?.map((entry: any, i: any) => (
                           <div key={i} className="flex gap-3 text-sm">
                             <div className="w-2 h-2 rounded-full bg-primary mt-1.5 shrink-0" />
                             <div>

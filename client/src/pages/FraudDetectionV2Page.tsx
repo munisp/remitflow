@@ -24,7 +24,7 @@ export default function FraudDetectionV2Page() {
 
   // Fetch fraud model metrics from mlInsights router
   const metricsQuery = trpc.mlInsights.getModelMetrics.useQuery();
-  const featuresQuery = trpc.mlInsights.getFeatureImportance.useQuery();
+  const featuresQuery = trpc.mlInsights.getFeatureImportance.useQuery({ model: "fraud_detection" });
 
   // Score a transaction using the fraud detection router
   const scoreMutation = trpc.fraudDetection.scoreTransaction.useMutation({

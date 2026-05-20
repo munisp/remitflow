@@ -28,7 +28,7 @@ export default function CorridorPricing() {
   const { data: performance } = trpc.corridorAnalytics.performance.useQuery(
     { ...selectedPair, days }, { enabled: isAdmin }
   );
-  const { data: liveRatesRaw } = trpc.fx.liveRates.useQuery();
+  const { data: liveRatesRaw } = trpc.fx.liveRates.useQuery({});
   const liveRates = liveRatesRaw ? Object.entries((liveRatesRaw as any)?.rates ?? {}).map(([currency, rate]) => ({ to_currency: currency, rate, from_currency: "USD" })) : [];
 
   if (!isAdmin) {

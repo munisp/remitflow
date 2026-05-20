@@ -22,7 +22,7 @@ async function callCorrespondentService(path: string, body?: object) {
   return res.json();
 }
 
-function requireAdmin(role: string) {
+function requireAdmin(role: string | null) {
   if (role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
 }
 
@@ -41,7 +41,7 @@ export const correspondentBankRouter = router({
       // Return DB balances as fallback
       const db = await getDb();
       const banks = await db.select().from(correspondentBanks);
-      return banks.map(b => ({
+      return banks.map((b: any) => ({
         correspondent_id: b.correspondentId,
         bank_name: b.bankName,
         currency: b.currency,
@@ -135,18 +135,18 @@ export const correspondentBankRouter = router({
     requireAdmin(ctx.user.role);
     const db = await getDb();
     const banks = await db.select().from(correspondentBanks);
-    const totalClearingLine = banks.reduce((s, b) => s + parseFloat(b.clearingLineUsd ?? "0"), 0);
-    const totalNostro = banks.reduce((s, b) => s + parseFloat(b.nostroBalanceUsd ?? "0"), 0);
+    const totalClearingLine = banks.reduce((s: any, b: any) => s + parseFloat(b.clearingLineUsd ?? "0"), 0);
+    const totalNostro = banks.reduce((s: any, b: any) => s + parseFloat(b.nostroBalanceUsd ?? "0"), 0);
     const avgFeeBps = banks.length > 0
-      ? banks.reduce((s, b) => s + parseFloat(b.feeBps ?? "50"), 0) / banks.length
+      ? banks.reduce((s: any, b: any) => s + parseFloat(b.feeBps ?? "50"), 0) / banks.length
       : 0;
     return {
       totalCorrespondents: banks.length,
-      activeCorrespondents: banks.filter(b => b.status === "active").length,
+      activeCorrespondents: banks.filter((b: any) => b.status === "active").length,
       totalClearingLineUsd: totalClearingLine,
       totalNostroBalanceUsd: totalNostro,
       avgFeeBps: avgFeeBps.toFixed(1),
-      byCountry: banks.reduce((acc: Record<string, number>, b) => {
+      byCountry: banks.reduce((acc: Record<string, number>, b: any) => {
         acc[b.countryCode ?? "XX"] = (acc[b.countryCode ?? "XX"] ?? 0) + 1;
         return acc;
       }, {}),

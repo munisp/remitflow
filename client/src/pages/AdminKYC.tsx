@@ -150,7 +150,7 @@ export default function AdminKYC() {
 
   const docs = data?.docs ?? [];
   const totalPages = data?.pages ?? 1;
-  const docIds = docs.map(d => d.id);
+  const docIds = docs.map((d: any) => d.id);
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -230,7 +230,7 @@ export default function AdminKYC() {
                   {selectedIds.length === docIds.length && docIds.length > 0 ? "Deselect all" : `Select all (${docIds.length})`}
                 </label>
               </div>
-              {docs.map((doc) => (
+              {docs.map((doc: any) => (
               <div key={doc.id} className="flex items-start gap-2">
                 <Checkbox
                   checked={selectedIds.includes(doc.id)}
@@ -580,7 +580,7 @@ export default function AdminKYC() {
             </div>
           ) : (
             <div className="divide-y">
-              {expiringData?.docs?.map((doc) => {
+              {expiringData?.docs?.map((doc: any) => {
                 const daysLeft = doc.expiresAt
                   ? Math.ceil((new Date(doc.expiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
                   : null;

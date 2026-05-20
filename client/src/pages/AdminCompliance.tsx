@@ -248,7 +248,7 @@ export default function AdminCompliance() {
   };
   const toggleSelectAll = () => {
     if (!data?.cases.length) return;
-    setSelectedIds(selectedIds.size === data.cases.length ? new Set() : new Set(data.cases.map(c => c.id)));
+    setSelectedIds(selectedIds.size === data.cases.length ? new Set() : new Set(data.cases.map((c: any) => c.id)));
   };
   const handleBulkSetSla = () => {
     if (!bulkSlaDueAt || selectedIds.size === 0) return;
@@ -299,8 +299,8 @@ export default function AdminCompliance() {
   };
 
   // Stats
-  const criticalCount = data?.cases.filter(c => c.severity === "critical").length ?? 0;
-  const escalatedCount = data?.cases.filter(c => c.status === "escalated").length ?? 0;
+  const criticalCount = data?.cases.filter((c: any) => c.severity === "critical").length ?? 0;
+  const escalatedCount = data?.cases.filter((c: any) => c.status === "escalated").length ?? 0;
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
@@ -629,7 +629,7 @@ export default function AdminCompliance() {
                 />
                 <span className="text-xs text-muted-foreground">Select all on this page</span>
               </div>
-              {data.cases.map((c) => (
+              {data.cases.map((c: any) => (
                 <div key={c.id} className="p-4 hover:bg-muted/30 transition-colors">
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex items-start gap-3 shrink-0 pt-0.5">
@@ -653,7 +653,7 @@ export default function AdminCompliance() {
                         </Badge>
                         {/* Priority badge */}
                         {(c as any).priority && (
-                          <Badge variant="outline" className={`text-xs cursor-pointer ${{critical:"bg-red-100 text-red-800 border-red-300",high:"bg-orange-100 text-orange-800 border-orange-200",medium:"bg-yellow-100 text-yellow-800 border-yellow-200",low:"bg-blue-100 text-blue-800 border-blue-200"}[(c as any).priority] ?? ""}`}
+                          <Badge variant="outline" className={`text-xs cursor-pointer ${{critical:"bg-red-100 text-red-800 border-red-300",high:"bg-orange-100 text-orange-800 border-orange-200",medium:"bg-yellow-100 text-yellow-800 border-yellow-200",low:"bg-blue-100 text-blue-800 border-blue-200"}[(c as any).priority as keyof { critical: string; high: string; medium: string; low: string }] ?? ""}`}
                             title="Click to cycle priority"
                             onClick={() => {
                               const order = ["low","medium","high","critical"];
@@ -821,10 +821,10 @@ export default function AdminCompliance() {
                 ) : (
                   (() => {
                     // Separate top-level and replies
-                    const topLevel = (caseComments ?? []).filter(c => !c.parentId);
-                    const replies = (caseComments ?? []).filter(c => !!c.parentId);
-                    return topLevel.map((comment) => {
-                      const commentReplies = replies.filter(r => r.parentId === comment.id);
+                    const topLevel = (caseComments ?? []).filter((c: any) => !c.parentId);
+                    const replies = (caseComments ?? []).filter((c: any) => !!c.parentId);
+                    return topLevel.map((comment: any) => {
+                      const commentReplies = replies.filter((r: any) => r.parentId === comment.id);
                       return (
                         <div key={comment.id}>
                           <div className={`flex gap-3 p-3 rounded-lg ${comment.isInternal ? 'bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800' : 'bg-blue-50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800'}`}>
@@ -879,7 +879,7 @@ export default function AdminCompliance() {
                           {/* Threaded replies */}
                           {commentReplies.length > 0 && (
                             <div className="ml-8 mt-1 space-y-1.5">
-                              {commentReplies.map(reply => (
+                              {commentReplies.map((reply: any) => (
                                 <div key={reply.id} className={`flex gap-2 p-2.5 rounded-lg border-l-2 ${reply.isInternal ? 'bg-amber-50/60 dark:bg-amber-950/20 border-amber-300' : 'bg-blue-50/60 dark:bg-blue-950/20 border-blue-300'}`}>
                                   <div className="h-5 w-5 rounded-full bg-primary/10 flex items-center justify-center shrink-0 mt-0.5">
                                     <User className="h-3 w-3 text-primary" />

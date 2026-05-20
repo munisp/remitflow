@@ -260,7 +260,7 @@ export default function BillingEngineDashboard() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {(corridorQuery.data ?? []).map((row) => (
+                      {(corridorQuery.data ?? []).map((row: any) => (
                         <TableRow key={`${row.corridor}-${row.sendCurrency}`}>
                           <TableCell className="font-medium">{row.corridor}</TableCell>
                           <TableCell>{row.sendCurrency}</TableCell>
@@ -311,7 +311,7 @@ export default function BillingEngineDashboard() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {(eventsQuery.data?.events ?? []).map((ev) => (
+                    {(eventsQuery.data?.events ?? []).map((ev: any) => (
                       <TableRow key={ev.eventId}>
                         <TableCell className="font-mono text-xs">{ev.eventId.slice(0, 12)}…</TableCell>
                         <TableCell>{ev.corridor}</TableCell>
@@ -481,7 +481,7 @@ export default function BillingEngineDashboard() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {(auditQuery.data?.entries ?? []).map((entry) => (
+                    {(auditQuery.data?.entries ?? []).map((entry: any) => (
                       <TableRow key={entry.id}>
                         <TableCell>
                           <Badge variant={entry.eventType === "TENANT_PROVISIONED" ? "default" : "secondary"}>

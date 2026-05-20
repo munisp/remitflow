@@ -90,10 +90,10 @@ export default function NGXStockMarket() {
     onError: (e) => toast.error(e.message),
   });
 
-  const watchlistIds = useMemo(() => new Set(watchlist?.map((w) => w.stockId) ?? []), [watchlist]);
+  const watchlistIds = useMemo(() => new Set(watchlist?.map((w: any) => w.stockId) ?? []), [watchlist]);
   const watchlistMap = useMemo(() => {
     const m = new Map<number, number>();
-    watchlist?.forEach((w) => m.set(w.stockId, w.id));
+    watchlist?.forEach((w: any) => m.set(w.stockId, w.id));
     return m;
   }, [watchlist]);
 
@@ -166,7 +166,7 @@ export default function NGXStockMarket() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All Sectors</SelectItem>
-                  {sectors?.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                  {sectors?.map((s: any) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -198,7 +198,7 @@ export default function NGXStockMarket() {
                               ))}
                             </tr>
                           ))
-                        : stocks?.map((stock) => {
+                        : stocks?.map((stock: any) => {
                             const inWatchlist = watchlistIds.has(stock.id);
                             return (
                               <tr key={stock.id} className="border-b hover:bg-muted/20 transition-colors">
@@ -282,7 +282,7 @@ export default function NGXStockMarket() {
               </Card>
             ) : (
               <div className="grid gap-3">
-                {watchlist.map((item) => (
+                {watchlist.map((item: any) => (
                   <Card key={item.id} className="hover:shadow-md transition-shadow">
                     <CardContent className="pt-4 pb-3">
                       <div className="flex items-center justify-between">
@@ -364,7 +364,7 @@ export default function NGXStockMarket() {
                         </tr>
                       </thead>
                       <tbody>
-                        {orders.map((order) => (
+                        {orders.map((order: any) => (
                           <tr key={order.id} className="border-b hover:bg-muted/20">
                             <td className="p-3 font-mono font-bold text-emerald-600 dark:text-emerald-400">{order.ticker}</td>
                             <td className="p-3">

@@ -1021,9 +1021,9 @@ export const v127ServicesHealthRouter = router({
   getAllHealth: adminProcedure.query(async () => {
     const checks = await Promise.allSettled(
       Object.entries(SVC_URLS).map(async ([name, url]) => ({
+        ...(await checkHealth(url)),
         name,
         url,
-        ...(await checkHealth(url)),
       }))
     );
     const services = checks.map(c => c.status === "fulfilled" ? c.value : { name: "unknown", status: "error" });

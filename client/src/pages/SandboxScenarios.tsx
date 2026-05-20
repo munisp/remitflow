@@ -134,7 +134,7 @@ export default function SandboxScenarios() {
         <Card><CardContent className="py-16 text-center text-muted-foreground">No scenarios yet. Create your first testing scenario.</CardContent></Card>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {scenarios.map(s => (
+          {scenarios.map((s: any) => (
             <Card key={s.id} className="hover:shadow-md transition-shadow">
               <CardHeader className="pb-2">
                 <div className="flex items-start justify-between gap-2">
@@ -147,7 +147,7 @@ export default function SandboxScenarios() {
               </CardHeader>
               <CardContent className="space-y-3">
                 {s.description && <p className="text-sm text-muted-foreground line-clamp-2">{s.description}</p>}
-                {s.tags && <div className="flex flex-wrap gap-1">{s.tags.split(",").map(t => <Badge key={t} variant="secondary" className="text-xs">{t.trim()}</Badge>)}</div>}
+                {s.tags && <div className="flex flex-wrap gap-1">{s.tags.split(",").map((t: any) => <Badge key={t} variant="secondary" className="text-xs">{t.trim()}</Badge>)}</div>}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span>Runs: {s.runCount}</span>
                   {s.lastRunAt && <span>Last: {new Date(s.lastRunAt).toLocaleDateString()}</span>}

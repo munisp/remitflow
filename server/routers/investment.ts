@@ -93,7 +93,7 @@ export const ngxStockRouter = router({
       .from(ngxStocks)
       .where(eq(ngxStocks.isActive, true))
       .orderBy(ngxStocks.sector);
-    return rows.map((r) => r.sector);
+    return rows.map((r: any) => r.sector);
   }),
 
   // Watchlist

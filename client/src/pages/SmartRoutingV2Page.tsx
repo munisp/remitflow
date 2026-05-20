@@ -180,7 +180,7 @@ export default function SmartRoutingV2Page() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(decisionsQuery.data?.decisions ?? []).map((d) => (
+                  {(decisionsQuery.data?.decisions ?? []).map((d: any) => (
                     <tr key={d.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                       <td className="p-3 font-mono text-xs text-muted-foreground">#{d.id}</td>
                       <td className="p-3 font-mono text-xs">{d.fromCurrency}→{d.toCurrency}</td>

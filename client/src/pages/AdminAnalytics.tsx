@@ -544,7 +544,7 @@ export default function AdminAnalytics() {
             </div>
           ) : (
             <div className="divide-y">
-              {thresholds.map((t) => {
+              {thresholds.map((t: any) => {
                 const metricOpt = METRIC_OPTIONS.find(m => m.value === t.metric);
                 const isBr = isBreached(t.metric);
                 return (
@@ -582,7 +582,7 @@ export default function AdminAnalytics() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Bell className="h-4 w-4 text-amber-500" />
-              {thresholds.find(t => t.metric === editMetric) ? "Edit" : "Add"} Alert Threshold
+              {thresholds.find((t: any) => t.metric === editMetric) ? "Edit" : "Add"} Alert Threshold
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">

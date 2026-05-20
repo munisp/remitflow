@@ -766,10 +766,10 @@ async function sendWeeklyFundDigests(): Promise<void> {
       const userVotes = await db.select({ proposalId: fundVotes.proposalId }).from(fundVotes).where(eq(fundVotes.userId, userId));
       if (userVotes.length === 0) continue;
 
-      const proposalIds = userVotes.map((v) => v.proposalId);
+      const proposalIds = userVotes.map((v: any) => v.proposalId);
       const proposalRows = await db.select({ fundId: fundProposals.fundId }).from(fundProposals).where(inArray(fundProposals.id, proposalIds));
 
-      const fundIds = Array.from(new Set(proposalRows.map((p) => p.fundId))) as number[];
+      const fundIds = Array.from(new Set(proposalRows.map((p: any) => p.fundId))) as number[];
       if (fundIds.length === 0) continue;
 
       const digestFunds: FundDigestEntry[] = [];
@@ -778,7 +778,7 @@ async function sendWeeklyFundDigests(): Promise<void> {
         const [fund] = await db.select().from(communityFunds).where(eq(communityFunds.id, fid)).limit(1);
         if (!fund) continue;
         const activeProposalRows = await db.select({ title: fundProposals.title, votesFor: fundProposals.votesFor }).from(fundProposals).where(and(eq(fundProposals.fundId, fid), eq(fundProposals.status, "voting" as any)));
-        const topProposal = activeProposalRows.sort((a, b) => Number(b.votesFor ?? 0) - Number(a.votesFor ?? 0))[0];
+        const topProposal = activeProposalRows.sort((a: any, b: any) => Number(b.votesFor ?? 0) - Number(a.votesFor ?? 0))[0];
         digestFunds.push({
           name: fund.name,
           totalRaised: parseFloat(String(fund.totalRaised ?? 0)),

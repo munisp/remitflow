@@ -876,7 +876,7 @@ export const emailDeliveryRouter = router({
         reportType: input.reportType,
         reportId: input.reportId,
         period: input.period,
-        filedBy: ctx.user.name ?? ctx.user.email,
+        filedBy: ctx.user.name ?? ctx.user.email ?? "Unknown",
         amount: input.amount,
         currency: input.currency,
         summary: input.summary,

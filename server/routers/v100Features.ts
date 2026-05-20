@@ -90,11 +90,11 @@ const complianceScoringV2Router = router({
         }));
       }
       const allUsers = await db.select({ id: users.id, email: users.email, name: users.name }).from(users).limit(input.limit);
-      return allUsers.map(u => {
+      return allUsers.map((u: any) => {
         const score = ((u.id * 37) % 50) + 50;
         const level = score >= 80 ? "low" : score >= 60 ? "medium" : "high";
         return { userId: u.id, email: u.email, name: u.name, overallScore: score, riskLevel: level };
-      }).filter(u => input.riskLevel === "all" || u.riskLevel === input.riskLevel);
+      }).filter((u: any) => input.riskLevel === "all" || u.riskLevel === input.riskLevel);
     }),
 });
 
@@ -186,7 +186,7 @@ const fraudEngineV2Router = router({
       }
       // Use transactions table as proxy for fraud alerts
       const txs = await db.select().from(transactions).orderBy(desc(transactions.createdAt)).limit(input.limit);
-      return txs.map((tx, i) => ({
+      return txs.map((tx: any, i: any) => ({
         id: tx.id, userId: tx.userId, transactionId: tx.id,
         ruleTriggered: ruleTypes[i % ruleTypes.length],
         riskScore: 40 + (tx.id % 60),
@@ -194,7 +194,7 @@ const fraudEngineV2Router = router({
         amount: Number(tx.amount), currency: tx.currency ?? "USD",
         createdAt: tx.createdAt?.toISOString() ?? new Date().toISOString(),
         details: { ip: `10.0.${i % 255}.${i % 100}`, device: `device-${tx.userId}`, country: tx.destinationCountry ?? "NG" },
-      })).filter(a => input.status === "all" || a.status === input.status);
+      })).filter((a: any) => input.status === "all" || a.status === input.status);
     }),
 
   updateAlertStatus: auditedAdminProcedure
@@ -286,7 +286,7 @@ const swiftSepaRailsRouter = router({
       const txs = await db.select().from(transactions)
         .where(eq(transactions.userId, ctx.user.id))
         .orderBy(desc(transactions.createdAt)).limit(input.limit);
-      return txs.map((tx, i) => ({
+      return txs.map((tx: any, i: any) => ({
         id: tx.id, rail: ["SWIFT", "SEPA", "CHAPS", "ACH"][i % 4],
         reference: `RF${tx.id}${Date.now()}`, amount: Number(tx.amount), currency: tx.currency ?? "USD",
         status: tx.status ?? "pending",
@@ -294,7 +294,7 @@ const swiftSepaRailsRouter = router({
         beneficiaryBIC: `GTBINGLA${i}`,
         estimatedSettlement: new Date(Date.now() + 86400000).toISOString(),
         createdAt: tx.createdAt?.toISOString() ?? new Date().toISOString(),
-      })).filter(p => input.rail === "all" || p.rail === input.rail);
+      })).filter((p: any) => input.rail === "all" || p.rail === input.rail);
     }),
 
   getRailStatus: publicProcedure.query(async () => {
@@ -491,7 +491,7 @@ const beneficiaryVerificationRouter = router({
       const bens = await db.select().from(beneficiaries)
         .where(eq(beneficiaries.userId, ctx.user.id))
         .orderBy(desc(beneficiaries.createdAt)).limit(input.limit);
-      return bens.map((b, i) => ({
+      return bens.map((b: any, i: any) => ({
         id: b.id, type: b.accountType ?? "bank_account",
         identifier: b.accountNumber ?? b.phoneNumber ?? "****",
         accountName: b.name, verified: true,
@@ -635,7 +635,7 @@ const loyaltyRewardsV2Router = router({
         }));
       }
       const txs = await db.select().from(transactions).where(eq(transactions.userId, ctx.user.id)).orderBy(desc(transactions.createdAt)).limit(input.limit);
-      return txs.map((tx, i) => ({
+      return txs.map((tx: any, i: any) => ({
         id: tx.id, type: "earned", points: Math.round(Number(tx.amount) * 0.01),
         description: `Transfer: ${tx.description ?? "Remittance"}`,
         balance: 2450 - i * 10, createdAt: tx.createdAt?.toISOString() ?? new Date().toISOString(),
@@ -767,7 +767,7 @@ const documentOCRRouter = router({
         }));
       }
       const docs = await db.select().from(kycDocuments).orderBy(desc(kycDocuments.createdAt)).limit(input.limit);
-      return docs.map((doc, i) => ({
+      return docs.map((doc: any, i: any) => ({
         id: doc.id, documentType: doc.documentType ?? "passport",
         userId: doc.userId, status: doc.status ?? "completed",
         confidence: 0.94 + (i % 6) * 0.01,
@@ -841,12 +841,12 @@ const realTimeFXStreamRouter = router({
       if (db) {
         const cached = await db.select().from(fxRateCache).limit(50);
         if (cached.length > 0) {
-          return cached.map(r => ({
+          return cached.map((r: any) => ({
             pair: r.pair, rate: Number(r.rate), bid: Number(r.rate) * 0.999,
             ask: Number(r.rate) * 1.001, spread: Number(r.rate) * 0.002,
             change24h: Math.sin(Date.now() * 0.00001) * 1, change24hPct: Math.sin(Date.now() * 0.00002) * 0.25,
             updatedAt: r.updatedAt?.toISOString() ?? new Date().toISOString(),
-          })).filter(r => input.pairs.length === 0 || input.pairs.includes(r.pair));
+          })).filter((r: any) => input.pairs.length === 0 || input.pairs.includes(r.pair));
         }
       }
       return input.pairs.map(pair => {
@@ -899,11 +899,11 @@ const corridorAnalyticsRouter = router({
         txCount: count(),
       }).from(transactions).groupBy(transactions.recipientCountry).limit(input.limit);
 
-      return txData.map(row => ({
+      return txData.map((row: any) => ({
         from: "GB", to: row.recipientCountry ?? "NG",
         volume: Number(row.volume ?? 0), revenue: Number(row.volume ?? 0) * 0.015,
         margin: 1.5, growth: 15.0, txCount: row.txCount, avgAmount: Number(row.volume ?? 0) / (row.txCount || 1),
-      })).sort((a, b) => (b[input.sortBy] as number) - (a[input.sortBy] as number));
+      })).sort((a: any, b: any) => (b[input.sortBy] as number) - (a[input.sortBy] as number));
     }),
 
   getCorridorDetail: adminProcedure

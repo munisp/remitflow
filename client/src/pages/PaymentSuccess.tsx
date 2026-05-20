@@ -40,7 +40,7 @@ export default function PaymentSuccess() {
     if (pollCount < 10) setPollCount(c => c + 1);
   }, [wallets]);
 
-  const totalBalance = wallets?.reduce((sum, w) => sum + Number(w.balance ?? 0), 0) ?? 0;
+  const totalBalance = wallets?.reduce((sum: any, w: any) => sum + Number(w.balance ?? 0), 0) ?? 0;
 
   return (
 
@@ -88,7 +88,7 @@ export default function PaymentSuccess() {
             </div>
             {wallets && wallets.length > 0 && (
               <div className="mt-3 space-y-1">
-                {wallets.map(w => (
+                {wallets.map((w: any) => (
                   <div key={w.id} className="flex justify-between text-sm">
                     <span className="text-muted-foreground">{w.currency}</span>
                     <span className="font-semibold">{Number(w.balance ?? 0).toLocaleString("en-US", { minimumFractionDigits: 2 })}</span>

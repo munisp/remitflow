@@ -198,7 +198,7 @@ export default function FeeRulesEngine() {
                   </tr>
                 </thead>
                 <tbody className="divide-y">
-                  {rules.map(rule => (
+                  {rules.map((rule: any) => (
                     <tr key={rule.id} className="hover:bg-muted/30">
                       <td className="px-4 py-3 font-mono font-semibold text-xs">{rule.corridor}</td>
                       <td className="px-4 py-3 text-xs">

@@ -123,7 +123,7 @@ export default function StripeRetryAdmin() {
                   </tr>
                 </thead>
                 <tbody>
-                  {webhooks.events.map((ev) => (
+                  {webhooks.events.map((ev: any) => (
                     <tr key={ev.id} className="border-b hover:bg-muted/30 transition-colors">
                       <td className="py-2 pr-3 font-mono text-xs max-w-[120px] truncate">{ev.stripeEventId}</td>
                       <td className="pr-3">

@@ -264,12 +264,12 @@ export const paymentMetricsRouter = router({
       .select()
       .from(paymentMetrics)
       .where(eq(paymentMetrics.userId, ctx.user.id));
-    const totalSuccess = rows.reduce((s, r) => s + (r.successCount ?? 0), 0);
-    const totalFailure = rows.reduce((s, r) => s + (r.failureCount ?? 0), 0);
+    const totalSuccess = rows.reduce((s: any, r: any) => s + (r.successCount ?? 0), 0);
+    const totalFailure = rows.reduce((s: any, r: any) => s + (r.failureCount ?? 0), 0);
     const avgProcessingMs = rows.length > 0
-      ? Math.round(rows.reduce((s, r) => s + (r.avgProcessingMs ?? 0), 0) / rows.length)
+      ? Math.round(rows.reduce((s: any, r: any) => s + (r.avgProcessingMs ?? 0), 0) / rows.length)
       : 0;
-    const totalVolume = rows.reduce((s, r) => s + Number(r.totalVolume ?? 0), 0);
+    const totalVolume = rows.reduce((s: any, r: any) => s + Number(r.totalVolume ?? 0), 0);
     return { totalSuccess, totalFailure, avgProcessingMs, totalVolume };
   }),
 
@@ -384,7 +384,7 @@ export const stablecoinRouter = router({
     if (!db) return [];
     const rows = await db.select().from(stablecoinWallets).where(eq(stablecoinWallets.userId, ctx.user.id));
     // Return real DB rows only — empty array means user has no wallets yet
-    return rows.map(w => ({ ...w, protocol: "Multi-chain", network: w.network ?? "Ethereum/BSC/Polygon" }));
+    return rows.map((w: any) => ({ ...w, protocol: "Multi-chain", network: w.network ?? "Ethereum/BSC/Polygon" }));
   }),
 
   create: protectedProcedure
@@ -996,7 +996,7 @@ export const chatCannedResponsesRouter = router({
       const db = await getDb();
       if (!db) return [];
       const rows = await db.select().from(chatCannedResponses).where(eq(chatCannedResponses.isActive, true)).orderBy(chatCannedResponses.title);
-      return input?.category ? rows.filter(r => r.category === input.category) : rows;
+      return input?.category ? rows.filter((r: any) => r.category === input.category) : rows;
     }),
 
   create: adminProcedure
@@ -1036,8 +1036,8 @@ export const securityIncidentsRouter = router({
       const db = await getDb();
       if (!db) return [];
       const rows = await db.select().from(securityIncidents).orderBy(desc(securityIncidents.createdAt)).limit(input?.limit ?? 100);
-      if (input?.severity) return rows.filter(r => r.severity === input.severity);
-      if (input?.resolved !== undefined) return rows.filter(r => input.resolved ? r.resolvedAt !== null : r.resolvedAt === null);
+      if (input?.severity) return rows.filter((r: any) => r.severity === input.severity);
+      if (input?.resolved !== undefined) return rows.filter((r: any) => input.resolved ? r.resolvedAt !== null : r.resolvedAt === null);
       return rows;
     }),
 
@@ -1047,10 +1047,10 @@ export const securityIncidentsRouter = router({
     const rows = await db.select().from(securityIncidents);
     return {
       total: rows.length,
-      critical: rows.filter(r => r.severity === "critical").length,
-      high: rows.filter(r => r.severity === "high").length,
-      unresolved: rows.filter(r => !r.resolvedAt).length,
-      blocked: rows.filter(r => r.blocked).length,
+      critical: rows.filter((r: any) => r.severity === "critical").length,
+      high: rows.filter((r: any) => r.severity === "high").length,
+      unresolved: rows.filter((r: any) => !r.resolvedAt).length,
+      blocked: rows.filter((r: any) => r.blocked).length,
     };
   }),
 

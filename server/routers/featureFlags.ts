@@ -88,7 +88,7 @@ export const featureFlagsRouter = router({
       }
 
       return rows
-        .filter(f => {
+        .filter((f: any) => {
           if (input?.category && f.category !== input.category) return false;
           if (input?.search) {
             const s = input.search.toLowerCase();
@@ -96,7 +96,7 @@ export const featureFlagsRouter = router({
           }
           return true;
         })
-        .map(f => ({
+        .map((f: any) => ({
           ...f,
           effectiveEnabled: userOverrides[f.id] ?? tenantOverrides[f.id] ?? f.defaultEnabled,
           tenantOverride: tenantOverrides[f.id] ?? null,
@@ -441,7 +441,7 @@ export const featureFlagsRouter = router({
         if (membership.length > 0) {
           tenantId = membership[0].tenantId;
           const [t] = await db.select({ plan: tenants.plan })
-            .from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+            .from(tenants).where(eq(tenants.id, tenantId!)).limit(1);
           if (t) tenantPlan = t.plan;
         }
       } catch { /* no tenant — use defaults */ }
@@ -634,10 +634,10 @@ export const tenantsRouter = router({
     if (!db) return { total: 0, active: 0, trial: 0, enterprise: 0 };
     const rows = await db.select({ status: tenants.status, plan: tenants.plan, count: sql<number>`count(*)` })
       .from(tenants).groupBy(tenants.status, tenants.plan);
-    const total = rows.reduce((s, r) => s + Number(r.count), 0);
-    const active = rows.filter(r => r.status === "active").reduce((s, r) => s + Number(r.count), 0);
-    const trial = rows.filter(r => r.status === "trial").reduce((s, r) => s + Number(r.count), 0);
-    const enterprise = rows.filter(r => r.plan === "enterprise" || r.plan === "white_label").reduce((s, r) => s + Number(r.count), 0);
+    const total = rows.reduce((s: any, r: any) => s + Number(r.count), 0);
+    const active = rows.filter((r: any) => r.status === "active").reduce((s: any, r: any) => s + Number(r.count), 0);
+    const trial = rows.filter((r: any) => r.status === "trial").reduce((s: any, r: any) => s + Number(r.count), 0);
+    const enterprise = rows.filter((r: any) => r.plan === "enterprise" || r.plan === "white_label").reduce((s: any, r: any) => s + Number(r.count), 0);
     return { total, active, trial, enterprise };
   }),
 });

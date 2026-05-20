@@ -21,7 +21,7 @@ export default function ESGReporting() {
   const companyId = 1;
 
   const utils = trpc.useUtils();
-  const { data: reports, isLoading } = trpc.esgReporting.list.useQuery({ companyId: undefined });
+  const { data: reports, isLoading } = trpc.esgReporting.list.useQuery({ companyId: 0 });
 
   // generate: { companyId, periodStart, periodEnd }
   const generateReport = trpc.esgReporting.generate.useMutation({

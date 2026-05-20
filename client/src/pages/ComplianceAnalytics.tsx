@@ -234,7 +234,7 @@ export default function ComplianceAnalytics() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {officerTrend && officerTrend.weeks && officerTrend.weeks.length > 0 ? (
+              {officerTrend && !Array.isArray(officerTrend) && officerTrend.weeks && officerTrend.weeks.length > 0 ? (
                 <ResponsiveContainer width="100%" height={200}>
                   <LineChart data={officerTrend.weeks} margin={{ top: 4, right: 8, left: -20, bottom: 4 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
@@ -242,7 +242,7 @@ export default function ComplianceAnalytics() {
                     <YAxis tick={{ fontSize: 10 }} domain={[0, 100]} unit="%" />
                     <Tooltip contentStyle={{ fontSize: 11, background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }} formatter={(v: number) => [`${v}%`, "Resolution Rate"]} />
                     <Legend iconSize={10} wrapperStyle={{ fontSize: 11 }} />
-                    {officerTrend.officers.map((officer, i) => (
+                    {officerTrend.officers.map((officer: any, i: any) => (
                       <Line
                         key={officer}
                         type="monotone"

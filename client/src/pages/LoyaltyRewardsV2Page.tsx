@@ -139,7 +139,7 @@ export default function LoyaltyRewardsV2Page() {
         <CardHeader><CardTitle>Points History</CardTitle></CardHeader>
         <CardContent>
           <div className="space-y-2">
-            {(history ?? []).map(h => (
+            {(history ?? []).map((h: any) => (
               <div key={h.id} className="flex items-center justify-between p-3 border rounded-lg">
                 <div>
                   <p className="font-medium text-sm">{h.description}</p>

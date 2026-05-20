@@ -158,7 +158,7 @@ export default function WalletPage() {
     }
   }, []);
 
-  const totalUSD = data?.reduce((sum, b) => sum + b.usdEquivalent, 0) ?? 0;
+  const totalUSD = data?.reduce((sum: any, b: any) => sum + b.usdEquivalent, 0) ?? 0;
 
   return (
     <DashboardLayout>
@@ -484,7 +484,7 @@ export default function WalletPage() {
             </div>
           ) : (
             <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-              {data?.map(bal => (
+              {data?.map((bal: any) => (
                 <Card key={bal.currency} className="hover:shadow-md transition-shadow">
                   <CardContent className="p-4">
                     <div className="flex items-center justify-between mb-3">
@@ -519,7 +519,7 @@ export default function WalletPage() {
             <Button variant="ghost" size="icon" onClick={() => refetch()}><RefreshCw className="h-4 w-4" /></Button>
           </CardHeader>
           <CardContent className="p-0">
-            {history?.slice(0, 8).map((tx, i) => (
+            {history?.slice(0, 8).map((tx: any, i: any) => (
               <div key={i} className="flex items-center gap-3 px-4 py-3 hover:bg-muted/50 border-b last:border-0">
                 <div className={`w-9 h-9 rounded-full flex items-center justify-center ${tx.type === "credit" ? "bg-emerald-100" : "bg-red-100"}`}>
                   {tx.type === "credit" ? <ArrowDownLeft className="h-4 w-4 text-emerald-600" /> : <ArrowUpRight className="h-4 w-4 text-red-500" />}

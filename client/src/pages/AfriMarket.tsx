@@ -257,7 +257,7 @@ export default function AfriMarket() {
           ) : (
             <>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                {listings.map((listing) => (
+                {listings.map((listing: any) => (
                   <Card key={listing.id} className="bg-slate-800/60 border-slate-700/50 hover:border-amber-500/40 transition-all group cursor-pointer"
                     onClick={() => { setSelectedListing(listing); setOrderDialogOpen(true); }}>
                     {listing.imageUrl ? (
@@ -324,7 +324,7 @@ export default function AfriMarket() {
               </div>
             ) : (
               <div className="space-y-3">
-                {myOrders.map((order) => (
+                {myOrders.map((order: any) => (
                   <div key={order.id} className="bg-slate-800/60 border border-slate-700/50 rounded-xl p-4 flex items-center justify-between gap-4">
                     <div className="flex-1 min-w-0">
                       <div className="font-semibold text-white text-sm truncate">{order.listingTitle ?? "Unknown listing"}</div>
@@ -377,7 +377,7 @@ export default function AfriMarket() {
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {myListings.map((listing) => (
+                {myListings.map((listing: any) => (
                   <Card key={listing.id} className="bg-slate-800/60 border-slate-700/50">
                     <CardContent className="p-4">
                       <div className="flex items-start justify-between gap-2 mb-2">

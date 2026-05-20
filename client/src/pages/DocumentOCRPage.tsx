@@ -238,7 +238,7 @@ export default function DocumentOCRPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(data?.documents ?? []).map((doc) => (
+                {(data?.documents ?? []).map((doc: any) => (
                   <TableRow key={doc.id}>
                     <TableCell className="font-mono text-xs">{doc.id}</TableCell>
                     <TableCell>

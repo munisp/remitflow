@@ -184,6 +184,11 @@ export interface KYCWorkflowResult {
   decision: "APPROVED" | "REJECTED" | "MANUAL_REVIEW" | "TIMEOUT";
   reason: string;
   livenessScore?: number;
+  passiveLivenessScore?: number;
+  activeLiveness?: boolean;
+  deepfakeScore?: number;
+  deepfakeMethod?: string;
+  deepfakeIndicators?: string[];
   extractedName?: string;
 }
 
@@ -247,10 +252,10 @@ export async function KYCVerificationWorkflow(input: KYCWorkflowInput): Promise<
     decision: decision.decision,
     reason: decision.reason,
     livenessScore: liveness.score,
-    passiveLivenessScore: liveness.passiveLivenessScore,
-    activeLiveness: liveness.activeLiveness,
-    deepfakeScore: liveness.deepfakeScore,
-    deepfakeMethod: liveness.deepfakeMethod,
+    passiveLivenessScore: liveness.passiveLivenessScore ?? undefined,
+    activeLiveness: liveness.activeLiveness?.passed ?? undefined,
+    deepfakeScore: liveness.deepfakeScore ?? undefined,
+    deepfakeMethod: liveness.deepfakeMethod ?? undefined,
     deepfakeIndicators: liveness.deepfakeIndicators,
     extractedName,
   };

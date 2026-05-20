@@ -405,7 +405,7 @@ export default function PromoCodeAdmin() {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    data?.items.map((promo) => (
+                    data?.items.map((promo: any) => (
                       <TableRow key={promo.id} className="hover:bg-muted/30 transition-colors">
                         <TableCell className="font-medium">
                           <div className="flex items-center gap-2">

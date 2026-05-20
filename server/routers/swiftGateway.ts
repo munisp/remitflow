@@ -132,7 +132,7 @@ export const swiftGatewayRouter = router({
       // Publish to Kafka
       try {
         const producer = await getKafkaProducer();
-        await producer.send({
+        await producer!.send({
           topic: "swift.transactions.outbound",
           messages: [{
             key: uetr,

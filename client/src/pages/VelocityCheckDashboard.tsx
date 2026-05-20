@@ -77,7 +77,7 @@ const VelocityCheckDashboard: React.FC = () => {
   });
 
   // Alerts Query
-  const { data: alerts, isLoading: alertsLoading } = trpc.velocityCheckAdmin.listOverrides.useQuery(undefined, {
+  const { data: alerts, isLoading: alertsLoading } = trpc.velocityCheckAdmin.listOverrides.useQuery({}, {
     refetchInterval: 10000,
   });
 

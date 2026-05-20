@@ -63,7 +63,7 @@ export default function NotificationCenterV2Page() {
               <p className="font-medium">No notifications</p>
               <p className="text-sm mt-1">You're all caught up!</p>
             </div>
-          ) : notifications.map((n) => (
+          ) : notifications.map((n: any) => (
             <div key={n.id} className={`flex items-start gap-4 p-4 hover:bg-muted/20 transition-colors ${!n.isRead ? "bg-primary/5" : ""}`}>
               <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${!n.isRead ? "bg-primary" : "bg-transparent"}`} />
               <div className="flex-1 min-w-0">

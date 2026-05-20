@@ -45,7 +45,7 @@ export default function CTRCompliance() {
     onError: (e) => toast.error(e.message),
   });
 
-  const selectedFlag = (flagsData as any)?.rows.find((f) => f.id === reviewId);
+  const selectedFlag = (flagsData as any)?.rows.find((f: any) => f.id === reviewId);
 
   return (
 
@@ -120,7 +120,7 @@ export default function CTRCompliance() {
                   </tr>
                 </thead>
                 <tbody>
-                  {flagsData.rows.map((f) => (
+                  {flagsData!.rows.map((f: any) => (
                     <tr key={f.id} className="border-b hover:bg-muted/30 transition-colors">
                       <td className="py-2 pr-3 font-mono text-xs">#{f.id}</td>
                       <td className="pr-3 text-xs">User #{f.userId}</td>

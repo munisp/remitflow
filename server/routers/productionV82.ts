@@ -107,7 +107,7 @@ export const treasuryRouter = router({
     if (!db) return [];
     const rows = await db.select().from(treasuryPositions).orderBy(desc(treasuryPositions.updatedAt)).catch(() => []);
     if (rows.length > 0) {
-      return rows.map(r => ({
+      return rows.map((r: any) => ({
         currency: r.currency,
         nostroBalance: r.balance,
         vostroBalance: r.lockedBalance ?? "0",

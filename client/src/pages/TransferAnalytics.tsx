@@ -110,10 +110,10 @@ export default function TransferAnalytics() {
     : 0;
 
   // Settlement rate from corridor performance data
-  const settlementRate = corridorPerf.length > 0
+  const settlementRate = corridorPerf!.length > 0
     ? (() => {
-        const total = corridorPerf.reduce((s: number, r: any) => s + Number(r.count ?? 0), 0);
-        const completed = corridorPerf.reduce((s: number, r: any) => s + Number(r.completed ?? 0), 0);
+        const total = corridorPerf!.reduce((s: number, r: any) => s + Number(r.count ?? 0), 0);
+        const completed = corridorPerf!.reduce((s: number, r: any) => s + Number(r.completed ?? 0), 0);
         return total > 0 ? Math.round((completed / total) * 100) : 0;
       })()
     : 98; // default until corridor selected
@@ -320,7 +320,7 @@ export default function TransferAnalytics() {
                 {selectedCorridor.from} → {selectedCorridor.to} Performance
               </CardTitle>
               <div className="flex items-center gap-2">
-                {corridorPerf.length > 0 && (
+                {corridorPerf!.length > 0 && (
                   <Badge variant={settlementRate >= 95 ? "default" : settlementRate >= 85 ? "secondary" : "destructive"}>
                     {settlementRate}% settlement rate
                   </Badge>
@@ -332,7 +332,7 @@ export default function TransferAnalytics() {
           <CardContent>
             {loadingPerf ? (
               <Skeleton className="h-48 w-full" />
-            ) : corridorPerf.length === 0 ? (
+            ) : corridorPerf!.length === 0 ? (
               <div className="flex items-center justify-center h-48 text-muted-foreground text-sm">
                 No data for {selectedCorridor.from}→{selectedCorridor.to} in this period
               </div>
@@ -342,7 +342,7 @@ export default function TransferAnalytics() {
                 <div>
                   <p className="text-sm font-medium mb-3">Daily Volume & Transactions</p>
                   <ResponsiveContainer width="100%" height={200}>
-                    <BarChart data={corridorPerf.map((r: any) => ({
+                    <BarChart data={corridorPerf!.map((r: any) => ({
                       day: String(r.day).slice(5),
                       volume: Number(r.volume ?? 0),
                       count: Number(r.count ?? 0),
@@ -359,7 +359,7 @@ export default function TransferAnalytics() {
                 <div>
                   <p className="text-sm font-medium mb-3">Completed vs Failed</p>
                   <ResponsiveContainer width="100%" height={200}>
-                    <LineChart data={corridorPerf.map((r: any) => ({
+                    <LineChart data={corridorPerf!.map((r: any) => ({
                       day: String(r.day).slice(5),
                       completed: Number(r.completed ?? 0),
                       failed: Number(r.failed ?? 0),

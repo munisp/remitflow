@@ -217,7 +217,7 @@ export default function BulkUserActions() {
                       </tr>
                     </thead>
                     <tbody>
-                      {log.map((entry) => (
+                      {log.map((entry: any) => (
                         <tr key={entry.id} className="border-b hover:bg-muted/30 transition-colors">
                           <td className="py-2 pr-3">
                             <Badge variant={entry.action === "suspend" ? "destructive" : entry.action === "export_csv" ? "outline" : "default"} className="text-xs">

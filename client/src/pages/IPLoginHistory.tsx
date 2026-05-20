@@ -44,7 +44,7 @@ export default function IPLoginHistory() {
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
-              {suspicious.map((s) => (
+              {suspicious.map((s: any) => (
                 <div key={s.id} className="flex items-center justify-between p-2 bg-white dark:bg-red-950/50 rounded border border-red-200 dark:border-red-800">
                   <div className="flex items-center gap-3">
                     <AlertTriangle className="h-4 w-4 text-red-500 flex-shrink-0" />
@@ -109,7 +109,7 @@ export default function IPLoginHistory() {
                   </tr>
                 </thead>
                 <tbody>
-                  {history.map((entry) => (
+                  {history.map((entry: any) => (
                     <tr key={entry.id} className="border-b hover:bg-muted/30 transition-colors">
                       <td className="py-2 pr-3 font-mono text-xs">
                         <div className="flex items-center gap-1">

@@ -320,7 +320,7 @@ export const globalPayrollRouter = router({
       // Validate with compliance service
       const validation = await callComplianceService("/validate-run", {
         company: { name: company.name, country: company.country },
-        employees: employees.map((e) => ({
+        employees: employees.map((e: any) => ({
           employee_code: e.employeeCode,
           jurisdiction: e.jurisdiction,
           gross_salary: Number(e.grossSalary),
@@ -346,7 +346,7 @@ export const globalPayrollRouter = router({
         period_end: input.periodEnd,
         pay_date: input.payDate,
         frequency: input.frequency,
-        employees: employees.map((e) => ({
+        employees: employees.map((e: any) => ({
           employee_id: e.id,
           employee_code: e.employeeCode,
           first_name: e.firstName,
@@ -513,7 +513,7 @@ export const globalPayrollRouter = router({
 
       const disbursements = [];
       for (const [currency, currItems] of Object.entries(byCurrency)) {
-        const totalAmount = currItems.reduce((s, i) => s + Number(i.netPay), 0);
+        const totalAmount = currItems.reduce((s: any, i: any) => s + Number(i.netPay), 0);
         const batchRef = `DISB-${run.runReference}-${currency}`;
 
         const [disb] = await db
@@ -536,7 +536,7 @@ export const globalPayrollRouter = router({
         await db
           .update(payrollRunItems)
           .set({ status: "processing", updatedAt: new Date() })
-          .where(inArray(payrollRunItems.id, currItems.map((i) => i.id)));
+          .where(inArray(payrollRunItems.id, currItems.map((i: any) => i.id)));
       }
 
       // Simulate successful disbursement (in production: call payment rails)
@@ -603,8 +603,8 @@ export const globalPayrollRouter = router({
         .limit(12);
 
       const totalDisbursed = runs
-        .filter((r) => r.status === "disbursed")
-        .reduce((s, r) => s + Number(r.totalNetUsd), 0);
+        .filter((r: any) => r.status === "disbursed")
+        .reduce((s: any, r: any) => s + Number(r.totalNetUsd), 0);
 
       const activeEmployees = await db
         .select({ count: sql<number>`count(*)` })
@@ -624,7 +624,7 @@ export const globalPayrollRouter = router({
       return {
         company,
         totalRuns: runs.length,
-        disbursedRuns: runs.filter((r) => r.status === "disbursed").length,
+        disbursedRuns: runs.filter((r: any) => r.status === "disbursed").length,
         totalDisbursedUsd: totalDisbursed,
         activeEmployees: Number(activeEmployees[0]?.count ?? 0),
         recentRuns: runs.slice(0, 5),

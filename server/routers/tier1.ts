@@ -662,7 +662,7 @@ export const bondSecondaryBuyerRouter = router({
       }
 
       // Find best matching order
-      const eligible = openOrders.filter(o => parseFloat(o.askPrice) <= input.maxPriceUsd);
+      const eligible = openOrders.filter((o: any) => parseFloat(o.askPrice) <= input.maxPriceUsd);
       if (eligible.length === 0) {
         throw new TRPCError({
           code: "BAD_REQUEST",

@@ -96,7 +96,7 @@ export const helmetMiddleware = helmet({
       defaultSrc: ["'self'"],
       scriptSrc: [
         "'self'",
-        (_req: Request, res: Response) => `'nonce-${(res.locals as any).cspNonce}'`,
+        (_req: any, res: any) => `'nonce-${res.locals?.cspNonce}'`,
         "https://js.stripe.com",
         "https://fonts.googleapis.com",
       ],

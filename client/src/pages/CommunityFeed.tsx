@@ -162,7 +162,7 @@ export default function CommunityFeed() {
             <Globe className="h-4 w-4" /> SDG IMPACT METRICS
           </h2>
           <div className="flex flex-wrap gap-2">
-            {sdgMetrics.map((m) => {
+            {sdgMetrics.map((m: any) => {
               const goal = SDG_GOALS[m.sdgGoal ?? 0];
               if (!goal) return null;
               return (
@@ -189,7 +189,7 @@ export default function CommunityFeed() {
               </CardContent>
             </Card>
           ) : (
-            feed.items.map((item) => (
+            feed.items.map((item: any) => (
               <Card key={item.id} className="hover:shadow-md transition-shadow">
                 <CardContent className="pt-4">
                   <div className="flex items-start gap-3">
@@ -267,7 +267,7 @@ export default function CommunityFeed() {
                 {!leaderboard?.length ? (
                   <p className="text-xs text-muted-foreground text-center py-4">No data yet</p>
                 ) : (
-                  leaderboard.slice(0, 10).map((entry, i) => entry && (
+                  leaderboard.slice(0, 10).map((entry: any, i: any) => entry && (
                     <div key={entry.userId} className="flex items-center gap-2">
                       <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${i === 0 ? "bg-yellow-500 text-white" : i === 1 ? "bg-gray-400 text-white" : i === 2 ? "bg-amber-600 text-white" : "bg-muted text-muted-foreground"}`}>
                         {i + 1}

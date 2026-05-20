@@ -624,7 +624,7 @@ export default function LivenessAuditPage() {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    data.rows.map((row) => (
+                    data.rows.map((row: any) => (
                       <TableRow
                         key={row.id}
                         className="cursor-pointer hover:bg-muted/30"
@@ -776,7 +776,7 @@ export default function LivenessAuditPage() {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    corridorStats.map((row) => (
+                    corridorStats.map((row: any) => (
                       <TableRow key={row.corridorCode}>
                         <TableCell>
                           <Badge variant="outline" className="font-mono font-semibold">{row.corridorCode}</Badge>
@@ -832,7 +832,7 @@ export default function LivenessAuditPage() {
                   <SelectTrigger className="w-32 h-7 text-xs"><SelectValue placeholder="All corridors" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All corridors</SelectItem>
-                    {corridorStats?.map(c => (
+                    {corridorStats?.map((c: any) => (
                       <SelectItem key={c.corridorCode} value={c.corridorCode}>{c.corridorCode}</SelectItem>
                     ))}
                   </SelectContent>
@@ -844,7 +844,7 @@ export default function LivenessAuditPage() {
                 {(histogramCorridor
                   ? histogramData.filter(d => d.corridorCode === histogramCorridor)
                   : histogramData.slice(0, 8)
-                ).map((corridorHist) => (
+                ).map((corridorHist: any) => (
                   <div key={corridorHist.corridorCode} className="space-y-1">
                     <p className="text-xs font-semibold text-muted-foreground">
                       <Badge variant="outline" className="font-mono text-xs">{corridorHist.corridorCode}</Badge>
@@ -859,7 +859,7 @@ export default function LivenessAuditPage() {
                           formatter={(v: number) => [v, "Count"]}
                         />
                         <Bar dataKey="count" radius={[2, 2, 0, 0]}>
-                          {corridorHist.buckets.map((b, idx) => (
+                          {corridorHist.buckets.map((b: any, idx: number) => (
                             <Cell
                               key={b.label}
                               fill={parseFloat(b.label.split("-")[0]) >= 0.5
@@ -925,7 +925,7 @@ export default function LivenessAuditPage() {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    reviewQueue.rows.map((row) => (
+                    reviewQueue.rows.map((row: any) => (
                       <TableRow key={row.id}>
                         <TableCell className="font-mono text-xs text-muted-foreground">#{row.id}</TableCell>
                         <TableCell>

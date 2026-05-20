@@ -28,7 +28,7 @@ export default function PrivateBankingDashboard() {
   const { data: profile } = trpc.hnwBanking.getHnwProfile.useQuery(undefined, { enabled: !!user });
   const { data: spread } = trpc.hnwBanking.getNegotiatedSpread.useQuery(undefined, { enabled: !!user });
   const { data: rateLocks, refetch: refetchLocks } = trpc.hnwBanking.getRateLocks.useQuery(undefined, { enabled: !!user });
-  const { data: history } = trpc.hnwBanking.getHnwTransferHistory.useQuery(undefined, { enabled: !!user });
+  const { data: history } = trpc.hnwBanking.getHnwTransferHistory.useQuery({}, { enabled: !!user });
 
   const createLock = trpc.hnwBanking.createRateLock.useMutation({
     onSuccess: (d) => { toast.success(`Rate locked! ID: ${(d as any).lockId}`); refetchLocks(); },

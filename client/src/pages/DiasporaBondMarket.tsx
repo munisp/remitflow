@@ -415,7 +415,7 @@ export default function DiasporaBondMarket() {
 
   const fillBuyOrder = trpc.diasporaBond.fillBuyOrder.useMutation({
     onSuccess: (data) => {
-      toast.success("Bond purchased!", { description: `Ref: ${data.buyerSubscriptionRef} · Settlement T+2` });
+      toast.success("Bond purchased!", { description: `Ref: ${(data as any).buyerSubscriptionRef} · Settlement T+2` });
       setBuyingOrderId(null);
       refetchPortfolio();
       refetchSecondary();

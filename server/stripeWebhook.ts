@@ -314,7 +314,7 @@ export function registerStripeWebhook(app: Express) {
             const amountPaid = (session.amount_total ?? 0) / 100;
             if (amountPaid > 0) {
               // Atomic: balance update + transaction record in one DB transaction
-              await db.transaction(async (tx) => {
+              await db.transaction(async (tx: any) => {
                 const walletRows = await tx
                   .select()
                   .from(wallets)

@@ -30,7 +30,7 @@ export const requestMoneyRouter = router({
         status: "pending",
         expiresAt,
       }).returning();
-      const paymentLink = `${ctx.req.headers.origin || process.env.APP_URL ?? "https://remitflow.example.com"}/pay/${token}`;
+      const paymentLink = `${ctx.req.headers.origin || (process.env.APP_URL ?? "https://remitflow.example.com")}/pay/${token}`;
       return { id: req.id, token, paymentLink, expiresAt };
     }),
 

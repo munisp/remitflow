@@ -44,7 +44,7 @@ export default function AdminBulkActions() {
     const a = document.createElement("a");
     a.href = url; a.download = `users-export-${Date.now()}.${format}`; a.click();
     URL.revokeObjectURL(url);
-    toast.success(`Exported ${count} users as ${format.toUpperCase()}`);
+    toast.success(`Exported ${count} users as ${format!.toUpperCase()}`);
   }
 
   const userList = usersData?.users ?? [];

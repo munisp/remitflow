@@ -80,7 +80,7 @@ export default function RateAlertHistoryPage() {
               </div>
             ) : (
               <div className="space-y-3">
-                {data.history.map(alert => (
+                {data.history.map((alert: any) => (
                   <div key={alert.id} className="flex items-center gap-4 p-4 rounded-lg border hover:bg-muted/30 transition-colors">
                     <div className={`w-10 h-10 rounded-full flex items-center justify-center ${alert.direction === "above" ? "bg-green-100" : "bg-red-100"}`}>
                       {alert.direction === "above" ? <TrendingUp className="w-5 h-5 text-green-600" /> : <TrendingDown className="w-5 h-5 text-red-600" />}

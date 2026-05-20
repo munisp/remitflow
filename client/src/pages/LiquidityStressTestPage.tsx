@@ -106,7 +106,7 @@ export default function LiquidityStressTestPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {runScenario.data.positions.map((p) => (
+                  {runScenario.data.positions.map((p: any) => (
                     <TableRow key={p.currency}>
                       <TableCell className="font-medium">{p.currency}</TableCell>
                       <TableCell>${p.currentBalance.toLocaleString()}</TableCell>

@@ -329,7 +329,7 @@ export default function TalentBridge() {
             <Button variant="outline" onClick={() => setApplyDialog({ open: false, opportunity: null })}>Cancel</Button>
             <Button
               className="bg-teal-600 hover:bg-teal-700 text-white"
-              onClick={() => applyMutation.mutate({ opportunityId: applyDialog.opportunity!.id, message: applyMessage || undefined })}
+              onClick={() => applyMutation.mutate({ opportunityId: applyDialog.opportunity!.id, message: applyMessage || "" })}
               disabled={applyMutation.isPending}
             >
               {applyMutation.isPending ? <><Loader2 className="w-4 h-4 animate-spin mr-2" />Submitting…</> : "Submit Application"}

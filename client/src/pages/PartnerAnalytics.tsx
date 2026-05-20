@@ -60,8 +60,8 @@ export default function PartnerAnalytics() {
 
   // Build funnel chart data
   const funnelByStep = [1,2,3,4,5,6].map((step) => {
-    const entries = funnel.filter(f => f.step === step);
-    const total = entries.reduce((s, e) => s + e.count, 0);
+    const entries = funnel.filter((f: any) => f.step === step);
+    const total = entries.reduce((s: any, e: any) => s + e.count, 0);
     return { step: STEP_LABELS[step] ?? `Step ${step}`, total };
   }).filter(s => s.total > 0);
 
@@ -378,7 +378,7 @@ export default function PartnerAnalytics() {
                         </tr>
                       </thead>
                       <tbody>
-                        {codePerformance.map((code) => {
+                        {codePerformance.map((code: any) => {
                           const usagePct = code.maxUses > 0 ? Math.round((code.usedCount / code.maxUses) * 100) : 0;
                           const isExpired = code.expiresAt && new Date() > new Date(code.expiresAt);
                           return (
@@ -433,7 +433,7 @@ export default function PartnerAnalytics() {
                   <div className="p-8 text-center text-muted-foreground text-sm">No onboarding sessions yet. Share your invite codes to get started!</div>
                 ) : (
                   <div className="divide-y">
-                    {recentActivity.map((session) => {
+                    {recentActivity.map((session: any) => {
                       const StatusIcon = session.status === "completed" ? CheckCircle2 : session.status === "abandoned" ? XCircle : Clock;
                       const statusColor = STATUS_COLORS[session.status] ?? "#94a3b8";
                       return (

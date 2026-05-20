@@ -224,7 +224,7 @@ export const partnerPayoutAutomationRouter = router({
         .orderBy(desc(partnerPayouts.createdAt)).limit(input.limit).offset(input.offset);
       const [{ total }] = await db.select({ total: count() }).from(partnerPayouts)
         .where(eq(partnerPayouts.status, "pending"));
-      return { payouts: rows.map((r) => ({ ...r, feeRevenue: Number(r.feeRevenue), revenueShare: Number(r.revenueShare) })), total: Number(total) };
+      return { payouts: rows.map((r: any) => ({ ...r, feeRevenue: Number(r.feeRevenue), revenueShare: Number(r.revenueShare) })), total: Number(total) };
     }),
 
   approvePayouts: adminProcedure
@@ -269,7 +269,7 @@ export const partnerPayoutAutomationRouter = router({
         .orderBy(desc(partnerPayouts.createdAt)).limit(input.limit).offset(input.offset);
       const [{ total }] = await db.select({ total: count() }).from(partnerPayouts)
         .where(conditions.length > 0 ? and(...conditions) : undefined);
-      return { payouts: rows.map((r) => ({ ...r, feeRevenue: Number(r.feeRevenue), revenueShare: Number(r.revenueShare) })), total: Number(total) };
+      return { payouts: rows.map((r: any) => ({ ...r, feeRevenue: Number(r.feeRevenue), revenueShare: Number(r.revenueShare) })), total: Number(total) };
     }),
 
   getStats: adminProcedure.query(async () => {
@@ -367,7 +367,7 @@ export const smartRoutingV2Router = router({
       const rows = await db.select().from(smartRoutingDecisions)
         .orderBy(desc(smartRoutingDecisions.createdAt)).limit(input.limit).offset(input.offset);
       const [{ total }] = await db.select({ total: count() }).from(smartRoutingDecisions);
-      return { decisions: rows.map((r) => ({ ...r, amount: Number(r.amount), estimatedFee: Number(r.estimatedFee ?? 0), score: Number(r.score ?? 0) })), total: Number(total) };
+      return { decisions: rows.map((r: any) => ({ ...r, amount: Number(r.amount), estimatedFee: Number(r.estimatedFee ?? 0), score: Number(r.score ?? 0) })), total: Number(total) };
     }),
 
   getStats: adminProcedure.query(async () => {
@@ -381,7 +381,7 @@ export const smartRoutingV2Router = router({
       .orderBy(desc(count())).limit(10);
     return {
       totalDecisions: Number(total),
-      topProviders: topProviders.map((p) => ({ provider: p.provider, count: Number(p.cnt) })),
+      topProviders: topProviders.map((p: any) => ({ provider: p.provider, count: Number(p.cnt) })),
     };
   }),
 
@@ -529,7 +529,7 @@ export const auditTrailV2Router = router({
       const headers = ["id", "userId", "action", "targetType", "targetId", "ipAddress", "createdAt"];
       const csv = [
         headers.join(","),
-        ...rows.map((r) => headers.map((h) => JSON.stringify((r as any)[h] ?? "")).join(",")),
+        ...rows.map((r: any) => headers.map((h) => JSON.stringify((r as any)[h] ?? "")).join(",")),
       ].join("\n");
       return { csv, rowCount: rows.length, generatedAt: new Date() };
     }),
@@ -543,7 +543,7 @@ export const auditTrailV2Router = router({
       .where(gte(auditLogs.createdAt, today));
     const topActions = await db.select({ action: auditLogs.action, cnt: count() })
       .from(auditLogs).groupBy(auditLogs.action).orderBy(desc(count())).limit(10);
-    return { total: Number(total), today: Number(todayCount), topActions: topActions.map((a) => ({ action: a.action, count: Number(a.cnt) })) };
+    return { total: Number(total), today: Number(todayCount), topActions: topActions.map((a: any) => ({ action: a.action, count: Number(a.cnt) })) };
   }),
 });
 
@@ -561,7 +561,7 @@ export const fraudRulesCrudRouter = router({
       const [{ total }] = await db.select({ total: count() }).from(feeRules)
         .where(conditions.length > 0 ? and(...conditions) : undefined);
       return {
-        rules: rows.map((r) => ({
+        rules: rows.map((r: any) => ({
           ...r,
           minAmount: Number(r.minAmount),
           maxAmount: r.maxAmount ? Number(r.maxAmount) : null,
@@ -748,7 +748,7 @@ export const multiCurrencyLedgerRouter = router({
       const rows = await db.select().from(transactions)
         .where(and(eq(transactions.fromCurrency, input.currency), eq(transactions.status, "completed")))
         .orderBy(desc(transactions.createdAt)).limit(input.limit);
-      return rows.map((r) => ({
+      return rows.map((r: any) => ({
         id: r.id,
         debit: { account: `user:${r.userId}:${r.fromCurrency}`, amount: Number(r.fromAmount), currency: r.fromCurrency },
         credit: { account: `partner:${r.provider ?? "internal"}:${r.toCurrency ?? r.fromCurrency}`, amount: Number(r.toAmount ?? 0), currency: r.toCurrency ?? r.fromCurrency },

@@ -164,7 +164,7 @@ export default function FeeRulesCRUDPage() {
                   <tr><td colSpan={7} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
                 ) : rules.length === 0 ? (
                   <tr><td colSpan={7} className="p-8 text-center text-muted-foreground">No fee rules found</td></tr>
-                ) : rules.map((r) => (
+                ) : rules.map((r: any) => (
                   <tr key={r.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                     <td className="p-3 font-mono font-bold">{r.corridor}</td>
                     <td className="p-3 capitalize">{r.feeType}</td>

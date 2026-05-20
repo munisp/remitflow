@@ -316,7 +316,7 @@ export default function BeyondRemittance() {
   const { data: orderHistory = [] } = trpc.investment.getOrderHistory.useQuery(undefined, { enabled: !!user });
 
   // Sentiment for featured symbols
-  const featuredSymbols = useMemo(() => assets.filter(a => a.isFeatured).map(a => a.symbol).slice(0, 6), [assets]);
+  const featuredSymbols = useMemo(() => assets.filter((a: any) => a.isFeatured).map((a: any) => a.symbol).slice(0, 6), [assets]);
   const { data: sentiment } = trpc.investment.getSentiment.useQuery(
     { symbols: featuredSymbols.length > 0 ? featuredSymbols : ["BTC", "ETH", "AAPL"] },
     { enabled: featuredSymbols.length > 0 }
@@ -341,7 +341,7 @@ export default function BeyondRemittance() {
   const watchlistAssetIds = new Set(watchlist.map((w: any) => w.asset.id));
 
   const filteredAssets = useMemo(() => {
-    return assets.filter(a => {
+    return assets.filter((a: any) => {
       if (assetTypeFilter !== "all" && a.assetType !== assetTypeFilter) return false;
       if (search) {
         const s = search.toLowerCase();
@@ -447,7 +447,7 @@ export default function BeyondRemittance() {
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {filteredAssets.map(asset => {
+                {filteredAssets.map((asset: any) => {
                   const price = Number(asset.currentPrice ?? 0);
                   const change = Number(asset.priceChange24h ?? 0);
                   const changePct = Number(asset.priceChangePct24h ?? 0);
@@ -813,7 +813,7 @@ export default function BeyondRemittance() {
                               <p className="text-sm font-semibold text-violet-400">{rec.suggested_allocation_pct.toFixed(1)}%</p>
                             </div>
                             <Button size="sm" onClick={() => {
-                              const asset = assets.find(a => a.symbol === rec.symbol);
+                              const asset = assets.find((a: any) => a.symbol === rec.symbol);
                               if (asset) setBuyAsset(asset);
                             }} className="bg-violet-600 hover:bg-violet-700 h-7 text-xs">
                               Invest

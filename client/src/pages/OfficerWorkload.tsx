@@ -64,8 +64,8 @@ export default function OfficerWorkload() {
               onClick={() => {
                 const header = ["Officer", "Email", "Total Assigned", "Open", "Escalated", "Resolved", "SARs Filed", "Avg Resolution (hrs)"];
                 const rows = officers.map(o => [
-                  o.officerName ?? "Unknown",
-                  o.officerEmail ?? "",
+                  (o as any).officerName ?? o.name ?? "Unknown",
+                  (o as any).officerEmail ?? o.email ?? "",
                   o.totalAssigned,
                   o.openCount,
                   o.escalatedCount,

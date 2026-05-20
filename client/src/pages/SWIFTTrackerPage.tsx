@@ -29,7 +29,7 @@ export default function SWIFTTrackerPage() {
   const { data: payments } = trpc.v100.swiftSepaRails.getPayments.useQuery({ rail, limit: 50 });
   const { data: railStatus } = trpc.v100.swiftSepaRails.getRailStatus.useQuery();
 
-  const filtered = (payments ?? []).filter(p =>
+  const filtered = (payments ?? []).filter((p: any) =>
     !search ||
     p.reference.toLowerCase().includes(search.toLowerCase()) ||
     p.beneficiaryName.toLowerCase().includes(search.toLowerCase())
@@ -96,7 +96,7 @@ export default function SWIFTTrackerPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(p => (
+                {filtered.map((p: any) => (
                   <tr key={p.id} className="border-b hover:bg-muted/30">
                     <td className="p-2 font-mono text-xs">{p.reference}</td>
                     <td className="p-2"><Badge variant="outline">{p.rail}</Badge></td>

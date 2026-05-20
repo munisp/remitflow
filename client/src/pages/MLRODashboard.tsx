@@ -70,7 +70,6 @@ export default function MLRODashboard() {
   const { data: escalatedAlerts, isLoading: alertsLoading, refetch } = trpc.complianceAlerts.list.useQuery({
     status: "escalated",
     limit: 50,
-    offset: 0,
   });
 
   // Fetch MLRO summary stats
@@ -388,7 +387,7 @@ export default function MLRODashboard() {
             ) : (
               <ScrollArea className="max-h-[520px]">
                 <div className="divide-y">
-                  {alerts.map((alert) => {
+                  {alerts.map((alert: any) => {
                     let meta: Record<string, unknown> = {};
                     try { meta = JSON.parse((alert as any).metadata ?? "{}"); } catch {}
                     return (
@@ -604,7 +603,7 @@ export default function MLRODashboard() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="unassign">— Unassign —</SelectItem>
-                  {(officers ?? []).map(o => (
+                  {(officers ?? []).map((o: any) => (
                     <SelectItem key={o.id} value={String(o.id)}>
                       {o.name ?? o.email ?? `Officer #${o.id}`}
                     </SelectItem>

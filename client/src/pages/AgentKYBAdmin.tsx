@@ -123,7 +123,7 @@ export default function AgentKYBAdmin() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Platinum Tier</p>
-                <p className="text-2xl font-bold">{pending?.filter(a => a.tier === "platinum").length ?? 0}</p>
+                <p className="text-2xl font-bold">{pending?.filter((a: any) => a.tier === "platinum").length ?? 0}</p>
               </div>
               <ShieldCheck className="h-8 w-8 text-purple-500 opacity-70" />
             </div>
@@ -134,7 +134,7 @@ export default function AgentKYBAdmin() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Gold Tier</p>
-                <p className="text-2xl font-bold">{pending?.filter(a => a.tier === "gold").length ?? 0}</p>
+                <p className="text-2xl font-bold">{pending?.filter((a: any) => a.tier === "gold").length ?? 0}</p>
               </div>
               <Building2 className="h-8 w-8 text-yellow-500 opacity-70" />
             </div>
@@ -145,7 +145,7 @@ export default function AgentKYBAdmin() {
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-muted-foreground">Basic/Silver</p>
-                <p className="text-2xl font-bold">{pending?.filter(a => ["basic", "silver"].includes(a.tier)).length ?? 0}</p>
+                <p className="text-2xl font-bold">{pending?.filter((a: any) => ["basic", "silver"].includes(a.tier)).length ?? 0}</p>
               </div>
               <Users className="h-8 w-8 text-slate-400 opacity-70" />
             </div>

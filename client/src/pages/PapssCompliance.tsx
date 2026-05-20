@@ -193,7 +193,7 @@ export default function PapssCompliance() {
               {corridors.isPending ? (
                 <div className="col-span-3 text-center text-white/40 py-12">Loading corridors...</div>
               ) : (
-                (corridors.data ?? []).map((corridor) => (
+                (corridors.data ?? []).map((corridor: any) => (
                   <Card key={corridor.corridor} className="bg-white/5 border-white/10 hover:bg-white/8 transition-colors">
                     <CardContent className="pt-6">
                       <div className="flex items-center justify-between mb-4">

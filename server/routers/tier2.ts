@@ -473,7 +473,7 @@ export const multiEntityTreasuryRouter = router({
 
       const result = await callTreasuryEngine("/net", {
         group_id:  input.groupId,
-        transfers: transfers.map(t => ({
+        transfers: transfers.map((t: any) => ({
           from_company_id: t.fromCompanyId,
           to_company_id:   t.toCompanyId,
           amount_usd:      parseFloat(t.amountUsd),

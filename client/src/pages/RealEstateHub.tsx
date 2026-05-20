@@ -65,8 +65,8 @@ export default function RealEstateHub() {
     onError: (e) => toast.error(e.message),
   });
 
-  const totalInvested = myInvestments?.reduce((s, i) => s + parseFloat(i.amountUsd ?? "0"), 0) ?? 0;
-  const totalNGNInvested = myInvestments?.reduce((s, i) => s + parseFloat(i.amountNgn ?? "0"), 0) ?? 0;
+  const totalInvested = myInvestments?.reduce((s: any, i: any) => s + parseFloat(i.amountUsd ?? "0"), 0) ?? 0;
+  const totalNGNInvested = myInvestments?.reduce((s: any, i: any) => s + parseFloat(i.amountNgn ?? "0"), 0) ?? 0;
 
   return (
     <DashboardLayout>
@@ -181,7 +181,7 @@ export default function RealEstateHub() {
               </div>
             ) : (
               <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {listings?.map((prop) => {
+                {listings?.map((prop: any) => {
                   const fundedPct = prop.totalValueNgn && prop.fundedAmountNgn
                     ? Math.min(100, (parseFloat(prop.fundedAmountNgn) / parseFloat(prop.totalValueNgn)) * 100)
                     : 0;
@@ -290,7 +290,7 @@ export default function RealEstateHub() {
               </Card>
             ) : (
               <div className="space-y-3">
-                {myInvestments.map((inv) => (
+                {myInvestments.map((inv: any) => (
                   <Card key={inv.id}>
                     <CardContent className="pt-4 pb-3">
                       <div className="flex items-center justify-between">

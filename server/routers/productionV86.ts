@@ -289,7 +289,7 @@ export const volumeWidgetRouter = router({
         .limit(input.days);
 
       if (snapshots.length >= Math.min(input.days, 7)) {
-        const data = snapshots.reverse().map(s => ({
+        const data = snapshots.reverse().map((s: any) => ({
           date: s.snapshotDate,
           transactions: s.totalTransactions,
           volumeUsd: Number(s.totalVolumeUsd),
@@ -297,9 +297,9 @@ export const volumeWidgetRouter = router({
           uniqueSenders: s.uniqueSenders,
           topCorridor: s.topCorridor,
         }));
-        const totalVolume = data.reduce((sum, d) => sum + d.volumeUsd, 0);
-        const totalTxns = data.reduce((sum, d) => sum + d.transactions, 0);
-        const peakDay = data.reduce((max, d) => d.volumeUsd > (max?.volumeUsd ?? 0) ? d : max, data[0] ?? null);
+        const totalVolume = data.reduce((sum: any, d: any) => sum + d.volumeUsd, 0);
+        const totalTxns = data.reduce((sum: any, d: any) => sum + d.transactions, 0);
+        const peakDay = data.reduce((max: any, d: any) => d.volumeUsd > (max?.volumeUsd ?? 0) ? d : max, data[0] ?? null);
         return { data, summary: { totalVolume, totalTxns, avgDailyVolume: totalVolume / data.length, peakDay } };
       }
 

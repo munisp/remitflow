@@ -199,7 +199,7 @@ export default function CBDCAdmin() {
                       </tr>
                     </thead>
                     <tbody>
-                      {log.rows.map((r) => (
+                      {log.rows.map((r: any) => (
                         <tr key={r.id} className="border-b hover:bg-muted/30 transition-colors">
                           <td className="py-2 pr-3 font-mono text-xs">#{r.id}</td>
                           <td className="pr-3">

@@ -246,7 +246,7 @@ export default function Dashboard() {
               </span>
             </div>
             <div className="flex gap-2 mt-4">
-              {data?.currencies?.map(c => (
+              {data?.currencies?.map((c: any) => (
                 <Badge key={c} variant="secondary" className="bg-white/20 text-primary-foreground border-0 text-xs">
                   {c}
                 </Badge>

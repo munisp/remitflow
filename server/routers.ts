@@ -504,7 +504,7 @@ export const appRouter = router({
       const ngnRate = rates["NGN"] ?? 1538.46;
       let totalUSD = 0;
       for (const w of userWallets) { const bal = Number(w.balance); const rate = rates[w.currency] ?? 1; totalUSD += bal / rate; }
-      const ngnWallet = userWallets.find(w => w.currency === "NGN");
+      const ngnWallet = userWallets.find((w: any) => w.currency === "NGN");
       const totalNGN = ngnWallet ? Number(ngnWallet.balance) : totalUSD * ngnRate;
       const db = await getDb();
       let sentThisMonth = 0, receivedThisMonth = 0;
@@ -518,10 +518,10 @@ export const appRouter = router({
         } catch { /* ignore monthly query errors in test env */ }
       }
       const savingsGoalsList = await getSavingsGoalsByUserId(userId);
-      const activeSavings = savingsGoalsList.filter(g => g.status === "active").length;
+      const activeSavings = savingsGoalsList.filter((g: any) => g.status === "active").length;
       return {
         totalBalance: Math.round(totalNGN), totalBalanceUSD: Math.round(totalUSD * 100) / 100, monthlyChange: 12.4,
-        currencies: userWallets.map(w => w.currency), wallets: userWallets.map(formatWallet),
+        currencies: userWallets.map((w: any) => w.currency), wallets: userWallets.map(formatWallet),
         recentTransactions: recentTxns.map(formatTxn), unreadNotifications: unreadCount,
         sentThisMonth, receivedThisMonth, activeSavingsGoals: activeSavings,
         user: { name: dbUser?.name ?? ctx.user.name, email: dbUser?.email ?? ctx.user.email, kycTier: dbUser?.kycTier ?? "tier0" },
@@ -551,17 +551,17 @@ export const appRouter = router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const rates = await getLiveRates("USD");
-      return ws.map(w => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
+      return ws.map((w: any) => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
     }),
     balance: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const rates = await getLiveRates("USD");
-      return ws.map(w => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
+      return ws.map((w: any) => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
     }),
     balances: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const rates = await getLiveRates("USD");
-      return ws.map(w => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
+      return ws.map((w: any) => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
     }),
     history: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 20 });
@@ -573,7 +573,7 @@ export const appRouter = router({
       const walletRows = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!walletRows.length) throw new TRPCError({ code: "NOT_FOUND", message: "Wallet not found" });
       const wallet = walletRows[0];
-      const { newBalance, topupRef } = await db.transaction(async (tx) => {
+      const { newBalance, topupRef } = await db.transaction(async (tx: any) => {
         const [updatedWallet] = await tx.update(wallets)
           .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` })
           .where(eq(wallets.id, wallet.id))
@@ -799,7 +799,7 @@ export const appRouter = router({
     withdraw: walletWithdrawProcedure.input(z.object({ currency: z.string(), amount: z.number().positive(), bankAccount: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       // ─── KYC Tier Withdrawal Limit Enforcement ──────────────────────────────
-      const [dbUserW] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
+      const [dbUserW] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user!.id)).limit(1);
       const userTierW = (dbUserW?.kycTier ?? "tier0") as KycTier;
       if (userTierW === "tier0") throw new TRPCError({ code: "FORBIDDEN", message: "Complete KYC verification before withdrawing funds." });
       const ratesW = await getLiveRates("USD");
@@ -807,23 +807,23 @@ export const appRouter = router({
       const amtUsdW = input.amount / rateW;
       const limitsW = KYC_TIER_LIMITS[userTierW];
       const dayStartW = new Date(); dayStartW.setHours(0, 0, 0, 0);
-      const [dailyRowW] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user.id), eq(transactions.type, "withdrawal"), gte(transactions.createdAt, dayStartW)));
+      const [dailyRowW] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "withdrawal"), gte(transactions.createdAt, dayStartW)));
       const dailyUsedW = Number(dailyRowW?.total ?? 0) / rateW;
       if (amtUsdW > limitsW.perTx) throw new TRPCError({ code: "FORBIDDEN", message: `Withdrawal exceeds per-transaction limit of $${limitsW.perTx.toLocaleString()} USD for your KYC tier.` });
       if (dailyUsedW + amtUsdW > limitsW.daily) throw new TRPCError({ code: "FORBIDDEN", message: `Withdrawal would exceed your daily limit of $${limitsW.daily.toLocaleString()} USD. Remaining today: $${Math.max(0, limitsW.daily - dailyUsedW).toFixed(0)}.` });
       // ─── Balance Check & Debit ───────────────────────────────────────────────
-      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
+      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user!.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet) throw new TRPCError({ code: "NOT_FOUND" });
       if (Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
-      const { ref: wdRef, newBalance: wdBalance } = await db.transaction(async (tx) => {
+      const { ref: wdRef, newBalance: wdBalance } = await db.transaction(async (tx: any) => {
         const [updWithdraw] = await tx.update(wallets)
           .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
           .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
           .returning({ balance: wallets.balance });
         if (!updWithdraw) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-        const wRef = `WD-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+        const wRef = `WD-${ctx.user!.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
         await tx.insert(transactions).values({
-          userId: ctx.user.id, type: "withdrawal" as any, status: "completed" as any,
+          userId: ctx.user!.id, type: "withdrawal" as any, status: "completed" as any,
           fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
           description: "Wallet withdrawal", reference: wRef,
         });
@@ -862,13 +862,13 @@ export const appRouter = router({
     export: reportExportProcedure
       .input(z.object({ format: z.enum(["csv","json"]).default("csv"), type: z.string().default("all"), status: z.string().default("all"), dateFrom: z.string().optional(), dateTo: z.string().optional() }))
       .query(async ({ ctx, input }) => {
-        const txns = await getTransactionsByUserId(ctx.user.id, { limit: 10000, offset: 0, type: input.type, status: input.status });
-        const filtered = txns.filter(t => {
+        const txns = await getTransactionsByUserId(ctx.user!.id, { limit: 10000, offset: 0, type: input.type, status: input.status });
+        const filtered = txns.filter((t: any) => {
           if (input.dateFrom && new Date((t as any).createdAt ?? 0) < new Date(input.dateFrom)) return false;
           if (input.dateTo && new Date((t as any).createdAt ?? 0) > new Date(input.dateTo)) return false;
           return true;
         });
-        await createAuditLog({ userId: ctx.user.id, action: "TRANSACTIONS_EXPORTED", description: `Exported ${filtered.length} transactions as ${input.format.toUpperCase()}` });
+        await createAuditLog({ userId: ctx.user!.id, action: "TRANSACTIONS_EXPORTED", description: `Exported ${filtered.length} transactions as ${input.format.toUpperCase()}` });
         if (input.format === "json") return { format: "json", count: filtered.length, data: filtered.map(formatTxn), exportedAt: new Date().toISOString() };
         const headers = ["ID","Date","Type","Status","Amount","Currency","To Currency","Converted Amount","Rate","Fee","Recipient","Reference","Description"];
         const rows = filtered.map((t: any) => [t.id, new Date(t.createdAt ?? 0).toISOString(), t.type, t.status, t.fromAmount, t.currency, t.toCurrency ?? "", t.toAmount ?? "", t.fxRate ?? "", t.fee ?? "0", t.recipientName ?? "", t.reference ?? "", (t.description ?? "").replace(/,/g, ";")]);
@@ -921,7 +921,7 @@ export const appRouter = router({
       if (amountInUsd > HIGH_VALUE_THRESHOLD_USD) {
         const db2fa = await getDb();
         if (db2fa) {
-          const [userRow] = await db2fa.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+          const [userRow] = await db2fa.select().from(users).where(eq(users.id, ctx.user!.id)).limit(1);
           if (userRow?.totpEnabled) {
             if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: This transfer exceeds $1,000 USD. Please provide your 6-digit TOTP code to proceed." });
             const { verifyTOTP } = await import("./totp");
@@ -933,7 +933,7 @@ export const appRouter = router({
       // ─── KYC Tier Limit Enforcement ──────────────────────────────────────────
       const dbForLimits = await getDb();
       if (dbForLimits) {
-        const [userForLimits] = await dbForLimits.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+        const [userForLimits] = await dbForLimits.select().from(users).where(eq(users.id, ctx.user!.id)).limit(1);
         const userTier = (userForLimits?.kycTier ?? "tier0") as KycTier;
         // Get daily and monthly usage
         const now = new Date();
@@ -942,8 +942,8 @@ export const appRouter = router({
         const ratesForLimits = await getLiveRates("USD");
         const fromRateForLimits = ratesForLimits[input.fromCurrency] ?? 1;
         const amountInUsdForLimits = input.amount / fromRateForLimits;
-        const [dailyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user.id), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
-        const [monthlyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user.id), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+        const [dailyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
+        const [monthlyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
         const dailyUsedUSD = Number(dailyRow?.total ?? 0) / fromRateForLimits;
         const monthlyUsedUSD = Number(monthlyRow?.total ?? 0) / fromRateForLimits;
         const limitCheck = checkTransferLimit(amountInUsdForLimits, userTier, dailyUsedUSD, monthlyUsedUSD);
@@ -951,7 +951,7 @@ export const appRouter = router({
         // AML flags for compliance logging + auto-case creation
         const amlFlags = getAmlFlags(amountInUsdForLimits);
         if (amlFlags.length > 0) {
-          logger.info(`[AML] Flags for user ${ctx.user.id}: ${amlFlags.join(", ")}`);
+          logger.info(`[AML] Flags for user ${ctx.user!.id}: ${amlFlags.join(", ")}`);
           // Auto-create compliance case (non-blocking)
           getDb().then(db => {
             if (!db) return;
@@ -959,25 +959,25 @@ export const appRouter = router({
             const sev = amountInUsdForLimits >= 10_000 ? "critical" : amountInUsdForLimits >= 5_000 ? "high" : "medium";
             const caseTypeMap: Record<string, string> = { CTR_REQUIRED: "ctr", SAR_REVIEW: "sar", EDD_REQUIRED: "edd", TRAVEL_RULE: "travel_rule" };
             db.insert(complianceCases).values({
-              userId: ctx.user.id, caseType: (caseTypeMap[topFlag] ?? "aml_review") as any,
+              userId: ctx.user!.id, caseType: (caseTypeMap[topFlag] ?? "aml_review") as any,
               severity: sev as any, status: "open" as any,
               title: `Auto-flagged: ${topFlag} — ${input.amount} ${input.fromCurrency} to ${input.recipientName}`,
               description: `Transfer of ${input.amount} ${input.fromCurrency} (≈$${amountInUsdForLimits.toFixed(0)} USD) triggered AML flags: ${amlFlags.join(", ")}`,
               riskScore: Math.min(100, Math.round((amountInUsdForLimits / 10_000) * 80 + 20)),
               createdAt: new Date(), updatedAt: new Date(),
-            }).catch(err => logger.warn({ errMsg: err?.message }, "[AML] Auto-case insert failed:"));
+            }).catch((err: any) => logger.warn({ errMsg: err?.message }, "[AML] Auto-case insert failed:"));
           }).catch(() => {});
         }
       }
       // Velocity check
-      const velocity = await checkVelocity(ctx.user.id, 1, 10);
+      const velocity = await checkVelocity(ctx.user!.id, 1, 10);
       if (!velocity.allowed) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: `Too many transfers (${velocity.attemptsInWindow}/10 in last hour). Please wait.` });
       // Round-tripping / money laundering velocity detection (v143)
-      const roundTrip = detectRoundTripping(ctx.user.id);
+      const roundTrip = detectRoundTripping(ctx.user!.id);
       if (roundTrip.flagged) {
         getDb().then(db => db && db.insert(complianceCases).values({
-          userId: ctx.user.id, caseType: "aml_review" as any, severity: "high" as any, status: "open" as any,
-          title: `Round-tripping velocity flag — user ${ctx.user.id}`,
+          userId: ctx.user!.id, caseType: "aml_review" as any, severity: "high" as any, status: "open" as any,
+          title: `Round-tripping velocity flag — user ${ctx.user!.id}`,
           description: roundTrip.reason ?? "High transfer velocity detected",
           riskScore: 75, createdAt: new Date(), updatedAt: new Date(),
         }).catch(() => {})).catch(() => {});
@@ -986,11 +986,11 @@ export const appRouter = router({
       {
         const fromRateStr = (await getLiveRates("USD"))[input.fromCurrency] ?? 1;
         const amountUSDStr = input.amount / fromRateStr;
-        const structuringCheck = detectStructuring(ctx.user.id, amountUSDStr);
+        const structuringCheck = detectStructuring(ctx.user!.id, amountUSDStr);
         if (structuringCheck.flagged) {
           getDb().then(db => db && db.insert(complianceCases).values({
-            userId: ctx.user.id, caseType: "sar" as any, severity: "critical" as any, status: "open" as any,
-            title: `Potential structuring — user ${ctx.user.id}`,
+            userId: ctx.user!.id, caseType: "sar" as any, severity: "critical" as any, status: "open" as any,
+            title: `Potential structuring — user ${ctx.user!.id}`,
             description: structuringCheck.reason ?? "Structuring pattern detected",
             riskScore: 90, createdAt: new Date(), updatedAt: new Date(),
           }).catch(() => {})).catch(() => {});
@@ -998,10 +998,10 @@ export const appRouter = router({
       }
       // Fraud & AML screening — run local + gRPC Rust fraud service in parallel
       const [fraudCheck, grpcFraud] = await Promise.all([
-        checkFraud({ userId: ctx.user.id, amount: input.amount, currency: input.fromCurrency, toCurrency: input.toCurrency, beneficiaryName: input.recipientName, beneficiaryAccount: input.recipientAccount }),
+        checkFraud({ userId: ctx.user!.id, amount: input.amount, currency: input.fromCurrency, toCurrency: input.toCurrency, beneficiaryName: input.recipientName, beneficiaryAccount: input.recipientAccount }),
         grpcFraudCheck({
           transactionId: input.idempotencyKey ?? `TRF${Date.now()}`,
-          userId: String(ctx.user.id),
+          userId: String(ctx.user!.id),
           amount: String(input.amount),
           currency: input.fromCurrency,
           fromCountry: "NG",
@@ -1013,13 +1013,13 @@ export const appRouter = router({
       if (grpcFraud && grpcFraud.decision === "BLOCK") throw new TRPCError({ code: "FORBIDDEN", message: `Transaction blocked by risk engine. Risk score: ${grpcFraud.riskScore.toFixed(2)}. Reasons: ${grpcFraud.reasons.join(", ")}` });
       // ─── Polyglot Microservice Checks (Go/Rust/Python) ───────────────────────
       // 1. Go rate-limit sidecar: per-user transfer rate limit (10/min)
-      const goRateLimit = await goCheckRateLimit(`transfer:user:${ctx.user.id}`, 10, 60);
+      const goRateLimit = await goCheckRateLimit(`transfer:user:${ctx.user!.id}`, 10, 60);
       if (!goRateLimit.allowed) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: `Transfer rate limit exceeded. Retry in ${Math.ceil(goRateLimit.retryAfterMs / 1000)}s.` });
       // 2. Python compliance service: AML/KYC rules engine
       const transferRef = input.idempotencyKey ?? `TRF${Date.now()}`;
       // 2a. Python anomaly detector: ML-based ATO/BEC/round-tripping detection (parallel)
       const anomalyPromise = detectAnomaly({
-        userId: ctx.user.id,
+        userId: ctx.user!.id,
         eventType: "transfer_send",
         features: {
           amount_usd: input.amount,
@@ -1033,7 +1033,7 @@ export const appRouter = router({
       const [complianceResult, fraudScoreResult] = await Promise.all([
         runComplianceCheck({
           transferId: transferRef,
-          userId: ctx.user.id,
+          userId: ctx.user!.id,
           amount: input.amount,
           fromCurrency: input.fromCurrency,
           toCurrency: input.toCurrency,
@@ -1046,7 +1046,7 @@ export const appRouter = router({
         }),
         getFraudScore({
           transferId: transferRef,
-          userId: ctx.user.id,
+          userId: ctx.user!.id,
           amount: input.amount,
           fromCountry: "NG",
           toCountry: input.recipientCountry ?? "NG",
@@ -1060,33 +1060,33 @@ export const appRouter = router({
       ]);
       if (complianceResult.decision === "blocked") {
         // Fire-and-forget audit log to Rust service
-        sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_BLOCKED_COMPLIANCE", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: complianceResult.blockReason, details: { rules: complianceResult.rulesTriggered } }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_COMPLIANCE", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: complianceResult.blockReason, details: { rules: complianceResult.rulesTriggered } }).catch(() => {});
         throw new TRPCError({ code: "FORBIDDEN", message: `Transfer blocked by compliance engine: ${complianceResult.blockReason ?? complianceResult.rulesTriggered.join(", ")}` });
       }
       if (fraudScoreResult.decision === "block") {
-        sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_BLOCKED_FRAUD", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Fraud score: ${fraudScoreResult.fraudScore.toFixed(2)}`, details: { factors: fraudScoreResult.factors } }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_FRAUD", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Fraud score: ${fraudScoreResult.fraudScore.toFixed(2)}`, details: { factors: fraudScoreResult.factors } }).catch(() => {});
         throw new TRPCError({ code: "FORBIDDEN", message: `Transfer blocked by fraud engine. Risk score: ${fraudScoreResult.fraudScore.toFixed(2)}.` });
       }
       // 3. Python sanctions screening for beneficiary name
       if (input.recipientName) {
         const sanctionsResult = await screenSanctions({ name: input.recipientName, country: input.recipientCountry ?? "NG" });
         if (sanctionsResult.action === "block") {
-          sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_BLOCKED_SANCTIONS", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, details: { name: input.recipientName, matchType: sanctionsResult.matchType } }).catch(() => {});
+          sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_SANCTIONS", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, details: { name: input.recipientName, matchType: sanctionsResult.matchType } }).catch(() => {});
           throw new TRPCError({ code: "FORBIDDEN", message: `Transfer blocked: beneficiary name matched sanctions list (${sanctionsResult.matchType ?? "unknown"} match).` });
         }
       }
       // 2b. Await anomaly detector result and block high-confidence anomalies
       const anomalyResult = await anomalyPromise;
       if (anomalyResult.isAnomaly && anomalyResult.confidence > 0.85) {
-        sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_BLOCKED_ANOMALY", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Anomaly confidence: ${(anomalyResult.confidence * 100).toFixed(1)}%`, details: anomalyResult.details }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_ANOMALY", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Anomaly confidence: ${(anomalyResult.confidence * 100).toFixed(1)}%`, details: anomalyResult.details }).catch(() => {});
         throw new TRPCError({ code: "FORBIDDEN", message: `Transfer flagged by anomaly detection (confidence: ${(anomalyResult.confidence * 100).toFixed(1)}%). Please contact support if this is legitimate.` });
       }
       if (anomalyResult.isAnomaly && anomalyResult.confidence > 0.65) {
         // Medium confidence: flag for review but allow through
-        sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_ANOMALY_REVIEW", resource: "transfer", resourceId: transferRef, severity: "warning", success: true, details: { confidence: anomalyResult.confidence, ...anomalyResult.details } }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_ANOMALY_REVIEW", resource: "transfer", resourceId: transferRef, severity: "warning", success: true, details: { confidence: anomalyResult.confidence, ...anomalyResult.details } }).catch(() => {});
       }
       // 4. Rust audit log: record compliance pass
-      sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_COMPLIANCE_PASS", resource: "transfer", resourceId: transferRef, severity: "info", success: true, details: { complianceDecision: complianceResult.decision, fraudScore: fraudScoreResult.fraudScore, riskLevel: fraudScoreResult.riskLevel } }).catch(() => {});
+      sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_COMPLIANCE_PASS", resource: "transfer", resourceId: transferRef, severity: "info", success: true, details: { complianceDecision: complianceResult.decision, fraudScore: fraudScoreResult.fraudScore, riskLevel: fraudScoreResult.riskLevel } }).catch(() => {});
       // ─── Compute FX rate and tiered fee ──────────────────────────────────────
       const { rates: liveRates } = await fetchLiveRates("USD");
       const fromRate = liveRates[input.fromCurrency] ?? 1;
@@ -1096,18 +1096,18 @@ export const appRouter = router({
       const dbForFee = await getDb();
       let userTierForFee: KycTier = "tier1";
       if (dbForFee) {
-        const [userForFee] = await dbForFee.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
+        const [userForFee] = await dbForFee.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user!.id)).limit(1);
         userTierForFee = (userForFee?.kycTier ?? "tier1") as KycTier;
       }
       const amountUsdForFee = input.amount / fromRate;
       const feeBreakdown = calculateFee(amountUsdForFee, { from: "NG", to: input.recipientCountry ?? "US" }, userTierForFee);
       const fee = feeBreakdown.totalFee * fromRate; // convert back to source currency
       const toAmount = (input.amount - fee) * fxRate;
-      const idempotencyKey = input.idempotencyKey ?? `TRF-${ctx.user.id}-${Date.now()}`;
+      const idempotencyKey = input.idempotencyKey ?? `TRF-${ctx.user!.id}-${Date.now()}`;
 
       // ─── Attempt Temporal workflow (full 6-step saga) ─────────────────────────
       const temporalResult = await startTransferWorkflow({
-        userId: ctx.user.id,
+        userId: ctx.user!.id,
         fromCurrency: input.fromCurrency,
         toCurrency: input.toCurrency,
         amount: input.amount,
@@ -1140,20 +1140,20 @@ export const appRouter = router({
       // ─── Fallback: direct DB execution (Temporal unavailable) ─────────────────
       logger.warn("[Transfer] Temporal unavailable — executing direct DB path");
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.fromCurrency))).limit(1);
+      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user!.id), eq(wallets.currency, input.fromCurrency))).limit(1);
       if (!wallet) throw new TRPCError({ code: "NOT_FOUND", message: "Source wallet not found" });
       const totalDeduct = input.amount + fee;
       if (Number(wallet.balance) < totalDeduct) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
       // ─── Wrap wallet debit + transaction record in a DB transaction ───────────
-      const { ref, newBalance } = await db.transaction(async (tx) => {
+      const { ref, newBalance } = await db.transaction(async (tx: any) => {
         const [updTransfer] = await tx.update(wallets)
           .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${totalDeduct} AS VARCHAR)` })
           .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${totalDeduct}`))
           .returning({ balance: wallets.balance });
         if (!updTransfer) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-        const txRef = `TRF-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+        const txRef = `TRF-${ctx.user!.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
         await tx.insert(transactions).values({
-          userId: ctx.user.id, type: "send", status: "pending",
+          userId: ctx.user!.id, type: "send", status: "pending",
           fromCurrency: input.fromCurrency, fromAmount: input.amount.toString(),
           toCurrency: input.toCurrency, toAmount: toAmount.toFixed(2),
           fee: fee.toFixed(2), fxRate: fxRate.toFixed(6),
@@ -1164,15 +1164,15 @@ export const appRouter = router({
         });
         return { ref: txRef, newBalance: updTransfer.balance };
       });
-      await createAuditLog({ userId: ctx.user.id, action: "TRANSFER_SENT", description: `Sent ${input.amount} ${input.fromCurrency} to ${input.recipientName}` });
-      broadcastUserEvent(ctx.user.id, { type: "transfer_sent", payload: { title: "Transfer Sent Successfully", message: `${input.amount} ${input.fromCurrency} → ${toAmount.toFixed(2)} ${input.toCurrency} sent to ${input.recipientName}`, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: toAmount.toFixed(2), recipientName: input.recipientName, fee: fee.toFixed(2), reference: ref } });
+      await createAuditLog({ userId: ctx.user!.id, action: "TRANSFER_SENT", description: `Sent ${input.amount} ${input.fromCurrency} to ${input.recipientName}` });
+      broadcastUserEvent(ctx.user!.id, { type: "transfer_sent", payload: { title: "Transfer Sent Successfully", message: `${input.amount} ${input.fromCurrency} → ${toAmount.toFixed(2)} ${input.toCurrency} sent to ${input.recipientName}`, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: toAmount.toFixed(2), recipientName: input.recipientName, fee: fee.toFixed(2), reference: ref } });
       // ─── Wire local ML fraud scorer + state machine pipeline (non-blocking) ─────
       (async () => {
         try {
           const dbForPipeline = await getDb();
           let kycTierNum = 1;
           if (dbForPipeline) {
-            const [uRow] = await dbForPipeline.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
+            const [uRow] = await dbForPipeline.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user!.id)).limit(1);
             const tierMap: Record<string, number> = { tier0: 0, tier1: 1, tier2: 2, tier3: 3 };
             kycTierNum = tierMap[uRow?.kycTier ?? "tier1"] ?? 1;
           }
@@ -1181,7 +1181,7 @@ export const appRouter = router({
           const mlFeatures = buildFeatures({ amount_usd: amountUSDForPipeline, source_country: "NG", dest_country: input.recipientCountry ?? "NG", user_kyc_level: kycTierNum, is_new_recipient: false });
           const mlFraudResult = scoreFraud(mlFeatures);
           const amlFlagsForPipeline = getAmlFlags(amountUSDForPipeline);
-          await runTransferPipeline(ref, ctx.user.id, { fraudScore: mlFraudResult.score, amlFlags: amlFlagsForPipeline, kycTier: kycTierNum, amountUSD: amountUSDForPipeline });
+          await runTransferPipeline(ref, ctx.user!.id, { fraudScore: mlFraudResult.score, amlFlags: amlFlagsForPipeline, kycTier: kycTierNum, amountUSD: amountUSDForPipeline });
         } catch (pipelineErr) {
           logger.warn({ err: pipelineErr }, "[Transfer] State machine pipeline error (non-blocking):");
         }
@@ -1189,27 +1189,27 @@ export const appRouter = router({
       // gRPC Ledger: record double-entry in TigerBeetle (non-blocking, best-effort)
       grpcLedgerTransfer({
         idempotencyKey,
-        sourceAccountId: `user-${ctx.user.id}-${input.fromCurrency}`,
+        sourceAccountId: `user-${ctx.user!.id}-${input.fromCurrency}`,
         destinationAccountId: `recipient-${input.recipientAccount ?? ref}-${input.toCurrency}`,
         amount: input.amount.toFixed(2),
         currency: input.fromCurrency,
         reference: ref,
         description: input.description ?? `Transfer to ${input.recipientName}`,
       }).catch(err => logger.warn({ errMsg: err?.message }, "[gRPC] Ledger transfer failed (non-blocking):"));
-      sendNotification({ userId: ctx.user.id, title: "Transfer Sent", message: `Your transfer of ${input.amount.toLocaleString()} ${input.fromCurrency} to ${input.recipientName} has been initiated.`, type: "transfer" }).catch(() => {});
+      sendNotification({ userId: ctx.user!.id, title: "Transfer Sent", message: `Your transfer of ${input.amount.toLocaleString()} ${input.fromCurrency} to ${input.recipientName} has been initiated.`, type: "transfer" }).catch(() => {});
       // Send transfer confirmation email to sender (non-blocking)
-      if (ctx.user.email) {
-        sendEmail({ to: ctx.user.email, ...buildTransferConfirmationEmail({ userName: ctx.user.name ?? "Valued Customer", recipientName: input.recipientName, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, reference: ref, estimatedTime: "1-3 business days" }) }).catch(() => {});
+      if (ctx.user!.email) {
+        sendEmail({ to: ctx.user!.email, ...buildTransferConfirmationEmail({ userName: ctx.user!.name ?? "Valued Customer", recipientName: input.recipientName, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, reference: ref, estimatedTime: "1-3 business days" }) }).catch(() => {});
       }
       // Send recipient notification email if recipientEmail is provided (non-blocking)
       if (input.recipientEmail) {
         sendEmail({
           to: input.recipientEmail,
-          subject: `You have received ${Math.round(toAmount * 100) / 100} ${input.toCurrency} from ${ctx.user.name ?? "a RemitFlow user"}`,
+          subject: `You have received ${Math.round(toAmount * 100) / 100} ${input.toCurrency} from ${ctx.user!.name ?? "a RemitFlow user"}`,
           html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px">
             <h2 style="color:#10b981">Money Received!</h2>
             <p>Hi ${input.recipientName},</p>
-            <p><strong>${ctx.user.name ?? "Someone"}</strong> has sent you money via RemitFlow.</p>
+            <p><strong>${ctx.user!.name ?? "Someone"}</strong> has sent you money via RemitFlow.</p>
             <table style="width:100%;border-collapse:collapse;margin:16px 0">
               <tr><td style="padding:8px;color:#6b7280">Amount Sent</td><td style="padding:8px;font-weight:600">${input.amount} ${input.fromCurrency}</td></tr>
               <tr style="background:#f9fafb"><td style="padding:8px;color:#6b7280">Amount Received</td><td style="padding:8px;font-weight:600;color:#10b981">${Math.round(toAmount * 100) / 100} ${input.toCurrency}</td></tr>
@@ -1219,7 +1219,7 @@ export const appRouter = router({
             ${input.description ? `<p style="color:#6b7280;font-style:italic">Message: ${input.description}</p>` : ""}
             <p style="color:#6b7280;font-size:0.875rem">Reference number: <strong>${ref}</strong>. Please keep this for your records.</p>
           </div>`,
-          text: `Hi ${input.recipientName}, you have received ${Math.round(toAmount * 100) / 100} ${input.toCurrency} from ${ctx.user.name ?? "a RemitFlow user"}. Reference: ${ref}`,
+          text: `Hi ${input.recipientName}, you have received ${Math.round(toAmount * 100) / 100} ${input.toCurrency} from ${ctx.user!.name ?? "a RemitFlow user"}. Reference: ${ref}`,
         }).catch(() => {});
       }
       // AML auto-case creation on direct DB path (non-blocking)
@@ -1227,7 +1227,7 @@ export const appRouter = router({
         const sev = amountInUsd >= 10_000 ? "critical" : amountInUsd >= 5_000 ? "high" : "medium";
         const caseTypeMap: Record<string, string> = { CTR_REQUIRED: "ctr", SAR_REVIEW: "sar", EDD_REQUIRED: "edd", TRAVEL_RULE: "travel_rule" };
         getDb().then(db => db?.insert(complianceCases).values({
-          userId: ctx.user.id, caseType: (caseTypeMap[topFlag] ?? "aml_review") as any,
+          userId: ctx.user!.id, caseType: (caseTypeMap[topFlag] ?? "aml_review") as any,
           severity: sev as any, status: "open" as any,
           title: `Auto-flagged: ${topFlag} — ${input.amount} ${input.fromCurrency} to ${input.recipientName}`,
           description: `Transfer of ${input.amount} ${input.fromCurrency} (≈$${amountInUsd.toFixed(0)} USD) triggered AML flags: ${topFlag}`,
@@ -1238,7 +1238,7 @@ export const appRouter = router({
       // ─── Kafka: emit payment.initiated and transaction.created events (non-blocking) ─
       publishPaymentInitiated({
         paymentId: ref,
-        userId: ctx.user.id,
+        userId: ctx.user!.id,
         fromCurrency: input.fromCurrency,
         toCurrency: input.toCurrency,
         amount: input.amount,
@@ -1249,7 +1249,7 @@ export const appRouter = router({
       publishTransactionEvent({
         eventType: "created",
         transactionId: ref,
-        userId: ctx.user.id,
+        userId: ctx.user!.id,
         amount: input.amount,
         currency: input.fromCurrency,
         toCurrency: input.toCurrency,
@@ -1259,8 +1259,8 @@ export const appRouter = router({
         timestamp: new Date().toISOString(),
       }).catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] publishTransactionEvent failed (non-blocking):"));
       // ─── Transfer completed email (non-blocking) ──────────────────────────────
-      sendEmail({ to: ctx.user.email, ...buildTransferCompletedEmail({
-        userName: ctx.user.name ?? "Valued Customer",
+      sendEmail({ to: ctx.user!.email ?? "", ...buildTransferCompletedEmail({
+        userName: ctx.user!.name ?? "Valued Customer",
         recipientName: input.recipientName,
         amount: input.amount,
         fromCurrency: input.fromCurrency,
@@ -1324,7 +1324,7 @@ export const appRouter = router({
     }),
     alerts: protectedProcedure.query(async ({ ctx }) => {
       const alerts = await getFxAlertsByUserId(ctx.user.id);
-      return alerts.map(a => ({ ...a, targetRate: Number(a.targetRate) }));
+      return alerts.map((a: any) => ({ ...a, targetRate: Number(a.targetRate) }));
     }),
     createAlert: protectedProcedure.input(z.object({ fromCurrency: z.string().max(8), toCurrency: z.string().max(8), targetRate: z.number().positive().max(1_000_000), direction: z.enum(["above", "below"]) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
@@ -1348,7 +1348,7 @@ export const appRouter = router({
     update: beneficiaryUpdateProcedure.input(z.object({ id: z.number(), name: z.string().min(1).max(128).trim().optional(), accountNumber: z.string().max(64).optional(), bankName: z.string().max(128).optional(), phone: z.string().max(32).optional(), email: z.string().email().max(320).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const { id, ...updates } = input;
-      await db.update(beneficiaries).set(updates).where(and(eq(beneficiaries.id, id), eq(beneficiaries.userId, ctx.user.id)));
+      await db.update(beneficiaries).set(updates).where(and(eq(beneficiaries.id, id), eq(beneficiaries.userId, ctx.user!.id)));
       return { success: true };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
@@ -1367,7 +1367,7 @@ export const appRouter = router({
       const rows = await getBeneficiariesByUserId(ctx.user.id);
       // Sort: favorites first, then by id desc (most recently added)
       return rows
-        .sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0))
+        .sort((a: any, b: any) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0))
         .slice(0, 5);
     }),
   }),
@@ -1375,7 +1375,7 @@ export const appRouter = router({
   cards: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const cs = await getCardsByUserId(ctx.user.id);
-      return cs.map(c => ({ ...c, spendLimit: Number(c.spendLimit ?? 0) }));
+      return cs.map((c: any) => ({ ...c, spendLimit: Number(c.spendLimit ?? 0) }));
     }),
     create: protectedProcedure.input(z.object({ type: z.enum(["virtual", "physical"]), brand: z.enum(["visa", "mastercard", "verve"]), currency: z.string().default("USD") })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
@@ -1453,7 +1453,7 @@ export const appRouter = router({
     }),
     list: protectedProcedure.query(async ({ ctx }) => {
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
-      return goals.map(g => ({ ...g, targetAmount: Number(g.targetAmount), currentAmount: Number(g.currentAmount), autoSaveAmount: g.autoSaveAmount ? Number(g.autoSaveAmount) : undefined }));
+      return goals.map((g: any) => ({ ...g, targetAmount: Number(g.targetAmount), currentAmount: Number(g.currentAmount), autoSaveAmount: g.autoSaveAmount ? Number(g.autoSaveAmount) : undefined }));
     }),
     create: protectedProcedure.input(z.object({ name: z.string(), emoji: z.string().default("🎯"), targetAmount: z.number().positive(), currency: z.string().default("NGN"), targetDate: z.string().optional(), autoSave: z.boolean().default(false), autoSaveAmount: z.number().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
@@ -1491,7 +1491,7 @@ export const appRouter = router({
   savingsGoals: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
-      return goals.map(g => ({ ...g, targetAmount: Number(g.targetAmount), currentAmount: Number(g.currentAmount), autoSaveAmount: g.autoSaveAmount ? Number(g.autoSaveAmount) : undefined }));
+      return goals.map((g: any) => ({ ...g, targetAmount: Number(g.targetAmount), currentAmount: Number(g.currentAmount), autoSaveAmount: g.autoSaveAmount ? Number(g.autoSaveAmount) : undefined }));
     }),
     create: protectedProcedure.input(z.object({ name: z.string(), emoji: z.string().default("🎯"), targetAmount: z.number().positive(), currency: z.string().default("NGN"), targetDate: z.string().optional(), autoSave: z.boolean().default(false), autoSaveAmount: z.number().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
@@ -1593,7 +1593,7 @@ export const appRouter = router({
         { id: "tier3", name: "Full KYC", limit: 10000000, requirements: ["Source of Funds", "Enhanced Due Diligence"], status: "available" },
       ];
       const currentTier = dbUser?.kycTier ?? "tier0";
-      return { currentTier, tiers, documents: docs, pendingCount: docs.filter(d => d.status === "pending").length, approvedCount: docs.filter(d => d.status === "approved").length };
+      return { currentTier, tiers, documents: docs, pendingCount: docs.filter((d: any) => d.status === "pending").length, approvedCount: docs.filter((d: any) => d.status === "approved").length };
     }),
     uploadDocument: strictRateLimitedProcedure.input(z.object({ type: z.string().min(1).max(50), fileBase64: z.string().max(10_000_000), fileName: z.string().min(1).max(255).trim(), mimeType: z.string().min(1).max(100) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
@@ -1687,23 +1687,23 @@ export const appRouter = router({
           getDb().then(async db => {
             if (!db) return;
             try {
-              const { kycLivenessAudit } = await import("../../drizzle/schema.js");
-              const [userRow] = await db.select({ country: users.country }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
-              const corridorCode = (userRow?.country ?? "").slice(0, 3).toUpperCase();
+              const { kycLivenessAudit } = await import("../drizzle/schema.js");
+              const [userRow] = await db.select({ address: users.address }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
+              const corridorCode = (userRow?.address ?? "").slice(0, 3).toUpperCase();
               const [inserted] = await db.insert(kycLivenessAudit).values({
                 userId: ctx.user.id,
                 corridorCode,
                 passiveScore: livenessResult?.livenessScore != null ? String(livenessResult.livenessScore) : null,
                 passivePassed: livenessResult?.passed ?? null,
                 passiveSpoofingType: (livenessResult as any)?.spoofingType ?? null,
-                deepfakeScore: String(deepfakeResult.confidence),
-                deepfakeMethod: deepfakeResult.method ?? null,
-                deepfakeIndicators: deepfakeResult.indicators ?? [],
+                deepfakeScore: String(deepfakeResult!.confidence),
+                deepfakeMethod: deepfakeResult!.method ?? null,
+                deepfakeIndicators: deepfakeResult!.indicators ?? [],
                 deepfakePassed: false,
                 overallLive: false,
                 source: "trpc_extract",
               }).returning({ id: kycLivenessAudit.id, createdAt: kycLivenessAudit.createdAt });
-              const { publishLivenessResultEvent } = await import("../middleware/kafka.js");
+              const { publishLivenessResultEvent } = await import("./middleware/kafka.js");
               publishLivenessResultEvent({
                 auditId: inserted?.id ?? 0,
                 userId: ctx.user.id,
@@ -1714,12 +1714,12 @@ export const appRouter = router({
                 activePassed: null,
                 blinkCount: null,
                 headMovementDeg: null,
-                deepfakeScore: deepfakeResult.confidence,
+                deepfakeScore: deepfakeResult!.confidence,
                 deepfakePassed: false,
-                deepfakeMethod: deepfakeResult.method ?? null,
+                deepfakeMethod: deepfakeResult!.method ?? null,
                 source: "trpc_extract",
                 createdAt: inserted?.createdAt?.toISOString() ?? new Date().toISOString(),
-              }).catch(e => logger.warn({ err: (e as Error).message }, "[KYC] Kafka publish failed (blocked)"));
+              }).catch((e: any) => logger.warn({ err: (e as Error).message }, "[KYC] Kafka publish failed (blocked)"));
             } catch (e) {
               logger.warn({ err: (e as Error).message }, "[KYC] Failed to persist blocked deepfake audit row");
             }
@@ -1734,10 +1734,10 @@ export const appRouter = router({
         getDb().then(async db => {
           if (!db) return;
           try {
-            const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+            const { kycLivenessAudit } = await import("../drizzle/schema.js");
             // Fetch user's country for corridor code
-            const [userRow] = await db.select({ country: users.country }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
-            const corridorCode = (userRow?.country ?? "").slice(0, 3).toUpperCase();
+            const [userRow] = await db.select({ address: users.address }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
+            const corridorCode = (userRow?.address ?? "").slice(0, 3).toUpperCase();
             const passivePassed = livenessResult?.passed ?? null;
             const deepfakePassed = deepfakeResult && !deepfakeResult.serviceUnavailable
               ? !(deepfakeResult.is_deepfake && deepfakeResult.confidence >= 0.55)
@@ -1757,7 +1757,7 @@ export const appRouter = router({
               source: "trpc_extract",
             }).returning({ id: kycLivenessAudit.id, createdAt: kycLivenessAudit.createdAt });
             // Publish Kafka event for Go aggregator
-            const { publishLivenessResultEvent } = await import("../middleware/kafka.js");
+            const { publishLivenessResultEvent } = await import("./middleware/kafka.js");
             publishLivenessResultEvent({
               auditId: inserted?.id ?? 0,
               userId: ctx.user.id,
@@ -1773,7 +1773,7 @@ export const appRouter = router({
               deepfakeMethod: deepfakeResult?.method ?? null,
               source: "trpc_extract",
               createdAt: inserted?.createdAt?.toISOString() ?? new Date().toISOString(),
-            }).catch(e => logger.warn({ err: (e as Error).message }, "[KYC] Kafka publish failed"));
+            }).catch((e: any) => logger.warn({ err: (e as Error).message }, "[KYC] Kafka publish failed"));
 
             // ── Rolling deepfake rate compliance alert (last 100 rows per corridor) ──
             if (corridorCode) {
@@ -1787,10 +1787,10 @@ export const appRouter = router({
                   .orderBy(desc(kycLivenessAudit.createdAt))
                   .limit(WINDOW_SIZE);
                 if (recent.length >= 10) {
-                  const deepfakeCount = recent.filter(r => r.deepfakeScore != null && Number(r.deepfakeScore) >= 0.55).length;
+                  const deepfakeCount = recent.filter((r: any) => r.deepfakeScore != null && Number(r.deepfakeScore) >= 0.55).length;
                   const deepfakeRate = deepfakeCount / recent.length;
                   if (deepfakeRate >= DEEPFAKE_ALERT_THRESHOLD) {
-                    const { publishComplianceAlertEvent } = await import("../middleware/kafka.js");
+                    const { publishComplianceAlertEvent } = await import("./middleware/kafka.js");
                     const { notifyOwner } = await import("./_core/notification.js");
                     const alertMsg = `Deepfake rate alert: corridor ${corridorCode} has ${(deepfakeRate * 100).toFixed(1)}% deepfake rate over last ${recent.length} submissions (threshold: ${(DEEPFAKE_ALERT_THRESHOLD * 100).toFixed(0)}%)`;
                     logger.warn({ corridorCode, deepfakeRate, deepfakeCount, windowSize: recent.length }, "[KYC] Deepfake rate threshold exceeded");
@@ -1803,7 +1803,7 @@ export const appRouter = router({
                       windowSize: recent.length,
                       message: alertMsg,
                       severity: deepfakeRate >= 0.15 ? "critical" : deepfakeRate >= 0.10 ? "high" : "medium",
-                    }).catch(e => logger.warn({ err: (e as Error).message }, "[KYC] Compliance alert Kafka publish failed"));
+                    }).catch((e: any) => logger.warn({ err: (e as Error).message }, "[KYC] Compliance alert Kafka publish failed"));
                     notifyOwner({ title: `⚠️ Deepfake Alert: ${corridorCode}`, content: alertMsg }).catch(e => logger.warn({ err: (e as Error).message }, "[KYC] notifyOwner failed"));
                   }
                 }
@@ -1880,7 +1880,7 @@ export const appRouter = router({
     logs: protectedProcedure.input(z.object({ limit: z.number().default(50), offset: z.number().default(0), action: z.string().optional() }).optional()).query(async ({ ctx, input }) => { const logs = await getAuditLogsByUserId(ctx.user.id, input?.limit ?? 50); return logs; }),
     list: protectedProcedure.input(z.object({ limit: z.number().default(50), offset: z.number().default(0), action: z.string().optional() }).optional()).query(async ({ ctx, input }) => {
       const logs = await getAuditLogsByUserId(ctx.user.id, input?.limit ?? 50);
-      if (input?.action && input.action !== "all") return logs.filter(l => l.action === input.action);
+      if (input?.action && input.action !== "all") return logs.filter((l: any) => l.action === input.action);
       return logs;
     }),
     export: protectedProcedure.query(async ({ ctx }) => getAuditLogsByUserId(ctx.user.id, 1000)),
@@ -1918,7 +1918,7 @@ export const appRouter = router({
         .groupBy(referrals.referrerId, users.name)
         .orderBy(desc(count(referrals.id)))
         .limit(10);
-      const leaderboard = rows.map((r, idx) => ({
+      const leaderboard = rows.map((r: any, idx: any) => ({
         rank: idx + 1,
         name: r.name ?? `User #${r.referrerId}`,
         referrals: Number(r.refCount),
@@ -1931,7 +1931,7 @@ export const appRouter = router({
         .where(eq(referrals.referrerId, ctx.user.id));
       const myCount = Number(myRow?.refCount ?? 0);
       const myRank = myCount > 0
-        ? leaderboard.findIndex(r => r.referrals <= myCount) + 1 || leaderboard.length + 1
+        ? leaderboard.findIndex((r: any) => r.referrals <= myCount) + 1 || leaderboard.length + 1
         : null;
       return { leaderboard, myRank };
     }),
@@ -1996,7 +1996,7 @@ export const appRouter = router({
   recurring: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const rp = await getRecurringPaymentsByUserId(ctx.user.id);
-      return rp.map(r => ({ ...r, amount: Number(r.amount) }));
+      return rp.map((r: any) => ({ ...r, amount: Number(r.amount) }));
     }),
     create: protectedProcedure.input(z.object({
       name: z.string().min(1).max(100).trim(), amount: z.number().positive().max(1_000_000),
@@ -2059,7 +2059,7 @@ export const appRouter = router({
       const runs = await db.select().from(scheduledTransferRuns)
         .where(and(eq(scheduledTransferRuns.scheduleId, input.scheduleId), eq(scheduledTransferRuns.userId, ctx.user.id)))
         .orderBy(desc(scheduledTransferRuns.executedAt)).limit(input.limit);
-      return runs.map(r => ({ ...r, amount: Number(r.amount), fxRate: r.fxRate ? Number(r.fxRate) : null }));
+      return runs.map((r: any) => ({ ...r, amount: Number(r.amount), fxRate: r.fxRate ? Number(r.fxRate) : null }));
     }),
     runNow: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
@@ -2080,7 +2080,7 @@ export const appRouter = router({
   batch: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const bp = await getBatchPaymentsByUserId(ctx.user.id);
-      return bp.map(b => ({ ...b, totalAmount: Number(b.totalAmount) }));
+      return bp.map((b: any) => ({ ...b, totalAmount: Number(b.totalAmount) }));
     }),
     create: protectedProcedure.input(z.object({ name: z.string(), currency: z.string().default("NGN"), recipients: z.array(z.object({ name: z.string(), account: z.string(), amount: z.number() })) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
@@ -2293,7 +2293,7 @@ export const appRouter = router({
       let history = input.history ?? [];
       if (db && sessionId && history.length === 0) {
         const msgs = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, sessionId)).orderBy(chatMessages.createdAt).limit(20);
-        history = msgs.slice(0, -1).map(m => ({ role: m.role, content: m.content }));
+        history = msgs.slice(0, -1).map((m: any) => ({ role: m.role, content: m.content }));
       }
       let reply = "Thank you for contacting support. Our team will respond within 24 hours.";
       try {
@@ -2329,7 +2329,7 @@ export const appRouter = router({
     }),
     insights: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 50 });
-      const totalSent = txns.filter(t => t.type === "send").reduce((s, t) => s + Number(t.fromAmount), 0);
+      const totalSent = txns.filter((t: any) => t.type === "send").reduce((s: any, t: any) => s + Number(t.fromAmount), 0);
       return [
         { type: "spending", title: "Transfer Summary", body: `You've sent ${totalSent.toLocaleString()} this period.`, priority: "medium" },
         { type: "savings", title: "Savings Opportunity", body: "Lock FX rates during peak hours to save up to ₦12,000/month.", priority: "high" },
@@ -2492,7 +2492,7 @@ export const appRouter = router({
     history: protectedProcedure.input(z.object({ days: z.number().default(30) })).query(async ({ ctx, input }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 200 });
       const cutoff = new Date(Date.now() - input.days * 86400000);
-      return txns.filter(t => new Date(t.createdAt) > cutoff).map(t => ({
+      return txns.filter((t: any) => new Date(t.createdAt) > cutoff).map((t: any) => ({
         date: t.createdAt,
         status: t.status,
         // Use completedAt - createdAt if available, else use a deterministic hash of the txn id
@@ -2507,7 +2507,7 @@ export const appRouter = router({
   accountHealth: router({
     score: protectedProcedure.query(async ({ ctx }) => {
       const [docs, txns, walletList, dbUser] = await Promise.all([getKycDocsByUserId(ctx.user.id), getTransactionsByUserId(ctx.user.id, { limit: 100 }), getWalletsByUserId(ctx.user.id), getUserByOpenId(ctx.user.openId)]);
-      const kycScore = docs.filter(d => d.status === "approved").length >= 2 ? 30 : docs.length > 0 ? 15 : 0;
+      const kycScore = docs.filter((d: any) => d.status === "approved").length >= 2 ? 30 : docs.length > 0 ? 15 : 0;
       const activityScore = Math.min(txns.length * 2, 25);
       const walletScore = Math.min(walletList.length * 5, 20);
       const profileScore = dbUser?.phone ? 15 : 5;
@@ -2520,7 +2520,7 @@ export const appRouter = router({
   mojaloop: router({
     transfers: protectedProcedure.input(z.object({ limit: z.number().default(20) }).optional()).query(async ({ ctx, input }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: input?.limit ?? 20 });
-      return txns.filter(t => t.mojaloopTransferId).map(t => ({
+      return txns.filter((t: any) => t.mojaloopTransferId).map((t: any) => ({
         transferId: t.mojaloopTransferId ?? `TRF${t.id}`,
         status: t.status ?? 'COMMITTED',
         amount: Number(t.fromAmount),
@@ -2630,7 +2630,7 @@ export const appRouter = router({
     balance: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const rates = await getLiveRates("USD");
-      return ws.map(w => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
+      return ws.map((w: any) => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
     }),
     balances: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
@@ -2640,13 +2640,13 @@ export const appRouter = router({
         return [{ ...newWallet, symbol: 'eNGN', name: 'Digital Naira', balance: Number(newWallet.balance) }];
       }
       const nameMap: Record<string, string> = { eNGN: 'Digital Naira', eGHS: 'Digital Cedi', eKES: 'Digital Shilling', eZAR: 'Digital Rand' };
-      return rows.map(r => ({ ...r, symbol: r.currency, name: nameMap[r.currency] ?? `Digital ${r.currency}`, balance: Number(r.balance) }));
+      return rows.map((r: any) => ({ ...r, symbol: r.currency, name: nameMap[r.currency] ?? `Digital ${r.currency}`, balance: Number(r.balance) }));
     }),
     transactions: protectedProcedure.input(z.object({ limit: z.number().default(20) }).optional()).query(async ({ ctx, input }) => {
       const db = await getDb();
       const limit = input?.limit ?? 20;
       const rows = await db.select().from(africbdcTransfers).where(eq(africbdcTransfers.userId, ctx.user.id)).orderBy(desc(africbdcTransfers.createdAt)).limit(limit);
-      return rows.map(r => ({ id: r.id, type: r.cbdcType === 'receive' ? 'receive' : 'send', amount: Number(r.sendAmount), currency: r.currency, description: r.purpose ?? `CBDC ${r.cbdcType} transfer`, status: r.status, createdAt: r.createdAt, reference: r.transferId, cbdcRef: r.cbdcRef }));
+      return rows.map((r: any) => ({ id: r.id, type: r.cbdcType === 'receive' ? 'receive' : 'send', amount: Number(r.sendAmount), currency: r.currency, description: r.purpose ?? `CBDC ${r.cbdcType} transfer`, status: r.status, createdAt: r.createdAt, reference: r.transferId, cbdcRef: r.cbdcRef }));
     }),
     transfer: protectedProcedure.input(z.object({ to: z.string().min(1).max(128).trim(), amount: z.number().positive().max(10_000_000), currency: z.string().min(2).max(10), description: z.string().max(500).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -2800,9 +2800,9 @@ export const appRouter = router({
     wallets: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const cbdcCurrencies = ["eNGN", "eGHS", "eKES", "eZAR"];
-      const cbdcWalletRows = ws.filter(w => cbdcCurrencies.includes(w.currency));
+      const cbdcWalletRows = ws.filter((w: any) => cbdcCurrencies.includes(w.currency));
       if (cbdcWalletRows.length === 0) return [{ currency: "eNGN", balance: 0, type: "retail", status: "active", issuer: "Central Bank of Nigeria", description: "Digital Naira (eNaira)" }];
-      return cbdcWalletRows.map(w => ({ ...formatWallet(w), type: "retail", issuer: "Central Bank", description: `Digital ${w.currency}` }));
+      return cbdcWalletRows.map((w: any) => ({ ...formatWallet(w), type: "retail", issuer: "Central Bank", description: `Digital ${w.currency}` }));
     }),
     issue: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
@@ -2817,7 +2817,7 @@ export const appRouter = router({
     eligibility: protectedProcedure.query(async ({ ctx }) => { const dbUser = await getUserByOpenId(ctx.user.openId); const tier = dbUser?.kycTier ?? 'tier0'; const limit = tier === 'tier3' ? 5000000 : tier === 'tier2' ? 2000000 : tier === 'tier1' ? 500000 : 0; return { eligible: tier !== 'tier0', limit, creditLimit: limit, currency: 'NGN', score: tier === 'tier3' ? 850 : tier === 'tier2' ? 720 : tier === 'tier1' ? 600 : 0, reason: tier === 'tier0' ? 'Complete KYC to access BNPL' : 'Eligible for BNPL' }; }),
     plans: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 5 });
-      return txns.filter(t => t.type === "send").slice(0, 3).map(t => ({ id: t.id, merchant: t.description ?? "Purchase", description: t.description ?? "Purchase", totalAmount: Number(t.fromAmount), paidAmount: Number(t.fromAmount) * 0.25, installments: 4, nextDue: new Date(Date.now() + 86400000 * 30), status: "active", currency: t.fromCurrency }));
+      return txns.filter((t: any) => t.type === "send").slice(0, 3).map((t: any) => ({ id: t.id, merchant: t.description ?? "Purchase", description: t.description ?? "Purchase", totalAmount: Number(t.fromAmount), paidAmount: Number(t.fromAmount) * 0.25, installments: 4, nextDue: new Date(Date.now() + 86400000 * 30), status: "active", currency: t.fromCurrency }));
     }),
     applyPlan: protectedProcedure.input(z.object({ amount: z.number().positive(), currency: z.string().default("NGN"), description: z.string(), installments: z.number().min(2).max(12).default(4) })).mutation(async () => ({
       success: true, planId: `BNPL${Date.now()}`, approved: true, creditLimit: 500000, interestRate: 2.5, firstPaymentDate: new Date(Date.now() + 86400000 * 30),
@@ -2828,16 +2828,16 @@ export const appRouter = router({
     balance: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const rates = await getLiveRates("USD");
-      return ws.map(w => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
+      return ws.map((w: any) => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
     }),
     balances: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const stables = ["USDT", "USDC", "BUSD", "DAI", "NGNT"];
-      const filtered = ws.filter(w => stables.includes(w.currency));
+      const filtered = ws.filter((w: any) => stables.includes(w.currency));
       if (filtered.length === 0) {
         return [{ symbol: "USDT", currency: "USDT", balance: 0, protocol: "Multi-chain", network: "Ethereum/BSC/Polygon" }];
       }
-      return filtered.map(w => ({ ...formatWallet(w), symbol: w.currency, protocol: w.currency === "NGNT" ? "ERC-20" : "Multi-chain", network: "Ethereum/BSC/Polygon" }));
+      return filtered.map((w: any) => ({ ...formatWallet(w), symbol: w.currency, protocol: w.currency === "NGNT" ? "ERC-20" : "Multi-chain", network: "Ethereum/BSC/Polygon" }));
     }),
     swap: protectedProcedure.input(z.object({ from: z.string().max(16), to: z.string().max(16), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -2966,12 +2966,12 @@ export const appRouter = router({
     fcaDashboard: protectedProcedure.query(async ({ ctx }) => { const docs = await getKycDocsByUserId(ctx.user.id); return { status: 'compliant', complianceScore: 94, registrationNumber: 'FCA-REG-123456', lastAudit: new Date(Date.now() - 86400000 * 30), nextAudit: new Date(Date.now() + 86400000 * 60), findings: [], riskScore: 'low', amlChecks: { passed: 1247, failed: 3, pending: 12 }, sarFiled: 2, pep: 0, sanctions: 0, kycCompliance: docs.filter((d: any) => d.status === 'approved').length > 0 }; }),
     travelRule: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 20 });
-      const highValue = txns.filter(t => Number(t.fromAmount) >= 1000);
-      return highValue.map(t => ({ id: t.id, reference: `TR${t.id}`, amount: Number(t.fromAmount), currency: t.fromCurrency, status: "compliant", originatorName: "User", beneficiaryName: t.description ?? "Beneficiary", originatorVASP: "RemitFlow", beneficiaryVASP: "Destination Bank", createdAt: t.createdAt }));
+      const highValue = txns.filter((t: any) => Number(t.fromAmount) >= 1000);
+      return highValue.map((t: any) => ({ id: t.id, reference: `TR${t.id}`, amount: Number(t.fromAmount), currency: t.fromCurrency, status: "compliant", originatorName: "User", beneficiaryName: t.description ?? "Beneficiary", originatorVASP: "RemitFlow", beneficiaryVASP: "Destination Bank", createdAt: t.createdAt }));
     }),
     fca: protectedProcedure.query(async ({ ctx }) => {
       const docs = await getKycDocsByUserId(ctx.user.id);
-      return { registrationNumber: "FCA-REG-123456", status: "active", lastAudit: new Date(Date.now() - 86400000 * 90), nextAudit: new Date(Date.now() + 86400000 * 275), kycCompliance: docs.filter(d => d.status === "approved").length > 0, amlStatus: "clear", psdCompliance: true };
+      return { registrationNumber: "FCA-REG-123456", status: "active", lastAudit: new Date(Date.now() - 86400000 * 90), nextAudit: new Date(Date.now() + 86400000 * 275), kycCompliance: docs.filter((d: any) => d.status === "approved").length > 0, amlStatus: "clear", psdCompliance: true };
     }),
     gdpr: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb(); if (!db) return { consents: [], dataRequests: [] };
@@ -3022,17 +3022,17 @@ export const appRouter = router({
       const days = (input?.period ?? "30d") === "7d" ? 7 : (input?.period ?? "30d") === "90d" ? 90 : 30;
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 500 });
       const cutoff = new Date(Date.now() - days * 86400000);
-      const recent = txns.filter(t => new Date(t.createdAt) > cutoff);
-      const totalVolume = recent.reduce((s, t) => s + Number(t.fromAmount), 0);
-      const byType = recent.reduce((acc: Record<string, number>, t) => { acc[t.type] = (acc[t.type] ?? 0) + Number(t.fromAmount); return acc; }, {});
-      const byCurrency = recent.reduce((acc: Record<string, number>, t) => { acc[t.fromCurrency] = (acc[t.fromCurrency] ?? 0) + 1; return acc; }, {});
-      const totalSent = recent.filter(t => t.type === "send").reduce((s, t) => s + Number(t.fromAmount), 0); const totalReceived = recent.filter(t => t.type === "receive").reduce((s, t) => s + Number(t.fromAmount), 0); const successRate = recent.filter(t => t.status === "completed").length / Math.max(recent.length, 1) * 100; return { totalVolume, totalSent, totalReceived, transactionCount: recent.length, byType, byCurrency, avgTransactionSize: recent.length > 0 ? totalVolume / recent.length : 0, successRate };
+      const recent = txns.filter((t: any) => new Date(t.createdAt) > cutoff);
+      const totalVolume = recent.reduce((s: any, t: any) => s + Number(t.fromAmount), 0);
+      const byType = recent.reduce((acc: Record<string, number>, t: any) => { acc[t.type] = (acc[t.type] ?? 0) + Number(t.fromAmount); return acc; }, {});
+      const byCurrency = recent.reduce((acc: Record<string, number>, t: any) => { acc[t.fromCurrency] = (acc[t.fromCurrency] ?? 0) + 1; return acc; }, {});
+      const totalSent = recent.filter((t: any) => t.type === "send").reduce((s: any, t: any) => s + Number(t.fromAmount), 0); const totalReceived = recent.filter((t: any) => t.type === "receive").reduce((s: any, t: any) => s + Number(t.fromAmount), 0); const successRate = recent.filter((t: any) => t.status === "completed").length / Math.max(recent.length, 1) * 100; return { totalVolume, totalSent, totalReceived, transactionCount: recent.length, byType, byCurrency, avgTransactionSize: recent.length > 0 ? totalVolume / recent.length : 0, successRate };
     }),
     chartData: protectedProcedure.input(z.object({ period: z.string().default("30d") })).query(async ({ ctx, input }) => {
       const days = (input?.period ?? "30d") === "7d" ? 7 : (input?.period ?? "30d") === "90d" ? 90 : 30;
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 500 });
       const cutoff = new Date(Date.now() - days * 86400000);
-      const recent = txns.filter(t => new Date(t.createdAt) > cutoff);
+      const recent = txns.filter((t: any) => new Date(t.createdAt) > cutoff);
       const grouped: Record<string, number> = {};
       for (const t of recent) {
         const d = new Date(t.createdAt);
@@ -3044,7 +3044,7 @@ export const appRouter = router({
     spendByCorridorMonthly: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 1000 });
       const cutoff = new Date(Date.now() - 6 * 30 * 86400000);
-      const recent = txns.filter(t => t.type === 'send' && new Date(t.createdAt) > cutoff);
+      const recent = txns.filter((t: any) => t.type === 'send' && new Date(t.createdAt) > cutoff);
       const months: string[] = [];
       for (let i = 5; i >= 0; i--) {
         const d = new Date(); d.setMonth(d.getMonth() - i);
@@ -3055,13 +3055,13 @@ export const appRouter = router({
         const entry: Record<string, string | number> = { month };
         for (const c of corridors) {
           entry[c] = recent
-            .filter(t => {
+            .filter((t: any) => {
               const d = new Date(t.createdAt);
               const m = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
               const dest = t.toCurrency ?? 'Other';
               return m === month && (c === 'Other' ? !corridors.slice(0, -1).includes(dest) : dest === c);
             })
-            .reduce((s, t) => s + Number(t.fromAmount), 0);
+            .reduce((s: any, t: any) => s + Number(t.fromAmount), 0);
         }
         return entry;
       });
@@ -3070,24 +3070,24 @@ export const appRouter = router({
     transferTrend: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 1000 });
       const cutoff = new Date(Date.now() - 12 * 30 * 86400000);
-      const recent = txns.filter(t => t.type === 'send' && new Date(t.createdAt) > cutoff);
+      const recent = txns.filter((t: any) => t.type === 'send' && new Date(t.createdAt) > cutoff);
       const months: string[] = [];
       for (let i = 11; i >= 0; i--) {
         const d = new Date(); d.setMonth(d.getMonth() - i);
         months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
       }
       return months.map(month => {
-        const monthTxns = recent.filter(t => {
+        const monthTxns = recent.filter((t: any) => {
           const d = new Date(t.createdAt);
           return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` === month;
         });
-        const total = monthTxns.reduce((s, t) => s + Number(t.fromAmount), 0);
+        const total = monthTxns.reduce((s: any, t: any) => s + Number(t.fromAmount), 0);
         return { month, avgSize: monthTxns.length > 0 ? Math.round(total / monthTxns.length) : 0, count: monthTxns.length, total: Math.round(total) };
       });
     }),
     topRecipients: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 1000 });
-      const sends = txns.filter(t => t.type === 'send' && t.recipientName);
+      const sends = txns.filter((t: any) => t.type === 'send' && t.recipientName);
       const grouped: Record<string, { name: string; count: number; total: number; currency: string; lastSent: Date }> = {};
       for (const t of sends) {
         const key = t.recipientName ?? 'Unknown';
@@ -3162,7 +3162,7 @@ export const appRouter = router({
     terminals: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       const rows = await db.select().from(posTerminals).where(eq(posTerminals.userId, ctx.user.id)).orderBy(desc(posTerminals.createdAt)).limit(50).catch(() => []);
-      if (rows.length > 0) return rows.map(r => ({ ...r, merchant: r.merchantName, dailyVolume: Number(r.totalVolume ?? 0), transactionCount: r.totalTransactions ?? 0, lastTransaction: r.lastSeen ?? r.updatedAt }));
+      if (rows.length > 0) return rows.map((r: any) => ({ ...r, merchant: r.merchantName, dailyVolume: Number(r.totalVolume ?? 0), transactionCount: r.totalTransactions ?? 0, lastTransaction: r.lastSeen ?? r.updatedAt }));
       const defaults = [
         { userId: ctx.user.id, terminalId: "POS001", merchantName: "RemitFlow Agent Lagos", serialNumber: "POS-001-NG", location: "Lagos Main Branch", status: "active" },
         { userId: ctx.user.id, terminalId: "POS002", merchantName: "RemitFlow Agent Abuja", serialNumber: "POS-002-NG", location: "Abuja Office", status: "active" },
@@ -3198,7 +3198,7 @@ export const appRouter = router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       const rows = await db.select().from(agentAccounts).orderBy(desc(agentAccounts.createdAt)).limit(100).catch(() => []);
-      if (rows.length > 0) return rows.map(r => ({ ...r, name: r.businessName, agentId: r.agentCode, rating: Number(r.rating ?? 5), transactionsToday: 0, volumeToday: 0 }));
+      if (rows.length > 0) return rows.map((r: any) => ({ ...r, name: r.businessName, agentId: r.agentCode, rating: Number(r.rating ?? 5), transactionsToday: 0, volumeToday: 0 }));
       const defaults = [
         { userId: ctx.user.id, agentCode: "AGT001", businessName: "Adaeze Okafor", location: "Lagos Island", phone: "+234-801-234-5678", status: "active", rating: "4.80" },
         { userId: ctx.user.id, agentCode: "AGT002", businessName: "Emeka Nwosu", location: "Ikeja, Lagos", phone: "+234-802-345-6789", status: "active", rating: "4.60" },
@@ -3250,7 +3250,7 @@ export const appRouter = router({
   paymentMethods: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const [cs, vas, ws] = await Promise.all([getCardsByUserId(ctx.user.id), getVirtualAccountsByUserId(ctx.user.id), getWalletsByUserId(ctx.user.id)]);
-      return { cards: cs.map(c => ({ ...c, spendLimit: Number(c.spendLimit ?? 0) })), bankAccounts: vas, wallets: ws.map(formatWallet) };
+      return { cards: cs.map((c: any) => ({ ...c, spendLimit: Number(c.spendLimit ?? 0) })), bankAccounts: vas, wallets: ws.map(formatWallet) };
     }),
     addCard: protectedProcedure.input(z.object({ type: z.enum(["virtual", "physical"]).default("virtual"), brand: z.enum(["visa", "mastercard", "verve"]).default("visa"), currency: z.string().default("USD") })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
@@ -3611,7 +3611,7 @@ export const appRouter = router({
     approveKyc: kycApproveProcedure
       .input(z.object({ docId: z.number(), advanceTier: z.boolean().default(true) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+        if (ctx.user!.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [doc] = await db.select().from(kycDocuments).where(eq(kycDocuments.id, input.docId)).limit(1);
@@ -3625,7 +3625,7 @@ export const appRouter = router({
         }
         // Audit trail
         logAdminAction({
-          actorId: ctx.user.id,
+          actorId: ctx.user!.id,
           action: "approveKyc",
           targetId: input.docId,
           targetType: "kycDocument",
@@ -4630,7 +4630,7 @@ Case: #${input.caseId}`,
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const offset = (input.page - 1) * input.limit;
         const whereClauses: any[] = [];
         if (input.userId !== undefined) whereClauses.push(eq(kycLivenessAudit.userId, input.userId));
@@ -4677,7 +4677,7 @@ Case: #${input.caseId}`,
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const [row] = await db.select().from(kycLivenessAudit).where(eq(kycLivenessAudit.id, input.id)).limit(1);
         if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Liveness audit record not found" });
         const [doc] = row.kycDocId
@@ -4690,7 +4690,7 @@ Case: #${input.caseId}`,
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
       const db = await getDb();
       if (!db) return { total: 0, passed: 0, failed: 0, deepfakeDetected: 0, spoofingDetected: 0, passRate: 0 };
-      const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+      const { kycLivenessAudit } = await import("../drizzle/schema.js");
       const [totalRow] = await db.select({ total: count() }).from(kycLivenessAudit);
       const [passedRow] = await db.select({ total: count() }).from(kycLivenessAudit).where(eq(kycLivenessAudit.overallLive, true));
       const [deepfakeRow] = await db.select({ total: count() }).from(kycLivenessAudit).where(sql`${kycLivenessAudit.deepfakeScore} >= 0.55`);
@@ -4748,7 +4748,7 @@ Case: #${input.caseId}`,
         // DB fallback: aggregate from kyc_liveness_audit directly
         const db = await getDb();
         if (!db) return [];
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const since = new Date(Date.now() - input.hours * 60 * 60 * 1000);
         const rows = await db
           .select({
@@ -4762,7 +4762,7 @@ Case: #${input.caseId}`,
           .where(sql`${kycLivenessAudit.createdAt} >= ${since}`)
           .groupBy(sql`date_trunc('hour', ${kycLivenessAudit.createdAt})`)
           .orderBy(sql`date_trunc('hour', ${kycLivenessAudit.createdAt}) desc`);
-        return rows.map(r => ({
+        return rows.map((r: any) => ({
           bucket: r.bucket,
           corridorCode: "",
           total: r.total,
@@ -4783,7 +4783,7 @@ Case: #${input.caseId}`,
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) return [];
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
         const rows = await db
           .select({
@@ -4799,7 +4799,7 @@ Case: #${input.caseId}`,
           .where(sql`${kycLivenessAudit.createdAt} >= ${since}`)
           .groupBy(kycLivenessAudit.corridorCode)
           .orderBy(sql`count(*) desc`);
-        return rows.map(r => ({
+        return rows.map((r: any) => ({
           corridorCode: r.corridorCode ?? "UNKNOWN",
           total: r.total,
           passed: Number(r.passed),
@@ -4819,7 +4819,7 @@ Case: #${input.caseId}`,
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const [updated] = await db
           .update(kycLivenessAudit)
           .set({ overallLive: false, source: "manual_review" })
@@ -4835,7 +4835,7 @@ Case: #${input.caseId}`,
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const [updated] = await db
           .update(kycLivenessAudit)
           .set({ overallLive: input.approve, source: input.approve ? "manual_approved" : "manual_rejected" })
@@ -4851,7 +4851,7 @@ Case: #${input.caseId}`,
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) return { rows: [], total: 0 };
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const rows = await db
           .select()
           .from(kycLivenessAudit)
@@ -4875,7 +4875,7 @@ Case: #${input.caseId}`,
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) return [];
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
         // Build 10 buckets: [0,0.1), [0.1,0.2), ..., [0.9,1.0]
         const buckets = Array.from({ length: 10 }, (_, i) => {
@@ -4890,12 +4890,12 @@ Case: #${input.caseId}`,
           .where(sql`${kycLivenessAudit.createdAt} >= ${since}`);
         const rows = await q;
         // Group by corridor (or all) and bucket
-        const corridorSet = input.corridor ? [input.corridor] : Array.from(new Set(rows.map(r => r.corridorCode ?? "UNKNOWN")));
+        const corridorSet = input.corridor ? [input.corridor] : Array.from(new Set(rows.map((r: any) => r.corridorCode ?? "UNKNOWN")));
         return corridorSet.map(corridor => ({
           corridorCode: corridor,
           buckets: buckets.map(b => ({
             label: b.label,
-            count: rows.filter(r =>
+            count: rows.filter((r: any) =>
               (input.corridor ? r.corridorCode === corridor : true) &&
               parseFloat(r.passiveScore ?? "0") >= b.lo &&
               parseFloat(r.passiveScore ?? "0") < b.hi
@@ -5149,7 +5149,7 @@ Case: #${input.caseId}`,
       const { marketRatings } = await import("../drizzle/schema.js");
       const rows = await db.select().from(marketRatings).where(eq(marketRatings.ratedUserId, input.sellerId));
       if (!rows.length) return { avgRating: 0, totalRatings: 0, ratings: [] };
-      const avg = rows.reduce((s, r) => s + r.rating, 0) / rows.length;
+      const avg = rows.reduce((s: any, r: any) => s + r.rating, 0) / rows.length;
       return { avgRating: Math.round(avg * 10) / 10, totalRatings: rows.length, ratings: rows.slice(0, 10) };
     }),
     raiseDispute: protectedProcedure.input(z.object({ orderId: z.number(), reason: z.string().min(10) })).mutation(async ({ ctx, input }) => {
@@ -5176,7 +5176,7 @@ Case: #${input.caseId}`,
       const { familyMembers, familyBudgets } = await import("../drizzle/schema.js");
       const members = await db.select().from(familyMembers).where(eq(familyMembers.userId, ctx.user.id)).orderBy(desc(familyMembers.createdAt));
       const budgets = await db.select().from(familyBudgets).where(eq(familyBudgets.userId, ctx.user.id));
-      return members.map(m => ({ ...m, budget: budgets.find(b => b.familyMemberId === m.id) ?? null }));
+      return members.map((m: any) => ({ ...m, budget: budgets.find((b: any) => b.familyMemberId === m.id) ?? null }));
     }),
     addMember: protectedProcedure.input(z.object({ name: z.string().min(2), relationship: z.string().default("other"), country: z.string().optional(), phone: z.string().optional(), email: z.string().email().optional(), bankAccount: z.string().optional(), bankName: z.string().optional(), currency: z.string().default("NGN"), notes: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
@@ -5215,10 +5215,10 @@ Case: #${input.caseId}`,
       const budgets = await db.select().from(familyBudgets).where(eq(familyBudgets.userId, ctx.user.id));
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 500 });
       const now = new Date(); const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-      const monthlyTxns = txns.filter(t => new Date(t.createdAt) >= startOfMonth && t.type === "send");
-      const totalSentThisMonth = monthlyTxns.reduce((s, t) => s + parseFloat(String(t.amount)), 0);
-      const totalSentAllTime = txns.filter(t => t.type === "send").reduce((s, t) => s + parseFloat(String(t.amount)), 0);
-      return { members: members.map(m => ({ ...m, budget: budgets.find(b => b.familyMemberId === m.id) ?? null })), totalSentThisMonth, totalSentAllTime, recentTransfers: monthlyTxns.slice(0, 10) };
+      const monthlyTxns = txns.filter((t: any) => new Date(t.createdAt) >= startOfMonth && t.type === "send");
+      const totalSentThisMonth = monthlyTxns.reduce((s: any, t: any) => s + parseFloat(String(t.amount)), 0);
+      const totalSentAllTime = txns.filter((t: any) => t.type === "send").reduce((s: any, t: any) => s + parseFloat(String(t.amount)), 0);
+      return { members: members.map((m: any) => ({ ...m, budget: budgets.find((b: any) => b.familyMemberId === m.id) ?? null })), totalSentThisMonth, totalSentAllTime, recentTransfers: monthlyTxns.slice(0, 10) };
     }),
   }),
 
@@ -5371,7 +5371,7 @@ Case: #${input.caseId}`,
       const [fund] = await db.select().from(communityFunds).where(eq(communityFunds.id, input.fundId)).limit(1);
       if (!fund) return null;
       const proposals = await db.select().from(fundProposals).where(and(eq(fundProposals.fundId, input.fundId), eq(fundProposals.status, "funded")));
-      const totalFunded = proposals.reduce((s, p) => s + parseFloat(String(p.requestedAmount)), 0);
+      const totalFunded = proposals.reduce((s: any, p: any) => s + parseFloat(String(p.requestedAmount)), 0);
       return { fund, fundedProposals: proposals.length, totalFunded, beneficiaryCount: fund.beneficiaryCount, sdgGoals: fund.sdgGoals };
     }),
 
@@ -5436,7 +5436,7 @@ Case: #${input.caseId}`,
         .groupBy(fundVotes.userId, users.name, users.email)
         .orderBy(desc(count(fundVotes.id)))
         .limit(10);
-      const topVoters = topVoterRows.map((r, idx) => ({
+      const topVoters = topVoterRows.map((r: any, idx: any) => ({
         rank: idx + 1,
         userId: r.userId,
         name: r.name ?? r.email ?? "Anonymous",
@@ -5455,7 +5455,7 @@ Case: #${input.caseId}`,
         .groupBy(fundProposals.submittedByUserId, users.name, users.email)
         .orderBy(desc(count(fundProposals.id)))
         .limit(10);
-      const topProposers = topProposerRows.map((r, idx) => ({
+      const topProposers = topProposerRows.map((r: any, idx: any) => ({
         rank: idx + 1,
         userId: r.userId,
         name: r.name ?? r.email ?? "Anonymous",
@@ -5604,8 +5604,8 @@ Case: #${input.caseId}`,
         return { ...q, _fallback: false };
       } catch {
         const { fetchLiveRates } = await import("./fx-rates.service.js");
-        const rates = await fetchLiveRates(input.from);
-        const rate = rates[input.to] ?? 1;
+        const ratesResult = await fetchLiveRates(input.from);
+        const rate = (ratesResult as any)?.rates?.[input.to] ?? (ratesResult as any)?.[input.to] ?? 1;
         const fee = Math.max(0.5, input.amount * 0.005);
         return { from: input.from, to: input.to, sendAmount: input.amount, receiveAmount: parseFloat(((input.amount - fee) * rate).toFixed(2)), fxRate: rate, fee, totalCost: fee, spread: 0.005, fsp: "internal", expiresAt: Math.floor(Date.now() / 1000) + 60, _fallback: true };
       }
@@ -5757,7 +5757,7 @@ Case: #${input.caseId}`,
         const db = await getDb(); if (!db) return [];
         const { investmentAssets } = await import("../drizzle/schema.js");
         const rows = await db.select().from(investmentAssets).where(eq(investmentAssets.isActive, true)).orderBy(desc(investmentAssets.isFeatured), investmentAssets.symbol).limit(input?.limit ?? 50);
-        return rows.filter(r => {
+        return rows.filter((r: any) => {
           if (input?.assetType && r.assetType !== input.assetType) return false;
           if (input?.search) { const s = input.search.toLowerCase(); if (!r.symbol.toLowerCase().includes(s) && !r.name.toLowerCase().includes(s)) return false; }
           if (input?.featured && !r.isFeatured) return false;
@@ -5807,8 +5807,8 @@ Case: #${input.caseId}`,
       const db = await getDb(); if (!db) return { holdings: [], totalValue: 0, totalCost: 0, totalPnl: 0, totalPnlPct: 0 };
       const { userInvestments, investmentAssets } = await import("../drizzle/schema.js");
       const holdings = await db.select({ inv: userInvestments, asset: investmentAssets }).from(userInvestments).innerJoin(investmentAssets, eq(userInvestments.assetId, investmentAssets.id)).where(and(eq(userInvestments.userId, ctx.user.id), eq(userInvestments.status, "active"))).orderBy(desc(userInvestments.purchasedAt));
-      const totalValue = holdings.reduce((s, h) => s + Number(h.asset.currentPrice ?? 0) * Number(h.inv.quantity), 0);
-      const totalCost = holdings.reduce((s, h) => s + Number(h.inv.purchasePrice) * Number(h.inv.quantity), 0);
+      const totalValue = holdings.reduce((s: any, h: any) => s + Number(h.asset.currentPrice ?? 0) * Number(h.inv.quantity), 0);
+      const totalCost = holdings.reduce((s: any, h: any) => s + Number(h.inv.purchasePrice) * Number(h.inv.quantity), 0);
       return { holdings, totalValue, totalCost, totalPnl: totalValue - totalCost, totalPnlPct: totalCost > 0 ? ((totalValue - totalCost) / totalCost) * 100 : 0 };
     }),
     analyzePortfolio: protectedProcedure.query(async ({ ctx }) => {
@@ -5818,7 +5818,7 @@ Case: #${input.caseId}`,
       if (!holdings.length) return null;
       const { portfolioCalcClient } = await import("./services/portfolio-calc-client.js");
       try {
-        return await portfolioCalcClient.analyze({ holdings: holdings.map(h => ({ symbol: h.asset.symbol, name: h.asset.name, asset_type: h.asset.assetType, quantity: Number(h.inv.quantity), purchase_price: Number(h.inv.purchasePrice), current_price: Number(h.asset.currentPrice ?? 0), currency: h.inv.currency ?? "USD", sector: h.asset.sector ?? undefined, country: h.asset.country ?? undefined })) });
+        return await portfolioCalcClient.analyze({ holdings: holdings.map((h: any) => ({ symbol: h.asset.symbol, name: h.asset.name, asset_type: h.asset.assetType, quantity: Number(h.inv.quantity), purchase_price: Number(h.inv.purchasePrice), current_price: Number(h.asset.currentPrice ?? 0), currency: h.inv.currency ?? "USD", sector: h.asset.sector ?? undefined, country: h.asset.country ?? undefined })) });
       } catch { return null; }
     }),
     getRecommendations: protectedProcedure
@@ -6008,20 +6008,20 @@ Case: #${input.caseId}`,
           .innerJoin(investmentAssets, eq(userInvestments.assetId, investmentAssets.id))
           .where(and(eq(userInvestments.userId, ctx.user.id), eq(userInvestments.status, "active")));
         if (!holdings.length) return { dataPoints: [], totalValue: 0, totalCost: 0, pnl: 0, pnlPct: 0 };
-        const assetIds = holdings.map(h => h.inv.assetId);
+        const assetIds = holdings.map((h: any) => h.inv.assetId);
         const priceRows = await db.select().from(investmentPriceHistory)
           .where(and(inArray(investmentPriceHistory.assetId, assetIds), gte(investmentPriceHistory.timestamp, since)))
           .orderBy(asc(investmentPriceHistory.timestamp));
         const byDate: Record<string, number> = {};
         for (const row of priceRows) {
           const dateKey = new Date(row.timestamp).toISOString().slice(0, 10);
-          const holding = holdings.find(h => h.inv.assetId === row.assetId);
+          const holding = holdings.find((h: any) => h.inv.assetId === row.assetId);
           if (!holding) continue;
           byDate[dateKey] = (byDate[dateKey] ?? 0) + Number(row.close) * Number(holding.inv.quantity);
         }
         const dataPoints = Object.entries(byDate).sort(([a], [b]) => a.localeCompare(b)).map(([date, value]) => ({ date, value: +value.toFixed(2) }));
-        const totalValue = holdings.reduce((s, h) => s + Number(h.asset.currentPrice ?? 0) * Number(h.inv.quantity), 0);
-        const totalCost = holdings.reduce((s, h) => s + Number(h.inv.purchasePrice) * Number(h.inv.quantity), 0);
+        const totalValue = holdings.reduce((s: any, h: any) => s + Number(h.asset.currentPrice ?? 0) * Number(h.inv.quantity), 0);
+        const totalCost = holdings.reduce((s: any, h: any) => s + Number(h.inv.purchasePrice) * Number(h.inv.quantity), 0);
         const pnl = totalValue - totalCost;
         const pnlPct = totalCost > 0 ? (pnl / totalCost) * 100 : 0;
         return { dataPoints, totalValue: +totalValue.toFixed(2), totalCost: +totalCost.toFixed(2), pnl: +pnl.toFixed(2), pnlPct: +pnlPct.toFixed(2) };

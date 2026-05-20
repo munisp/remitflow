@@ -71,7 +71,7 @@ export default function MedicalTourism() {
           </CardContent>
         </Card>
         <div className="space-y-4">
-          {quoteQuery.data&&(
+          {quoteQuery.data?(
             <Card>
               <CardHeader><CardTitle className="text-base">Live Quote</CardTitle></CardHeader>
               <CardContent className="space-y-2 text-sm">
@@ -82,7 +82,7 @@ export default function MedicalTourism() {
                 <Badge className="mt-2" variant="outline">Medical corridor — priority processing</Badge>
               </CardContent>
             </Card>
-          )}
+          ):null}
           <Card className="border-green-200 dark:border-green-800">
             <CardHeader><CardTitle className="text-base">Required Documents</CardTitle></CardHeader>
             <CardContent className="text-sm space-y-1 text-muted-foreground">

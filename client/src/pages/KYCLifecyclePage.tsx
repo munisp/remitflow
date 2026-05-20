@@ -115,7 +115,7 @@ export default function KYCLifecyclePage() {
                     <CheckCircle className="w-8 h-8 mx-auto mb-2 text-green-400 opacity-50" />
                     No documents in this status
                   </td></tr>
-                ) : docs.map((doc) => (
+                ) : docs.map((doc: any) => (
                   <tr key={doc.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                     <td className="p-3 font-mono text-xs text-muted-foreground">#{doc.id}</td>
                     <td className="p-3 text-sm">User #{doc.userId}</td>

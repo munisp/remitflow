@@ -35,7 +35,7 @@ import crypto from "crypto";
 import { logger } from '../_core/logger';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function adminOnly(ctx: { user: { role: string } }) {
+function adminOnly(ctx: { user: { role: string | null } }) {
   if (ctx.user.role !== "admin") {
     throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
   }
@@ -893,7 +893,7 @@ export const cbnComplianceRouter = router({
       // Build a live rate map for all active corridors in parallel
       const liveRateMap = new Map<string, number>();
       await Promise.all(
-        activeCbnCorridors.map(async ({ corridor }) => {
+        activeCbnCorridors.map(async ({ corridor }: { corridor: string }) => {
           try {
             const rate = await fetchBmatchRate(corridor);
             liveRateMap.set(corridor, parseFloat(rate.midRate ?? "0"));
@@ -976,7 +976,7 @@ export const cbnComplianceRouter = router({
         triggered: triggered.length,
         corridorsChecked: liveRateMap.size,
         liveRates: Object.fromEntries(liveRateMap),
-        alerts: triggered.map((a) => ({
+        alerts: triggered.map((a: any) => ({
           id: a.id,
           pair: `${a.fromCurrency}/${a.toCurrency}`,
           direction: a.direction,
@@ -1304,7 +1304,7 @@ export const cbnComplianceRouter = router({
         .where(and(...conditions));
 
       return {
-        items: rows.map((r) => ({
+        items: rows.map((r: any) => ({
           id: r.id,
           pair: `${r.fromCurrency}/${r.toCurrency}`,
           fromCurrency: r.fromCurrency,
@@ -1414,7 +1414,7 @@ export const cbnComplianceRouter = router({
         .from(bdcPartners)
         .where(eq(bdcPartners.status, "approved"))
         .orderBy(bdcPartners.name);
-      const rows = partners.map((p, i) => ({
+      const rows = partners.map((p: any, i: any) => ({
         sn: i + 1,
         bdcName: p.name,
         cbnLicenceNumber: p.cbnLicenceNumber,
@@ -1429,7 +1429,7 @@ export const cbnComplianceRouter = router({
       const headers = ["S/N","BDC Name","CBN Licence No","ADB Name","ADB Code","Contact Email","Contact Phone","Status","Approved At","Report Period"];
       const csvLines = [
         headers.join(","),
-        ...rows.map(r => [
+        ...rows.map((r: any) => [
           r.sn, `"${r.bdcName}"`, `"${r.cbnLicenceNumber}"`, `"${r.adbName}"`,
           `"${r.adbCode}"`, `"${r.contactEmail}"`, `"${r.contactPhone}"`,
           r.status, r.approvedAt, `"${r.reportPeriod}"`

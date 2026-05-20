@@ -93,15 +93,15 @@ export const feeNegotiationRouter = router({
         .where(and(eq(transactions.userId, ctx.user.id), gte(transactions.createdAt, since)))
         .orderBy(desc(transactions.createdAt))
         .limit(100);
-      const txList = rows.map(r => ({
+      const txList = rows.map((r: any) => ({
         date: r.date,
         amount: parseFloat(r.amount ?? "0"),
         currency: r.currency ?? "USD",
         fee: parseFloat(r.fee ?? "0"),
         feeRate: parseFloat(r.amount ?? "1") > 0 ? parseFloat(r.fee ?? "0") / parseFloat(r.amount ?? "1") : 0,
       }));
-      const totalFees = txList.reduce((s, t) => s + t.fee, 0);
-      const avgFeeRate = txList.length > 0 ? txList.reduce((s, t) => s + t.feeRate, 0) / txList.length : 0;
+      const totalFees = txList.reduce((s: any, t: any) => s + t.fee, 0);
+      const avgFeeRate = txList.length > 0 ? txList.reduce((s: any, t: any) => s + t.feeRate, 0) / txList.length : 0;
       return { transactions: txList, summary: { count: txList.length, totalFees, avgFeeRate: parseFloat((avgFeeRate * 100).toFixed(3)) } };
     }),
 });
@@ -412,7 +412,7 @@ export const auditTrailV2Router = router({
     return {
       total: Number(totalResult?.c ?? 0),
       today: Number(todayResult?.c ?? 0),
-      topActions: topActions.map(a => ({ action: a.action, count: Number(a.count) })),
+      topActions: topActions.map((a: any) => ({ action: a.action, count: Number(a.count) })),
     };
   }),
 
@@ -436,7 +436,7 @@ export const auditTrailV2Router = router({
         return { data: JSON.stringify(logs, null, 2), format: "json", count: logs.length };
       }
       const header = "id,userId,action,ipAddress,createdAt\n";
-      const rows = logs.map(l => `${l.id},${l.userId},${l.action ?? ""},${l.ipAddress ?? ""},${l.createdAt}`).join("\n");
+      const rows = logs.map((l: any) => `${l.id},${l.userId},${l.action ?? ""},${l.ipAddress ?? ""},${l.createdAt}`).join("\n");
       return { data: header + rows, format: "csv", count: logs.length };
     }),
 });

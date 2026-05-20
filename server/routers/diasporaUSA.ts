@@ -43,7 +43,7 @@ export const diasporaUSARouter = router({
     const db = await getDb();
     const claimed = await db.select().from(diasporaOfferClaims)
       .where(eq(diasporaOfferClaims.userId, ctx.user.id));
-    const claimedTypes = new Set(claimed.map(c => c.offerType));
+    const claimedTypes = new Set(claimed.map((c: any) => c.offerType));
 
     const allOffers = [
       {

@@ -604,7 +604,7 @@ export default function CorridorPricingAdmin() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {historyData.rows.map((row) => (
+                {historyData.rows.map((row: any) => (
                   <TableRow key={row.id}>
                     <TableCell className="text-xs font-mono font-medium">{row.corridorId}</TableCell>
                     <TableCell>

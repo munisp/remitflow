@@ -163,7 +163,7 @@ export default function ReferralDashboard() {
                 <Gift className="w-12 h-12 mx-auto mb-3 opacity-30" />
                 <p>No referral bonuses yet. Share your link to start earning!</p>
               </div>
-            ) : bonusData.bonuses.map(b => (
+            ) : bonusData.bonuses.map((b: any) => (
               <Card key={b.id}>
                 <CardContent className="pt-4">
                   <div className="flex items-center justify-between">
@@ -192,7 +192,7 @@ export default function ReferralDashboard() {
               <div className="space-y-2">
                 {!leaderboardData?.leaders.length ? (
                   <p className="text-center text-muted-foreground py-8">No leaderboard data yet</p>
-                ) : leaderboardData.leaders.map(l => (
+                ) : leaderboardData.leaders.map((l: any) => (
                   <div key={l.userId} className="flex items-center gap-3 p-3 rounded-lg hover:bg-muted/50">
                     <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${l.rank === 1 ? "bg-yellow-100 text-yellow-700" : l.rank === 2 ? "bg-gray-100 text-gray-700" : l.rank === 3 ? "bg-amber-100 text-amber-700" : "bg-muted text-muted-foreground"}`}>
                       {l.rank === 1 ? "🥇" : l.rank === 2 ? "🥈" : l.rank === 3 ? "🥉" : l.rank}

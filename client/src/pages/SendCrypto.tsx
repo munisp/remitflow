@@ -69,7 +69,7 @@ export default function SendCrypto() {
 
   const sendMutation = trpc.cryptoCustody.send.useMutation({
     onSuccess: (data) => {
-      setTxResult(data as Record<string, unknown>);
+      setTxResult(data as unknown as Record<string, unknown>);
       setStep("sent");
       toast("Transfer submitted", { description: "Your crypto transfer is being processed." });
     },

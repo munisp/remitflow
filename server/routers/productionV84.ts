@@ -96,15 +96,15 @@ export const apiUsageRouter = router({
         .limit(500);
 
       const totalRequests = usage.length;
-      const successCount = usage.filter(u => u.statusCode && u.statusCode < 400).length;
+      const successCount = usage.filter((u: any) => u.statusCode && u.statusCode < 400).length;
       const errorCount = totalRequests - successCount;
       const avgLatency = usage.length > 0
-        ? Math.round(usage.reduce((sum, u) => sum + (u.latencyMs ?? 0), 0) / usage.length)
+        ? Math.round(usage.reduce((sum: any, u: any) => sum + (u.latencyMs ?? 0), 0) / usage.length)
         : 0;
 
       // Group by day
       const byDay: Record<string, { requests: number; errors: number }> = {};
-      usage.forEach(u => {
+      usage.forEach((u: any) => {
         const day = new Date(u.createdAt).toISOString().split("T")[0];
         if (!byDay[day]) byDay[day] = { requests: 0, errors: 0 };
         byDay[day].requests++;
@@ -113,7 +113,7 @@ export const apiUsageRouter = router({
 
       // Group by endpoint
       const byEndpoint: Record<string, number> = {};
-      usage.forEach(u => {
+      usage.forEach((u: any) => {
         const ep = u.endpoint ?? "unknown";
         byEndpoint[ep] = (byEndpoint[ep] ?? 0) + 1;
       });

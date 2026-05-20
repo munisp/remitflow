@@ -229,7 +229,7 @@ export default function FeeNegotiationPage() {
                 </div>
               </div>
               <div className="space-y-2 max-h-48 overflow-y-auto">
-                {history.transactions.slice(0, 10).map((tx, i) => (
+                {history.transactions.slice(0, 10).map((tx: any, i: any) => (
                   <div key={i} className="flex items-center justify-between text-sm py-1.5 border-b last:border-0">
                     <span className="text-muted-foreground">{new Date(tx.date!).toLocaleDateString()}</span>
                     <span>{tx.amount.toFixed(2)} {tx.currency}</span>
