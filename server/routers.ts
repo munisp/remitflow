@@ -292,6 +292,10 @@ import {
   kycAnalyticsRouter,
 } from "./routers/kycEnhanced";
 import { logger } from './_core/logger';
+import { doubleEntryRouter } from "./routers/doubleEntry";
+import { receiptGenerationRouter } from "./routers/receiptGeneration";
+import { loyaltyPointsRouter } from "./routers/loyaltyPoints";
+import { beneficiaryVerificationRouter } from "./routers/beneficiaryVerification";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -1023,7 +1027,7 @@ export const appRouter = router({
               riskScore: Math.min(100, Math.round((amountInUsdForLimits / 10_000) * 80 + 20)),
               createdAt: new Date(), updatedAt: new Date(),
             }).catch((err: any) => logger.warn({ errMsg: err?.message }, "[AML] Auto-case insert failed:"));
-          }).catch(() => {});
+          }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         }
       }
       // Velocity check
@@ -1037,7 +1041,7 @@ export const appRouter = router({
           title: `Round-tripping velocity flag — user ${ctx.user!.id}`,
           description: roundTrip.reason ?? "High transfer velocity detected",
           riskScore: 75, createdAt: new Date(), updatedAt: new Date(),
-        }).catch(() => {})).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); })).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       }
       // Structuring / smurfing detection (v143)
       {
@@ -1050,7 +1054,7 @@ export const appRouter = router({
             title: `Potential structuring — user ${ctx.user!.id}`,
             description: structuringCheck.reason ?? "Structuring pattern detected",
             riskScore: 90, createdAt: new Date(), updatedAt: new Date(),
-          }).catch(() => {})).catch(() => {});
+          }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); })).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         }
       }
       // Fraud & AML screening — run local + gRPC Rust fraud service in parallel
@@ -1064,7 +1068,7 @@ export const appRouter = router({
           fromCountry: "NG",
           toCountry: input.recipientCountry ?? "NG",
           recipientAccount: input.recipientAccount ?? "",
-        }).catch(() => null),
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed, returning null"); return null; }),
       ]);
       if (!fraudCheck.approved) throw new TRPCError({ code: "FORBIDDEN", message: `Transaction blocked. Risk score: ${fraudCheck.riskScore}. Flags: ${fraudCheck.flags.join(", ")}` });
       if (grpcFraud && grpcFraud.decision === "BLOCK") throw new TRPCError({ code: "FORBIDDEN", message: `Transaction blocked by risk engine. Risk score: ${grpcFraud.riskScore.toFixed(2)}. Reasons: ${grpcFraud.reasons.join(", ")}` });
@@ -1117,33 +1121,33 @@ export const appRouter = router({
       ]);
       if (complianceResult.decision === "blocked") {
         // Fire-and-forget audit log to Rust service
-        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_COMPLIANCE", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: complianceResult.blockReason, details: { rules: complianceResult.rulesTriggered } }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_COMPLIANCE", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: complianceResult.blockReason, details: { rules: complianceResult.rulesTriggered } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
         throw new TRPCError({ code: "FORBIDDEN", message: `Transfer blocked by compliance engine: ${complianceResult.blockReason ?? complianceResult.rulesTriggered.join(", ")}` });
       }
       if (fraudScoreResult.decision === "block") {
-        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_FRAUD", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Fraud score: ${fraudScoreResult.fraudScore.toFixed(2)}`, details: { factors: fraudScoreResult.factors } }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_FRAUD", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Fraud score: ${fraudScoreResult.fraudScore.toFixed(2)}`, details: { factors: fraudScoreResult.factors } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
         throw new TRPCError({ code: "FORBIDDEN", message: `Transfer blocked by fraud engine. Risk score: ${fraudScoreResult.fraudScore.toFixed(2)}.` });
       }
       // 3. Python sanctions screening for beneficiary name
       if (input.recipientName) {
         const sanctionsResult = await screenSanctions({ name: input.recipientName, country: input.recipientCountry ?? "NG" });
         if (sanctionsResult.action === "block") {
-          sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_SANCTIONS", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, details: { name: input.recipientName, matchType: sanctionsResult.matchType } }).catch(() => {});
+          sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_SANCTIONS", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, details: { name: input.recipientName, matchType: sanctionsResult.matchType } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
           throw new TRPCError({ code: "FORBIDDEN", message: `Transfer blocked: beneficiary name matched sanctions list (${sanctionsResult.matchType ?? "unknown"} match).` });
         }
       }
       // 2b. Await anomaly detector result and block high-confidence anomalies
       const anomalyResult = await anomalyPromise;
       if (anomalyResult.isAnomaly && anomalyResult.confidence > 0.85) {
-        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_ANOMALY", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Anomaly confidence: ${(anomalyResult.confidence * 100).toFixed(1)}%`, details: anomalyResult.details }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_ANOMALY", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Anomaly confidence: ${(anomalyResult.confidence * 100).toFixed(1)}%`, details: anomalyResult.details }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         throw new TRPCError({ code: "FORBIDDEN", message: `Transfer flagged by anomaly detection (confidence: ${(anomalyResult.confidence * 100).toFixed(1)}%). Please contact support if this is legitimate.` });
       }
       if (anomalyResult.isAnomaly && anomalyResult.confidence > 0.65) {
         // Medium confidence: flag for review but allow through
-        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_ANOMALY_REVIEW", resource: "transfer", resourceId: transferRef, severity: "warning", success: true, details: { confidence: anomalyResult.confidence, ...anomalyResult.details } }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_ANOMALY_REVIEW", resource: "transfer", resourceId: transferRef, severity: "warning", success: true, details: { confidence: anomalyResult.confidence, ...anomalyResult.details } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
       }
       // 4. Rust audit log: record compliance pass
-      sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_COMPLIANCE_PASS", resource: "transfer", resourceId: transferRef, severity: "info", success: true, details: { complianceDecision: complianceResult.decision, fraudScore: fraudScoreResult.fraudScore, riskLevel: fraudScoreResult.riskLevel } }).catch(() => {});
+      sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_COMPLIANCE_PASS", resource: "transfer", resourceId: transferRef, severity: "info", success: true, details: { complianceDecision: complianceResult.decision, fraudScore: fraudScoreResult.fraudScore, riskLevel: fraudScoreResult.riskLevel } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
       // ─── Compute FX rate and tiered fee ──────────────────────────────────────
       const { rates: liveRates } = await fetchLiveRates("USD");
       const fromRate = liveRates[input.fromCurrency] ?? 1;
@@ -1253,10 +1257,10 @@ export const appRouter = router({
         reference: ref,
         description: input.description ?? `Transfer to ${input.recipientName}`,
       }).catch(err => logger.warn({ errMsg: err?.message }, "[gRPC] Ledger transfer failed (non-blocking):"));
-      sendNotification({ userId: ctx.user!.id, title: "Transfer Sent", message: `Your transfer of ${input.amount.toLocaleString()} ${input.fromCurrency} to ${input.recipientName} has been initiated.`, type: "transfer" }).catch(() => {});
+      sendNotification({ userId: ctx.user!.id, title: "Transfer Sent", message: `Your transfer of ${input.amount.toLocaleString()} ${input.fromCurrency} to ${input.recipientName} has been initiated.`, type: "transfer" }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
       // Send transfer confirmation email to sender (non-blocking)
       if (ctx.user!.email) {
-        sendEmail({ to: ctx.user!.email, ...buildTransferConfirmationEmail({ userName: ctx.user!.name ?? "Valued Customer", recipientName: input.recipientName, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, reference: ref, estimatedTime: "1-3 business days" }) }).catch(() => {});
+        sendEmail({ to: ctx.user!.email, ...buildTransferConfirmationEmail({ userName: ctx.user!.name ?? "Valued Customer", recipientName: input.recipientName, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, reference: ref, estimatedTime: "1-3 business days" }) }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       }
       // Send recipient notification email if recipientEmail is provided (non-blocking)
       if (input.recipientEmail) {
@@ -1277,7 +1281,7 @@ export const appRouter = router({
             <p style="color:#6b7280;font-size:0.875rem">Reference number: <strong>${ref}</strong>. Please keep this for your records.</p>
           </div>`,
           text: `Hi ${input.recipientName}, you have received ${Math.round(toAmount * 100) / 100} ${input.toCurrency} from ${ctx.user!.name ?? "a RemitFlow user"}. Reference: ${ref}`,
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       }
       // AML auto-case creation on direct DB path (non-blocking)
       getAmlFlags(amountInUsd).forEach(topFlag => {
@@ -1290,7 +1294,7 @@ export const appRouter = router({
           description: `Transfer of ${input.amount} ${input.fromCurrency} (≈$${amountInUsd.toFixed(0)} USD) triggered AML flags: ${topFlag}`,
           riskScore: Math.min(100, Math.round((amountInUsd / 10_000) * 80 + 20)),
           createdAt: new Date(), updatedAt: new Date(),
-        }).catch(() => {})).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); })).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       });
       // ─── Kafka: emit payment.initiated and transaction.created events (non-blocking) ─
       publishPaymentInitiated({
@@ -1325,7 +1329,7 @@ export const appRouter = router({
         toCurrency: input.toCurrency,
         reference: ref,
         completedAt: new Date().toLocaleString(),
-      }) }).catch(() => {});
+      }) }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       return { success: true, reference: ref, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, fxRate, orchestrated: false, mlRisk: anomalyResult ? { isAnomaly: anomalyResult.isAnomaly, confidence: anomalyResult.confidence, requiresReview: anomalyResult.isAnomaly && anomalyResult.confidence > 0.65 } : null };
     }),
     quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() })).query(async ({ input }) => {
@@ -1693,7 +1697,7 @@ export const appRouter = router({
       }).catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] publishKYCEvent failed:"));
       // Send KYC submission confirmation email (non-blocking)
       if (ctx.user.email) {
-        sendEmail({ to: ctx.user.email, ...buildKycStatusEmail({ userName: ctx.user.name ?? "Valued Customer", docType: input.type, status: "approved", newTier: undefined }) }).catch(() => {});
+        sendEmail({ to: ctx.user.email, ...buildKycStatusEmail({ userName: ctx.user.name ?? "Valued Customer", docType: input.type, status: "approved", newTier: undefined }) }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
       }
       return { success: true, url };
     }),
@@ -3218,14 +3222,14 @@ export const appRouter = router({
   pos: router({
     terminals: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      const rows = await db.select().from(posTerminals).where(eq(posTerminals.userId, ctx.user.id)).orderBy(desc(posTerminals.createdAt)).limit(50).catch(() => []);
+      const rows = await db.select().from(posTerminals).where(eq(posTerminals.userId, ctx.user.id)).orderBy(desc(posTerminals.createdAt)).limit(50).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "DB query failed, returning empty"); return []; });
       if (rows.length > 0) return rows.map((r: any) => ({ ...r, merchant: r.merchantName, dailyVolume: Number(r.totalVolume ?? 0), transactionCount: r.totalTransactions ?? 0, lastTransaction: r.lastSeen ?? r.updatedAt }));
       const defaults = [
         { userId: ctx.user.id, terminalId: "POS001", merchantName: "RemitFlow Agent Lagos", serialNumber: "POS-001-NG", location: "Lagos Main Branch", status: "active" },
         { userId: ctx.user.id, terminalId: "POS002", merchantName: "RemitFlow Agent Abuja", serialNumber: "POS-002-NG", location: "Abuja Office", status: "active" },
         { userId: ctx.user.id, terminalId: "POS003", merchantName: "RemitFlow Agent PH", serialNumber: "POS-003-NG", location: "Port Harcourt Agent", status: "offline" },
       ];
-      await db.insert(posTerminals).values(defaults).onConflictDoNothing().catch(() => {});
+      await db.insert(posTerminals).values(defaults).onConflictDoNothing().catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       return defaults.map((d, i) => ({ ...d, id: i + 1, merchant: d.merchantName, dailyVolume: 0, transactionCount: 0, lastTransaction: new Date(), totalTransactions: 0, totalVolume: "0", dailyLimit: "500000.00", model: null, lastSeen: null, createdAt: new Date(), updatedAt: new Date() }));
     }),
     transactions: protectedProcedure.input(z.object({ terminalId: z.number().optional(), limit: z.number().default(20) })).query(async ({ ctx }) => {
@@ -3254,7 +3258,7 @@ export const appRouter = router({
   agents: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      const rows = await db.select().from(agentAccounts).orderBy(desc(agentAccounts.createdAt)).limit(100).catch(() => []);
+      const rows = await db.select().from(agentAccounts).orderBy(desc(agentAccounts.createdAt)).limit(100).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "DB query failed, returning empty"); return []; });
       if (rows.length > 0) return rows.map((r: any) => ({ ...r, name: r.businessName, agentId: r.agentCode, rating: Number(r.rating ?? 5), transactionsToday: 0, volumeToday: 0 }));
       const defaults = [
         { userId: ctx.user.id, agentCode: "AGT001", businessName: "Adaeze Okafor", location: "Lagos Island", phone: "+234-801-234-5678", status: "active", rating: "4.80" },
@@ -3262,7 +3266,7 @@ export const appRouter = router({
         { userId: ctx.user.id, agentCode: "AGT003", businessName: "Fatima Aliyu", location: "Abuja FCT", phone: "+234-803-456-7890", status: "active", rating: "4.90" },
         { userId: ctx.user.id, agentCode: "AGT004", businessName: "Chidi Obi", location: "Port Harcourt", phone: "+234-804-567-8901", status: "inactive", rating: "4.20" },
       ];
-      await db.insert(agentAccounts).values(defaults).onConflictDoNothing().catch(() => {});
+      await db.insert(agentAccounts).values(defaults).onConflictDoNothing().catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       return defaults.map((d, i) => ({ ...d, id: i + 1, name: d.businessName, agentId: d.agentCode, rating: Number(d.rating), transactionsToday: 0, volumeToday: 0, totalTransactions: 0, totalVolume: "0", commissionRate: "1.50", dailyLimit: "1000000.00", tier: "basic", createdAt: new Date(), updatedAt: new Date() }));
     }),
     stats: protectedProcedure.query(async () => {
@@ -3289,7 +3293,7 @@ export const appRouter = router({
     })),
     webhooks: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      const rows = await db.select().from(webhooksTable).where(eq(webhooksTable.createdBy, ctx.user.id)).orderBy(desc(webhooksTable.createdAt)).limit(50).catch(() => []);
+      const rows = await db.select().from(webhooksTable).where(eq(webhooksTable.createdBy, ctx.user.id)).orderBy(desc(webhooksTable.createdAt)).limit(50).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "DB query failed, returning empty"); return []; });
       return rows;
     }),
     addWebhook: protectedProcedure.input(z.object({ url: z.string().url(), events: z.array(z.string()) })).mutation(async ({ ctx, input }) => {
@@ -3528,7 +3532,7 @@ export const appRouter = router({
                 subject: `FX Alert Triggered: ${pairLabel}`,
                 text: `Your FX alert for ${pairLabel} has been triggered. Target rate: ${alert.target_rate}, Current rate: ${currentRate.toFixed(4)}.`,
                 html: `<p>Hi ${u.name ?? "there"},</p><p>Your FX rate alert has been triggered!</p><ul><li><strong>Pair:</strong> ${pairLabel}</li><li><strong>Direction:</strong> ${alert.direction === "above" ? "Rate went above" : "Rate went below"} ${alert.target_rate}</li><li><strong>Current rate:</strong> ${currentRate.toFixed(4)}</li></ul><p><a href="${process.env.VITE_OAUTH_PORTAL_URL ?? "https://remitflow.io"}/send-money">Send money now</a> to lock in this rate.</p>`,
-              }).catch(() => {});
+              }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
             }
             // Web Push notification (background alert even when app is not open)
             if (alert.notify_push !== false) {
@@ -3539,7 +3543,7 @@ export const appRouter = router({
                   currentRate.toFixed(4),
                   String(alert.target_rate)
                 )
-              ).catch(() => {});
+              ).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
             }
             // SSE in-app notification
             broadcastUserEvent(alert.user_id, {
@@ -3638,7 +3642,7 @@ export const appRouter = router({
           description: `Set user #${input.userId} role to '${input.role}'`,
           severity: input.role === "admin" ? "warning" : "info",
           metadata: { newRole: input.role },
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, userId: input.userId, newRole: input.role };
       }),
      deleteUser: protectedProcedure
@@ -3689,7 +3693,7 @@ export const appRouter = router({
           description: `Approved KYC document #${input.docId} for user #${doc.userId}`,
           severity: "info",
           metadata: { advanceTier: input.advanceTier, userId: doc.userId },
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         // Kafka: emit KYC approved / tier upgraded event (non-blocking)
         if (input.advanceTier) {
           publishKYCEvent({
@@ -3719,7 +3723,7 @@ export const appRouter = router({
           description: `Rejected KYC document #${input.docId} for user #${doc.userId}: ${input.reason}`,
           severity: "warning",
           metadata: { reason: input.reason, userId: doc.userId },
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, docId: input.docId };
       }),
     setKycUnderReview: protectedProcedure
@@ -3837,7 +3841,7 @@ export const appRouter = router({
               to: ctx.user.email,
               subject: `[RemitFlow] Compliance Case #${input.caseId} Escalated`,
               html: `<p>Compliance case <strong>#${input.caseId}</strong> has been escalated by ${ctx.user.name ?? ctx.user.email}.</p><p><strong>Case:</strong> ${caseRow?.title ?? "Unknown"}</p><p><strong>Notes:</strong> ${input.notes ?? "None"}</p><p>Please review in the Admin Compliance Dashboard.</p>`,
-            }).catch(() => {});
+            }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
           }
           // Broadcast SSE event to all admins
           broadcastAdminEvent({ type: "case_updated", payload: { caseId: input.caseId, status: "escalated", actorName: ctx.user.name ?? ctx.user.email } });
@@ -3851,7 +3855,7 @@ export const appRouter = router({
           description: `Updated compliance case #${input.caseId} to status '${input.status}'`,
           severity: input.status === "escalated" ? "critical" : input.status === "dismissed" ? "warning" : "info",
           metadata: { status: input.status, notes: input.notes, assignedTo: input.assignedTo },
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, caseId: input.caseId };
       }),
     assignCase: protectedProcedure
@@ -3871,7 +3875,7 @@ export const appRouter = router({
           description: `Assigned compliance case #${input.caseId} to ${assignedTo}`,
           severity: "info",
           metadata: { assignedTo },
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, caseId: input.caseId, assignedTo };
       }),
     // ─── Case Comments ──────────────────────────────────────────────────────────
@@ -3908,7 +3912,7 @@ export const appRouter = router({
           targetType: "complianceCase",
           description: `Added comment to case #${input.caseId}`,
           severity: "info",
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         // Parse @mentions and send in-app notifications
         const mentionRegex = /@([\w.\-]+)/g;
         const mentionMatchesRaw: RegExpExecArray[] = [];
@@ -3934,7 +3938,7 @@ export const appRouter = router({
 
 Case: #${input.caseId}`,
                 isRead: false,
-              }).catch(() => {});
+              }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
             }
           }
         }
@@ -3974,7 +3978,7 @@ Case: #${input.caseId}`,
           targetType: "complianceCase",
           description: `Bulk updated ${updated} cases to status '${input.newStatus}'`,
           severity: "warning",
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { updated };
       }),
     // ─── Analytics Alert Thresholds ──────────────────────────────────────────────
@@ -4100,7 +4104,7 @@ Case: #${input.caseId}`,
           targetType: "kycDocument",
           description: `Set KYC doc #${input.docId} expiry to ${input.expiresAt}`,
           severity: "info",
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true };
       }),
     setCaseDueAt: protectedProcedure
@@ -4311,7 +4315,7 @@ Case: #${input.caseId}`,
               sendOwnerNotif({
                 title: `Analytics Alert: ${t.label}`,
                 content: `Metric "${t.label}" is ${val} — ${t.operator} threshold of ${t.threshold} (last ${input.days} days).`,
-              }).catch(() => {});
+              }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
             }
           }
         }
@@ -4481,7 +4485,7 @@ Case: #${input.caseId}`,
         await db.update(complianceCases).set({ assignedTo, status: "under_review" }).where(eq(complianceCases.id, input.caseId));
         // Send notification to assigned admin
         await sendNotification({ userId: admin.id, type: "system", title: "Case Assigned to You", message: `Compliance case #${input.caseId} has been assigned to you by ${ctx.user.name ?? "an admin"}.`, metadata: { caseId: input.caseId } });
-        logAdminAction({ actorId: ctx.user.id, action: "assignCaseToAdmin", targetId: input.caseId, targetType: "complianceCase", description: `Assigned case #${input.caseId} to ${assignedTo}`, severity: "info", metadata: { assignedTo, adminId: admin.id } }).catch(() => {});
+        logAdminAction({ actorId: ctx.user.id, action: "assignCaseToAdmin", targetId: input.caseId, targetType: "complianceCase", description: `Assigned case #${input.caseId} to ${assignedTo}`, severity: "info", metadata: { assignedTo, adminId: admin.id } }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, caseId: input.caseId, assignedTo };
       }),
 
@@ -5408,7 +5412,7 @@ Case: #${input.caseId}`,
           // Notify the platform owner for 100% milestone
           if (hitMilestone === 100) {
             const { notifyOwner } = await import("./_core/notification.js");
-            await notifyOwner({ title: notifTitle, content: `${notifMsg} Fund: Proposal ID ${input.proposalId}.` }).catch(() => {});
+            await notifyOwner({ title: notifTitle, content: `${notifMsg} Fund: Proposal ID ${input.proposalId}.` }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
           }
         }
       } catch { /* non-critical — milestone notification failure should not block vote */ }
@@ -5448,7 +5452,7 @@ Case: #${input.caseId}`,
       await db.update(fundProposals).set({ status: "funded", updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId));
       await db.insert(notifications).values({ userId: ctx.user.id, type: "disbursement_requested", title: "Disbursement Requested", message: `Your proposal "${proposal.title}" has been submitted for disbursement review.`, isRead: false, createdAt: new Date() });
       const { notifyOwner: _notifyOwner } = await import("./_core/notification.js");
-      await _notifyOwner({ title: "Fund Disbursement Request", content: `Proposal "${proposal.title}" (ID: ${proposal.id}) has been submitted for disbursement by ${ctx.user.name ?? ctx.user.email}. Amount: ${proposal.requestedAmount} ${proposal.currency}. Method: ${input.disbursementMethod}.` }).catch(() => {});
+      await _notifyOwner({ title: "Fund Disbursement Request", content: `Proposal "${proposal.title}" (ID: ${proposal.id}) has been submitted for disbursement by ${ctx.user.name ?? ctx.user.email}. Amount: ${proposal.requestedAmount} ${proposal.currency}. Method: ${input.disbursementMethod}.` }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       return { success: true, proposalId: input.proposalId };
     }),
 
@@ -6531,5 +6535,9 @@ Case: #${input.caseId}`,
   kycSelfService: kycSelfServiceRouter,
   kycDataQuality: kycDataQualityRouter,
   kycAnalytics: kycAnalyticsRouter,
+  doubleEntry: doubleEntryRouter,
+  receiptGeneration: receiptGenerationRouter,
+  loyaltyPoints: loyaltyPointsRouter,
+  beneficiaryVerification: beneficiaryVerificationRouter,
 });
 export type AppRouter = typeof appRouter;

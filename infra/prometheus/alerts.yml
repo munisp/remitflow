@@ -1,0 +1,51 @@
+groups:
+  - name: remitflow
+    rules:
+      - alert: APIDown
+        expr: up{job="api-server"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RemitFlow API is down"
+          description: "API server has been unreachable for more than 1 minute."
+
+      - alert: HighErrorRate
+        expr: rate(remitflow_errors_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected"
+
+      - alert: SlowAPIResponse
+        expr: histogram_quantile(0.99, rate(remitflow_api_duration_seconds_bucket[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P99 API latency exceeds 2 seconds"
+
+      - alert: TransferFailureRate
+        expr: rate(remitflow_transfers_total{status="failed"}[5m]) / rate(remitflow_transfers_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Transfer failure rate exceeds 5%"
+
+      - alert: FXRatesStale
+        expr: time() - remitflow_fx_last_update_timestamp > 600
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "FX rates are stale (>10 minutes old)"
+
+      - alert: DatabaseConnectionPoolExhausted
+        expr: remitflow_db_pool_available == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database connection pool exhausted"
