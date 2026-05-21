@@ -94,6 +94,8 @@ const SERVICES: ServiceConfig[] = [
 ];
 
 const processes: Map<string, ChildProcess> = new Map();
+const restartCounts: Map<string, number> = new Map();
+const MAX_RESTARTS = 3;
 let shuttingDown = false;
 
 function spawnService(config: ServiceConfig): void {
@@ -161,8 +163,16 @@ function spawnService(config: ServiceConfig): void {
     processes.delete(config.name);
     if (!shuttingDown) {
       if (code !== 0 && code !== null) {
+        const count = (restartCounts.get(config.name) ?? 0) + 1;
+        restartCounts.set(config.name, count);
+        if (count > MAX_RESTARTS) {
+          logger.warn(
+            `[Microservices] ${config.name} exceeded ${MAX_RESTARTS} restarts — giving up`
+          );
+          return;
+        }
         logger.warn(
-          `[Microservices] ${config.name} exited with code ${code}. Restarting in 5s...`
+          `[Microservices] ${config.name} exited with code ${code}. Restarting in 5s (attempt ${count}/${MAX_RESTARTS})...`
         );
         setTimeout(() => spawnService(config), 5000);
       } else if (signal) {

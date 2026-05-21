@@ -507,7 +507,7 @@ export function ransomwareUploadGuard(req: Request, res: Response, next: NextFun
 
 // ─── 24. DDoS Circuit Breaker (v143) ─────────────────────────────────────────
 const CIRCUIT_WINDOW_MS = 10_000;
-const CIRCUIT_THRESHOLD = 500;
+const CIRCUIT_THRESHOLD = 5000;
 const CIRCUIT_COOLDOWN_MS = 30_000;
 
 let circuitRequests = 0;

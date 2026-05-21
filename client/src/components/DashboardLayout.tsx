@@ -47,6 +47,7 @@ import { GlobalMobileNav } from "./GlobalMobileNav";
 import { OfflineQueueBanner } from "./OfflineQueueBanner";
 import { SessionTimeout } from "./SessionTimeout";
 import { CSSProperties, useCallback, useEffect, useRef, useState } from "react";
+import { useTheme } from "@/contexts/ThemeContext";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { trpc } from "@/lib/trpc";
@@ -672,6 +673,15 @@ function OnboardingProgress({
 }
 
 // ─── BREADCRUMB ───────────────────────────────────────────────────────────────
+function DarkModeToggle() {
+  const { theme, toggleTheme } = useTheme();
+  return (
+    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggleTheme} aria-label="Toggle dark mode">
+      {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+    </Button>
+  );
+}
+
 function Breadcrumb({ path }: { path: string }) {
   const item = ALL_NAV_ITEMS.find((i) => i.path === path);
   if (!item) return null;
@@ -1137,6 +1147,7 @@ function DashboardLayoutContent({
               </kbd>
             </button>
             <NotificationBell />
+            <DarkModeToggle />
             <LanguageSwitcher />
           </div>
         </div>

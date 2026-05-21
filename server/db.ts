@@ -176,9 +176,9 @@ async function autoSeedUser(userId: number) {
   ]).onConflictDoNothing();
   // ── Referrals ────────────────────────────────────────────────────────────────
   await db.insert(referrals).values([
-    { referrerId: userId, status: "rewarded", rewardAmount: "10.00", rewardCurrency: "USD" },
-    { referrerId: userId, status: "completed", rewardAmount: "10.00", rewardCurrency: "USD" },
-    { referrerId: userId, status: "pending" },
+    { referrerId: userId, referredId: userId, status: "rewarded", rewardAmount: "10.00", rewardCurrency: "USD" },
+    { referrerId: userId, referredId: userId, status: "completed", rewardAmount: "10.00", rewardCurrency: "USD" },
+    { referrerId: userId, referredId: userId, status: "pending" },
   ]).onConflictDoNothing();
   // ── Batch Payments ───────────────────────────────────────────────────────────
   await db.insert(batchPayments).values([

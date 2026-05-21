@@ -447,7 +447,8 @@ export default function SendMoney() {
               {quote && (
                 <div className="bg-muted/50 rounded-lg p-3 space-y-1 text-sm">
                   <div className="flex justify-between"><span className="text-muted-foreground">Exchange rate</span><span>1 {fromCurrency} = {quote.fxRate?.toFixed(4)} {toCurrency}</span></div>
-                  <div className="flex justify-between"><span className="text-muted-foreground">Fee (0.5%)</span><span>{quote.fee?.toFixed(2)} {fromCurrency}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Transfer fee</span><span>{quote.fee?.toFixed(2)} {fromCurrency}</span></div>
+                  {(quote as any).fxMarkup ? <div className="flex justify-between text-xs"><span className="text-muted-foreground">FX markup</span><span>{((quote as any).fxMarkup * 100).toFixed(2)}%</span></div> : null}
                   <Separator className="my-1" />
                   <div className="flex justify-between font-semibold"><span>Total deducted</span><span>{(parseFloat(amount) + (quote.fee ?? 0)).toFixed(2)} {fromCurrency}</span></div>
                 </div>

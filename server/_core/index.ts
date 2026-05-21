@@ -1052,6 +1052,13 @@ async function startServer() {
         if (error.code === "INTERNAL_SERVER_ERROR") {
           logger.error(`[tRPC] Error on ${path}:`, error.message);
         }
+        // Strip stack traces in production to prevent information leakage
+        if (process.env.NODE_ENV === "production") {
+          delete (error as any).stack;
+          if (error.cause && typeof error.cause === "object") {
+            delete (error.cause as any).stack;
+          }
+        }
       },
     })
   );
@@ -1082,6 +1089,17 @@ async function startServer() {
     } catch (err: any) {
       logger.error({ err: err?.message }, "[purge-expired-keys] Handler error");
       return res.status(500).json({ error: err?.message, timestamp: new Date().toISOString() });
+    }
+  });
+
+  // Global Express error handler — strip stack traces in production
+  app.use((err: any, _req: any, res: any, _next: any) => {
+    const status = err.status ?? err.statusCode ?? 500;
+    logger.error({ err: err.message, status, path: _req.path }, "[Express] Unhandled error");
+    if (process.env.NODE_ENV === "production") {
+      res.status(status).json({ error: status >= 500 ? "Internal server error" : err.message });
+    } else {
+      res.status(status).json({ error: err.message, stack: err.stack });
     }
   });
 
