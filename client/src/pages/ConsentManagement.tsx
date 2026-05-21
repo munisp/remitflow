@@ -22,11 +22,7 @@ const CONSENT_TYPES = [
   { id: "profiling", label: "Automated Profiling", description: "Allow automated decision-making for personalised FX rates and recommendations.", required: false, category: "AI/ML" },
 ];
 
-const HISTORY_SAMPLE = [
-  { id: 1, type: "marketing", action: "granted", date: "2026-01-15T10:30:00Z", method: "Web UI" },
-  { id: 2, type: "analytics", action: "granted", date: "2026-01-15T10:30:00Z", method: "Web UI" },
-  { id: 3, type: "third_party_sharing", action: "withdrawn", date: "2026-02-20T14:15:00Z", method: "Mobile App" },
-];
+type ConsentHistoryItem = { id: number; type: string; action: string; date: string; method: string };
 
 export default function ConsentManagement() {
   const { t } = useTranslation();
@@ -76,7 +72,7 @@ export default function ConsentManagement() {
           </div>
         ) : (
           <div className="space-y-3">
-            {HISTORY_SAMPLE.map(h => (
+            {(((consentData as any)?.history ?? []) as ConsentHistoryItem[]).map((h: ConsentHistoryItem) => (
               <Card key={h.id}><CardContent className="p-4 flex items-center justify-between">
                 <div><div className="font-medium text-sm capitalize">{h.type.replace(/_/g, " ")}</div><div className="text-xs text-muted-foreground">{new Date(h.date).toLocaleString()} · {h.method}</div></div>
                 <Badge className={`text-xs capitalize ${h.action === "granted" ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"}`}>{h.action}</Badge>
