@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { format } from "date-fns";
 import { Search, RefreshCw, FileText, Download } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const ACTION_COLORS: Record<string, string> = {
   CREATE: "bg-green-100 text-green-800",
@@ -21,12 +22,13 @@ const ACTION_COLORS: Record<string, string> = {
 };
 
 export default function AuditLogAdmin() {
+  const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [actionFilter, setActionFilter] = useState("all");
   const [page, setPage] = useState(1);
   const limit = 50;
 
-  const { data, isLoading, refetch } = trpc.auditLog.list.useQuery({
+  const { data, isLoading, refetch, isError } = trpc.auditLog.list.useQuery({
     action: actionFilter !== "all" ? actionFilter : undefined,
     page,
     limit,

@@ -15,8 +15,10 @@ import {  Plus, Copy, Power, PowerOff, Trash2, RefreshCw, Building2,
   BarChart3, TrendingUp, Activity, Shield,
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function AdminInviteCodes() {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("codes");
   const [generateOpen, setGenerateOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");

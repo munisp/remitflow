@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ShieldCheck, Plus, AlertTriangle, CheckCircle2, Clock, XCircle } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 type ReasonType = "unauthorized_transaction" | "goods_not_received" | "duplicate_charge" | "wrong_amount" | "subscription_cancelled" | "other";
 
@@ -31,6 +32,7 @@ const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
 };
 
 export default function ChargebackManager() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({

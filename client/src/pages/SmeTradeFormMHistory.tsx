@@ -15,6 +15,7 @@ import {
   Info, ShieldCheck, TrendingUp
 } from "lucide-react";
 import { Link } from "wouter";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline"; icon: React.ReactNode; description: string }> = {
   validated: {
@@ -164,6 +165,7 @@ function ValidationDetail({ result }: { result: Record<string, unknown> | null }
 }
 
 export default function SmeTradeFormMHistory() {
+  const { t } = useTranslation();
   const [page, setPage] = useState(0);
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "validated" | "approved" | "rejected">("all");
   const [search, setSearch] = useState("");

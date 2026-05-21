@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { Calculator, Plus, Pencil, DollarSign, Percent } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const CORRIDORS = ["USD-NGN","GBP-NGN","EUR-NGN","USD-KES","GBP-KES","USD-GHS","USD-ZAR","USD-TZS","USD-UGX","GBP-GHS","EUR-KES","USD-EGP","USD-MAD","USD-XOF","USD-XAF","USD-ETB","USD-RWF","GBP-ZAR","USD-INR","USD-PHP"];
 
@@ -18,6 +19,7 @@ function emptyForm() {
 }
 
 export default function FeeRulesEngine() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [createOpen, setCreateOpen] = useState(false);
   const [editRule, setEditRule] = useState<any>(null);

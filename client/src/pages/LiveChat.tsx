@@ -65,7 +65,7 @@ export default function LiveChat() {
   const [showQuickActions, setShowQuickActions] = useState(true);
 
   const { data: sessions = [], isLoading: sessionsLoading } = trpc.support.listSessions.useQuery();
-  const { data: sessionMessages } = trpc.support.getMessages.useQuery(
+  const { data: sessionMessages, isError } = trpc.support.getMessages.useQuery(
     { sessionId: activeSessionId! },
     { enabled: !!activeSessionId }
   );

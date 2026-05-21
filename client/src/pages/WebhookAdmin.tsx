@@ -62,6 +62,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { format } from 'date-fns';
+import { useTranslation } from 'react-i18next';
 
 const EVENT_TYPES = [
   'transfer.completed',
@@ -84,6 +85,7 @@ interface WebhookFormValues {
 }
 
 export default function WebhookAdmin() {
+  const { t } = useTranslation();
   const utils = trpc.useContext();
   const [searchQuery, setSearchQuery] = useState('');
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);

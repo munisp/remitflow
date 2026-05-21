@@ -9,6 +9,7 @@ import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, LineChart, Line,
 } from "recharts";
 import { TrendingUp, TrendingDown, DollarSign, Activity, Users, Award } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const PERIOD_OPTIONS = [
   { label: "Last 7 days", value: 7 },
@@ -44,10 +45,11 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 };
 
 export default function DailyVolumeWidget() {
+  const { t } = useTranslation();
   const [days, setDays] = useState(30);
   const [chartType, setChartType] = useState<"area" | "bar" | "line">("area");
 
-  const { data, isLoading } = trpc.volumeWidget.daily.useQuery({ days });
+  const { data, isLoading, isError } = trpc.volumeWidget.daily.useQuery({ days });
 
   const chartData = data?.data.map((d: any) => ({
     date: d.date,

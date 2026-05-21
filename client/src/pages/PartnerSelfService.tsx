@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -16,6 +17,7 @@ import {
 } from "lucide-react";
 
 export default function PartnerSelfService() {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("api-keys");
   const [showCreateKey, setShowCreateKey] = useState(false);
   const [showCreateWebhook, setShowCreateWebhook] = useState(false);

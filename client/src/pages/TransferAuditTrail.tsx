@@ -17,6 +17,7 @@ const STATUS_COLORS: Record<string, string> = {
 
 import React from "react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 const TRIGGER_ICONS: Record<string, React.ReactElement> = {
   user: <User className="w-3.5 h-3.5" />,
   system: <Cpu className="w-3.5 h-3.5" />,
@@ -25,10 +26,11 @@ const TRIGGER_ICONS: Record<string, React.ReactElement> = {
 };
 
 export default function TransferAuditTrail() {
+  const { t } = useTranslation();
   const [transferId, setTransferId] = useState("");
   const [searchId, setSearchId] = useState<number | null>(null);
 
-  const { data: trail, isLoading } = trpc.transferAudit.getTrail.useQuery(
+  const { data: trail, isLoading, isError } = trpc.transferAudit.getTrail.useQuery(
     { transferId: searchId! },
     { enabled: searchId !== null }
   );

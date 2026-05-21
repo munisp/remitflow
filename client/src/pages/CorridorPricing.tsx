@@ -22,7 +22,7 @@ export default function CorridorPricing() {
   const [days, setDays] = useState(30);
   const [selectedPair, setSelectedPair] = useState({ fromCurrency: "USD", toCurrency: "NGN" });
 
-  const { data: topCorridors } = trpc.corridorAnalytics.topCorridors.useQuery(
+  const { data: topCorridors, isLoading, isError } = trpc.corridorAnalytics.topCorridors.useQuery(
     { days, limit: 10 }, { enabled: isAdmin }
   );
   const { data: performance } = trpc.corridorAnalytics.performance.useQuery(

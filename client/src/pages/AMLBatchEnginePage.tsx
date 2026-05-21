@@ -9,8 +9,10 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Shield, Play, CheckCircle2, AlertTriangle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function AMLBatchEnginePage() {
+  const { t } = useTranslation();
   const [batchSize, setBatchSize] = useState(100);
   const [riskThreshold, setRiskThreshold] = useState(70);
 

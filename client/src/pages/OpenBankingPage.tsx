@@ -6,8 +6,10 @@ import { Button } from "@/components/ui/button";
 import { Building2, CheckCircle, AlertCircle, RefreshCw, Link } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function OpenBankingPage() {
+  const { t } = useTranslation();
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const { data, refetch } = trpc.v90.openBanking.getConnectedAccounts.useQuery();
   const consentMutation = trpc.v90.openBanking.initiateConsent.useMutation({

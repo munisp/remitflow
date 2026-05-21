@@ -21,7 +21,7 @@ const statusBadge = (status: "pass" | "warn" | "fail") => {
 
 export default function AdminReadiness() {
   const { t } = useTranslation();
-  const { data, isLoading, refetch, isFetching } = trpc.admin.readinessCheck.useQuery(undefined, {
+  const { data, isLoading, refetch, isFetching, isError } = trpc.admin.readinessCheck.useQuery(undefined, {
     refetchInterval: false,
   });
 

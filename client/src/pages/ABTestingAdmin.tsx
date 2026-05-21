@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { FlaskConical, Plus, Play, Pause, BarChart2, CheckCircle, Clock, Layers } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const statusColor: Record<string, string> = {
   draft: "bg-gray-100 text-gray-700",
@@ -20,6 +21,7 @@ const statusColor: Record<string, string> = {
 };
 
 export default function ABTestingAdmin() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [open, setOpen] = useState(false);
   const [selectedExp, setSelectedExp] = useState<number | null>(null);

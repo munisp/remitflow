@@ -4,6 +4,7 @@
  * Route: /admin/agent-kyb
  * Uses: trpc.agentOnboarding.listPending, .approve, .reject
  */
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from '@/contexts/AuthContext';
@@ -42,6 +43,7 @@ const TIER_COLORS: Record<string, string> = {
 };
 
 export default function AgentKYBAdmin() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const utils = trpc.useUtils();
   const [rejectTarget, setRejectTarget] = useState<AgentApplication | null>(null);

@@ -68,6 +68,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { useTranslation } from 'react-i18next';
 
 // --- Schemas ---
 
@@ -85,6 +86,7 @@ type BeneficiaryFormValues = z.infer<typeof beneficiarySchema>;
 // --- Component ---
 
 export default function BeneficiaryManager() {
+  const { t } = useTranslation();
   // State
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');

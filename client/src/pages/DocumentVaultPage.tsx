@@ -18,6 +18,7 @@ import {
   CheckCircle, History,
 } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
+import { useTranslation } from 'react-i18next';
 
 const categoryColor: Record<string, string> = {
   identity:   "bg-blue-100 text-blue-700",
@@ -46,6 +47,7 @@ function getExpiryUrgency(expiresAt: Date | string | null | undefined) {
 }
 
 export default function DocumentVaultPage() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploadOpen, setUploadOpen] = useState(false);

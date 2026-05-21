@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useLocation } from "wouter";
+import { useTranslation } from 'react-i18next';
 
 const KYC_COLORS: Record<string, string> = {
   tier0: "bg-gray-500", tier1: "bg-yellow-500", tier2: "bg-blue-500", tier3: "bg-green-500",
@@ -38,6 +39,7 @@ function completenessScore(profile: any): { score: number; missing: string[] } {
 }
 
 export default function Profile() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const { user } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);

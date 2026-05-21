@@ -12,6 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { Play, Plus, Pencil, Trash2, FlaskConical, Globe, Lock } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const SCENARIO_TYPES = ["transfer", "fx", "kyc", "webhook", "payment", "compliance"] as const;
 type ScenarioType = typeof SCENARIO_TYPES[number];
@@ -35,6 +36,7 @@ const DEFAULT_PAYLOADS: Record<ScenarioType, object> = {
 };
 
 export default function SandboxScenarios() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [filterType, setFilterType] = useState<string>("all");
   const [createOpen, setCreateOpen] = useState(false);

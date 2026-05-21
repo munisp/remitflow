@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { CheckCircle2, AlertTriangle, XCircle, Activity, Database, Zap, Bell, CreditCard, HardDrive, Server, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useTranslation } from 'react-i18next';
 
 const statusConfig: Record<string, { icon: any; color: string; badge: string }> = {
   healthy: { icon: CheckCircle2, color: "text-emerald-600", badge: "bg-emerald-100 text-emerald-700" },
@@ -26,6 +27,7 @@ const serviceIcons: Record<string, any> = {
 };
 
 export default function SystemHealthDashboardV2() {
+  const { t } = useTranslation();
   const { data: health, isLoading, refetch, isFetching } = trpc.v99.systemHealth.getHealth.useQuery(
     undefined,
     { refetchInterval: 30000 }

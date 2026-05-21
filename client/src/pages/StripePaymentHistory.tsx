@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import React, { useState } from 'react';
 import { format } from 'date-fns';
@@ -63,6 +64,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 
 const StripePaymentHistory: React.FC = () => {
+  const { t } = useTranslation();
   // State for filters and pagination
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState<string>('all');

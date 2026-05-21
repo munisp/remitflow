@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -35,6 +36,7 @@ const PROPERTY_TYPES = ["all", "residential", "commercial", "land", "mixed_use",
 const CITIES = ["all", "Lagos", "Abuja", "Port Harcourt", "Kano", "Ibadan", "Enugu", "Kaduna"];
 
 export default function RealEstateHub() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState("listings");
   const [search, setSearch] = useState("");
   const [propertyType, setPropertyType] = useState("all");

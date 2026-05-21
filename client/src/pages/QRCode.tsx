@@ -18,7 +18,7 @@ export default function QRCodePage() {
   const [currency, setCurrency] = useState("USD");
   const [note, setNote] = useState("");
   const [generated, setGenerated] = useState(false);
-  const { data: profile } = trpc.auth.me.useQuery();
+  const { data: profile, isLoading } = trpc.auth.me.useQuery();
   const { data: wallets = [] } = trpc.wallet.list.useQuery();
   const walletArr = Array.isArray(wallets) ? wallets : [];
   const qrRef = useRef<HTMLDivElement>(null);

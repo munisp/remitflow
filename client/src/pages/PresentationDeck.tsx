@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { ChevronLeft, ChevronRight, Globe, Zap, Shield, TrendingUp, Users, Building2, ArrowLeftRight, Layers, Star, CheckCircle2, ArrowRight, Play, Pause } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 // ─── Slide data ───────────────────────────────────────────────────────────────
 
@@ -881,6 +882,7 @@ const SLIDE_COMPONENTS = [Slide1, Slide2, Slide3, Slide4, Slide5, Slide6, Slide7
 // ─── Main Presentation Component ─────────────────────────────────────────────
 
 export default function PresentationDeck() {
+  const { t } = useTranslation();
   const [current, setCurrent] = useState(0);
   const [autoPlay, setAutoPlay] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);

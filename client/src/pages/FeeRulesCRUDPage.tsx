@@ -11,6 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { Plus, Edit, Trash2, DollarSign } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 interface FeeRuleForm {
   corridor: string; minAmount: string; maxAmount: string;
@@ -24,6 +25,7 @@ const defaultForm: FeeRuleForm = {
 };
 
 export default function FeeRulesCRUDPage() {
+  const { t } = useTranslation();
   const [showCreate, setShowCreate] = useState(false);
   const [editRule, setEditRule] = useState<any | null>(null);
   const [form, setForm] = useState<FeeRuleForm>(defaultForm);

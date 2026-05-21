@@ -9,8 +9,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Store, CheckCircle, XCircle, Clock, Search, Plus } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function MerchantOnboardingPage() {
+  const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState<"pending"|"active"|"suspended"|"rejected"|"all">("all");
   const [search, setSearch] = useState("");
   const [approveDialog, setApproveDialog] = useState<number | null>(null);

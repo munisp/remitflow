@@ -15,7 +15,7 @@ export default function ExchangeRates() {
   const [fromCcy, setFromCcy] = useState("USD");
   const [toCcy, setToCcy] = useState("NGN");
   const [amount, setAmount] = useState("100");
-  const { data, isLoading, refetch } = trpc.fx.rates.useQuery();
+  const { data, isLoading, refetch, isError } = trpc.fx.rates.useQuery();
   const lockMutation = trpc.fx.lockRate.useMutation({ onSuccess: () => toast.success("Rate locked for 15 minutes!") });
 
   // API returns a flat array: [{ currency, rate, change, trend, source }]

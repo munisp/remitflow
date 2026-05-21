@@ -8,6 +8,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { CheckCircle2, Clock, XCircle, AlertCircle, FileText, Send, Building2 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_CONFIG: Record<string, { color: string; icon: any; label: string; description: string }> = {
   draft: { color: "bg-gray-500/20 text-gray-300 border-gray-500/30", icon: FileText, label: "Draft", description: "Application not yet submitted" },
@@ -26,6 +27,7 @@ const TIMELINE_STEPS = [
 ];
 
 export default function PartnerApplicationStatus() {
+  const { t } = useTranslation();
   const params = useParams<{ slug: string }>();
   const slug = params.slug;
   const [additionalInfo, setAdditionalInfo] = useState("");

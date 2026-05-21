@@ -9,8 +9,10 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Route, Zap, DollarSign, Shield, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function SmartRoutingV2Page() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<"simulate" | "decisions" | "stats">("simulate");
   const [fromCurrency, setFromCurrency] = useState("USD");
   const [toCurrency, setToCurrency] = useState("NGN");

@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { FileText, Download, Plus, RefreshCw, CheckCircle2, Clock, AlertTriangle, Shield } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const REPORT_TYPES = [
   { value: "SAR", label: "Suspicious Activity Report (SAR)" },
@@ -23,6 +24,7 @@ const REPORT_TYPES = [
 ];
 
 export default function ComplianceReporting() {
+  const { t } = useTranslation();
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState<{ reportType: "SAR" | "CTR" | "AML" | "KYC_AUDIT" | "TRANSACTION_MONITORING" | "REGULATORY_CAPITAL" | "OFAC_SCREENING"; reportPeriod: string }>({ reportType: "AML", reportPeriod: "2025-Q4" });
 

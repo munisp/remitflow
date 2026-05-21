@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Users, Gift, Trophy, Copy, Share2, DollarSign, Clock, CheckCircle, XCircle } from "lucide-react";
 import { format } from "date-fns";
+import { useTranslation } from 'react-i18next';
 
 const statusColor: Record<string, string> = {
   pending: "bg-yellow-100 text-yellow-700",
@@ -18,9 +19,10 @@ const statusColor: Record<string, string> = {
 };
 
 export default function ReferralDashboard() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<"overview" | "bonuses" | "leaderboard">("overview");
 
-  const { data: referralData } = trpc.referral.info.useQuery();
+  const { data: referralData, isLoading, isError } = trpc.referral.info.useQuery();
   const { data: bonusData } = trpc.referralBonus.list.useQuery();
   const { data: leaderboardData } = trpc.referralBonus.leaderboard.useQuery();
 

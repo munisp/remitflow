@@ -8,8 +8,10 @@ import { Input } from "@/components/ui/input";
 import { Loader2, Database, Layers, ArrowDown, Play, BarChart3 } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function LakehousePage() {
+  const { t } = useTranslation();
   const [etlLimit, setEtlLimit] = useState("1000");
   const [bronzeTable, setBronzeTable] = useState("transactions");
   const [bronzeLimit, setBronzeLimit] = useState("500");

@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DollarSign, Users, FileText, Send, Plus, Clock, CheckCircle, XCircle, AlertCircle } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   draft: "bg-gray-100 text-gray-700",
@@ -23,6 +24,7 @@ const STATUS_COLORS: Record<string, string> = {
 const CURRENCIES = ["USD", "GBP", "EUR", "NGN", "KES", "GHS", "ZAR", "CAD", "AUD"];
 
 export default function ContractorPayments() {
+  const { t } = useTranslation();
   const [createOpen, setAddContractorOpen] = useState(false);
   const [addInvoiceOpen, setAddInvoiceOpen] = useState(false);
   const [selectedContractor, setSelectedContractor] = useState<number | null>(null);

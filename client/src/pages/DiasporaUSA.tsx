@@ -9,8 +9,10 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Loader2, ArrowRight, Gift, Users, Star } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function DiasporaUSA() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [amount, setAmount] = useState(500);
   const [routingNumber, setRoutingNumber] = useState("");

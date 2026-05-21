@@ -14,6 +14,7 @@ type DocType = "passport" | "national_id" | "drivers_license" | "utility_bill" |
 
 // Helper type for the extractedData Record<string, unknown>
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 interface ExtractedData {
   documentType?: string;
   confidence?: number;
@@ -26,6 +27,7 @@ interface ExtractedData {
 }
 
 export default function DocumentOCRPage() {
+  const { t } = useTranslation();
   const [docUrl, setDocUrl] = useState("https://example.com/sample-passport.jpg");
   const [docType, setDocType] = useState<DocType>("passport");
   const [userId, setUserId] = useState(1);

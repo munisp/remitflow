@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { DollarSign, Clock, CheckCircle, XCircle, Plus, RefreshCw, TrendingUp } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
@@ -22,6 +23,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function PartnerPayouts() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const utils = trpc.useUtils();
   const [statusFilter, setStatusFilter] = useState<string>("all");

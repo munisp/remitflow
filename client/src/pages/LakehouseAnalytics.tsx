@@ -12,6 +12,7 @@ import {
 } from "recharts";
 import { Database, TrendingUp, Globe, Activity, RefreshCw, Download } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const RAIL_COLORS: Record<string, string> = {
   cips: "#ef4444",
@@ -42,10 +43,11 @@ function formatNumber(n: number) {
 }
 
 export default function LakehouseAnalytics() {
+  const { t } = useTranslation();
   const [period, setPeriod] = useState<"7d" | "30d" | "90d" | "1y">("30d");
   const [selectedRail, setSelectedRail] = useState<string>("all");
 
-  const { data, isLoading, refetch, isFetching } = trpc.v90.paymentRails.getAnalytics.useQuery({
+  const { data, isLoading, refetch, isFetching, isError } = trpc.v90.paymentRails.getAnalytics.useQuery({
     period,
     rail: selectedRail === "all" ? undefined : selectedRail,
   });

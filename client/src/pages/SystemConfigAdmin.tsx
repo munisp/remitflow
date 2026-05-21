@@ -56,6 +56,7 @@ import {
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { useTranslation } from 'react-i18next';
 
 interface ConfigEntry {
   key: string;
@@ -74,6 +75,7 @@ const CONFIG_GROUPS = [
 ];
 
 export default function SystemConfigAdmin() {
+  const { t } = useTranslation();
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState('ALL');
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);

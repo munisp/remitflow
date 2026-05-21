@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { toast } from "sonner";
 import { AlertTriangle, CheckCircle, FileText, Flag, TrendingUp } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   pending_review: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200",
@@ -24,6 +25,7 @@ const FLAG_REASON_LABELS: Record<string, string> = {
 };
 
 export default function CTRCompliance() {
+  const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState("");
   const [reviewId, setReviewId] = useState<number | null>(null);
   const [reviewStatus, setReviewStatus] = useState<"filed" | "dismissed" | "escalated">("filed");

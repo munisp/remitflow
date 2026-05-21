@@ -6,11 +6,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { TrendingUp, DollarSign, Users, BarChart3, ArrowUp, ArrowDown } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function RevenueAnalytics() {
+  const { t } = useTranslation();
   const [period, setPeriod] = useState<"7d" | "30d" | "90d" | "1y">("30d");
 
-  const { data: revenue } = trpc.v98.analytics.revenue.useQuery({ period });
+  const { data: revenue, isLoading, isError } = trpc.v98.analytics.revenue.useQuery({ period });
   const { data: topCorridors } = trpc.v98.analytics.topCorridors.useQuery({ period, limit: 10 });
   const { data: userGrowth } = trpc.v98.analytics.userGrowth.useQuery({ period });
 

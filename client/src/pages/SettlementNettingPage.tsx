@@ -9,10 +9,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ArrowLeftRight, DollarSign, TrendingUp, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const DEFAULT_CURRENCIES = ["USD", "GBP", "EUR", "NGN", "KES", "GHS"];
 
 export default function SettlementNettingPage() {
+  const { t } = useTranslation();
   const [settlementDate, setSettlementDate] = useState(() => new Date().toISOString().split("T")[0]);
 
   const runNetting = trpc.v101.settlementNetting.runNetting.useMutation({

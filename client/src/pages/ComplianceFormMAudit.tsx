@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Loader2, Search, Shield, FileText, Clock, CheckCircle2, XCircle, AlertTriangle, ChevronLeft, ChevronRight, Eye, RefreshCw } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_CONFIG: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline"; icon: React.ReactNode }> = {
   validated: { label: "Validated", variant: "default", icon: <CheckCircle2 className="h-3 w-3" /> },
@@ -67,6 +68,7 @@ function ValidationResultPanel({ result }: { result: Record<string, unknown> | n
 }
 
 export default function ComplianceFormMAudit() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [page, setPage] = useState(0);
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "validated" | "approved" | "rejected">("all");

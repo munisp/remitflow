@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -43,6 +44,7 @@ function formatBillions(val: string | null | undefined) {
 }
 
 export default function NGXStockMarket() {
+  const { t } = useTranslation();
   
   const [search, setSearch] = useState("");
   const [sector, setSector] = useState("all");

@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { Webhook, Plus, Trash2, RefreshCw, Eye, EyeOff, Copy, CheckCircle, XCircle, Clock } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const AVAILABLE_EVENTS = [
   "payment.completed", "payment.failed", "payment.refunded",
@@ -28,6 +29,7 @@ const STATUS_ICON: Record<string, any> = {
 };
 
 export default function WebhookManager() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedEndpoint, setSelectedEndpoint] = useState<number | null>(null);

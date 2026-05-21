@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -394,6 +395,7 @@ function RunDetailDialog({ runId, onRefresh }: { runId: number; onRefresh: () =>
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function GlobalPayroll() {
+  const { t } = useTranslation();
   const [selectedCompanyId, setSelectedCompanyId] = useState<number | null>(null);
   const [showNewCompany, setShowNewCompany] = useState(false);
   const [newCompanyForm, setNewCompanyForm] = useState({ name: "", registrationNumber: "", taxId: "", country: "NG", baseCurrency: "USD" });

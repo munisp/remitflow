@@ -3,6 +3,7 @@
  * Compliance Officer Workload Dashboard
  * Shows per-officer open/escalated alert counts, avg resolution time, SAR count.
  */
+import { useTranslation } from 'react-i18next';
 import { useMemo } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
@@ -28,7 +29,8 @@ function DeadlineBadge({ deadline }: { deadline: string | null | undefined }) {
 export { DeadlineBadge };
 
 export default function OfficerWorkload() {
-  const { data: officers, isLoading } = trpc.complianceAlerts.officerWorkload.useQuery();
+  const { t } = useTranslation();
+  const { data: officers, isLoading, isError } = trpc.complianceAlerts.officerWorkload.useQuery();
 
   const totals = useMemo(() => {
     if (!officers) return { total: 0, open: 0, escalated: 0, resolved: 0, sars: 0 };

@@ -14,6 +14,7 @@ import {  MessageSquare, Users, Clock, CheckCircle, AlertCircle, Send, User,
   Zap, Tag, MoreVertical, PhoneOff, ArrowRight, Search, RefreshCw
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const priorityColors: Record<string, string> = {
   low: "bg-gray-500/20 text-gray-300",
@@ -40,6 +41,7 @@ const CANNED_RESPONSES = [
 ];
 
 export default function ChatAgentDashboard() {
+  const { t } = useTranslation();
   const { user } = useAuth();
 
   const [selectedSessionId, setSelectedSessionId] = useState<number | null>(null);

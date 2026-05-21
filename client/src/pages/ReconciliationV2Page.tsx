@@ -9,8 +9,10 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import { Scale, Play, CheckCircle2, AlertTriangle, Clock, DollarSign, RefreshCw, FileText, TrendingUp } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function ReconciliationV2Page() {
+  const { t } = useTranslation();
   const [fromDate, setFromDate] = useState(() => {
     const d = new Date();
     d.setDate(d.getDate() - 1);

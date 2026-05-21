@@ -9,8 +9,10 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { PiggyBank, TrendingUp, Unlock, Plus, DollarSign } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function BusinessSavings() {
+  const { t } = useTranslation();
   const [openAccountDialog, setOpenAccountDialog] = useState(false);
   const [accountForm, setAccountForm] = useState({
     productId: "", principalUsd: "",

@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { GraduationCap, Loader2, ArrowRight } from "lucide-react";
 import { AnnualLimitBadge } from "@/components/AnnualLimitBadge";
 import { CrossSellOfferModal } from "@/components/CrossSellOfferModal";
+import { useTranslation } from 'react-i18next';
 
 const EDU_COUNTRIES = [
   {code:"GB",name:"United Kingdom",currency:"GBP"},{code:"US",name:"United States",currency:"USD"},
@@ -19,6 +20,7 @@ const EDU_COUNTRIES = [
 ];
 
 export default function EducationPayments() {
+  const { t } = useTranslation();
   const { isAuthenticated } = useAuth();
   const [amountNgn, setAmountNgn] = useState("");
   const [country, setCountry] = useState("GB");

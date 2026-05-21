@@ -8,11 +8,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Shield, AlertTriangle, CheckCircle, Search } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 type SanctionsList = "OFAC_SDN" | "EU_CONSOLIDATED" | "UN_CONSOLIDATED" | "HMT_OFSI";
 type EntityType = "individual" | "company" | "vessel" | "aircraft";
 
 export default function SanctionsScreeningPage() {
+  const { t } = useTranslation();
   const [name, setName] = useState("");
   const [entityType, setEntityType] = useState<EntityType>("individual");
   const [result, setResult] = useState<any>(null);

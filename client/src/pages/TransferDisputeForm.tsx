@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Progress } from "@/components/ui/progress";
 import { AlertTriangle, ArrowLeft, CheckCircle, FileText, Upload, Paperclip, RefreshCw, X, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const ALLOWED_MIME = ["image/jpeg", "image/png", "image/webp", "application/pdf"] as const;
 type AllowedMime = typeof ALLOWED_MIME[number];
@@ -32,6 +33,7 @@ const REASON_HINTS: Record<string, string> = {
 };
 
 export default function TransferDisputeForm() {
+  const { t } = useTranslation();
   const [, params] = useRoute("/transfers/:id/dispute");
   const [, navigate] = useLocation();
   const { user } = useAuth();

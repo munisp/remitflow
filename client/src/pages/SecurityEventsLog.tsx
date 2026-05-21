@@ -10,6 +10,7 @@ import { toast } from "sonner";
 
 import React from "react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 const SEVERITY_ICONS: Record<string, React.ReactElement> = {
   info: <Info className="w-4 h-4 text-blue-500" />,
   warning: <AlertTriangle className="w-4 h-4 text-yellow-500" />,
@@ -38,11 +39,12 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
 };
 
 export default function SecurityEventsLog() {
+  const { t } = useTranslation();
   const [severity, setSeverity] = useState<string>("all");
   const [eventType, setEventType] = useState<string>("");
   const [limit, setLimit] = useState(50);
 
-  const { data: events, isLoading, refetch } = trpc.securityEvents.list.useQuery({
+  const { data: events, isLoading, refetch, isError } = trpc.securityEvents.list.useQuery({
     severity: severity as any,
     eventType: eventType || undefined,
     limit,

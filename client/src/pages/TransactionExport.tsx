@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { toast } from "sonner";
 import { Download, FileText, Plus, Trash2, Clock } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const FORMAT_ICONS: Record<string, string> = {
   csv: "📊",
@@ -19,6 +20,7 @@ const FORMAT_ICONS: Record<string, string> = {
 };
 
 export default function TransactionExport() {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [format, setFormat] = useState<"csv" | "json" | "pdf" | "xlsx">("csv");
   const [dateFrom, setDateFrom] = useState("");

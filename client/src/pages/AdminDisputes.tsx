@@ -16,6 +16,7 @@ import {
   FileText, Image as ImageIcon, Download, MessageSquare, Paperclip, Copy, Check,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
   open: "destructive",
@@ -147,6 +148,7 @@ function CopyIdButton({ value, label }: { value: string | number | null | undefi
 }
 
 export default function AdminDisputes() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const utils = trpc.useUtils();
 

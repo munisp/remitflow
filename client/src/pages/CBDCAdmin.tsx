@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { Coins, TrendingUp, TrendingDown, History } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const CBDC_CURRENCIES = ["eNGN", "eGHS", "eKES", "eZAR"] as const;
 const CBDC_FLAGS: Record<string, { flag: string; name: string }> = {
@@ -21,6 +22,7 @@ const CBDC_FLAGS: Record<string, { flag: string; name: string }> = {
 };
 
 export default function CBDCAdmin() {
+  const { t } = useTranslation();
   const [operation, setOperation] = useState<"mint" | "burn">("mint");
   const [userId, setUserId] = useState("");
   const [currency, setCurrency] = useState<typeof CBDC_CURRENCIES[number]>("eNGN");

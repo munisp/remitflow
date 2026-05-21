@@ -10,8 +10,10 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { CheckCircle, XCircle, DollarSign, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function PartnerPayoutsV2Page() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<"pending" | "history">("pending");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [rejectDialog, setRejectDialog] = useState<{ id: number } | null>(null);

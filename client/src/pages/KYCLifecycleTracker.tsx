@@ -60,10 +60,12 @@ import {
   CheckSquare,
 } from 'lucide-react';
 import { format } from 'date-fns';
+import { useTranslation } from 'react-i18next';
 
 type KYCStatus = 'submitted' | 'under_review' | 'approved' | 'rejected' | 'expired';
 
 export default function KYCLifecycleTracker() {
+  const { t } = useTranslation();
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [levelFilter, setLevelFilter] = useState<string>('all');

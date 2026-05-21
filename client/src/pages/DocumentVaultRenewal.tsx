@@ -50,6 +50,7 @@ import {
 } from 'lucide-react';
 import { format, differenceInDays, isPast, addDays } from 'date-fns';
 import { cn } from '@/lib/utils';
+import { useTranslation } from 'react-i18next';
 
 // --- Types ---
 type Document = {
@@ -155,6 +156,7 @@ const StepIndicator = ({ currentStep }: { currentStep: number }) => {
 // --- Main Component ---
 
 export default function DocumentVaultRenewal() {
+  const { t } = useTranslation();
   const [currentStep, setCurrentStep] = useState(1);
   const [selectedDoc, setSelectedDoc] = useState<Document | null>(null);
   const [newFile, setNewFile] = useState<{ name: string; size: number; type: string; url: string } | null>(null);

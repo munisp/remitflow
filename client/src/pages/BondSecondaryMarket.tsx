@@ -8,8 +8,10 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { BarChart2, ShoppingCart } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function BondSecondaryMarket() {
+  const { t } = useTranslation();
   const [selectedOrder, setSelectedOrder] = useState<any>(null);
   const [buyUnits, setBuyUnits] = useState("");
   const [maxPrice, setMaxPrice] = useState("");

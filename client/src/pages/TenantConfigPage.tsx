@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Plus, Edit, Ban, Search, Building2 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 interface TenantFormData {
   name: string; slug: string; primaryColor: string; secondaryColor: string;
@@ -21,6 +22,7 @@ const defaultForm: TenantFormData = {
 };
 
 export default function TenantConfigPage() {
+  const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [showCreate, setShowCreate] = useState(false);

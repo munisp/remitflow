@@ -14,7 +14,7 @@ import { useTranslation } from 'react-i18next';
 export default function FXAlerts() {
   const { t } = useTranslation();
   
-  const { data: alerts, refetch } = trpc.fx.alerts.useQuery();
+  const { data: alerts, refetch, isError } = trpc.fx.alerts.useQuery();
   const createMutation = trpc.fx.createAlert.useMutation({ onSuccess: () => { toast.success("Alert created!"); refetch(); setOpen(false); } });
   const deleteMutation = trpc.fx.deleteAlert.useMutation({ onSuccess: () => { toast.success("Alert deleted"); refetch(); } });
   const [open, setOpen] = useState(false);

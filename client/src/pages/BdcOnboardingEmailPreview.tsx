@@ -16,8 +16,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Eye, RefreshCw, Mail, Shield, ChevronLeft, Copy, Check } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function BdcOnboardingEmailPreview() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const authLoading = false;
   const [, navigate] = useLocation();
@@ -40,7 +42,7 @@ export default function BdcOnboardingEmailPreview() {
   }, []);
   const [copied, setCopied] = useState(false);
 
-  const { data: preview, refetch } = trpc.cbnCompliance.getBdcOnboardingEmailPreview.useQuery(
+  const { data: preview, refetch, isLoading, isError } = trpc.cbnCompliance.getBdcOnboardingEmailPreview.useQuery(
     { partnerName, cbnLicenceNumber, adbName, maxDailyFxUsd },
     { enabled: !!user && user.role === "admin" }
   );

@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Heart, Plus, Globe, Trophy, TrendingUp } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const ACTIVITY_ICONS: Record<string, string> = {
   transfer: "💸",
@@ -35,6 +36,7 @@ const SDG_GOALS: Record<number, { name: string; color: string }> = {
 };
 
 export default function CommunityFeed() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [activityType, setActivityType] = useState<any>("transfer");

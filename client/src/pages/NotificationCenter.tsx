@@ -7,11 +7,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Bell, BellOff, CheckCheck, Settings, Trash2, Mail, Smartphone, MessageSquare } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function NotificationCenter() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
 
-  const { data: notifData, isLoading } = trpc.notificationCenter.list.useQuery({ type: "all", limit: 50, offset: 0 });
+  const { data: notifData, isLoading, isError } = trpc.notificationCenter.list.useQuery({ type: "all", limit: 50, offset: 0 });
   const { data: prefs } = trpc.notificationCenter.preferences.useQuery();
 
   const markReadMutation = trpc.notificationCenter.markRead.useMutation({

@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -26,6 +27,7 @@ const STATUS_BADGE: Record<string, string> = {
 };
 
 export default function AdminPartnerApplications() {
+  const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState<any>("all");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -40,7 +42,7 @@ export default function AdminPartnerApplications() {
 
   const utils = trpc.useUtils();
 
-  const { data: stats } = trpc.partnerApplications.adminStats.useQuery();
+  const { data: stats, isError } = trpc.partnerApplications.adminStats.useQuery();
   const { data: listData, isLoading } = trpc.partnerApplications.adminList.useQuery({
     status: statusFilter,
     page,

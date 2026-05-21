@@ -7,6 +7,7 @@ import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { RefreshCw, Activity, AlertTriangle, CheckCircle, Zap, Database } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLOR: Record<string, string> = {
   active: "bg-green-500",
@@ -17,6 +18,7 @@ const STATUS_COLOR: Record<string, string> = {
 };
 
 export default function KafkaDashboard() {
+  const { t } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(false);
 
   const { data: metrics, isLoading, refetch } = trpc.v98.kafka.getMetrics.useQuery(undefined, {

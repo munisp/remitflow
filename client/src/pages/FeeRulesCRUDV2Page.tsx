@@ -12,10 +12,12 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import { Settings, Plus, Edit, Trash2, Play, DollarSign, Percent, Layers } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = ["*", "USD", "GBP", "EUR", "NGN", "KES", "GHS", "ZAR"];
 
 export default function FeeRulesCRUDV2Page() {
+  const { t } = useTranslation();
   const [showCreate, setShowCreate] = useState(false);
   const [simFrom, setSimFrom] = useState("USD");
   const [simTo, setSimTo] = useState("NGN");

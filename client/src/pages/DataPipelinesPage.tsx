@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { Play, RefreshCw, Database, GitBranch, Wind, CheckCircle, XCircle, Clock } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   running: "bg-blue-500/20 text-blue-400",
@@ -24,6 +25,7 @@ const STATUS_ICONS: Record<string, React.ReactNode> = {
 };
 
 export default function DataPipelinesPage() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<"nifi" | "dbt" | "airflow">("nifi");
 
   // NiFi

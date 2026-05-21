@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Shield, CheckCircle, AlertTriangle, Activity } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const GRADE_COLORS: Record<string, string> = {
   "A+": "text-green-500",
@@ -13,7 +14,8 @@ const GRADE_COLORS: Record<string, string> = {
 };
 
 export default function SecurityScore() {
-  const { data: score } = trpc.v98.platform.securityScore.useQuery();
+  const { t } = useTranslation();
+  const { data: score, isLoading } = trpc.v98.platform.securityScore.useQuery();
   const { data: health } = trpc.v98.platform.fullHealthCheck.useQuery();
 
   return (

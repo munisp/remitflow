@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { Wallet, ArrowUpRight, ArrowDownLeft, Plus, Eye, EyeOff, TrendingUp, RefreshCw, Send, Download, RefreshCcw, Receipt, Building2, ArrowLeftRight, Info, CheckCircle2, ExternalLink, CreditCard } from "lucide-react";
 import { useLocation } from "wouter";
+import { useTranslation } from 'react-i18next';
 
 // PayPal SVG icon
 function PayPalIcon({ className }: { className?: string }) {
@@ -34,6 +35,7 @@ function FlutterwaveIcon({ className }: { className?: string }) {
 }
 
 export default function WalletPage() {
+  const { t } = useTranslation();
   const [, setLocation] = useLocation();
   const { data, isLoading, refetch } = trpc.wallet.balances.useQuery();
   const { data: history } = trpc.wallet.history.useQuery();

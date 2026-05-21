@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Label } from "@/components/ui/label";
 import { Shield, TrendingUp, AlertTriangle, CheckCircle2, Edit2, RefreshCw, Info } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const TIER_INFO = [
   { tier: "tier1", label: "Tier 1 — Basic", dailyLimit: 500, monthlyLimit: 2000, singleLimit: 200, color: "text-blue-600", bg: "bg-blue-50 dark:bg-blue-900/20", desc: "Email verified only. Suitable for small personal transfers." },
@@ -19,6 +20,7 @@ const TIER_INFO = [
 ];
 
 export default function TransferLimits() {
+  const { t } = useTranslation();
   const [editDialog, setEditDialog] = useState(false);
   const [selectedTier, setSelectedTier] = useState("tier1");
   const [dailyOverride, setDailyOverride] = useState("");

@@ -11,6 +11,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Trash2, Shield, Clock, CheckCircle, AlertTriangle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200",
@@ -20,6 +21,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function GDPRErasure() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [reason, setReason] = useState("");
   const [requestType, setRequestType] = useState<"erasure" | "portability" | "restriction">("erasure");

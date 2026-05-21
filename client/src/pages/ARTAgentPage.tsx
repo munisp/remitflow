@@ -7,8 +7,10 @@ import { Badge } from "@/components/ui/badge";
 import { Loader2, Brain, Wrench, CheckCircle2, ArrowRight, Lightbulb } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function ARTAgentPage() {
+  const { t } = useTranslation();
   const [question, setQuestion] = useState("");
   const [maxSteps, setMaxSteps] = useState(5);
   const [result, setResult] = useState<any>(null);

@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Heart, Loader2, ArrowRight } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const MED_COUNTRIES = [
   {code:"IN",name:"India",currency:"INR"},{code:"TH",name:"Thailand",currency:"THB"},
@@ -18,6 +19,7 @@ const MED_COUNTRIES = [
 const TREATMENT_TYPES = ["Cardiac Surgery","Orthopaedic Surgery","Oncology Treatment","Fertility Treatment","Dental / Oral Surgery","Ophthalmology","General Consultation"];
 
 export default function MedicalTourism() {
+  const { t } = useTranslation();
   const { isAuthenticated } = useAuth();
   const [amountNgn, setAmountNgn] = useState("");
   const [country, setCountry] = useState("IN");

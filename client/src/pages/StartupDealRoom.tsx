@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -38,6 +39,7 @@ const STAGE_COLORS: Record<string, string> = {
 };
 
 export default function StartupDealRoom() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState("deals");
   const [search, setSearch] = useState("");
   const [stage, setStage] = useState("all");

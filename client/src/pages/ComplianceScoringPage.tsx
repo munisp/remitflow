@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Shield, Search, AlertTriangle, CheckCircle, XCircle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const RISK_COLORS: Record<string, { bg: string; text: string; bar: string }> = {
   low: { bg: "bg-green-500/10 border-green-500/30", text: "text-green-400", bar: "bg-green-500" },
@@ -17,6 +18,7 @@ const RISK_COLORS: Record<string, { bg: string; text: string; bar: string }> = {
 };
 
 export default function ComplianceScoringPage() {
+  const { t } = useTranslation();
   const [userId, setUserId] = useState("");
   const [queriedUserId, setQueriedUserId] = useState<number | null>(null);
   const [casesStatus, setCasesStatus] = useState("all");

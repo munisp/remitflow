@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 /**
  * PAPSS Compliance & Rate Transparency Page (P3)
@@ -21,6 +22,7 @@ import {
 } from "lucide-react";
 
 export default function PapssCompliance() {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("rates");
 
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());

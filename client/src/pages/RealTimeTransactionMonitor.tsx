@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState, useEffect, useRef, useCallback } from "react";
 import { trpc } from "@/lib/trpc";
 // tRPC-powered: uses admin.listAllTransactions + admin.monitorStats
@@ -80,6 +81,7 @@ function generateMockTransaction(): LiveTransaction {
 }
 
 export default function RealTimeTransactionMonitor() {
+  const { t } = useTranslation();
   const [isStreaming, setIsStreaming] = useState(true);
   const [transactions, setTransactions] = useState<LiveTransaction[]>([]);
   const [corridorFilter, setCorridorFilter] = useState("ALL");
@@ -100,7 +102,7 @@ export default function RealTimeTransactionMonitor() {
 
   // Real tRPC data
   const trpcAdmin = trpc.admin as any;
-  const { data: adminTxData, refetch: refetchAdminTx } = trpcAdmin.listAllTransactions.useQuery(
+  const { data: adminTxData, refetch: refetchAdminTx, isLoading } = trpcAdmin.listAllTransactions.useQuery(
     { limit: 50, offset: 0 },
     { refetchInterval: isStreaming ? 5000 : false, retry: false }
   );

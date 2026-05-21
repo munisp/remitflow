@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { CheckCircle, Building2, MapPin, FileText, ClipboardCheck, ChevronRight, ChevronLeft, Loader2, Shield, Banknote, TrendingUp } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 type Step = "business" | "location" | "documents" | "review" | "success";
 
@@ -35,6 +36,7 @@ const TIER_INFO = {
 };
 
 export default function AgentRegister() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [, navigate] = useLocation();
   const utils = trpc.useUtils();

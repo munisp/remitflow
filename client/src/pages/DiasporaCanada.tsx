@@ -9,10 +9,12 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Loader2, ArrowRight } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const DESTINATION = "CA";
 
 export default function DiasporaCanada() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [amount, setAmount] = useState(500);
   const [iban, setIban] = useState("");

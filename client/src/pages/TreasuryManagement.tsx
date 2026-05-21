@@ -7,8 +7,10 @@ import { Progress } from "@/components/ui/progress";
 import { Building2, TrendingUp, RefreshCw, DollarSign, Layers } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function TreasuryManagement() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const { data: positions, isLoading: posLoading } = trpc.treasury.positions.useQuery();
   const { data: pools, isLoading: poolLoading } = trpc.treasury.liquidityPools.useQuery();

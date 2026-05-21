@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Search, Zap, AlertTriangle, TrendingUp, ArrowRight, Info } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
+import { useTranslation } from 'react-i18next';
 
 function SimilarityScore({ score }: { score: number }) {
   const pct = Math.round(score * 100);
@@ -43,6 +44,7 @@ function LoadingSkeleton() {
 }
 
 export default function SimilarTransactionsPage() {
+  const { t } = useTranslation();
   const [txId, setTxId] = useState("");
   const [searchedId, setSearchedId] = useState<number | null>(null);
 

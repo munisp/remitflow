@@ -27,6 +27,7 @@ import {
   Phone, DollarSign, Banknote, Clock, Shield
 } from "lucide-react";
 import { useLocation } from "wouter";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = ["NGN", "KES", "GHS", "ZAR", "XOF", "UGX", "TZS", "ETB", "RWF"];
 
@@ -65,6 +66,7 @@ function StatCard({ label, value, sub, icon: Icon, color }: {
 }
 
 export default function AgentPOS() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const { user } = useAuth();
   // Form state

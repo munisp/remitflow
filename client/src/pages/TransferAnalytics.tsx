@@ -16,6 +16,7 @@ import {
   ArrowUpRight, ArrowDownRight, RefreshCw, Layers, Users,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const CORRIDOR_COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#f97316", "#84cc16", "#ec4899", "#14b8a6"];
 
@@ -56,6 +57,7 @@ function StatCard({
 }
 
 export default function TransferAnalytics() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [days, setDays] = useState(30);
   const [selectedCorridor, setSelectedCorridor] = useState<{ from: string; to: string } | null>(null);

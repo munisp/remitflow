@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Receipt, TrendingUp, CheckCircle, XCircle, Plus, Upload, AlertCircle } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 
 type FormState = {
@@ -43,6 +44,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function ExpenseManagement() {
+  const { t } = useTranslation();
   const [addOpen, setAddOpen] = useState(false);
   const companyId = 1;
   const [form, setForm] = useState<FormState>(defaultForm);

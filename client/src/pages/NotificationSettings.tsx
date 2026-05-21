@@ -8,6 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Bell, BellOff, Smartphone, Trash2, Send, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const PREF_LABELS: Record<string, { label: string; description: string }> = {
   transfer_sent: { label: "Transfer Sent", description: "When you initiate a new transfer" },
@@ -21,6 +22,7 @@ const PREF_LABELS: Record<string, { label: string; description: string }> = {
 };
 
 export default function NotificationSettings() {
+  const { t } = useTranslation();
   const [isSubscribed, setIsSubscribed] = useState(false);
   const [isSupported, setIsSupported] = useState(false);
   const [subscribing, setSubscribing] = useState(false);

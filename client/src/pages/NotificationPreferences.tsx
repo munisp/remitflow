@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const CATEGORY_META: Record<string, { icon: React.ElementType; label: string; description: string; color: string; badge?: string; group: string }> = {
   // Core Financial
@@ -33,6 +34,7 @@ const GROUPS = ["Financial", "Rates & Alerts", "Compliance", "Growth", "Platform
 type PrefRow = { category: string; emailEnabled: boolean; inAppEnabled: boolean; pushEnabled: boolean };
 
 export default function NotificationPreferences() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const { data: prefs, isLoading } = trpc.notifications.getPreferences.useQuery();
   const updateMutation = trpc.notifications.updatePreference.useMutation({

@@ -32,7 +32,7 @@ export default function AdminHome() {
   const { user, loading: authLoading } = useAuth();
   const [, navigate] = useLocation();
 
-  const { data, isLoading } = trpc.admin.homeSummary.useQuery(undefined, {
+  const { data, isLoading, isError } = trpc.admin.homeSummary.useQuery(undefined, {
     enabled: !!user && user.role === "admin",
     refetchInterval: 30_000,
   });

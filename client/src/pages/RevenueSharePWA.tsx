@@ -198,7 +198,9 @@ function EarningsSparkline({ data }: { data: number[] }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 export default function RevenueSharePWA() {
+  const { t } = useTranslation();
   const { user, isAuthenticated } = useAuth();
   const [activeTab, setActiveTab] = useState(() => {
     const params = new URLSearchParams(window.location.search);

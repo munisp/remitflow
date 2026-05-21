@@ -10,10 +10,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import { Network, ArrowRight, Zap, TrendingDown, CheckCircle2, Clock, Globe, BarChart3 } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = ["USD", "GBP", "EUR", "NGN", "KES", "GHS", "ZAR", "UGX", "TZS"];
 
 export default function MultiHopRoutingPage() {
+  const { t } = useTranslation();
   const [fromCurrency, setFromCurrency] = useState("USD");
   const [toCurrency, setToCurrency] = useState("NGN");
   const [amount, setAmount] = useState("5000");

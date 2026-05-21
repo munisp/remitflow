@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import { useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
@@ -78,6 +79,7 @@ function WorkflowProgress({ steps, statuses }: { steps: string[]; statuses: Step
 }
 
 export default function TenantOnboardingWizard() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const [currentStep, setCurrentStep] = useState(1);
   const [workflowStatuses, setWorkflowStatuses] = useState<StepStatus[]>(TEMPORAL_STEPS.map(() => "pending"));

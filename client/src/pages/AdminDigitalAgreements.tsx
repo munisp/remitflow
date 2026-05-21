@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -39,6 +40,7 @@ const STATUS_ICONS: Record<string, React.ReactNode> = {
 };
 
 export default function AdminDigitalAgreements() {
+  const { t } = useTranslation();
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [search, setSearch] = useState("");

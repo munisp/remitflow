@@ -17,6 +17,7 @@ import {
   MessageSquare, Send, Eye, UserCheck
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const SEVERITY_COLORS: Record<string, string> = {
   low: "bg-blue-100 text-blue-800 border-blue-200",
@@ -291,6 +292,7 @@ function AlertDetailDrawer({ alertId, open, onClose }: { alertId: number | null;
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function ComplianceAlerts() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [severityFilter, setSeverityFilter] = useState<string>("all");

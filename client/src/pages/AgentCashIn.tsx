@@ -11,8 +11,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Loader2, CheckCircle, Store, ArrowRight } from "lucide-react";
 import { Link } from "wouter";
+import { useTranslation } from 'react-i18next';
 
 export default function AgentCashIn() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [customerPhone, setCustomerPhone] = useState("");
   const [amountNgn, setAmountNgn] = useState(10000);

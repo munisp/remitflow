@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Leaf, BarChart2, Users, Globe, Plus, FileText } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   generating: "bg-blue-100 text-blue-700",
@@ -16,6 +17,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function ESGReporting() {
+  const { t } = useTranslation();
   const [generateOpen, setGenerateOpen] = useState(false);
   const [form, setForm] = useState({ periodStart: "", periodEnd: "" });
   const companyId = 1;

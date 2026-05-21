@@ -69,6 +69,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { format } from 'date-fns';
+import { useTranslation } from 'react-i18next';
 
 // --- Schemas ---
 
@@ -131,6 +132,7 @@ const PromoCodeStatsModal = ({ promoId, code }: { promoId: string; code: string 
 };
 
 export default function PromoCodeAdmin() {
+  const { t } = useTranslation();
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
   const [isCreateOpen, setIsCreateOpen] = useState(false);

@@ -11,8 +11,10 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { CreditCard, CheckCircle, Clock, AlertCircle, Sparkles, ChevronRight, ShieldCheck } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function BNPL() {
+  const { t } = useTranslation();
   const [planName, setPlanName] = useState("");
   const [totalAmount, setTotalAmount] = useState("");
   const [installmentCount, setInstallmentCount] = useState(3);

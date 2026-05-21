@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { FileText, Download, Calendar, CheckCircle, Clock } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 type ReportType = "CTR" | "SAR" | "FBAR" | "ANNUAL_AML";
 
@@ -15,6 +16,7 @@ const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString(
 const today = now.toISOString().split("T")[0];
 
 export default function RegulatoryReportingPage() {
+  const { t } = useTranslation();
   const [reportType, setReportType] = useState<ReportType>("CTR");
   const { data: ctrData } = trpc.v90.regulatoryReporting.getCTRReport.useQuery({ startDate: startOfMonth, endDate: today });
   const { data: sarData } = trpc.v90.regulatoryReporting.getSARReport.useQuery({ startDate: startOfMonth, endDate: today });

@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { toast } from "@/hooks/use-toast";
 import { MessageCircle, Plus, CheckCircle, Clock, AlertCircle, HelpCircle, ChevronRight } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const PRIORITY_COLORS: Record<string, string> = {
   low: "bg-slate-100 text-slate-700",
@@ -39,6 +40,7 @@ const CATEGORIES = [
 ];
 
 export default function SupportTickets() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [subject, setSubject] = useState("");

@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Home, DollarSign, TrendingUp, Clock, Plus, Calculator } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const COUNTRIES = ["NG", "GH", "KE", "ZA", "GB", "US", "CA", "AE", "DE", "FR"];
 const CURRENCIES = ["USD", "GBP", "EUR", "NGN", "KES", "GHS", "ZAR"];
@@ -24,6 +25,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function DiasporaMortgage() {
+  const { t } = useTranslation();
   const [applyOpen, setApplyOpen] = useState(false);
   const [form, setForm] = useState({
     propertyCountry: "NG", propertyCity: "", propertyAddress: "",

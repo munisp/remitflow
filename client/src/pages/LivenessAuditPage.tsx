@@ -72,6 +72,7 @@ import {
   ClipboardList,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { useTranslation } from 'react-i18next';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -297,6 +298,7 @@ function AuditDetailDialog({
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function LivenessAuditPage() {
+  const { t } = useTranslation();
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<"audit" | "corridors" | "review">("audit");
   const [page, setPage] = useState(1);

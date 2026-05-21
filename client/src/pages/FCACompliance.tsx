@@ -11,7 +11,7 @@ import { useTranslation } from 'react-i18next';
 export default function FCACompliance() {
   const { t } = useTranslation();
   
-  const { data: report } = trpc.compliance.fca.useQuery();
+  const { data: report, isLoading, isError } = trpc.compliance.fca.useQuery();
 
   const checks = [
     { label: "AML Policy", status: "compliant", lastReview: "Jan 2024", nextReview: "Jan 2025" },

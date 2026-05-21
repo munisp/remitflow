@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { Shield, MapPin, AlertTriangle, CheckCircle, Ban } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const RISK_COLORS: Record<string, string> = {
   low: "text-green-500",
@@ -12,6 +13,7 @@ const RISK_COLORS: Record<string, string> = {
 };
 
 export default function IPLoginHistory() {
+  const { t } = useTranslation();
 
   const { data: history, refetch } = trpc.v98.ipLogin.getHistory.useQuery({ limit: 50 });
   const { data: suspicious } = trpc.v98.ipLogin.getSuspicious.useQuery({ limit: 20 });

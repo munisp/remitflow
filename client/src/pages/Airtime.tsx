@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Smartphone, Zap, CheckCircle2, History } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const networks = [
   { id: "mtn", name: "MTN", color: "bg-yellow-500" },
@@ -18,6 +19,7 @@ const networks = [
 const quickAmounts = [100, 200, 500, 1000, 2000, 5000];
 
 export default function Airtime() {
+  const { t } = useTranslation();
   const [phone, setPhone] = useState("");
   const [network, setNetwork] = useState("mtn");
   const [amount, setAmount] = useState(500);

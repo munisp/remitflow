@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Shield, CheckCircle, XCircle, AlertTriangle, Search, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const RESOURCE_ACTIONS = [
   { resource: "transfer", action: "send", label: "Transfer: Send" },
@@ -29,6 +30,7 @@ const KYC_TIERS = ["0", "1", "2", "3"];
 const ROLES = ["user", "admin", "partner"];
 
 export default function PBACPolicies() {
+  const { t } = useTranslation();
   const [selectedResource, setSelectedResource] = useState("transfer");
   const [selectedAction, setSelectedAction] = useState("send");
   const [testRole, setTestRole] = useState("user");

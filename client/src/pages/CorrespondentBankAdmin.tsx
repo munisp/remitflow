@@ -12,8 +12,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Loader2, Plus, RefreshCw, Building2, ShieldAlert } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function CorrespondentBankAdmin() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [addOpen, setAddOpen] = useState(false);
   const [newBank, setNewBank] = useState({ bankName: "", swiftCode: "", countryCode: "", currency: "USD", clearingLineUsd: 10000000, feeBps: 50, settlementRail: "swift" });

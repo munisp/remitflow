@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Clock, CheckCircle, AlertCircle, Globe, Search, Zap } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   processing: "text-blue-500",
@@ -23,10 +24,11 @@ const STATUS_ICONS: Record<string, React.ReactNode> = {
 };
 
 export default function SWIFTTrackerPage() {
+  const { t } = useTranslation();
   const [rail, setRail] = useState<"SWIFT"|"SEPA"|"CHAPS"|"ACH"|"all">("all");
   const [search, setSearch] = useState("");
 
-  const { data: payments } = trpc.v100.swiftSepaRails.getPayments.useQuery({ rail, limit: 50 });
+  const { data: payments, isLoading, isError } = trpc.v100.swiftSepaRails.getPayments.useQuery({ rail, limit: 50 });
   const { data: railStatus } = trpc.v100.swiftSepaRails.getRailStatus.useQuery();
 
   const filtered = (payments ?? []).filter((p: any) =>

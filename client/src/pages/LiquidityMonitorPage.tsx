@@ -10,8 +10,10 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Droplets, AlertTriangle, ArrowRightLeft, RefreshCw, CheckCircle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function LiquidityMonitorPage() {
+  const { t } = useTranslation();
   const [rebalanceDialog, setRebalanceDialog] = useState(false);
   const [fromCurrency, setFromCurrency] = useState("USD");
   const [toCurrency, setToCurrency] = useState("GHS");

@@ -21,6 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -53,6 +54,7 @@ function PnLCard({ label, value, sub, color = "text-foreground" }: {
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function BillingEngineDashboard() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [periodDays, setPeriodDays] = useState("30");
   const [tenantId] = useState("default");

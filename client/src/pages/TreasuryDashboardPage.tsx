@@ -5,9 +5,11 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { DollarSign, TrendingUp, Shield, BarChart3, PieChart, Activity } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function TreasuryDashboardPage() {
-  const { data: positions } = trpc.v100.treasuryManagement.getPositions.useQuery();
+  const { t } = useTranslation();
+  const { data: positions, isLoading, isError } = trpc.v100.treasuryManagement.getPositions.useQuery();
   const { data: yield_ } = trpc.v100.treasuryManagement.getYieldAnalytics.useQuery();
 
   const formatM = (n: number) => n >= 1000000 ? `$${(n / 1000000).toFixed(1)}M` : `$${(n / 1000).toFixed(0)}K`;

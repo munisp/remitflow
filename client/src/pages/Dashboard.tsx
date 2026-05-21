@@ -27,7 +27,7 @@ import { haptics } from "@/lib/haptics";
 
 function QuickSendBeneficiaries() {
   const [, navigate] = useLocation();
-  const { data: topSenders, isLoading } = trpc.beneficiaries.topSenders.useQuery();
+  const { data: topSenders, isLoading, isError } = trpc.beneficiaries.topSenders.useQuery();
 
   if (!isLoading && (!topSenders || topSenders.length === 0)) return null;
 

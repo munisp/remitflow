@@ -11,6 +11,7 @@ import {
   TrendingUp, AlertTriangle, Clock, CheckCircle, Shield, BarChart2, PieChart as PieIcon
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const SEVERITY_COLORS: Record<string, string> = {
   critical: "#ef4444",
@@ -22,9 +23,10 @@ const SEVERITY_COLORS: Record<string, string> = {
 const BUCKET_COLORS = ["#22c55e", "#84cc16", "#eab308", "#f97316", "#ef4444"];
 
 export default function ComplianceAnalytics() {
+  const { t } = useTranslation();
   const [days, setDays] = useState(30);
 
-  const { data: summary } = trpc.complianceAnalytics.summary.useQuery({ days });
+  const { data: summary, isLoading, isError } = trpc.complianceAnalytics.summary.useQuery({ days });
   const { data: timeSeries } = trpc.complianceAnalytics.timeSeries.useQuery({ days });
   const { data: severityTrend } = trpc.complianceAnalytics.severityTrend.useQuery({ days });
   const { data: resolutionTime } = trpc.complianceAnalytics.resolutionTime.useQuery({ days });

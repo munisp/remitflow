@@ -4,10 +4,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DollarSign, TrendingUp, BarChart2, Globe } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function RevenueAnalyticsPage() {
+  const { t } = useTranslation();
   const [period, setPeriod] = useState<"today"|"week"|"month"|"quarter"|"year">("month");
-  const { data, isLoading } = trpc.v90.revenueAnalytics.getSummary.useQuery({ period, currency: "USD" });
+  const { data, isLoading, isError } = trpc.v90.revenueAnalytics.getSummary.useQuery({ period, currency: "USD" });
   const { data: daily } = trpc.v90.revenueAnalytics.getRevenueByDay.useQuery({ days: 30 });
   if (isLoading) return <div className="p-6 text-muted-foreground">Loading revenue analytics...</div>;
   return (

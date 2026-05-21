@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import { AlertTriangle, FileText, Clock, CheckCircle2, ShieldAlert, User, Calendar, DollarSign, RefreshCw, CheckSquare, Square } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { DeadlineBadge } from "./OfficerWorkload";
+import { useTranslation } from 'react-i18next';
 
 const SEVERITY_COLORS: Record<string, string> = {
   critical: "bg-red-100 text-red-800 border-red-200",
@@ -55,6 +56,7 @@ interface SARFormState {
 }
 
 export default function MLRODashboard() {
+  const { t } = useTranslation();
   const [sarOpen, setSarOpen] = useState(false);
   const [sarForm, setSarForm] = useState<SARFormState | null>(null);
   const [assignOpen, setAssignOpen] = useState(false);

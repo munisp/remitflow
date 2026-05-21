@@ -45,7 +45,7 @@ function LeaderRow({ rank, name, score, label }: { rank: number; name: string; s
 
 export default function CommunityLeaderboard() {
   const { t } = useTranslation();
-  const { data, isLoading } = trpc.community.communityLeaderboard.useQuery();
+  const { data, isLoading, isError } = trpc.community.communityLeaderboard.useQuery();
 
   return (
 

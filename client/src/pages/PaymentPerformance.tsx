@@ -12,7 +12,7 @@ import { useTranslation } from 'react-i18next';
 export default function PaymentPerformance() {
   const { t } = useTranslation();
   const [days, setDays] = useState(30);
-  const { data: perf, isLoading } = trpc.paymentPerformance.metrics.useQuery();
+  const { data: perf, isLoading, isError } = trpc.paymentPerformance.metrics.useQuery();
   const { data: history } = trpc.paymentPerformance.history.useQuery({ days });
   const d = (perf as any) ?? {};
   const overall = d.overall ?? {};

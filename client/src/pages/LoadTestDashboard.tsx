@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 interface LatencyBucket { label: string; count: number; pct: number; }
 interface TestResult {
@@ -64,6 +65,7 @@ function BucketHistogram({ buckets }: { buckets: LatencyBucket[] }) {
 }
 
 export default function LoadTestDashboard() {
+  const { t } = useTranslation();
   const [workers, setWorkers] = useState(20);
   const [duration, setDuration] = useState(30);
   const [targetUrl, setTargetUrl] = useState("");

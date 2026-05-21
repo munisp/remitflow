@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { Plus, Pencil, Trash2, RefreshCw } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 interface FlagForm {
   id?: number;
@@ -27,6 +28,7 @@ const emptyForm = (): FlagForm => ({
 });
 
 export default function FeatureFlagsAdmin() {
+  const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState<FlagForm>(emptyForm());

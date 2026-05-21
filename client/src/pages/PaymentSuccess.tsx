@@ -13,8 +13,10 @@ import { CheckCircle, Wallet, ArrowRight, Home, RefreshCw } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function PaymentSuccess() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [pollCount, setPollCount] = useState(0);
@@ -28,7 +30,7 @@ export default function PaymentSuccess() {
   }, []);
 
   // Poll wallet to detect credit
-  const { data: wallets, refetch } = trpc.wallet.list.useQuery(undefined, {
+  const { data: wallets, refetch, isLoading, isError } = trpc.wallet.list.useQuery(undefined, {
     refetchInterval: credited ? false : pollCount < 10 ? 3000 : false,
   });
 

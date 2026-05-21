@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -26,6 +27,7 @@ const ALL_SCOPES = [
 ];
 
 export default function APIKeyManager() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [, setLocation] = useLocation();
   const [createOpen, setCreateOpen] = useState(false);

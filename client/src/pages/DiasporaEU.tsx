@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Loader2, ArrowRight } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const EU_COUNTRIES = [
   { value: "IT", label: "🇮🇹 Italy", currency: "EUR" },
@@ -22,6 +23,7 @@ const EU_COUNTRIES = [
 ];
 
 export default function DiasporaEU() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [destinationCountry, setDestinationCountry] = useState("IT" as "CA" | "DE" | "FR" | "NL" | "IT" | "ES" | "BE" | "PT");
   const [amount, setAmount] = useState(500);

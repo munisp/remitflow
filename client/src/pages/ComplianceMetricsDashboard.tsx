@@ -10,6 +10,7 @@ import { Shield, AlertTriangle, CheckCircle, XCircle, RefreshCw, TrendingUp, Act
 
 import { useLocation } from "wouter";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 interface OWASPCheck {
   id: string;
@@ -64,6 +65,7 @@ function StatusIcon({ status }: { status: string }) {
 }
 
 export default function ComplianceMetricsDashboard() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [, navigate] = useLocation();
   const { data: secScore, loading: secLoading, error: secError, refresh: refreshSec } = useSecurityScore();

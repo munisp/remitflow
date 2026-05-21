@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Briefcase, Users, DollarSign, Play, CheckCircle, Plus } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   draft: "bg-gray-100 text-gray-700",
@@ -31,6 +32,7 @@ interface PayrollFormState {
 }
 
 export default function PayrollRun() {
+  const { t } = useTranslation();
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState<PayrollFormState>({
     companyId: "",

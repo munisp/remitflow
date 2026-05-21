@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { Bell, BellOff, Check, CheckCheck, Trash2 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const TYPE_COLORS: Record<string, string> = {
   system: "bg-blue-500/20 text-blue-400",
@@ -15,6 +16,7 @@ const TYPE_COLORS: Record<string, string> = {
 };
 
 export default function NotificationCenterV2Page() {
+  const { t } = useTranslation();
   const allQuery = trpc.v89.notificationCenterV2.getAll.useQuery({ limit: 50, offset: 0 });
   const unreadQuery = trpc.v89.notificationCenterV2.getUnreadCount.useQuery();
 

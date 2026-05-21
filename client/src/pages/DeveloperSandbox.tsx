@@ -9,6 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Code2, Play, RefreshCw, Copy, CheckCircle2, Terminal, Zap, Globe } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const TEST_CARDS = [
   { number: "4242 4242 4242 4242", type: "Visa", result: "Success" },
@@ -39,6 +40,7 @@ const SAMPLE_REQUESTS = [
 ];
 
 export default function DeveloperSandbox() {
+  const { t } = useTranslation();
   const [activeRequest, setActiveRequest] = useState(SAMPLE_REQUESTS[0]);
   const [customEndpoint, setCustomEndpoint] = useState("");
   const [response, setResponse] = useState<any>(null);

@@ -29,6 +29,7 @@ import {  Clock,
   Activity,
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 interface CronJob {
   id: string;
@@ -212,6 +213,7 @@ function formatNextRun(iso: string): string {
 }
 
 export default function CronJobsAdmin() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const { data: dbJobs = [], isLoading } = trpc.cronJobs.list.useQuery();
   const { data: stats } = trpc.cronJobs.getStats.useQuery();

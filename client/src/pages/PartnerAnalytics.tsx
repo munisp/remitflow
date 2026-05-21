@@ -17,6 +17,7 @@ import {
   DollarSign, Download, BarChart2, Award,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const PLAN_COLORS: Record<string, string> = {
   starter: "#6366f1",
@@ -42,13 +43,14 @@ const STEP_LABELS: Record<number, string> = {
 const REVENUE_COLORS = ["#6366f1", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#f97316", "#84cc16", "#ec4899", "#14b8a6"];
 
 export default function PartnerAnalytics() {
+  const { t } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [feeMonths, setFeeMonths] = useState(6);
 
   const { data, isLoading, refetch, dataUpdatedAt } = trpc.adminInviteCodes.analytics.useQuery(undefined, {
     refetchInterval: autoRefresh ? 15_000 : false,
   });
-  const { data: feeData, isLoading: feeLoading, refetch: feeRefetch } = trpc.adminInviteCodes.feeRevenue.useQuery(
+  const { data: feeData, isLoading: feeLoading, refetch: feeRefetch, isError } = trpc.adminInviteCodes.feeRevenue.useQuery(
     { months: feeMonths },
     { refetchInterval: autoRefresh ? 30_000 : false }
   );

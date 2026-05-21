@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Loader2, ArrowRight, ShieldCheck, Globe } from "lucide-react";
 import { AnnualLimitBadge } from "@/components/AnnualLimitBadge";
 import { CrossSellOfferModal } from "@/components/CrossSellOfferModal";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = ["USD","GBP","EUR","CAD","AUD","JPY","CNY"];
 const PURPOSE_CODES = [
@@ -20,6 +21,7 @@ const PURPOSE_CODES = [
 ];
 
 export default function SendFromNigeria() {
+  const { t } = useTranslation();
   const { isAuthenticated } = useAuth();
   const [amountNgn, setAmountNgn] = useState("");
   const [currency, setCurrency] = useState("USD");

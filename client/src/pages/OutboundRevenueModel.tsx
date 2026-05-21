@@ -7,8 +7,10 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { BarChart3, Loader2, TrendingUp } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function OutboundRevenueModel() {
+  const { t } = useTranslation();
   const { isAuthenticated } = useAuth();
   const [dailyVolume, setDailyVolume] = useState("500000000");
   const [fxRate, setFxRate] = useState("1600");
@@ -27,6 +29,7 @@ export default function OutboundRevenueModel() {
     daily_volume_ngn:parseFloat(dailyVolume)||500000000,
     projection_years:parseInt(years)||5,
   });
+  const isError = floatQuery.isError;
 
   if (!isAuthenticated) return <div className="flex items-center justify-center min-h-screen"><p className="text-muted-foreground">Admin access required.</p></div>;
 

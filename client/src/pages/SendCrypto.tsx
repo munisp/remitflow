@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { Bitcoin, Wallet, QrCode, ArrowRight, Shield, Clock, AlertTriangle, CheckCircle2, X, Camera } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const CRYPTO_ASSETS = [
   { symbol: "BTC",  name: "Bitcoin",    network: "Bitcoin",    icon: "B", color: "#F7931A", minAmount: 0.0001 },
@@ -56,6 +57,7 @@ function QRScannerModal({ onScan, onClose }: { onScan: (addr: string) => void; o
 }
 
 export default function SendCrypto() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const [selectedAsset, setSelectedAsset] = useState(CRYPTO_ASSETS[0]);
   const [custodyProvider, setCustodyProvider] = useState("mock");

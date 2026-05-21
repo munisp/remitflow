@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
@@ -170,6 +171,7 @@ const SEVERITY_BADGE: Record<string, string> = {
 };
 
 export default function SecurityAttackSimulator() {
+  const { t } = useTranslation();
   const [results, setResults] = useState<Record<string, AttackResult & { simulated: boolean }>>({});
   const [running, setRunning] = useState<string | null>(null);
   const [runningAll, setRunningAll] = useState(false);

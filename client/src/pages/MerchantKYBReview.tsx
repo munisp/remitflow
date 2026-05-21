@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Building2, CheckCircle, XCircle, Clock, Plus, FileCheck } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const INDUSTRIES = ["retail", "ecommerce", "hospitality", "logistics", "healthcare", "education", "fintech", "agriculture", "manufacturing", "other"];
 const COUNTRIES = ["NG", "GH", "KE", "ZA", "GB", "US", "CA", "AE", "DE", "FR"];
@@ -22,6 +23,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function MerchantKYBReview() {
+  const { t } = useTranslation();
   const [applyOpen, setApplyOpen] = useState(false);
   const [form, setForm] = useState({
     businessName: "", registrationNumber: "", taxId: "",

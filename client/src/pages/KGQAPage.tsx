@@ -7,8 +7,10 @@ import { Badge } from "@/components/ui/badge";
 import { Loader2, MessageSquare, Code2, Sparkles, HelpCircle } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function KGQAPage() {
+  const { t } = useTranslation();
   const [question, setQuestion] = useState("");
   const [result, setResult] = useState<any>(null);
 

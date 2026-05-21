@@ -8,8 +8,10 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { CheckCircle2, Clock, AlertCircle, DollarSign, RefreshCw, ArrowRight } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function PayRequest() {
+  const { t } = useTranslation();
   const params = useParams<{ token: string }>();
   const [, navigate] = useLocation();
   const [customAmount, setCustomAmount] = useState("");

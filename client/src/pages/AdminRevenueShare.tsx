@@ -18,6 +18,7 @@ import {  DollarSign, TrendingUp, Users, FileText, Plus, Check, X, Edit, Trash2,
   ChevronDown, ChevronUp, AlertCircle, CheckCircle, Clock, Download
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const COLORS = ["#8b5cf6", "#06b6d4", "#10b981", "#f59e0b", "#ef4444"];
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -36,6 +37,7 @@ const reportStatusColors: Record<string, string> = {
 };
 
 export default function AdminRevenueShare() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState("agreements");
   const [showCreate, setShowCreate] = useState(false);
   const [selectedAgreement, setSelectedAgreement] = useState<number | null>(null);

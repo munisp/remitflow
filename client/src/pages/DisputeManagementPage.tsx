@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { AlertTriangle, Plus, CheckCircle } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   open: "bg-yellow-100 text-yellow-800",
@@ -24,6 +25,7 @@ const PRIORITY_COLORS: Record<string, string> = {
 };
 
 export default function DisputeManagementPage() {
+  const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState<any>("all");
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({

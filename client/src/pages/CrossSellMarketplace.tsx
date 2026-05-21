@@ -10,8 +10,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { Phone, Zap, Shield, ShoppingBag } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function CrossSellMarketplace() {
+  const { t } = useTranslation();
   const [airtimeForm, setAirtimeForm] = useState({ providerId: "", phoneNumber: "", amount: "" });
   const [billForm, setBillForm] = useState({ billTypeId: "", accountNumber: "", amount: "" });
   const [insuranceProductId, setInsuranceProductId] = useState("");

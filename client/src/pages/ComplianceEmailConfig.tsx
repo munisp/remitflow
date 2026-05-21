@@ -11,6 +11,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { Mail, Send, Settings, CheckCircle2, AlertCircle, Plus, Trash2, TestTube } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const REPORT_TYPES = [
   { key: "CTR", label: "Currency Transaction Report (CTR)", threshold: "$10,000+", agency: "FinCEN" },
@@ -20,6 +21,7 @@ const REPORT_TYPES = [
 ];
 
 export default function ComplianceEmailConfig() {
+  const { t } = useTranslation();
   const [showAddConfig, setShowAddConfig] = useState(false);
   const [showTestDialog, setShowTestDialog] = useState(false);
   const [testReportType, setTestReportType] = useState("CTR");

@@ -13,8 +13,10 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { Building2, Flag, Search, RefreshCw, X, ChevronDown, ChevronRight, Users, Shield } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function TenantFeatureFlagsAdmin() {
+  const { t } = useTranslation();
   const [selectedTenantId, setSelectedTenantId] = useState<number | null>(null);
   const [flagSearch, setFlagSearch] = useState("");
   const [overrideDialog, setOverrideDialog] = useState<{ flagId: number; flagKey: string; current: boolean | null } | null>(null);

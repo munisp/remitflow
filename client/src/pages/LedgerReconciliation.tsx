@@ -9,8 +9,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { Scale, AlertTriangle, CheckCircle, RefreshCw, DollarSign } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function LedgerReconciliation() {
+  const { t } = useTranslation();
   const [reconcileDate, setReconcileDate] = useState(new Date().toISOString().slice(0, 10));
 
   const { data: summary, refetch: refetchSummary } = trpc.v98.ledger.reconciliationSummary.useQuery();

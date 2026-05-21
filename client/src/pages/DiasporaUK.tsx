@@ -45,7 +45,7 @@ const TESTIMONIALS = [
 
 export default function DiasporaUK() {
   const { t } = useTranslation();
-  const { data: fxRates } = trpc.fx.rates.useQuery(undefined, {
+  const { data: fxRates, isLoading, isError } = trpc.fx.rates.useQuery(undefined, {
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });

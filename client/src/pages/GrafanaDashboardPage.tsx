@@ -4,11 +4,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { BarChart2, Activity, ExternalLink, AlertTriangle, CheckCircle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const GRAFANA_URL = "http://localhost:3001";
 
 export default function GrafanaDashboardPage() {
-  const { data: dashData } = trpc.v90.grafana.getDashboards.useQuery();
+  const { t } = useTranslation();
+  const { data: dashData, isLoading, isError } = trpc.v90.grafana.getDashboards.useQuery();
   const { data: alertData } = trpc.v90.grafana.getAlerts.useQuery();
 
   return (

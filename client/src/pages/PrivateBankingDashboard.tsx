@@ -14,8 +14,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Loader2, Crown, TrendingDown, Lock, Phone, CreditCard, Star } from "lucide-react";
 import { useSearchParams } from "wouter";
+import { useTranslation } from 'react-i18next';
 
 export default function PrivateBankingDashboard() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [lockAmount, setLockAmount] = useState(10000000);
   const [lockCorridor, setLockCorridor] = useState("USD");

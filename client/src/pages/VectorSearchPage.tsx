@@ -9,15 +9,17 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Loader2, Search, Database, Zap, BookOpen, Users } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function VectorSearchPage() {
+  const { t } = useTranslation();
   const [query, setQuery] = useState("");
   const [searchType, setSearchType] = useState<"transactions" | "beneficiaries" | "kb">("transactions");
   const [limit, setLimit] = useState("10");
   const [results, setResults] = useState<any[]>([]);
   const [searching, setSearching] = useState(false);
 
-  const { data: statusData } = trpc.qdrant.status.useQuery();
+  const { data: statusData, isLoading } = trpc.qdrant.status.useQuery();
 
   const searchTxMutation = trpc.qdrant.searchTransactions.useQuery(
     { query, limit: parseInt(limit) },

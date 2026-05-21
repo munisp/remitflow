@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { Flag, Plus, Trash2, Edit } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 interface FlagForm {
   id?: number;
@@ -30,6 +31,7 @@ const defaultForm: FlagForm = {
 };
 
 export default function FeatureFlagAdmin() {
+  const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [showDialog, setShowDialog] = useState(false);
   const [form, setForm] = useState<FlagForm>(defaultForm);

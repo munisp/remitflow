@@ -10,8 +10,10 @@ import { Progress } from "@/components/ui/progress";
 import { toast } from "sonner";
 import { Shield, AlertTriangle, TrendingUp, Brain, RefreshCw, CheckCircle, XCircle, Clock } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function FraudDetectionV2Page() {
+  const { t } = useTranslation();
   const [scoreInput, setScoreInput] = useState({
     amount_usd: 1500,
     source_country: "US",
