@@ -9,8 +9,10 @@
  */
 
 import { z } from "zod";
+import { randomBytes } from "crypto";
 import { router, publicProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
+import { createAuditLog } from "../db";
 
 interface RateAlert {
   id: string;
@@ -44,7 +46,7 @@ export const rateAlertsRouter = router({
       notificationMethod: z.enum(["email", "push", "both"]).default("both"),
     }))
     .mutation(({ input }) => {
-      const id = `alert_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const id = `alert_${Date.now()}_${randomBytes(3).toString("hex")}`;
 
       if (input.alertType === "target" && !input.targetRate) {
         return { success: false, reason: "Target rate required for target alerts" };

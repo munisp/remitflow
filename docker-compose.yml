@@ -148,6 +148,88 @@ services:
       - "16686:16686"
       - "4318:4318"
 
+  # ═══ ADDITIONAL SERVICES (profile: full) ════════════════════════════════════
+
+  go-community-feed:
+    build: ./services/go-community-feed
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8110:8110"
+
+  go-ratelimit-sidecar:
+    build: ./services/go-ratelimit-sidecar
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8111:8111"
+
+  kafka-processor:
+    build: ./services/kafka-processor
+    profiles: ["full", "monitoring"]
+    depends_on:
+      - kafka
+
+  ledger-service:
+    build: ./services/ledger-service
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8112:8112"
+
+  mojaloop-connector:
+    build: ./services/mojaloop-connector
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8113:8113"
+
+  python-compliance-service:
+    build: ./services/python-compliance-service
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8092:8092"
+
+  python-nav-analytics:
+    build: ./services/python-nav-analytics
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8114:8114"
+
+  rate-limiter:
+    image: redis:7-alpine
+    profiles: ["full", "monitoring"]
+    ports:
+      - "6380:6379"
+
+  risk-engine:
+    build: ./services/risk-engine
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8115:8115"
+
+  rust-audit-service:
+    build: ./services/rust-audit-service
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8116:8116"
+
+  search-indexer:
+    build: ./services/search-indexer
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8117:8117"
+
+  synthetic-monitor:
+    build: ./services/python-synthetic-monitor
+    profiles: ["monitoring"]
+    ports:
+      - "8201:8201"
+    environment:
+      REMITFLOW_BASE_URL: http://api:3000
+
+  idempotency-service:
+    build: ./services/rust-idempotency
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8103:8103"
+
 volumes:
   pgdata:
   grafanadata:

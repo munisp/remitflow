@@ -12,6 +12,7 @@
 import { z } from "zod";
 import { router, publicProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
+import { createAuditLog } from "../db";
 
 // Country-specific account number patterns
 const ACCOUNT_PATTERNS: Record<string, { pattern: RegExp; description: string; example: string }> = {

@@ -903,7 +903,6 @@ export const cbnComplianceRouter = router({
         })
       );
 
-      // Fetch approved BDC partners with email once (reused for all triggered alerts)
       const approvedBdcPartners = await db
         .select({ name: bdcPartners.name, contactEmail: bdcPartners.contactEmail })
         .from(bdcPartners)

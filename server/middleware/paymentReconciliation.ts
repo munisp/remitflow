@@ -10,6 +10,7 @@
  * - Payment state machine with audit trail
  * - Auto-refund on timeout
  */
+import { createHmac, timingSafeEqual } from "crypto";
 import { logger } from "../_core/logger";
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
@@ -419,13 +420,12 @@ export function verifyStripeWebhook(payload: string, signature: string): boolean
     return false;
   }
 
-  const expected = require("crypto")
-    .createHmac("sha256", secret)
+  const expected = createHmac("sha256", secret)
     .update(`${timestamp}.${payload}`)
     .digest("hex");
 
   try {
-    return require("crypto").timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+    return timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
   } catch {
     return false;
   }

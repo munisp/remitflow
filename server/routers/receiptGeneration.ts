@@ -12,7 +12,9 @@
 
 import { z } from "zod";
 import { router, publicProcedure } from "../_core/trpc";
+import { randomBytes } from "crypto";
 import { logger } from "../_core/logger";
+import { createAuditLog } from "../db";
 
 interface ReceiptData {
   receiptId: string;
@@ -69,7 +71,7 @@ export const receiptGenerationRouter = router({
       estimatedDelivery: z.string().default("1-3 business days"),
     }))
     .mutation(({ input }) => {
-      const receiptId = `REC-${Date.now()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const receiptId = `REC-${Date.now()}-${randomBytes(3).toString("hex").slice(0, 4).toUpperCase()}`;
       const totalFees = input.transferFee + input.fxMarkup + input.railFee;
 
       // Determine regulatory disclosures based on corridors

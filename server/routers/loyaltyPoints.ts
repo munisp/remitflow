@@ -12,6 +12,7 @@
 import { z } from "zod";
 import { router, publicProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
+import { createAuditLog } from "../db";
 
 interface PointsAccount {
   userId: number;

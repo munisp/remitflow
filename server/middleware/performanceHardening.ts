@@ -10,6 +10,7 @@
  * - Database connection monitoring
  * - Request coalescing for duplicate queries
  */
+import { createHash } from "crypto";
 import { Request, Response, NextFunction } from "express";
 import { logger } from "../_core/logger";
 
@@ -98,9 +99,7 @@ export function etagSupport(req: Request, res: Response, next: NextFunction) {
   const originalJson = res.json.bind(res);
   res.json = function (body: unknown) {
     if (req.method === "GET" && body) {
-      const crypto = require("crypto");
-      const hash = crypto
-        .createHash("md5")
+      const hash = createHash("md5")
         .update(JSON.stringify(body))
         .digest("hex");
       const etag = `W/"${hash}"`;

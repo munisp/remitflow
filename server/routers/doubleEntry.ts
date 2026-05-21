@@ -10,8 +10,10 @@
  */
 
 import { z } from "zod";
+import { randomBytes } from "crypto";
 import { router, publicProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
+import { createAuditLog } from "../db";
 
 interface LedgerEntry {
   id: string;
@@ -29,7 +31,7 @@ interface LedgerEntry {
 const ledger: LedgerEntry[] = [];
 
 function generateEntryId(): string {
-  return `le_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  return `le_${Date.now()}_${randomBytes(4).toString("hex")}`;
 }
 
 export const doubleEntryRouter = router({
