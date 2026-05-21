@@ -319,7 +319,7 @@ async function getLiveRates(base = "USD"): Promise<Record<string, number>> {
 }
 
 function formatTxn(t: any) {
-  return { ...t, fromAmount: Number(t.fromAmount), toAmount: t.toAmount ? Number(t.toAmount) : undefined, fee: Number(t.fee ?? 0), fxRate: t.fxRate ? Number(t.fxRate) : undefined };
+  return { ...t, fromAmount: Number(t.fromAmount), toAmount: t.toAmount ? Number(t.toAmount) : undefined, fee: Number(t.fee ?? 0), fxRate: t.fxRate ? Number(t.fxRate) : undefined, amount: Number(t.fromAmount ?? 0), currency: t.fromCurrency ?? "NGN" };
 }
 const CURRENCY_META: Record<string, { symbol: string; flag: string; name: string }> = {
   NGN: { symbol: "\u20a6", flag: "\ud83c\uddf3\ud83c\uddec", name: "Nigerian Naira" },
@@ -526,41 +526,79 @@ export const appRouter = router({
       const ngnWallet = userWallets.find((w: any) => w.currency === "NGN");
       const totalNGN = ngnWallet ? Number(ngnWallet.balance) : totalUSD * ngnRate;
       const db = await getDb();
-      let sentThisMonth = 0, receivedThisMonth = 0;
+      let sentThisMonth = 0, receivedThisMonth = 0, billsThisMonth = 0, savingsThisMonth = 0, exchangeThisMonth = 0, otherThisMonth = 0;
+      let sentLastMonth = 0, receivedLastMonth = 0;
       if (db) {
         try {
-        const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-        const [sentRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
-        const [recvRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, monthStart)));
-        sentThisMonth = Number(sentRow?.total ?? 0);
-        receivedThisMonth = Number(recvRow?.total ?? 0);
+          const now = new Date();
+          const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+          const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+          const [sentRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+          const [recvRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, monthStart)));
+          sentThisMonth = Number(sentRow?.total ?? 0);
+          receivedThisMonth = Number(recvRow?.total ?? 0);
+          // Last month totals for real monthly change calculation
+          const [sentLastRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
+          const [recvLastRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
+          sentLastMonth = Number(sentLastRow?.total ?? 0);
+          receivedLastMonth = Number(recvLastRow?.total ?? 0);
+          // Spend by category — query actual transaction types
+          const categoryTypes = ["bill", "airtime", "exchange", "topup"] as const;
+          for (const cType of categoryTypes) {
+            try {
+              const [row] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, cType), gte(transactions.createdAt, monthStart)));
+              const val = Number(row?.total ?? 0);
+              if (cType === "bill" || cType === "airtime") billsThisMonth += val;
+              else if (cType === "exchange") exchangeThisMonth = val;
+              else otherThisMonth += val;
+            } catch { /* skip */ }
+          }
+          // Savings contributions this month
+          try {
+            const [savRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "savings"), gte(transactions.createdAt, monthStart)));
+            savingsThisMonth = Number(savRow?.total ?? 0);
+          } catch { /* skip */ }
         } catch { /* ignore monthly query errors in test env */ }
+      }
+      // Calculate real monthly change: (this month net) vs (last month net), as % of total balance
+      const thisMonthNet = receivedThisMonth - sentThisMonth;
+      const lastMonthNet = receivedLastMonth - sentLastMonth;
+      let monthlyChange = 0;
+      if (totalNGN > 0) {
+        monthlyChange = Math.round(((thisMonthNet - lastMonthNet) / totalNGN) * 10000) / 100;
       }
       const savingsGoalsList = await getSavingsGoalsByUserId(userId);
       const activeSavings = savingsGoalsList.filter((g: any) => g.status === "active").length;
+      // Build spend by category with real data
+      const spendByCategory = [
+        { name: "Remittances", value: sentThisMonth, color: "#6366f1" },
+        { name: "Bills & Airtime", value: billsThisMonth, color: "#f59e0b" },
+        { name: "Savings", value: savingsThisMonth, color: "#10b981" },
+        { name: "Exchange", value: exchangeThisMonth, color: "#06b6d4" },
+        { name: "Other", value: otherThisMonth, color: "#8b5cf6" },
+      ].filter(c => c.value > 0);
       return {
-        totalBalance: Math.round(totalNGN), totalBalanceUSD: Math.round(totalUSD * 100) / 100, monthlyChange: 12.4,
+        totalBalance: Math.round(totalNGN), totalBalanceUSD: Math.round(totalUSD * 100) / 100, monthlyChange,
         currencies: userWallets.map((w: any) => w.currency), wallets: userWallets.map(formatWallet),
         recentTransactions: recentTxns.map(formatTxn), unreadNotifications: unreadCount,
-        sentThisMonth, receivedThisMonth, activeSavingsGoals: activeSavings,
+        sentThisMonth, receivedThisMonth, billsThisMonth, savingsThisMonth, exchangeThisMonth, otherThisMonth,
+        spendByCategory, activeSavingsGoals: activeSavings,
         user: { name: dbUser?.name ?? ctx.user.name, email: dbUser?.email ?? ctx.user.email, kycTier: dbUser?.kycTier ?? "tier0" },
         aiInsight: { title: "Portfolio Tip", body: "Your NGN balance is strong. Consider diversifying into USD savings to hedge against currency fluctuations." },
         chartData: await (async () => {
-          const db = await getDb();
+          const db2 = await getDb();
           const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
           const now = new Date();
-          const result = [];
-          for (let i = 11; i >= 0; i--) {
-            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-            const monthStart = d.getTime();
-            const monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59).getTime();
-            if (!db) { result.push({ month: months[d.getMonth()], balance: 0 }); continue; }
-            const monthStartDate = new Date(monthStart);
-            const monthEndDate = new Date(monthEnd);
-            const [txRow] = await db.select({ total: sql<string>`COALESCE(SUM(${transactions.fromAmount}), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), gte(transactions.createdAt, monthStartDate), lte(transactions.createdAt, monthEndDate), eq(transactions.status, 'completed')));
-            result.push({ month: months[d.getMonth()], balance: Math.round(Number(txRow?.total ?? 0)) });
-          }
-          return result;
+          if (!db2) return Array.from({ length: 12 }, (_, i) => { const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1); return { month: months[d.getMonth()], balance: 0 }; });
+          // Single batch query for all 12 months instead of 12 sequential queries
+          const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+          const rows = await db2.select({ month: sql<string>`to_char(${transactions.createdAt}, 'YYYY-MM')`, total: sql<string>`COALESCE(SUM(${transactions.fromAmount}), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), gte(transactions.createdAt, twelveMonthsAgo), eq(transactions.status, "completed"))).groupBy(sql`to_char(${transactions.createdAt}, 'YYYY-MM')`);
+          const monthMap = new Map(rows.map((r: any) => [r.month, Math.round(Number(r.total ?? 0))]));
+          return Array.from({ length: 12 }, (_, i) => {
+            const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1);
+            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+            return { month: months[d.getMonth()], balance: monthMap.get(key) ?? 0 };
+          });
         })(),
       };
     }),

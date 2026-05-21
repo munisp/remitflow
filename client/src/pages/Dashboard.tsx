@@ -312,7 +312,7 @@ export default function Dashboard() {
                     <XAxis dataKey="month" tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} axisLine={false} tickLine={false} />
                     <YAxis tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} axisLine={false} tickLine={false} tickFormatter={v => `₦${(v / 1000000).toFixed(1)}M`} />
                     <Tooltip formatter={(v: number) => [`₦${v.toLocaleString()}`, "Balance"]} contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: 8 }} />
-                    <Area type="monotone" dataKey="value" stroke="hsl(var(--primary))" strokeWidth={2} fill="url(#colorValue)" />
+                    <Area type="monotone" dataKey="balance" stroke="hsl(var(--primary))" strokeWidth={2} fill="url(#colorValue)" />
                   </AreaChart>
                 </ResponsiveContainer>
               )}
@@ -352,7 +352,7 @@ export default function Dashboard() {
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-muted-foreground">Savings goals</span>
-                  <span className="font-semibold">{0} active</span>
+                  <span className="font-semibold">{data?.activeSavingsGoals ?? 0} active</span>
                 </div>
               </CardContent>
             </Card>
@@ -361,13 +361,15 @@ export default function Dashboard() {
 
         {/* Spend by Category */}
         {(() => {
-          const cats = [
-            { name: "Remittances", value: data?.sentThisMonth ?? 0, color: "#6366f1" },
-            { name: "Bills", value: (data?.sentThisMonth ?? 0) * 0.18, color: "#f59e0b" },
-            { name: "Savings", value: (data?.sentThisMonth ?? 0) * 0.22, color: "#10b981" },
-            { name: "Exchange", value: (data?.sentThisMonth ?? 0) * 0.12, color: "#06b6d4" },
-            { name: "Other", value: (data?.sentThisMonth ?? 0) * 0.08, color: "#8b5cf6" },
-          ].filter(c => c.value > 0);
+          const cats = (data?.spendByCategory && Array.isArray(data.spendByCategory) && data.spendByCategory.length > 0)
+            ? (data.spendByCategory as Array<{ name: string; value: number; color: string }>)
+            : [
+              { name: "Remittances", value: data?.sentThisMonth ?? 0, color: "#6366f1" },
+              { name: "Bills", value: data?.billsThisMonth ?? 0, color: "#f59e0b" },
+              { name: "Savings", value: data?.savingsThisMonth ?? 0, color: "#10b981" },
+              { name: "Exchange", value: data?.exchangeThisMonth ?? 0, color: "#06b6d4" },
+              { name: "Other", value: data?.otherThisMonth ?? 0, color: "#8b5cf6" },
+            ].filter(c => c.value > 0);
           const total = cats.reduce((s, c) => s + c.value, 0);
           if (!total) return null;
           return (
@@ -436,8 +438,8 @@ export default function Dashboard() {
                     <div className="text-right shrink-0">
                       <p className={cn("text-sm font-semibold", txn.type === "receive" || txn.type === "topup" ? "text-emerald-600" : "text-foreground")}>
                         {txn.type === "receive" || txn.type === "topup" ? "+" : "-"}
-                        {txn.currency === "NGN" ? "₦" : txn.currency + " "}
-                        {Number(txn.amount).toLocaleString()}
+                        {(txn.fromCurrency ?? txn.currency ?? "NGN") === "NGN" ? "₦" : (txn.fromCurrency ?? txn.currency ?? "") + " "}
+                        {Number(txn.fromAmount ?? txn.amount ?? 0).toLocaleString()}
                       </p>
                       <Badge className={cn("text-xs mt-0.5", STATUS_COLORS[txn.status])}>
                         {txn.status}
