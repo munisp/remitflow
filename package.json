@@ -17,6 +17,7 @@
     "seed:reset": "node scripts/seed.mjs --reset",
     "db:seed:canonical": "node scripts/seed-canonical.mjs",
     "lint": "tsc --noEmit",
+    "test:coverage": "vitest run --coverage",
     "prepare": "husky || true"
   },
   "lint-staged": {
