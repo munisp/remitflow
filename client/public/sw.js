@@ -85,6 +85,20 @@ const V204_API_PATTERNS = [
   '/api/trpc/cbnCompliance.getCbnCorridors',
 ];
 
+// Future-proofing APIs — SWR (5-min TTL for read endpoints)
+const FUTURE_PROOFING_API_PATTERNS = [
+  '/api/trpc/futureProofing.getPredictiveTransfers',
+  '/api/trpc/futureProofing.getFxForecast',
+  '/api/trpc/futureProofing.smartBeneficiaryMatch',
+  '/api/trpc/futureProofing.getConnectedAccounts',
+  '/api/trpc/futureProofing.getSupportedBanks',
+  '/api/trpc/futureProofing.getSubscriptionTiers',
+  '/api/trpc/futureProofing.getDynamicPricing',
+  '/api/trpc/futureProofing.getMiddlewareHealth',
+  '/api/trpc/futureProofing.getRailHealth',
+  '/api/trpc/futureProofing.getEventSourcingStats',
+];
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(STATIC_CACHE).then((cache) => cache.addAll(STATIC_ASSETS))
@@ -120,6 +134,12 @@ self.addEventListener('fetch', (event) => {
   // Revenue Share APIs — Stale-While-Revalidate (2 min TTL for near-real-time earnings)
   if (REVENUE_SHARE_API_PATTERNS.some((p) => url.pathname.includes(p))) {
     event.respondWith(staleWhileRevalidate(request, REVENUE_SHARE_CACHE, 120));
+    return;
+  }
+
+  // Future-proofing APIs — Stale-While-Revalidate (5 min TTL)
+  if (FUTURE_PROOFING_API_PATTERNS.some((p) => url.pathname.includes(p))) {
+    event.respondWith(staleWhileRevalidate(request, API_CACHE, 300));
     return;
   }
 

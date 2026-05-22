@@ -296,6 +296,7 @@ import { doubleEntryRouter } from "./routers/doubleEntry";
 import { receiptGenerationRouter } from "./routers/receiptGeneration";
 import { loyaltyPointsRouter } from "./routers/loyaltyPoints";
 import { beneficiaryVerificationRouter } from "./routers/beneficiaryVerification";
+import { futureProofingRouter } from "./routers/futureProofing";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -6770,5 +6771,7 @@ Case: #${input.caseId}`,
   receiptGeneration: receiptGenerationRouter,
   loyaltyPoints: loyaltyPointsRouter,
   beneficiaryVerification: beneficiaryVerificationRouter,
+  // v240 — Future-Proofing: AI, Open Banking, ISO 20022, CBDC, Compliance, Architecture, Payment Rails, Security, DX, Business
+  futureProofing: futureProofingRouter,
 });
 export type AppRouter = typeof appRouter;

@@ -287,7 +287,7 @@ export async function startKafkaConsumers(): Promise<void> {
     const handlerMap = new Map(handlers.map((h) => [h.topic, h.handler]));
 
     await consumer.run({
-      eachMessage: async ({ topic, message }) => {
+      eachMessage: async ({ topic, message }: { topic: string; partition: number; message: any }) => {
         const handler = handlerMap.get(topic);
         if (!handler || !message.value) return;
 
