@@ -88,19 +88,32 @@ const CONFIG = {
 export class RedisIntegration {
   private connected = false;
   private client: any = null;
+  private connectAttempted = false;
 
   async connect(): Promise<void> {
+    if (this.connectAttempted) return;
+    this.connectAttempted = true;
     try {
       const { createClient } = await import("redis");
-      this.client = createClient({
+      const redisClient = createClient({
         url: CONFIG.redis.url,
         password: CONFIG.redis.password,
         database: CONFIG.redis.db,
-        socket: { reconnectStrategy: (retries: number) => Math.min(retries * 100, 3000) },
+        socket: {
+          connectTimeout: 3000,
+          reconnectStrategy: (retries: number) => {
+            if (retries > 3) return new Error("Max reconnect attempts reached");
+            return Math.min(retries * 100, 3000);
+          },
+        },
       });
-      this.client.on("error", (err: Error) => logger.error({ err }, "[Redis] Connection error"));
-      this.client.on("connect", () => { this.connected = true; logger.info("[Redis] Connected"); });
-      await this.client.connect();
+      redisClient.on("error", () => {});
+      redisClient.on("connect", () => { logger.info("[Redis] Connected"); });
+      const connectPromise = redisClient.connect();
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Redis connect timeout (3s)")), 3000));
+      await Promise.race([connectPromise, timeoutPromise]);
+      this.client = redisClient;
+      this.connected = true;
     } catch (err) {
       logger.warn({ err }, "[Redis] Connection failed, using in-memory fallback");
       this.client = new InMemoryCache();
@@ -108,44 +121,53 @@ export class RedisIntegration {
     }
   }
 
-  async get(key: string): Promise<string | null> {
+  private async safeExec<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
     if (!this.connected) await this.connect();
-    return this.client.get(`${CONFIG.redis.keyPrefix}${key}`);
-  }
-
-  async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
-    if (!this.connected) await this.connect();
-    const fullKey = `${CONFIG.redis.keyPrefix}${key}`;
-    if (ttlSeconds) {
-      await this.client.setEx(fullKey, ttlSeconds, value);
-    } else {
-      await this.client.set(fullKey, value);
+    try {
+      return await fn();
+    } catch {
+      if (!(this.client instanceof InMemoryCache)) {
+        this.client = new InMemoryCache();
+      }
+      try { return await fn(); } catch { return fallback; }
     }
   }
 
+  async get(key: string): Promise<string | null> {
+    return this.safeExec(() => this.client.get(`${CONFIG.redis.keyPrefix}${key}`), null);
+  }
+
+  async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
+    return this.safeExec(async () => {
+      const fullKey = `${CONFIG.redis.keyPrefix}${key}`;
+      if (ttlSeconds) {
+        await this.client.setEx(fullKey, ttlSeconds, value);
+      } else {
+        await this.client.set(fullKey, value);
+      }
+    }, undefined);
+  }
+
   async del(key: string): Promise<void> {
-    if (!this.connected) await this.connect();
-    await this.client.del(`${CONFIG.redis.keyPrefix}${key}`);
+    return this.safeExec(() => this.client.del(`${CONFIG.redis.keyPrefix}${key}`), undefined);
   }
 
   async incr(key: string): Promise<number> {
-    if (!this.connected) await this.connect();
-    return this.client.incr(`${CONFIG.redis.keyPrefix}${key}`);
+    return this.safeExec(() => this.client.incr(`${CONFIG.redis.keyPrefix}${key}`), 0);
   }
 
   async hSet(key: string, field: string, value: string): Promise<void> {
-    if (!this.connected) await this.connect();
-    await this.client.hSet(`${CONFIG.redis.keyPrefix}${key}`, field, value);
+    return this.safeExec(() => this.client.hSet(`${CONFIG.redis.keyPrefix}${key}`, field, value), undefined);
   }
 
   async hGetAll(key: string): Promise<Record<string, string>> {
-    if (!this.connected) await this.connect();
-    return this.client.hGetAll(`${CONFIG.redis.keyPrefix}${key}`) || {};
+    return this.safeExec(() => this.client.hGetAll(`${CONFIG.redis.keyPrefix}${key}`).then((r: Record<string, string>) => r || {}), {});
   }
 
   async publish(channel: string, message: string): Promise<void> {
-    if (!this.connected) await this.connect();
-    if (this.client.publish) await this.client.publish(channel, message);
+    return this.safeExec(async () => {
+      if (this.client.publish) await this.client.publish(channel, message);
+    }, undefined);
   }
 
   async setRateLimit(key: string, maxRequests: number, windowSeconds: number): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {

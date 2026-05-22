@@ -133,7 +133,7 @@ const conversationalPaymentsRouter = router({
       const db = await getDb();
       if (!db) return [];
       const rows = await db.execute(sql`
-        SELECT * FROM audit_logs WHERE user_id = ${ctx.user.id} AND action IN ('AI_INTENT_PARSED', 'AI_TRANSFER_EXECUTED')
+        SELECT * FROM "auditLogs" WHERE user_id = ${ctx.user.id} AND action IN ('AI_INTENT_PARSED', 'AI_TRANSFER_EXECUTED')
         ORDER BY created_at DESC LIMIT ${input.limit}
       `);
       return rows as any[];
@@ -144,11 +144,12 @@ const conversationalPaymentsRouter = router({
 function parsePaymentIntent(message: string): { action: string; amount?: number; currency?: string; beneficiaryName?: string; toCurrency?: string; frequency?: string; confidence: number } {
   const lower = message.toLowerCase().trim();
 
-  // Amount extraction
-  const amountMatch = lower.match(/(?:₦|ngn|naira)\s*([\d,]+(?:\.\d{2})?)|(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(?:₦|ngn|naira|dollars?|usd|\$|£|gbp|€|eur)/i)
-    || lower.match(/(?:send|transfer|pay)\s+(?:₦|ngn|\$|£|€)?\s*([\d,]+(?:\.\d{2})?)/i)
-    || lower.match(/([\d,]+(?:\.\d{2})?)\s*(?:to|for)/i);
-  const amount = amountMatch ? parseFloat((amountMatch[1] || amountMatch[2] || "0").replace(/,/g, "")) : undefined;
+  // Amount extraction — try specific patterns first, then fallback
+  const amountMatch = lower.match(/(?:₦|ngn|naira)\s*([\d,]+(?:\.\d{1,2})?)/i)
+    || lower.match(/([\d,]+(?:\.\d{1,2})?)\s*(?:₦|ngn|naira|dollars?|usd|\$|£|gbp|€|eur)/i)
+    || lower.match(/(?:send|transfer|pay)\s+(?:₦|ngn|\$|£|€)?\s*([\d,]+(?:\.\d{1,2})?)/i)
+    || lower.match(/([\d,]+(?:\.\d{1,2})?)\s*(?:to|for)/i);
+  const amount = amountMatch ? parseFloat((amountMatch[1] || amountMatch[2] || "0").replace(/,/g, "")) || undefined : undefined;
 
   // Currency detection
   let currency = "NGN";
@@ -284,7 +285,11 @@ const fxForecastingRouter = router({
       if (rates.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: `No rate history for ${input.fromCurrency}/${input.toCurrency}` });
 
       // Time-series analysis: exponential moving average + linear regression
-      const values = (rates as any[]).reverse().map((r: any) => parseFloat(r.rate));
+      // fxRateCache.rates is a JSON object keyed by currency code (e.g. {"NGN": 1371.48, "GBP": 0.79})
+      const values = (rates as any[]).reverse().map((r: any) => {
+        const ratesObj = typeof r.rates === "string" ? JSON.parse(r.rates) : r.rates;
+        return parseFloat(ratesObj?.[input.toCurrency] ?? "0");
+      }).filter((v: number) => v > 0 && !isNaN(v));
       const ema5 = calcEMA(values, 5);
       const ema20 = calcEMA(values, 20);
       const { slope, intercept } = linearRegression(values);
@@ -681,8 +686,22 @@ const iso20022Router = router({
       country: z.string().length(2),
     }))
     .query(({ input }) => {
+      const ISO_3166_1_ALPHA2 = new Set([
+        "AD","AE","AF","AG","AI","AL","AM","AO","AQ","AR","AS","AT","AU","AW","AX","AZ",
+        "BA","BB","BD","BE","BF","BG","BH","BI","BJ","BL","BM","BN","BO","BQ","BR","BS","BT","BV","BW","BY","BZ",
+        "CA","CC","CD","CF","CG","CH","CI","CK","CL","CM","CN","CO","CR","CU","CV","CW","CX","CY","CZ",
+        "DE","DJ","DK","DM","DO","DZ","EC","EE","EG","EH","ER","ES","ET","FI","FJ","FK","FM","FO","FR",
+        "GA","GB","GD","GE","GF","GG","GH","GI","GL","GM","GN","GP","GQ","GR","GS","GT","GU","GW","GY",
+        "HK","HM","HN","HR","HT","HU","ID","IE","IL","IM","IN","IO","IQ","IR","IS","IT","JE","JM","JO","JP",
+        "KE","KG","KH","KI","KM","KN","KP","KR","KW","KY","KZ","LA","LB","LC","LI","LK","LR","LS","LT","LU","LV","LY",
+        "MA","MC","MD","ME","MF","MG","MH","MK","ML","MM","MN","MO","MP","MQ","MR","MS","MT","MU","MV","MW","MX","MY","MZ",
+        "NA","NC","NE","NF","NG","NI","NL","NO","NP","NR","NU","NZ","OM","PA","PE","PF","PG","PH","PK","PL","PM","PN","PR","PS","PT","PW","PY",
+        "QA","RE","RO","RS","RU","RW","SA","SB","SC","SD","SE","SG","SH","SI","SJ","SK","SL","SM","SN","SO","SR","SS","ST","SV","SX","SY","SZ",
+        "TC","TD","TF","TG","TH","TJ","TK","TL","TM","TN","TO","TR","TT","TV","TW","TZ",
+        "UA","UG","UM","US","UY","UZ","VA","VC","VE","VG","VI","VN","VU","WF","WS","YE","YT","ZA","ZM","ZW",
+      ]);
       const errors: string[] = [];
-      if (!/^[A-Z]{2}$/.test(input.country)) errors.push("Country must be ISO 3166-1 alpha-2");
+      if (!/^[A-Z]{2}$/.test(input.country) || !ISO_3166_1_ALPHA2.has(input.country)) errors.push("Country must be a valid ISO 3166-1 alpha-2 code");
       if (input.streetName.length === 0) errors.push("Street name is required");
       if (input.townName.length === 0) errors.push("Town name is required");
       if (input.postCode.length === 0) errors.push("Post code is required");
