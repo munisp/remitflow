@@ -9,6 +9,7 @@
  *   - Ray Training Pipeline (port 8114)
  *   - MLflow Model Registry (port 8115)
  *   - ML Retraining Orchestrator (port 8116)
+ *   - GPU-Agnostic Training Engine (port 8120)
  *
  * Each endpoint calls the real Python service with proper error handling
  * and circuit-breaker fallback.
@@ -27,6 +28,7 @@ const INVESTMENT_ML_URL = process.env.INVESTMENT_ML_SERVICE_URL || "http://local
 const RAY_TRAINING_URL = process.env.RAY_TRAINING_SERVICE_URL || "http://localhost:8114";
 const MLFLOW_REGISTRY_URL = process.env.MLFLOW_REGISTRY_SERVICE_URL || "http://localhost:8115";
 const ML_RETRAINING_URL = process.env.ML_RETRAINING_SERVICE_URL || "http://localhost:8116";
+const GPU_ENGINE_URL = process.env.GPU_ENGINE_SERVICE_URL || "http://localhost:8120";
 
 // ─── HTTP Client with Circuit Breaker ───────────────────────────────────────
 
@@ -613,6 +615,258 @@ const mlHealthRouter = router({
   }),
 });
 
+// ─── GPU Training Engine Router ──────────────────────────────────────────────
+
+const gpuEngineRouter = router({
+  /** List all detected GPU/NPU/CPU devices */
+  devices: adminProcedure.query(async () => {
+    return callMLService<Record<string, unknown>>(GPU_ENGINE_URL, "/devices");
+  }),
+
+  /** Train a model on the best available GPU */
+  train: adminProcedure
+    .input(
+      z.object({
+        modelType: z.enum(["fraud_detection", "nlu_intent", "fx_forecasting", "investment_scoring", "gnn_fraud"]),
+        preferredDevice: z.string().optional(),
+        epochs: z.number().min(1).max(1000).default(30),
+        batchSize: z.number().min(1).max(4096).default(64),
+        learningRate: z.number().gt(0).lt(1).default(0.001),
+        mixedPrecision: z.boolean().default(true),
+        exportOnnx: z.boolean().default(true),
+        dataSource: z.enum(["synthetic", "platform_db", "custom"]).default("synthetic"),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      return callMLService<Record<string, unknown>>(
+        GPU_ENGINE_URL,
+        "/train",
+        "POST",
+        {
+          model_type: input.modelType,
+          preferred_device: input.preferredDevice,
+          epochs: input.epochs,
+          batch_size: input.batchSize,
+          learning_rate: input.learningRate,
+          mixed_precision: input.mixedPrecision,
+          export_onnx: input.exportOnnx,
+          data_source: input.dataSource,
+        },
+        120_000,
+      );
+    }),
+
+  /** Run inference on a loaded ONNX model (any GPU vendor) */
+  inference: protectedProcedure
+    .input(
+      z.object({
+        modelName: z.string(),
+        inputs: z.array(z.array(z.number())),
+        targetDevice: z.string().optional(),
+        returnProbabilities: z.boolean().default(true),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      return callMLService<Record<string, unknown>>(
+        GPU_ENGINE_URL,
+        "/inference",
+        "POST",
+        {
+          model_name: input.modelName,
+          inputs: input.inputs,
+          target_device: input.targetDevice,
+          return_probabilities: input.returnProbabilities,
+        },
+      );
+    }),
+
+  /** List all loaded and available models */
+  models: adminProcedure.query(async () => {
+    return callMLService<Record<string, unknown>>(GPU_ENGINE_URL, "/models");
+  }),
+
+  /** List available inference providers */
+  providers: adminProcedure.query(async () => {
+    return callMLService<Record<string, unknown>>(GPU_ENGINE_URL, "/providers");
+  }),
+
+  /** Benchmark model inference latency */
+  benchmark: adminProcedure
+    .input(
+      z.object({
+        modelName: z.string(),
+        inputShape: z.array(z.number()),
+        batchSize: z.number().default(1),
+        iterations: z.number().default(100),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      return callMLService<Record<string, unknown>>(
+        GPU_ENGINE_URL,
+        "/benchmark",
+        "POST",
+        {
+          model_name: input.modelName,
+          input_shape: input.inputShape,
+          batch_size: input.batchSize,
+          iterations: input.iterations,
+        },
+      );
+    }),
+
+  /** Export model to different format (tensorrt, openvino, coreml, quantized) */
+  exportModel: adminProcedure
+    .input(
+      z.object({
+        modelName: z.string(),
+        targetFormat: z.enum(["onnx", "tensorrt", "openvino", "coreml", "quantized"]),
+        inputShape: z.array(z.number()).optional(),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      return callMLService<Record<string, unknown>>(
+        GPU_ENGINE_URL,
+        "/export",
+        "POST",
+        {
+          model_name: input.modelName,
+          target_format: input.targetFormat,
+          input_shape: input.inputShape,
+        },
+      );
+    }),
+
+  /** Train-and-deploy workflow: train on one GPU, infer on another */
+  trainAndDeploy: adminProcedure
+    .input(
+      z.object({
+        modelType: z.string(),
+        trainDevice: z.string().optional(),
+        inferDevice: z.string().optional(),
+        epochs: z.number().default(30),
+        batchSize: z.number().default(64),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      return callMLService<Record<string, unknown>>(
+        GPU_ENGINE_URL,
+        "/workflow/train-and-deploy",
+        "POST",
+        {
+          model_type: input.modelType,
+          train_device: input.trainDevice,
+          infer_device: input.inferDevice,
+          epochs: input.epochs,
+          batch_size: input.batchSize,
+        },
+        300_000,
+      );
+    }),
+
+  /** Register a remote GPU node */
+  registerNode: adminProcedure
+    .input(
+      z.object({
+        nodeId: z.string(),
+        host: z.string(),
+        port: z.number().default(8120),
+        gpuVendor: z.string().optional(),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      return callMLService<Record<string, unknown>>(
+        GPU_ENGINE_URL,
+        "/remote/nodes/register",
+        "POST",
+        {
+          node_id: input.nodeId,
+          host: input.host,
+          port: input.port,
+          gpu_vendor: input.gpuVendor,
+        },
+      );
+    }),
+
+  /** List remote nodes */
+  remoteNodes: adminProcedure.query(async () => {
+    return callMLService<Record<string, unknown>>(GPU_ENGINE_URL, "/remote/nodes");
+  }),
+
+  /** Dispatch training to remote GPU node */
+  remoteTrain: adminProcedure
+    .input(
+      z.object({
+        nodeId: z.string(),
+        modelType: z.string(),
+        epochs: z.number().default(30),
+        batchSize: z.number().default(64),
+        learningRate: z.number().default(0.001),
+        mixedPrecision: z.boolean().default(true),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      return callMLService<Record<string, unknown>>(
+        GPU_ENGINE_URL,
+        "/remote/train",
+        "POST",
+        {
+          node_id: input.nodeId,
+          model_type: input.modelType,
+          epochs: input.epochs,
+          batch_size: input.batchSize,
+          learning_rate: input.learningRate,
+          mixed_precision: input.mixedPrecision,
+        },
+        300_000,
+      );
+    }),
+
+  /** Run inference on remote GPU node */
+  remoteInfer: adminProcedure
+    .input(
+      z.object({
+        nodeId: z.string(),
+        modelName: z.string(),
+        inputs: z.array(z.array(z.number())),
+        returnProbabilities: z.boolean().default(true),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      return callMLService<Record<string, unknown>>(
+        GPU_ENGINE_URL,
+        "/remote/infer",
+        "POST",
+        {
+          node_id: input.nodeId,
+          model_name: input.modelName,
+          inputs: input.inputs,
+          return_probabilities: input.returnProbabilities,
+        },
+      );
+    }),
+
+  /** Transfer ONNX model to remote node */
+  transferModel: adminProcedure
+    .input(
+      z.object({
+        modelName: z.string(),
+        targetNodeId: z.string(),
+      }),
+    )
+    .mutation(async ({ input }) => {
+      return callMLService<Record<string, unknown>>(
+        GPU_ENGINE_URL,
+        `/remote/transfer?model_name=${encodeURIComponent(input.modelName)}&target_node_id=${encodeURIComponent(input.targetNodeId)}`,
+        "POST",
+      );
+    }),
+
+  /** List training jobs */
+  jobs: adminProcedure.query(async () => {
+    return callMLService<Record<string, unknown>>(GPU_ENGINE_URL, "/jobs");
+  }),
+});
+
 // ─── Export Combined Router ─────────────────────────────────────────────────
 
 export const mlPipelineRouter = router({
@@ -624,4 +878,5 @@ export const mlPipelineRouter = router({
   modelRegistry: modelRegistryRouter,
   retraining: retrainingRouter,
   health: mlHealthRouter,
+  gpuEngine: gpuEngineRouter,
 });
