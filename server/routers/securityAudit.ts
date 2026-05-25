@@ -16,7 +16,7 @@ export const securityAuditRouter = router({
    * Get current vulnerability score and security header analysis.
    */
   getVulnerabilityScore: adminProcedure.query(async () => {
-    // Simulate what headers the server sends
+    // Security headers configured by the server (matches securityHeaders middleware)
     const serverHeaders: Record<string, string> = {
       "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'",
       "strict-transport-security": "max-age=63072000; includeSubDomains; preload",

@@ -2,6 +2,11 @@
  * Backup Automation — P2 Database 2.9
  * Automated database backup scheduling, verification, retention, and S3 upload.
  */
+import { exec } from "child_process";
+import { promisify } from "util";
+import { logger } from "../_core/logger";
+
+const execAsync = promisify(exec);
 
 interface BackupRecord {
   id: string;
@@ -27,13 +32,14 @@ let backupConfig = {
   s3Region: process.env.BACKUP_S3_REGION ?? "eu-west-1",
   encryptionKey: process.env.BACKUP_ENCRYPTION_KEY,
   maxConcurrent: 1,
+  backupDir: process.env.BACKUP_DIR ?? "/backups",
 };
 
 export function configureBackup(config: Partial<typeof backupConfig>): void {
   backupConfig = { ...backupConfig, ...config };
 }
 
-export function createBackup(type: BackupRecord["type"]): BackupRecord {
+export async function createBackup(type: BackupRecord["type"]): Promise<BackupRecord> {
   const record: BackupRecord = {
     id: `bak_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     type,
@@ -46,12 +52,46 @@ export function createBackup(type: BackupRecord["type"]): BackupRecord {
     backupHistory.splice(0, backupHistory.length - MAX_HISTORY);
   }
 
-  // Simulate backup execution
   record.status = "running";
-  record.status = "completed";
-  record.endTime = Date.now();
-  record.sizeBytes = type === "full" ? 1024 * 1024 * 512 : 1024 * 1024 * 50;
-  record.path = `/backups/${record.id}.${type === "wal" ? "wal.gz" : "pgdump.gz"}`;
+  const dbUrl = process.env.DATABASE_URL;
+  if (!dbUrl) {
+    record.status = "failed";
+    record.error = "DATABASE_URL not configured";
+    record.endTime = Date.now();
+    return record;
+  }
+
+  const ext = type === "wal" ? "wal.gz" : "pgdump.gz";
+  const backupPath = `${backupConfig.backupDir}/${record.id}.${ext}`;
+  record.path = backupPath;
+
+  try {
+    const pgDumpCmd = type === "full"
+      ? `pg_dump "${dbUrl}" --format=custom --compress=6 --file="${backupPath}"`
+      : type === "incremental"
+        ? `pg_dump "${dbUrl}" --format=custom --compress=6 --data-only --file="${backupPath}"`
+        : `pg_basebackup -D "${backupPath}" --wal-method=stream --compress=6 2>/dev/null || pg_dump "${dbUrl}" --format=custom --compress=6 --file="${backupPath}"`;
+
+    await execAsync(`mkdir -p ${backupConfig.backupDir}`);
+    await execAsync(pgDumpCmd, { timeout: 600_000 });
+
+    // Get actual file size
+    const { stdout: sizeOut } = await execAsync(`stat -c %s "${backupPath}" 2>/dev/null || echo "0"`);
+    record.sizeBytes = parseInt(sizeOut.trim(), 10) || 0;
+
+    // Compute checksum
+    const { stdout: sha } = await execAsync(`sha256sum "${backupPath}" | cut -d' ' -f1`);
+    record.checksum = sha.trim();
+
+    record.status = "completed";
+    record.endTime = Date.now();
+    logger.info({ backupId: record.id, type, sizeBytes: record.sizeBytes, durationMs: record.endTime - record.startTime }, "Backup completed");
+  } catch (err: unknown) {
+    record.status = "failed";
+    record.error = err instanceof Error ? err.message : String(err);
+    record.endTime = Date.now();
+    logger.error({ err, backupId: record.id }, "Backup failed");
+  }
 
   return record;
 }
@@ -62,7 +102,7 @@ export function verifyBackup(backupId: string): { valid: boolean; details: strin
   if (backup.status !== "completed") return { valid: false, details: `Backup status: ${backup.status}` };
 
   backup.status = "verified";
-  return { valid: true, details: `Verified ${backup.type} backup (${backup.sizeBytes} bytes)` };
+  return { valid: true, details: `Verified ${backup.type} backup (${backup.sizeBytes} bytes, checksum: ${backup.checksum ?? "n/a"})` };
 }
 
 export function getBackupHistory(limit = 50): BackupRecord[] {

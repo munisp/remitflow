@@ -826,7 +826,8 @@ export const flutterwaveTopupRouter = router({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const secretKey = process.env.FLW_SECRET_KEY ?? "FLWSECK_TEST-SANDBOXDEMOKEY-X";
+      const secretKey = process.env.FLW_SECRET_KEY;
+      if (!secretKey) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Flutterwave API key not configured" });
       const baseUrl = "https://api.flutterwave.com/v3";
       const txRef = generateTxRef("FLW");
 

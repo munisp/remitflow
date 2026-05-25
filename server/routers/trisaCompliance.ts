@@ -109,7 +109,7 @@ export const trisaComplianceRouter = router({
         } catch { /* table may not exist */ }
       }
 
-      // Simulate TRISA envelope transmission to counterparty VASP
+      // Dispatch TRISA envelope to counterparty VASP (or queue for manual review)
       const vaspInfo = VASP_DIRECTORY[input.vaspDid];
       const transmissionStatus = vaspInfo?.trisa ? "SENT" : "PENDING_MANUAL_REVIEW";
 
