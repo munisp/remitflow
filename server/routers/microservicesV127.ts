@@ -14,6 +14,7 @@ import { router, protectedProcedure, publicProcedure, adminProcedure } from "../
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
 import { logAdminAction } from "../audit.service";
+import { logger } from "../_core/logger";
 
 // ─── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -347,7 +348,7 @@ export const rustTigerBeetleRouter = router({
     try {
       const resp = await fetch(`${SVC_URLS.rustTigerBeetle}/accounts?limit=${input.limit}${input.currency ? `&currency=${input.currency}` : ''}`, { signal: AbortSignal.timeout(3000) });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const rows = await db.execute(sql`
       SELECT id, currency, balance, status, created_at FROM wallets
@@ -365,7 +366,7 @@ export const rustTigerBeetleRouter = router({
     try {
       const resp = await fetch(`${SVC_URLS.rustTigerBeetle}/accounts/${input.accountId}/balance?currency=${input.currency}`, { signal: AbortSignal.timeout(3000) });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const [row] = await db.execute(sql`
       SELECT id, currency, balance, status FROM wallets
@@ -382,7 +383,7 @@ export const rustTigerBeetleRouter = router({
     try {
       const resp = await fetch(`${SVC_URLS.rustTigerBeetle}/transfers?limit=${input.limit}${input.status ? `&status=${input.status}` : ''}`, { signal: AbortSignal.timeout(3000) });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const rows = await db.execute(sql`
       SELECT id, amount, currency, status, created_at FROM transfers
@@ -409,7 +410,7 @@ export const rustTigerBeetleRouter = router({
         signal: AbortSignal.timeout(10000),
       });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     // Fallback: write to ledger_entries as double-entry
     const db = await getDb();
     const ref = input.reference;
@@ -434,7 +435,7 @@ export const rustTigerBeetleRouter = router({
         signal: AbortSignal.timeout(10000),
       });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     await db.execute(sql`
       UPDATE transfers SET status = 'reversed', notes = ${`Reversed: ${input.reason}`}, updated_at = NOW()
@@ -448,7 +449,7 @@ export const rustTigerBeetleRouter = router({
     try {
       const resp = await fetch(`${SVC_URLS.rustTigerBeetle}/stats`, { signal: AbortSignal.timeout(3000) });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const [row] = await db.execute(sql`
       SELECT
@@ -512,7 +513,7 @@ export const pythonOpenSearchRouter = router({
         signal: AbortSignal.timeout(5000),
       });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     // Fallback: PostgreSQL full-text search
     const db = await getDb();
     const q = `%${input.query}%`;
@@ -551,7 +552,7 @@ export const pythonOpenSearchRouter = router({
         signal: AbortSignal.timeout(3000),
       });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const q = `${input.prefix}%`;
     if (input.field === "reference") {
@@ -580,7 +581,7 @@ export const pythonOpenSearchRouter = router({
         signal: AbortSignal.timeout(5000),
       });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     return { success: true, mode: "queued", index: input.index, id: input.id };
   }),
 
@@ -589,7 +590,7 @@ export const pythonOpenSearchRouter = router({
     try {
       const resp = await fetch(`${SVC_URLS.pythonOpenSearch}/stats`, { signal: AbortSignal.timeout(3000) });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const [row] = await db.execute(sql`
       SELECT
@@ -691,7 +692,7 @@ export const rustFluvioServiceRouter = router({
     try {
       const resp = await fetch(`${SVC_URLS.rustFluvioService}/topics`, { signal: AbortSignal.timeout(3000) });
       if (resp.ok) return (await resp.json() as any).topics;
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const rows = await db.execute(sql`
       SELECT topic, COUNT(*) AS event_count, MAX(created_at) AS last_event
@@ -716,7 +717,7 @@ export const rustFluvioServiceRouter = router({
         signal: AbortSignal.timeout(5000),
       });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     // Fallback: persist to outbox_events for at-least-once delivery
     const db = await getDb();
     await db.execute(sql`
@@ -740,7 +741,7 @@ export const rustFluvioServiceRouter = router({
         signal: AbortSignal.timeout(5000),
       });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const rows = await db.execute(sql`
       SELECT id, topic, payload, status, created_at
@@ -767,7 +768,7 @@ export const rustFluvioServiceRouter = router({
         signal: AbortSignal.timeout(5000),
       });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     return { success: true, mode: "registered", topic: input.name };
   }),
 
@@ -776,7 +777,7 @@ export const rustFluvioServiceRouter = router({
     try {
       const resp = await fetch(`${SVC_URLS.rustFluvioService}/topics/${encodeURIComponent(input.topic)}/offset`, { signal: AbortSignal.timeout(3000) });
       if (resp.ok) return await resp.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const [row] = await db.execute(sql`
       SELECT COUNT(*) AS offset_count FROM outbox_events WHERE topic = ${input.topic}
@@ -847,7 +848,7 @@ export const rustUpiAdapterRouter = router({
         signal: AbortSignal.timeout(5000),
       });
       if (res.ok) return await res.json();
-    } catch {}
+    } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     return { vpa: input.vpa, valid: false, name: null, bank: null, error: "UPI service temporarily unavailable" };
   }),
   initiatePayment: protectedProcedure.input(z.object({

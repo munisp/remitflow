@@ -803,13 +803,30 @@ export const regulatoryReportsRouter = router({
           generatedBy: ctx.user.id,
         })
         .returning();
-      // Simulate async generation — mark as ready after a delay
-      setTimeout(async () => {
-        const db2 = await getDb();
-        if (db2) {
-          await db2.update(regulatoryReports).set({ status: "ready" as any, downloadUrl: `/api/reports/${reportId}.pdf` }).where(eq(regulatoryReports.reportId, reportId));
+      // Async report generation — update status after completion
+      (async () => {
+        try {
+          const db2 = await getDb();
+          if (!db2) return;
+          // Generate report content from DB
+          const txnData = await db2.execute(
+            sql`SELECT COUNT(*) as count, SUM(amount) as volume, currency
+                FROM transactions
+                WHERE created_at >= ${input.periodStart} AND created_at <= ${input.periodEnd}
+                GROUP BY currency`
+          );
+          const hasData = (txnData as any).rows?.length > 0;
+          await db2.update(regulatoryReports).set({
+            status: (hasData ? "ready" : "empty") as any,
+            downloadUrl: hasData ? `/api/reports/${reportId}.pdf` : null,
+          }).where(eq(regulatoryReports.reportId, reportId));
+        } catch (err) {
+          const db2 = await getDb();
+          if (db2) {
+            await db2.update(regulatoryReports).set({ status: "error" as any }).where(eq(regulatoryReports.reportId, reportId));
+          }
         }
-      }, 3000);
+      })();
       return report;
     }),
 
@@ -856,22 +873,43 @@ export const fraudModelRunsRouter = router({
           status: "running",
         })
         .returning();
-      // Simulate completion
-      setTimeout(async () => {
-        const db2 = await getDb();
-        if (db2) {
-          await db2.update(fraudModelRuns).set({
-            status: "completed",
-            accuracy: 94,
-            f1Score: 91,
-            aucRoc: 97,
-            trainingRecords: 125000,
-            validationRecords: 25000,
-            durationSeconds: Math.round((Date.now() % 300) + 60),
-            completedAt: new Date(),
-          }).where(eq(fraudModelRuns.runId, runId));
+      // Trigger actual model training via ML service
+      (async () => {
+        const mlServiceUrl = process.env.FRAUD_ML_URL ?? "http://localhost:8084";
+        const startMs = Date.now();
+        try {
+          const res = await fetch(`${mlServiceUrl}/train`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ model_name: input.modelName, model_version: input.modelVersion }),
+            signal: AbortSignal.timeout(300000),
+          });
+          const result = res.ok ? await res.json() as Record<string, number> : null;
+          const db2 = await getDb();
+          if (db2) {
+            await db2.update(fraudModelRuns).set({
+              status: "completed",
+              accuracy: result?.accuracy ?? 0,
+              f1Score: result?.f1_score ?? 0,
+              aucRoc: result?.auc_roc ?? 0,
+              trainingRecords: result?.training_records ?? 0,
+              validationRecords: result?.validation_records ?? 0,
+              durationSeconds: Math.round((Date.now() - startMs) / 1000),
+              completedAt: new Date(),
+            }).where(eq(fraudModelRuns.runId, runId));
+          }
+        } catch (err: unknown) {
+          const db2 = await getDb();
+          if (db2) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            await db2.update(fraudModelRuns).set({
+              status: "failed",
+              durationSeconds: Math.round((Date.now() - startMs) / 1000),
+              completedAt: new Date(),
+            } as any).where(eq(fraudModelRuns.runId, runId));
+          }
         }
-      }, 5000);
+      })();
       return run;
     }),
 });

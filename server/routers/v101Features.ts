@@ -9,7 +9,9 @@ import { randomBytes, randomUUID } from "crypto";
  * Redis Cache Stats, Kafka Event Bus, Carbon Credits Market
  */
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure, publicProcedure, auditedProcedure } from "../_core/trpc";
+import { logger } from "../_core/logger";
 import { getDb } from "../db";
 import { sql, desc, eq, and, gte, lte, like, count } from "drizzle-orm";
 import {
@@ -556,19 +558,54 @@ const openBankingPSD2Router = router({
   getAccountData: protectedProcedure
     .input(z.object({ consentId: z.string() }))
     .query(async ({ input }) => {
-      // Simulate PSD2 account data (in production would call Open Banking API)
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+
+      // Get consent and validate it's active
+      const [consent] = await db.select().from(openBankingConsents).where(eq(openBankingConsents.consentId, input.consentId));
+      if (!consent) throw new TRPCError({ code: "NOT_FOUND", message: "Consent not found" });
+      if (consent.status !== "active") throw new TRPCError({ code: "FORBIDDEN", message: `Consent status: ${consent.status}` });
+
+      // Call Open Banking API if provider is configured
+      const obApiBase = process.env.OPEN_BANKING_API_URL;
+      if (obApiBase && consent.accessToken) {
+        try {
+          const [acctRes, txnRes] = await Promise.all([
+            fetch(`${obApiBase}/accounts`, {
+              headers: { Authorization: `Bearer ${consent.accessToken}`, "x-fapi-financial-id": process.env.OPEN_BANKING_FINANCIAL_ID ?? "" },
+              signal: AbortSignal.timeout(8000),
+            }),
+            fetch(`${obApiBase}/accounts/${input.consentId}/transactions`, {
+              headers: { Authorization: `Bearer ${consent.accessToken}`, "x-fapi-financial-id": process.env.OPEN_BANKING_FINANCIAL_ID ?? "" },
+              signal: AbortSignal.timeout(8000),
+            }),
+          ]);
+          if (acctRes.ok) {
+            const acctData = await acctRes.json() as { Data?: { Account?: unknown[] } };
+            const txnData = txnRes.ok ? await txnRes.json() as { Data?: { Transaction?: unknown[] } } : { Data: { Transaction: [] } };
+            return {
+              consentId: input.consentId,
+              accounts: acctData.Data?.Account ?? [],
+              transactions: txnData.Data?.Transaction ?? [],
+              fetchedAt: new Date(),
+              source: "open_banking_api",
+            };
+          }
+        } catch (err) {
+          logger.warn({ err }, "[OpenBanking] API call failed, falling back to cached data");
+        }
+      }
+
+      // Fallback: return cached account data from DB (linked accounts)
+      const linkedAccounts = await db.execute(
+        sql`SELECT * FROM open_banking_accounts WHERE consent_id = ${input.consentId} ORDER BY created_at DESC LIMIT 20`
+      );
       return {
         consentId: input.consentId,
-        accounts: [
-          { accountId: "ACC001", currency: "GBP", balance: 5420.50, accountType: "Personal", sortCode: "20-00-00", accountNumber: "12345678" },
-          { accountId: "ACC002", currency: "EUR", balance: 2100.00, accountType: "Savings", iban: "GB29NWBK60161331926819" },
-        ],
-        transactions: Array.from({ length: 10 }, (_, i) => ({
-          id: `TXN${i}`, amount: -((i * 137 % 500) + 10).toFixed(2), currency: "GBP",
-          description: ["Grocery Store","Coffee Shop","Online Transfer","Salary","Rent"][i % 5],
-          date: new Date(Date.now() - i * 86400000),
-        })),
+        accounts: (linkedAccounts as any).rows ?? [],
+        transactions: [],
         fetchedAt: new Date(),
+        source: "cached",
       };
     }),
 });

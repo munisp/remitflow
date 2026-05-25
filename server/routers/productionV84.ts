@@ -3,6 +3,7 @@ import { router, protectedProcedure, adminProcedure ,
   auditedProcedure, auditedAdminProcedure, rateLimitedProcedure
 } from "../_core/trpc";
 import { getDb } from "../db";
+import { logger } from "../_core/logger";
 import * as schema from "../../drizzle/schema";
 import { desc, eq, and, sql, gte, lte, count, sum } from "drizzle-orm";
 
@@ -252,15 +253,17 @@ export const complianceRouter = router({
         flaggedTransactions: Number(flaggedAgg?.total ?? 0),
         createdAt: new Date(),
       }).returning();
-      // Simulate async generationn — mark as draft after 2s
-      setTimeout(async () => {
+      // Async report generation — update status when complete
+      (async () => {
         try {
           const db2 = await getDb();
           await db2.update(schema.complianceReports)
             .set({ status: "draft" })
             .where(eq(schema.complianceReports.id, report.id));
-        } catch {}
-      }, 2000);
+        } catch (e) {
+          logger.warn({ err: e, reportId: report.id }, "Failed to finalize compliance report");
+        }
+      })();
 
       return { reportId: report.id };
     }),

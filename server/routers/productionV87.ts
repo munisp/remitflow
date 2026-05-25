@@ -772,28 +772,52 @@ export const mlInsightsRouter = router({
     }),
 
   detectDrift: protectedProcedure.query(async () => {
-    // Simulate drift detection metrics
     const db = await getDb();
-    const result = await db.execute(
-      `SELECT AVG(risk_score) AS avg_risk, STDDEV(risk_score) AS std_risk,
-              COUNT(*) AS tx_count
-       FROM transactions
-       WHERE created_at > NOW() - INTERVAL '7 days'`
-    );
-    const recent = result.rows[0] as any;
+    // Compute recent and baseline stats from real transaction data
+    const [recentResult, baselineResult] = await Promise.all([
+      db.execute(
+        sql`SELECT AVG("riskScore") AS avg_risk, STDDEV("riskScore") AS std_risk,
+                COUNT(*) AS tx_count
+         FROM transactions
+         WHERE created_at > NOW() - INTERVAL '7 days' AND "riskScore" IS NOT NULL`
+      ),
+      db.execute(
+        sql`SELECT AVG("riskScore") AS avg_risk, STDDEV("riskScore") AS std_risk,
+                COUNT(*) AS tx_count
+         FROM transactions
+         WHERE created_at BETWEEN NOW() - INTERVAL '90 days' AND NOW() - INTERVAL '7 days' AND "riskScore" IS NOT NULL`
+      ),
+    ]);
+    const recent = (recentResult as any).rows?.[0];
+    const baseline = (baselineResult as any).rows?.[0];
+
+    const recentAvg = parseFloat(recent?.avg_risk || "0");
+    const recentStd = parseFloat(recent?.std_risk || "0");
+    const baseAvg = parseFloat(baseline?.avg_risk || "0");
+    const baseStd = parseFloat(baseline?.std_risk || "0");
+    const recentCount = parseInt(recent?.tx_count || "0", 10);
+    const baseCount = parseInt(baseline?.tx_count || "0", 10);
+
+    // Approximate KS statistic from mean/std shift
+    const driftThreshold = 0.1;
+    const ksStatistic = baseStd > 0 ? Math.abs(recentAvg - baseAvg) / baseStd : 0;
+    const driftDetected = ksStatistic > driftThreshold;
 
     return {
-      driftDetected: false,
+      driftDetected,
       metrics: {
-        recentAvgRisk: parseFloat(recent?.avg_risk || "0.35"),
-        recentStdRisk: parseFloat(recent?.std_risk || "0.12"),
-        baselineAvgRisk: 0.32,
-        baselineStdRisk: 0.11,
-        ksStatistic: 0.043,
-        pValue: 0.234,
-        driftThreshold: 0.1,
+        recentAvgRisk: recentAvg,
+        recentStdRisk: recentStd,
+        recentTxCount: recentCount,
+        baselineAvgRisk: baseAvg,
+        baselineStdRisk: baseStd,
+        baselineTxCount: baseCount,
+        ksStatistic: Math.round(ksStatistic * 1000) / 1000,
+        driftThreshold,
       },
-      recommendation: "Model performance is stable. No retraining required.",
+      recommendation: driftDetected
+        ? `Drift detected (KS=${ksStatistic.toFixed(3)} > ${driftThreshold}). Model retraining recommended.`
+        : "Model performance is stable. No retraining required.",
       lastCheckedAt: new Date().toISOString(),
     };
   }),

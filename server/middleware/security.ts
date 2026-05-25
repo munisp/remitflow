@@ -5,6 +5,7 @@
  */
 import { Request, Response, NextFunction } from "express";
 import { logger } from '../_core/logger';
+import { redis } from './middlewareIntegration';
 
 // ─── Security Headers ─────────────────────────────────────────────────────────
 export function securityHeaders(req: Request, res: Response, next: NextFunction) {
@@ -54,8 +55,7 @@ export function securityHeaders(req: Request, res: Response, next: NextFunction)
   next();
 }
 
-// ─── Rate Limiting (in-memory, use Redis in production) ──────────────────────
-const rateLimitStore = new Map<string, { count: number; resetAt: number }>();
+// ─── Rate Limiting (Redis-backed) ────────────────────────────────────────────
 
 interface RateLimitOptions {
   windowMs: number;
@@ -66,33 +66,36 @@ interface RateLimitOptions {
 
 export function rateLimit(options: RateLimitOptions) {
   const { windowMs, max, keyFn } = options;
+  const windowSec = Math.ceil(windowMs / 1000);
 
   return (req: Request, res: Response, next: NextFunction) => {
-    const key = keyFn ? keyFn(req) : (req.ip || "unknown");
+    const key = `rl:${keyFn ? keyFn(req) : (req.ip || "unknown")}`;
     const now = Date.now();
 
-    let record = rateLimitStore.get(key);
-    if (!record || now > record.resetAt) {
-      record = { count: 0, resetAt: now + windowMs };
-      rateLimitStore.set(key, record);
-    }
+    redis.get(key).then(raw => {
+      let record = raw ? JSON.parse(raw) as { count: number; resetAt: number } : null;
+      if (!record || now > record.resetAt) {
+        record = { count: 0, resetAt: now + windowMs };
+      }
 
-    record.count++;
+      record.count++;
+      redis.set(key, JSON.stringify(record), windowSec);
 
-    res.setHeader("X-RateLimit-Limit", max);
-    res.setHeader("X-RateLimit-Remaining", Math.max(0, max - record.count));
-    res.setHeader("X-RateLimit-Reset", Math.ceil(record.resetAt / 1000));
+      res.setHeader("X-RateLimit-Limit", max);
+      res.setHeader("X-RateLimit-Remaining", Math.max(0, max - record.count));
+      res.setHeader("X-RateLimit-Reset", Math.ceil(record.resetAt / 1000));
 
-    if (record.count > max) {
-      res.status(429).json({
-        error: "Too Many Requests",
-        message: "Rate limit exceeded. Please try again later.",
-        retryAfter: Math.ceil((record.resetAt - now) / 1000),
-      });
-      return;
-    }
+      if (record.count > max) {
+        res.status(429).json({
+          error: "Too Many Requests",
+          message: "Rate limit exceeded. Please try again later.",
+          retryAfter: Math.ceil((record.resetAt - now) / 1000),
+        });
+        return;
+      }
 
-    next();
+      next();
+    }).catch(() => next());
   };
 }
 
@@ -256,18 +259,30 @@ interface SecurityEvent {
   timestamp: string;
 }
 
-const securityEventLog: SecurityEvent[] = [];
-
 export function logSecurityEvent(event: Omit<SecurityEvent, "timestamp">) {
   const entry: SecurityEvent = { ...event, timestamp: new Date().toISOString() };
-  securityEventLog.push(entry);
-  // Keep last 1000 events in memory
-  if (securityEventLog.length > 1000) securityEventLog.shift();
   logger.warn(`[Security Event] ${entry.type} from ${entry.ip} at ${entry.path}`);
+  // Persist to Redis list for distributed access
+  redis.set(`secEvt:${Date.now()}`, JSON.stringify(entry), 86400).catch(() => {});
 }
 
-export function getSecurityEvents(limit = 100): SecurityEvent[] {
-  return securityEventLog.slice(-limit);
+export async function getSecurityEvents(limit = 100): Promise<SecurityEvent[]> {
+  // Retrieve recent security events from DB audit log
+  try {
+    const { getDb } = await import("../db.js");
+    const db = await getDb();
+    if (db) {
+      const { sql } = await import("drizzle-orm");
+      const rows = await db.execute(
+        sql`SELECT action AS type, metadata->>'ip' AS ip, metadata->>'path' AS path,
+            metadata->>'details' AS details, created_at AS timestamp
+            FROM "auditLogs" WHERE action LIKE 'security.%'
+            ORDER BY created_at DESC LIMIT ${limit}`
+      );
+      return ((rows as any).rows ?? []) as SecurityEvent[];
+    }
+  } catch {}
+  return [];
 }
 
 // ─── Vulnerability Score Calculator ──────────────────────────────────────────

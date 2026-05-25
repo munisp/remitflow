@@ -59,13 +59,27 @@ export const billsRouter = router({
       accountNumber: z.string().min(5).max(30),
     }))
     .mutation(async ({ input }) => {
-      // Simulate account validation
-      await new Promise(r => setTimeout(r, 300));
-      return {
-        valid: true,
-        accountName: `Customer ${input.accountNumber.slice(-4)}`,
-        outstandingBalance: 0, // fetched from wallet balance
-      };
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // Look up biller in DB and validate the account
+      const billerRows = await db.execute(
+        sql`SELECT id, name, category FROM billers WHERE id = ${input.billerId} OR code = ${input.billerId} LIMIT 1`
+      );
+      const biller = (billerRows as any).rows?.[0];
+      if (!biller) throw new TRPCError({ code: "NOT_FOUND", message: `Biller ${input.billerId} not found` });
+
+      // Validate account format per biller category (meter numbers, account refs, etc.)
+      const minLen = input.accountNumber.length >= 8;
+      if (!minLen) return { valid: false, accountName: null, outstandingBalance: 0, error: "Account number too short for this biller" };
+
+      // Check if user has a saved biller account
+      const savedRows = await db.execute(
+        sql`SELECT account_name FROM biller_accounts WHERE biller_id = ${input.billerId} AND account_number = ${input.accountNumber} LIMIT 1`
+      );
+      const saved = (savedRows as any).rows?.[0];
+      const accountName = saved?.account_name ?? `Account ${input.accountNumber.slice(-4)}`;
+
+      return { valid: true, accountName, outstandingBalance: 0 };
     }),
 
   pay: protectedProcedure

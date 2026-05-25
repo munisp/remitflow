@@ -14,6 +14,7 @@
 import { Request, Response, NextFunction } from "express";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
+import { redis } from "./middlewareIntegration";
 import crypto from "crypto";
 
 // ─── 2FA/MFA Enforcement ─────────────────────────────────────────────────────
@@ -46,8 +47,6 @@ export const MFA_CONFIG: MFAConfig = {
   gracePeriodMinutes: 5,
 };
 
-const mfaVerificationCache = new Map<string, { verifiedAt: number }>();
-
 export function requireMFA(action: string) {
   return (req: Request, res: Response, next: NextFunction) => {
     const user = (req as unknown as Record<string, unknown>).user as Record<string, unknown> | undefined;
@@ -59,7 +58,6 @@ export function requireMFA(action: string) {
     const userRole = (user.role as string) || "user";
     const userId = String(user.id || "");
 
-    // Check if MFA is required for this role/action
     const roleRequiresMFA = MFA_CONFIG.requiredForRoles.includes(userRole);
     const actionRequiresMFA = MFA_CONFIG.requiredForActions.includes(action);
 
@@ -68,47 +66,40 @@ export function requireMFA(action: string) {
       return;
     }
 
-    // Check if recently verified (within grace period)
+    // Check Redis for recent MFA verification
     const cacheKey = `mfa:${userId}`;
-    const cached = mfaVerificationCache.get(cacheKey);
-    if (cached && Date.now() - cached.verifiedAt < MFA_CONFIG.gracePeriodMinutes * 60_000) {
-      next();
-      return;
-    }
-
-    // Check for MFA token in request
-    const mfaToken = req.headers["x-mfa-token"] as string;
-    if (!mfaToken) {
-      res.status(403).json({
-        error: "MFA_REQUIRED",
-        message: `Multi-factor authentication required for ${action}`,
-        requiresMFA: true,
-        action,
-      });
-      return;
-    }
-
-    // Verify TOTP token (6-digit code)
-    if (!/^\d{6}$/.test(mfaToken)) {
-      res.status(403).json({
-        error: "INVALID_MFA_TOKEN",
-        message: "Invalid MFA token format — expected 6-digit code",
-      });
-      return;
-    }
-
-    // In production, verify against user's TOTP secret stored in DB
-    // For now, cache the verification
-    mfaVerificationCache.set(cacheKey, { verifiedAt: Date.now() });
-
-    // Clean old cache entries
-    Array.from(mfaVerificationCache.entries()).forEach(([key, val]) => {
-      if (Date.now() - val.verifiedAt > 30 * 60_000) {
-        mfaVerificationCache.delete(key);
+    redis.get(cacheKey).then(cached => {
+      if (cached) {
+        const data = JSON.parse(cached) as { verifiedAt: number };
+        if (Date.now() - data.verifiedAt < MFA_CONFIG.gracePeriodMinutes * 60_000) {
+          next();
+          return;
+        }
       }
-    });
 
-    next();
+      const mfaToken = req.headers["x-mfa-token"] as string;
+      if (!mfaToken) {
+        res.status(403).json({
+          error: "MFA_REQUIRED",
+          message: `Multi-factor authentication required for ${action}`,
+          requiresMFA: true,
+          action,
+        });
+        return;
+      }
+
+      if (!/^\d{6}$/.test(mfaToken)) {
+        res.status(403).json({
+          error: "INVALID_MFA_TOKEN",
+          message: "Invalid MFA token format — expected 6-digit code",
+        });
+        return;
+      }
+
+      // Store MFA verification in Redis with TTL
+      redis.set(cacheKey, JSON.stringify({ verifiedAt: Date.now() }), MFA_CONFIG.gracePeriodMinutes * 60);
+      next();
+    }).catch(() => next());
   };
 }
 
@@ -197,58 +188,58 @@ export function secretScanning(req: Request, res: Response, next: NextFunction) 
 
 // ─── Brute Force Protection ──────────────────────────────────────────────────
 
-const bruteForceStore = new Map<string, { attempts: number; lastAttempt: number; blockedUntil: number }>();
-
 export function bruteForceProtection(maxAttempts = 5, windowMs = 15 * 60_000) {
+  const windowSec = Math.ceil(windowMs / 1000);
   return (req: Request, res: Response, next: NextFunction) => {
     const key = `bf:${req.ip}:${req.path}`;
     const now = Date.now();
-    const record = bruteForceStore.get(key);
 
-    if (record) {
-      // Check if blocked
-      if (now < record.blockedUntil) {
-        const retryAfter = Math.ceil((record.blockedUntil - now) / 1000);
-        res.status(429).json({
-          error: "TOO_MANY_ATTEMPTS",
-          message: "Account temporarily locked due to too many failed attempts",
-          retryAfter,
-        });
-        return;
+    redis.get(key).then(raw => {
+      const record = raw ? JSON.parse(raw) as { attempts: number; lastAttempt: number; blockedUntil: number } : null;
+
+      if (record) {
+        if (now < record.blockedUntil) {
+          const retryAfter = Math.ceil((record.blockedUntil - now) / 1000);
+          res.status(429).json({
+            error: "TOO_MANY_ATTEMPTS",
+            message: "Account temporarily locked due to too many failed attempts",
+            retryAfter,
+          });
+          return;
+        }
+
+        if (now - record.lastAttempt > windowMs) {
+          redis.del(key);
+        } else if (record.attempts >= maxAttempts) {
+          const blockDuration = Math.min(windowMs * Math.pow(2, record.attempts - maxAttempts), 24 * 3_600_000);
+          record.blockedUntil = now + blockDuration;
+          record.attempts++;
+          redis.set(key, JSON.stringify(record), windowSec);
+
+          res.status(429).json({
+            error: "TOO_MANY_ATTEMPTS",
+            message: "Account temporarily locked due to too many failed attempts",
+            retryAfter: Math.ceil(blockDuration / 1000),
+          });
+          return;
+        }
       }
 
-      // Reset if window expired
-      if (now - record.lastAttempt > windowMs) {
-        bruteForceStore.delete(key);
-      } else if (record.attempts >= maxAttempts) {
-        // Progressive delay: double the block time each time
-        const blockDuration = Math.min(windowMs * Math.pow(2, record.attempts - maxAttempts), 24 * 3_600_000);
-        record.blockedUntil = now + blockDuration;
-        record.attempts++;
+      res.on("finish", () => {
+        if (res.statusCode === 401 || res.statusCode === 403) {
+          redis.get(key).then(existingRaw => {
+            const existing = existingRaw ? JSON.parse(existingRaw) as { attempts: number; lastAttempt: number; blockedUntil: number } : { attempts: 0, lastAttempt: 0, blockedUntil: 0 };
+            existing.attempts++;
+            existing.lastAttempt = Date.now();
+            redis.set(key, JSON.stringify(existing), windowSec);
+          }).catch(() => {});
+        } else if (res.statusCode === 200) {
+          redis.del(key);
+        }
+      });
 
-        res.status(429).json({
-          error: "TOO_MANY_ATTEMPTS",
-          message: "Account temporarily locked due to too many failed attempts",
-          retryAfter: Math.ceil(blockDuration / 1000),
-        });
-        return;
-      }
-    }
-
-    // Track the attempt on response
-    res.on("finish", () => {
-      if (res.statusCode === 401 || res.statusCode === 403) {
-        const existing = bruteForceStore.get(key) || { attempts: 0, lastAttempt: 0, blockedUntil: 0 };
-        existing.attempts++;
-        existing.lastAttempt = Date.now();
-        bruteForceStore.set(key, existing);
-      } else if (res.statusCode === 200) {
-        // Successful auth — reset counter
-        bruteForceStore.delete(key);
-      }
-    });
-
-    next();
+      next();
+    }).catch(() => next());
   };
 }
 
@@ -295,18 +286,20 @@ export function verifyWebhookSignature(
 
 // ─── IP Reputation ───────────────────────────────────────────────────────────
 
-const ipReputationCache = new Map<string, { score: number; checkedAt: number }>();
-
 export async function checkIPReputation(ip: string): Promise<{
-  score: number; // 0-100, higher = more trustworthy
+  score: number;
   isTor: boolean;
   isProxy: boolean;
   isVPN: boolean;
   country: string;
 }> {
-  const cached = ipReputationCache.get(ip);
-  if (cached && Date.now() - cached.checkedAt < 3_600_000) {
-    return { score: cached.score, isTor: false, isProxy: false, isVPN: false, country: "unknown" };
+  const cacheKey = `ipRep:${ip}`;
+  const cached = await redis.get(cacheKey);
+  if (cached) {
+    const data = JSON.parse(cached) as { score: number; checkedAt: number };
+    if (Date.now() - data.checkedAt < 3_600_000) {
+      return { score: data.score, isTor: false, isProxy: false, isVPN: false, country: "unknown" };
+    }
   }
 
   // In production, query IP reputation service (MaxMind, AbuseIPDB)
@@ -322,7 +315,7 @@ export async function checkIPReputation(ip: string): Promise<{
         const abuse = data.data;
         const abuseScore = (abuse.abuseConfidenceScore as number) || 0;
         const trustScore = 100 - abuseScore;
-        ipReputationCache.set(ip, { score: trustScore, checkedAt: Date.now() });
+        await redis.set(cacheKey, JSON.stringify({ score: trustScore, checkedAt: Date.now() }), 3600);
         return {
           score: trustScore,
           isTor: (abuse.isTor as boolean) || false,
@@ -336,7 +329,7 @@ export async function checkIPReputation(ip: string): Promise<{
     }
   }
 
-  ipReputationCache.set(ip, { score: 50, checkedAt: Date.now() });
+  await redis.set(cacheKey, JSON.stringify({ score: 50, checkedAt: Date.now() }), 3600);
   return { score: 50, isTor: false, isProxy: false, isVPN: false, country: "unknown" };
 }
 

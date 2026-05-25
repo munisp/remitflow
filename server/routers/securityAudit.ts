@@ -53,8 +53,8 @@ export const securityAuditRouter = router({
    */
   getSecurityEvents: adminProcedure
     .input(z.object({ limit: z.number().min(1).max(500).default(100) }))
-    .query(({ input }) => {
-      const events = getSecurityEvents(input.limit);
+    .query(async ({ input }) => {
+      const events = await getSecurityEvents(input.limit);
       return {
         events,
         total: events.length,

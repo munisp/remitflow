@@ -122,7 +122,7 @@ export const abTestingRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { success: true };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.insert(abEvents).values({
         experimentId: input.experimentId,
         assignmentId: input.assignmentId,

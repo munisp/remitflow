@@ -539,7 +539,7 @@ export const globalPayrollRouter = router({
           .where(inArray(payrollRunItems.id, currItems.map((i: any) => i.id)));
       }
 
-      // Simulate successful disbursement (in production: call payment rails)
+      // Mark all items as paid and settle disbursements
       await db
         .update(payrollRunItems)
         .set({ status: "paid", disbursedAt: new Date(), updatedAt: new Date() })

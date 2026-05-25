@@ -452,27 +452,71 @@ const beneficiaryVerificationRouter = router({
   verifyBankAccount: auditedProcedure
     .input(z.object({ accountNumber: z.string(), bankCode: z.string(), country: z.string() }))
     .mutation(async ({ input }) => {
-      // Simulate bank account verification
-      const isValid = input.accountNumber.length >= 10;
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      if (input.accountNumber.length < 10) {
+        return { verified: false, accountNumber: input.accountNumber, bankCode: input.bankCode,
+          accountName: null, bankName: null, accountType: null, verifiedAt: null,
+          error: "Account number must be at least 10 digits" };
+      }
+
+      // Check beneficiaries DB for known accounts
+      const existing = await db.execute(
+        sql`SELECT name, "bankName", "accountType" FROM beneficiaries
+            WHERE "accountNumber" = ${input.accountNumber} AND "bankCode" = ${input.bankCode} LIMIT 1`
+      );
+      const match = (existing as any).rows?.[0];
+
+      // Call bank verification microservice if available
+      const bvnUrl = process.env.BVN_NIN_VERIFICATION_URL ?? "http://localhost:8221";
+      try {
+        const resp = await fetch(`${bvnUrl}/verify/bank-account`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input), signal: AbortSignal.timeout(5000),
+        });
+        if (resp.ok) {
+          const result = await resp.json() as Record<string, unknown>;
+          return { verified: true, accountNumber: input.accountNumber, bankCode: input.bankCode,
+            accountName: result.accountName ?? match?.name ?? null,
+            bankName: result.bankName ?? match?.bankName ?? null,
+            accountType: result.accountType ?? match?.accountType ?? "current",
+            verifiedAt: new Date().toISOString(), error: null };
+        }
+      } catch { /* Service unavailable — use DB data */ }
+
       return {
-        verified: isValid, accountNumber: input.accountNumber, bankCode: input.bankCode,
-        accountName: isValid ? "JOHN ADEBAYO SMITH" : null,
-        bankName: isValid ? "Guaranty Trust Bank" : null,
-        accountType: isValid ? "current" : null,
-        verifiedAt: isValid ? new Date().toISOString() : null,
-        error: isValid ? null : "Account number not found",
+        verified: !!match, accountNumber: input.accountNumber, bankCode: input.bankCode,
+        accountName: match?.name ?? null, bankName: match?.bankName ?? null,
+        accountType: match?.accountType ?? null,
+        verifiedAt: match ? new Date().toISOString() : null,
+        error: match ? null : "Account not found — bank verification service unavailable",
       };
     }),
 
   verifyMobileMoney: auditedProcedure
     .input(z.object({ phoneNumber: z.string(), provider: z.string(), country: z.string() }))
     .mutation(async ({ input }) => {
-      const isValid = input.phoneNumber.length >= 10;
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      if (input.phoneNumber.length < 10) {
+        return { verified: false, phoneNumber: input.phoneNumber, provider: input.provider,
+          accountName: null, verifiedAt: null, error: "Phone number must be at least 10 digits" };
+      }
+
+      // Check beneficiaries DB for known mobile money accounts
+      const existing = await db.execute(
+        sql`SELECT name FROM beneficiaries
+            WHERE phone = ${input.phoneNumber} AND "bankCode" = ${input.provider} LIMIT 1`
+      );
+      const match = (existing as any).rows?.[0];
+
       return {
-        verified: isValid, phoneNumber: input.phoneNumber, provider: input.provider,
-        accountName: isValid ? "AMINA IBRAHIM" : null,
-        verifiedAt: isValid ? new Date().toISOString() : null,
-        error: isValid ? null : "Mobile money account not found",
+        verified: !!match, phoneNumber: input.phoneNumber, provider: input.provider,
+        accountName: match?.name ?? null,
+        verifiedAt: match ? new Date().toISOString() : null,
+        error: match ? null : "Mobile money account not found",
       };
     }),
 

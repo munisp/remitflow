@@ -20,7 +20,8 @@ import {
   africbdcTransfers,
   papssTransfers,
 } from "../../drizzle/schema";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { logger } from "../_core/logger";
 
 const MICROSERVICE_URLS = {
   bricspay: process.env.BRICSPAY_SERVICE_URL || "http://localhost:8102",
@@ -44,11 +45,21 @@ async function callRailService(url: string, path: string, body: unknown) {
     }
     return await res.json();
   } catch (err: unknown) {
-    // Microservice temporarily unavailable — queue for retry
-    // Returns mock_submitted with mock: true flag so callers can detect sandbox/offline mode
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes("ECONNREFUSED") || msg.includes("fetch failed") || msg.includes("timeout")) {
-      return { status: "mock_submitted", mock: true, message: "Payment queued — microservice temporarily unavailable, will retry automatically", queued: true };
+      // Persist to DB retry queue for automatic retry by background worker
+      try {
+        const db = await getDb();
+        if (db) {
+          await db.execute(
+            sql`INSERT INTO outbox_events (event_type, payload, status, created_at)
+                VALUES ('rail_retry', ${JSON.stringify({ url, path, body })}::jsonb, 'pending', NOW())
+                ON CONFLICT DO NOTHING`
+          );
+        }
+      } catch { /* DB unavailable — propagate original error */ }
+      logger.warn({ url, path }, "Rail service unavailable — queued for retry");
+      return { status: "queued", queued: true, message: "Payment queued for retry — microservice temporarily unavailable" };
     }
     throw err;
   }
@@ -164,7 +175,7 @@ export const newRailsRouter = router({
           { ...input, userId: String(ctx.user.id) }
         );
 
-        if (!serviceResp.queued && !serviceResp.mock) {
+        if (!serviceResp.queued) {
           await db.update(bricspayTransfers)
             .set({ status: "submitted", updatedAt: new Date() })
             .where(eq(bricspayTransfers.transferId, input.transferId));
