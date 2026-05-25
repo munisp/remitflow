@@ -217,6 +217,7 @@ const LakehousePage = lazy(() => import("./pages/LakehousePage"));
 const CocoIndexPage = lazy(() => import("./pages/CocoIndexPage"));
 const SimilarTransactionsPage = lazy(() => import("./pages/SimilarTransactionsPage"));
 const AIMetricsDashboard = lazy(() => import("./pages/AIMetricsDashboard"));
+const GPUTrainingEngine = lazy(() => import("./pages/GPUTrainingEngine"));
 // v89 — Production Hardening & Data Pipelines
 const WebhookRetryPage = lazy(() => import("./pages/WebhookRetryPage"));
 const TenantConfigPage = lazy(() => import("./pages/TenantConfigPage"));
@@ -550,6 +551,7 @@ function Router() {
         {/* v88 — AI Metrics & Similarity */}
         <Route path="/similar-transactions" component={SimilarTransactionsPage} />
         <Route path="/ai-metrics" component={AIMetricsDashboard} />
+        <Route path="/gpu-training" component={GPUTrainingEngine} />
         {/* v89 — Production Hardening & Data Pipelines */}
         <Route path="/webhook-retry" component={WebhookRetryPage} />
         <Route path="/tenant-config" component={TenantConfigPage} />
