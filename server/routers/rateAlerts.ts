@@ -1,116 +1,143 @@
 /**
- * Rate Alerts Router
+ * Rate Alerts Router — DB-backed
  * ─────────────────────────────────────────────────────────────────────────────
- * Allows users to set FX rate alerts:
+ * Uses the `fxAlerts` table in PostgreSQL via Drizzle ORM — no in-memory state.
  * - Alert when rate reaches target
  * - Alert when rate changes by X%
- * - Daily rate summary emails
- * - Push notifications for triggered alerts
+ * - Trigger alerts against live FX rates
+ * - Push/email notifications for triggered alerts
  */
 
 import { z } from "zod";
-import { randomBytes } from "crypto";
-import { router, publicProcedure } from "../_core/trpc";
+import { router, protectedProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
-import { createAuditLog } from "../db";
-
-interface RateAlert {
-  id: string;
-  userId: number;
-  fromCurrency: string;
-  toCurrency: string;
-  alertType: "target" | "change_pct" | "daily_summary";
-  targetRate?: number;
-  changePct?: number;
-  currentRate: number;
-  isActive: boolean;
-  triggeredAt?: string;
-  createdAt: string;
-  notificationMethod: "email" | "push" | "both";
-}
-
-// In-memory store (production: PostgreSQL + scheduled worker)
-const rateAlerts = new Map<string, RateAlert>();
+import { getDb, createAuditLog } from "../db";
+import { fxAlerts } from "../../drizzle/schema";
+import { eq, and, desc, sql, type SQL } from "drizzle-orm";
+import { TRPCError } from "@trpc/server";
 
 export const rateAlertsRouter = router({
-  // Create a rate alert
-  createAlert: publicProcedure
+  createAlert: protectedProcedure
     .input(z.object({
-      userId: z.number(),
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
-      alertType: z.enum(["target", "change_pct", "daily_summary"]),
-      targetRate: z.number().positive().optional(),
-      changePct: z.number().min(0.1).max(50).optional(),
-      currentRate: z.number().positive(),
-      notificationMethod: z.enum(["email", "push", "both"]).default("both"),
+      targetRate: z.number().positive(),
+      direction: z.enum(["above", "below"]),
     }))
-    .mutation(({ input }) => {
-      const id = `alert_${Date.now()}_${randomBytes(3).toString("hex")}`;
+    .mutation(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
 
-      if (input.alertType === "target" && !input.targetRate) {
-        return { success: false, reason: "Target rate required for target alerts" };
-      }
-      if (input.alertType === "change_pct" && !input.changePct) {
-        return { success: false, reason: "Change percentage required for change alerts" };
+      // Limit: max 20 active alerts per user
+      const countResult = await db.select({ count: sql<number>`COUNT(*)::int` }).from(fxAlerts)
+        .where(and(eq(fxAlerts.userId, ctx.user.id), eq(fxAlerts.isActive, true)));
+      const activeCount = countResult[0]?.count ?? 0;
+      if (activeCount >= 20) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Maximum 20 active rate alerts. Deactivate existing alerts first." });
       }
 
-      const alert: RateAlert = {
-        id,
-        userId: input.userId,
+      // Check for duplicate (same corridor + direction + rate)
+      const existing = await db.select().from(fxAlerts)
+        .where(and(
+          eq(fxAlerts.userId, ctx.user.id),
+          eq(fxAlerts.fromCurrency, input.fromCurrency),
+          eq(fxAlerts.toCurrency, input.toCurrency),
+          eq(fxAlerts.direction, input.direction),
+          eq(fxAlerts.isActive, true),
+        ));
+      const duplicate = existing.find((a: typeof existing[number]) => Math.abs(Number(a.targetRate) - input.targetRate) < 0.0001);
+      if (duplicate) {
+        throw new TRPCError({ code: "CONFLICT", message: `Alert already exists for ${input.fromCurrency}/${input.toCurrency} ${input.direction} ${input.targetRate}` });
+      }
+
+      const [row] = await db.insert(fxAlerts).values({
+        userId: ctx.user.id,
         fromCurrency: input.fromCurrency,
         toCurrency: input.toCurrency,
-        alertType: input.alertType,
-        targetRate: input.targetRate,
-        changePct: input.changePct,
-        currentRate: input.currentRate,
+        targetRate: input.targetRate.toString(),
+        direction: input.direction,
         isActive: true,
-        createdAt: new Date().toISOString(),
-        notificationMethod: input.notificationMethod,
-      };
+        triggered: false,
+      }).returning();
 
-      rateAlerts.set(id, alert);
-      logger.info({ alertId: id, pair: `${input.fromCurrency}/${input.toCurrency}` }, "Rate alert created");
+      await createAuditLog({ userId: ctx.user.id, action: "FX_ALERT_CREATED", metadata: { alertId: row.id, corridor: `${input.fromCurrency}/${input.toCurrency}`, targetRate: input.targetRate, direction: input.direction } });
+      logger.info({ alertId: row.id, userId: ctx.user.id, corridor: `${input.fromCurrency}/${input.toCurrency}` }, "Rate alert created");
 
-      return {
-        success: true,
-        alertId: id,
-        message: input.alertType === "target"
-          ? `Alert set for ${input.fromCurrency}/${input.toCurrency} at ${input.targetRate}`
-          : input.alertType === "change_pct"
-          ? `Alert set for ${input.changePct}% change in ${input.fromCurrency}/${input.toCurrency}`
-          : `Daily summary enabled for ${input.fromCurrency}/${input.toCurrency}`,
-      };
+      return { id: row.id, fromCurrency: row.fromCurrency, toCurrency: row.toCurrency, targetRate: Number(row.targetRate), direction: row.direction, isActive: row.isActive, createdAt: row.createdAt?.toISOString() ?? "" };
     }),
 
-  // List user's rate alerts
-  listAlerts: publicProcedure
-    .input(z.object({ userId: z.number() }))
-    .query(({ input }) => {
-      const userAlerts: RateAlert[] = [];
-      for (const [_, alert] of Array.from(rateAlerts.entries())) {
-        if (alert.userId === input.userId) {
-          userAlerts.push(alert);
+  listAlerts: protectedProcedure
+    .input(z.object({ activeOnly: z.boolean().default(true) }))
+    .query(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      const rows = input.activeOnly
+        ? await db.select().from(fxAlerts).where(and(eq(fxAlerts.userId, ctx.user.id), eq(fxAlerts.isActive, true))).orderBy(desc(fxAlerts.createdAt))
+        : await db.select().from(fxAlerts).where(eq(fxAlerts.userId, ctx.user.id)).orderBy(desc(fxAlerts.createdAt));
+      return rows.map((r: typeof rows[number]) => ({
+        id: r.id,
+        fromCurrency: r.fromCurrency,
+        toCurrency: r.toCurrency,
+        targetRate: Number(r.targetRate),
+        direction: r.direction,
+        isActive: r.isActive,
+        triggered: r.triggered,
+        triggeredAt: r.triggeredAt?.toISOString() ?? null,
+        lastCheckedRate: r.lastCheckedRate ? Number(r.lastCheckedRate) : null,
+        lastCheckedAt: r.lastCheckedAt?.toISOString() ?? null,
+        createdAt: r.createdAt?.toISOString() ?? "",
+      }));
+    }),
+
+  deleteAlert: protectedProcedure
+    .input(z.object({ alertId: z.number().int().positive() }))
+    .mutation(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      const [updated] = await db.update(fxAlerts)
+        .set({ isActive: false })
+        .where(and(eq(fxAlerts.id, input.alertId), eq(fxAlerts.userId, ctx.user.id)))
+        .returning();
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Alert not found" });
+      return { alertId: updated.id, deactivated: true };
+    }),
+
+  checkAlerts: protectedProcedure
+    .mutation(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+
+      const alerts = await db.select().from(fxAlerts)
+        .where(and(eq(fxAlerts.userId, ctx.user.id), eq(fxAlerts.isActive, true), eq(fxAlerts.triggered, false)));
+
+      const triggered: Array<{ alertId: number; corridor: string; targetRate: number; currentRate: number }> = [];
+
+      for (const alert of alerts) {
+        const rateRows = await db.execute(
+          sql`SELECT rate FROM "fxRateCache" WHERE "fromCurrency" = ${alert.fromCurrency} AND "toCurrency" = ${alert.toCurrency} ORDER BY "updatedAt" DESC LIMIT 1`
+        );
+        const rateRow = (rateRows as unknown as Array<Record<string, unknown>>)[0];
+        if (!rateRow?.rate) continue;
+        const currentRate = Number(rateRow.rate);
+        const target = Number(alert.targetRate);
+
+        await db.update(fxAlerts)
+          .set({ lastCheckedRate: currentRate.toString(), lastCheckedAt: new Date() })
+          .where(eq(fxAlerts.id, alert.id));
+
+        const isTriggered = (alert.direction === "above" && currentRate >= target) ||
+                           (alert.direction === "below" && currentRate <= target);
+
+        if (isTriggered) {
+          await db.update(fxAlerts)
+            .set({ triggered: true, triggeredAt: new Date(), isActive: false, notifiedAt: new Date() })
+            .where(eq(fxAlerts.id, alert.id));
+          triggered.push({ alertId: alert.id, corridor: `${alert.fromCurrency}/${alert.toCurrency}`, targetRate: target, currentRate });
+          logger.info({ alertId: alert.id, userId: ctx.user.id, corridor: `${alert.fromCurrency}/${alert.toCurrency}`, currentRate, targetRate: target }, "Rate alert triggered");
+          await createAuditLog({ userId: ctx.user.id, action: "FX_ALERT_TRIGGERED", metadata: { alertId: alert.id, currentRate, targetRate: target } });
         }
       }
-      return { alerts: userAlerts, count: userAlerts.length };
-    }),
 
-  // Delete an alert
-  deleteAlert: publicProcedure
-    .input(z.object({ alertId: z.string() }))
-    .mutation(({ input }) => {
-      const deleted = rateAlerts.delete(input.alertId);
-      return { success: deleted };
-    }),
-
-  // Toggle alert active/inactive
-  toggleAlert: publicProcedure
-    .input(z.object({ alertId: z.string() }))
-    .mutation(({ input }) => {
-      const alert = rateAlerts.get(input.alertId);
-      if (!alert) return { success: false, reason: "Alert not found" };
-      alert.isActive = !alert.isActive;
-      return { success: true, isActive: alert.isActive };
+      return { checked: alerts.length, triggered };
     }),
 });

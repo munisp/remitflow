@@ -115,7 +115,7 @@ export const sandboxScenariosRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(sandboxScenarios)
         .where(and(eq(sandboxScenarios.id, input.id), eq(sandboxScenarios.userId, ctx.user.id)));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   run: auditedProcedure
@@ -656,7 +656,7 @@ export const complianceAlertsRouter = router({
         content: `Alert unsnoozed and re-opened by ${ctx.user.name ?? ctx.user.email}`,
         isInternal: true,
       });
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   updateMlroNotes: protectedProcedure
@@ -667,7 +667,7 @@ export const complianceAlertsRouter = router({
       await db.update(complianceAlerts)
         .set({ mlroNotes: input.notes })
         .where(eq(complianceAlerts.id, input.alertId));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   stats: protectedProcedure.query(async ({ ctx }) => {
@@ -732,7 +732,7 @@ export const securityEventsRouter = router({
       if (input.severity === "critical") {
         broadcastAdminEvent({ type: "fraud_alert", payload: { userId: ctx.user.id, eventType: input.eventType } });
       }
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   stats: protectedProcedure.query(async ({ ctx }) => {
@@ -829,7 +829,7 @@ export const mfaRouter = router({
         severity: "warning",
         details: JSON.stringify({ method: "totp" }),
       });
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   generateBackupCodes: auditedProcedure.mutation(async ({ ctx }) => {

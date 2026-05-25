@@ -151,7 +151,7 @@ export const revenueShareRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(revenueShareAgreements.id, id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   approveAgreement: adminProcedure
@@ -162,7 +162,7 @@ export const revenueShareRouter = router({
       await db.update(revenueShareAgreements)
         .set({ status: "active", approvedBy: ctx.user.id, approvedAt: new Date(), updatedAt: new Date() })
         .where(eq(revenueShareAgreements.id, input.id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   terminateAgreement: adminProcedure
@@ -173,7 +173,7 @@ export const revenueShareRouter = router({
       await db.update(revenueShareAgreements)
         .set({ status: "terminated", effectiveTo: new Date(), notes: input.reason, updatedAt: new Date() })
         .where(eq(revenueShareAgreements.id, input.id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Tiers ────────────────────────────────────────────────────────────────────
@@ -208,7 +208,7 @@ export const revenueShareRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(revenueShareTiers).where(eq(revenueShareTiers.id, input.id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Ledger ────────────────────────────────────────────────────────────────────
@@ -333,7 +333,7 @@ export const revenueShareRouter = router({
       await db.update(revenueShareReports)
         .set({ status: "paid", paidAt: new Date(), ...(input.payoutId ? { payoutId: input.payoutId } : {}) })
         .where(eq(revenueShareReports.id, input.reportId));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Analytics ─────────────────────────────────────────────────────────────────

@@ -161,7 +161,7 @@ export const partnerApplicationsRouter = router({
         SET ${sql.raw(col)} = ${input.fileUrl}, updated_at = NOW()
         WHERE id = ${input.applicationId} AND submitted_by_user_id = ${ctx.user.id}
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Protected: Sign SLA ──────────────────────────────────────────────────
@@ -199,7 +199,7 @@ export const partnerApplicationsRouter = router({
         WHERE id = ${input.applicationId} AND submitted_by_user_id = ${ctx.user.id}
           AND status = 'additional_info_required'
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Admin: List all applications with filters ────────────────────────────
@@ -274,7 +274,7 @@ export const partnerApplicationsRouter = router({
         SET status = 'under_review', reviewed_by = ${ctx.user.id}, updated_at = NOW()
         WHERE id = ${input.id} AND status IN ('submitted', 'additional_info_required')
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Admin: Approve application ───────────────────────────────────────────
@@ -349,7 +349,7 @@ export const partnerApplicationsRouter = router({
         INSERT INTO partner_application_comments (application_id, author_id, comment, is_internal, created_at)
         VALUES (${input.id}, ${ctx.user.id}, ${`Application rejected: ${input.rejectionReason}`}, false, NOW())
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Admin: Request additional info ──────────────────────────────────────
@@ -372,7 +372,7 @@ export const partnerApplicationsRouter = router({
         INSERT INTO partner_application_comments (application_id, author_id, comment, is_internal, created_at)
         VALUES (${input.id}, ${ctx.user.id}, ${`Additional info requested: ${input.request}`}, false, NOW())
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Admin: Add comment ───────────────────────────────────────────────────
@@ -389,7 +389,7 @@ export const partnerApplicationsRouter = router({
         INSERT INTO partner_application_comments (application_id, author_id, comment, is_internal, created_at)
         VALUES (${input.applicationId}, ${ctx.user.id}, ${input.comment}, ${input.isInternal}, NOW())
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Admin: Dashboard stats ───────────────────────────────────────────────
@@ -466,7 +466,7 @@ export const partnerApiKeysRouter = router({
         SET status = 'revoked', revoked_by = ${ctx.user.id}, revoked_at = NOW()
         WHERE id = ${input.keyId}
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });
 
@@ -509,7 +509,7 @@ export const partnerWebhooksRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.execute(sql`UPDATE partner_webhooks SET is_active = ${input.isActive}, updated_at = NOW() WHERE id = ${input.webhookId}`);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   delete: auditedProcedure
@@ -518,7 +518,7 @@ export const partnerWebhooksRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.execute(sql`DELETE FROM partner_webhooks WHERE id = ${input.webhookId}`);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });
 
@@ -589,7 +589,7 @@ export const userOnboardingRouter = router({
       if (p?.profile_completed && p?.bank_linked && p?.kyc_completed && p?.first_transfer_made) {
         await db.execute(sql`UPDATE user_onboarding_progress SET status = 'completed', completed_at = NOW() WHERE user_id = ${ctx.user.id}`);
       }
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   skip: auditedProcedure.mutation(async ({ ctx }) => {
@@ -600,7 +600,7 @@ export const userOnboardingRouter = router({
       VALUES (${ctx.user.id}, 'skipped', NOW(), NOW(), NOW())
       ON CONFLICT (user_id) DO UPDATE SET status = 'skipped', skipped_at = NOW(), updated_at = NOW()
     `);
-    return { success: true };
+    return { success: true, updatedAt: new Date().toISOString() };
   }),
 
   // Full onboarding completion — saves all collected data in one shot
@@ -672,7 +672,7 @@ export const complianceEmailRouter = router({
            'smtp.sendgrid.net', 587, 'compliance@remitflow.com', 'RemitFlow Compliance',
            ${ctx.user.id}, NOW(), NOW())
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   deleteConfig: adminProcedure
@@ -681,7 +681,7 @@ export const complianceEmailRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.execute(sql`DELETE FROM compliance_email_config WHERE id = ${input.configId}`);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   sendTestEmail: adminProcedure
@@ -744,7 +744,7 @@ export const complianceEmailRouter = router({
           ${input.fromEmail}, ${input.fromName}, ${ctx.user.id}, NOW(), NOW()
         )
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   sendReport: adminProcedure

@@ -151,6 +151,6 @@ export const requestMoneyRouter = router({
       await db.update(paymentRequests)
         .set({ status: "cancelled", updatedAt: new Date() })
         .where(eq(paymentRequests.id, input.id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });

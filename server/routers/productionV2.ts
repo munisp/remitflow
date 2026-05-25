@@ -215,7 +215,7 @@ export const webhooksRouter = router({
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
     await db.delete(webhookEndpoints)
       .where(and(eq(webhookEndpoints.id, input.id), eq(webhookEndpoints.userId, ctx.user.id)));
-    return { success: true };
+    return { success: true, updatedAt: new Date().toISOString() };
   }),
 
   rotateSecret: auditedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
@@ -310,7 +310,7 @@ export const apiKeysRouter = router({
       .where(and(eq(apiKeys.id, input.id), eq(apiKeys.userId, ctx.user.id)))
       .returning();
     if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
-    return { success: true };
+    return { success: true, updatedAt: new Date().toISOString() };
   }),
 });
 
@@ -524,7 +524,7 @@ export const systemConfigRouter = router({
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
     await db.delete(systemConfig).where(eq(systemConfig.key, input.key));
-    return { success: true };
+    return { success: true, updatedAt: new Date().toISOString() };
   }),
 });
 

@@ -217,7 +217,7 @@ export const cardsRouter = router({
       await db.execute(sql`
         UPDATE virtual_cards SET status = 'frozen' WHERE id = ${input.cardId} AND user_id = ${user.id}
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   unfreeze: auditedProcedure
@@ -228,7 +228,7 @@ export const cardsRouter = router({
       await db.execute(sql`
         UPDATE virtual_cards SET status = 'active' WHERE id = ${input.cardId} AND user_id = ${user.id}
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   cancel: auditedProcedure
@@ -239,7 +239,7 @@ export const cardsRouter = router({
       await db.execute(sql`
         UPDATE virtual_cards SET status = 'cancelled' WHERE id = ${input.cardId} AND user_id = ${user.id}
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   topup: auditedProcedure
@@ -441,7 +441,7 @@ export const agentNetworkFullRouter = router({
         UPDATE agent_registrations SET status = 'active', tier = ${input.tier}, daily_limit_ngn = ${limits[input.tier]}
         WHERE id = ${input.agentId}
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });
 
@@ -514,7 +514,7 @@ export const supportRouter = router({
       if (isAdmin) {
         await db.execute(sql`UPDATE support_tickets SET status = 'in_progress', "updatedAt" = NOW() WHERE id = ${input.ticketId}`);
       }
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   resolve: auditedProcedure
@@ -526,7 +526,7 @@ export const supportRouter = router({
         UPDATE support_tickets SET status = 'resolved', resolved_at = NOW(), satisfaction_score = ${input.satisfactionScore ?? null}
         WHERE id = ${input.ticketId} AND (user_id = ${user.id} OR ${user.role} = 'admin')
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   adminList: protectedProcedure
@@ -632,7 +632,7 @@ export const distributionsRouter = router({
         UPDATE investment_distributions SET status = 'paid', paid_at = NOW()
         WHERE id = ${input.distributionId}
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   adminList: protectedProcedure

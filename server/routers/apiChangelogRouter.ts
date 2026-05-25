@@ -112,6 +112,6 @@ export const apiChangelogRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(apiChangelogs).where(eq(apiChangelogs.id, input.id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });

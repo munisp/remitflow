@@ -376,7 +376,7 @@ export const partnerOnboardingRouter = router({
 
       const { tenantId, ...updates } = input;
       await db.update(tenants).set({ ...updates, updatedAt: new Date() }).where(eq(tenants.id, tenantId));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Get tenant members ────────────────────────────────────────────────────
@@ -425,7 +425,7 @@ export const partnerOnboardingRouter = router({
       await db.delete(tenantUsers)
         .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.targetUserId)));
 
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Get white-label config ────────────────────────────────────────────────
@@ -473,7 +473,7 @@ export const partnerOnboardingRouter = router({
         .set({ ...updates, updatedAt: new Date() })
         .where(eq(whiteLabelConfigs.tenantId, tenantId));
 
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Tenant analytics ──────────────────────────────────────────────────────
@@ -610,7 +610,7 @@ export const adminInviteCodesRouter = router({
         .set({ isActive: false })
         .where(eq(partnerInviteCodes.id, input.id));
 
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Reactivate invite code ────────────────────────────────────────────────
@@ -624,7 +624,7 @@ export const adminInviteCodesRouter = router({
         .set({ isActive: true })
         .where(eq(partnerInviteCodes.id, input.id));
 
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Delete invite code ────────────────────────────────────────────────────
@@ -635,7 +635,7 @@ export const adminInviteCodesRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       await db.delete(partnerInviteCodes).where(eq(partnerInviteCodes.id, input.id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── List all tenants (admin) ──────────────────────────────────────────────
@@ -696,7 +696,7 @@ export const adminInviteCodesRouter = router({
         .set({ status: input.status as any, updatedAt: new Date() })
         .where(eq(tenants.id, input.tenantId));
 
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Real-time partner analytics dashboard ──────────────────────────────────

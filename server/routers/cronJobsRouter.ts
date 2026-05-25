@@ -114,7 +114,7 @@ export const cronJobsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(cronJobs).where(eq(cronJobs.id, input.id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   toggle: adminProcedure

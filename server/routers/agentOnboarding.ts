@@ -152,7 +152,7 @@ export const agentOnboardingRouter = router({
         .update(agentAccounts)
         .set({ status: "active" } as any)
         .where(eq(agentAccounts.id, input.agentId));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   /** Admin: reject an agent application */
@@ -165,6 +165,6 @@ export const agentOnboardingRouter = router({
         .update(agentAccounts)
         .set({ status: "suspended" } as any)
         .where(eq(agentAccounts.id, input.agentId));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });

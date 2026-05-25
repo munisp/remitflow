@@ -11,10 +11,11 @@
  */
 
 import { z } from "zod";
-import { router, publicProcedure } from "../_core/trpc";
+import { router, protectedProcedure } from "../_core/trpc";
 import { randomBytes } from "crypto";
 import { logger } from "../_core/logger";
-import { createAuditLog } from "../db";
+import { getDb, createAuditLog } from "../db";
+import { sql } from "drizzle-orm";
 
 interface ReceiptData {
   receiptId: string;
@@ -49,7 +50,7 @@ interface ReceiptData {
 
 export const receiptGenerationRouter = router({
   // Generate a receipt for a completed transfer
-  generateReceipt: publicProcedure
+  generateReceipt: protectedProcedure
     .input(z.object({
       transactionRef: z.string(),
       senderName: z.string(),
@@ -130,20 +131,63 @@ export const receiptGenerationRouter = router({
       return receipt;
     }),
 
-  // Get receipt as formatted text (for email/print)
-  formatReceipt: publicProcedure
+  // Get receipt as formatted text (for email/print) — queries transaction from DB
+  formatReceipt: protectedProcedure
     .input(z.object({
-      receiptId: z.string(),
+      transactionRef: z.string(),
       format: z.enum(["text", "html"]).default("text"),
-      language: z.string().default("en"),
     }))
-    .query(({ input }) => {
-      // Placeholder — in production, retrieve from DB and format
+    .query(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) return { transactionRef: input.transactionRef, format: input.format, content: "DB unavailable" };
+      const rows = await db.execute(
+        sql`SELECT t.*, u.name as sender_name, b.name as recipient_name, b."country" as recipient_country
+            FROM transactions t
+            LEFT JOIN users u ON u.id = t."userId"
+            LEFT JOIN beneficiaries b ON b.id = t."beneficiaryId"
+            WHERE t.reference = ${input.transactionRef} AND t."userId" = ${ctx.user.id}
+            LIMIT 1`
+      );
+      const tx = (rows as unknown as Array<Record<string, unknown>>)[0];
+      if (!tx) return { transactionRef: input.transactionRef, format: input.format, content: "Transaction not found" };
+      const amt = Number(tx.amount) || 0;
+      const fee = Number(tx.fee) || 0;
+      const rate = Number(tx.rate) || 1;
+      if (input.format === "html") {
+        return {
+          transactionRef: input.transactionRef,
+          format: "html",
+          content: `<div style="font-family:sans-serif;max-width:500px;margin:auto;padding:20px;border:1px solid #ddd;border-radius:8px;">
+            <h2 style="text-align:center;">RemitFlow Receipt</h2>
+            <hr/>
+            <p><strong>Reference:</strong> ${tx.reference}</p>
+            <p><strong>Sender:</strong> ${tx.sender_name ?? "—"}</p>
+            <p><strong>Recipient:</strong> ${tx.recipient_name ?? "—"} (${tx.recipient_country ?? "—"})</p>
+            <p><strong>Amount:</strong> ${tx.currency} ${amt.toFixed(2)}</p>
+            <p><strong>Fee:</strong> ${tx.currency} ${fee.toFixed(2)}</p>
+            <p><strong>FX Rate:</strong> ${rate.toFixed(4)}</p>
+            <p><strong>Status:</strong> ${tx.status}</p>
+            <p><strong>Date:</strong> ${tx.createdAt ? new Date(tx.createdAt as string).toLocaleDateString() : "—"}</p>
+            <hr/>
+            <p style="font-size:12px;color:#666;">This is your official receipt. Keep for your records.</p>
+          </div>`,
+        };
+      }
       return {
-        receiptId: input.receiptId,
-        format: input.format,
-        language: input.language,
-        content: `Receipt ${input.receiptId} — format: ${input.format}, lang: ${input.language}`,
+        transactionRef: input.transactionRef,
+        format: "text",
+        content: [
+          "════════════ REMITFLOW RECEIPT ════════════",
+          `Reference: ${tx.reference}`,
+          `Sender: ${tx.sender_name ?? "—"}`,
+          `Recipient: ${tx.recipient_name ?? "—"} (${tx.recipient_country ?? "—"})`,
+          `Amount: ${tx.currency} ${amt.toFixed(2)}`,
+          `Fee: ${tx.currency} ${fee.toFixed(2)}`,
+          `FX Rate: ${rate.toFixed(4)}`,
+          `Status: ${tx.status}`,
+          `Date: ${tx.createdAt ? new Date(tx.createdAt as string).toLocaleDateString() : "—"}`,
+          "═══════════════════════════════════════════",
+        ].join("\n"),
       };
     }),
 });

@@ -139,7 +139,7 @@ export const bnplRouter = router({
         WHERE id = ${input.installmentId}
         AND application_id IN (SELECT id FROM bnpl_applications WHERE "userId" = ${ctx.user.id})
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });
 
@@ -339,7 +339,7 @@ export const agentNetworkRouter = router({
           updated_at = NOW()
         WHERE id = ${input.id}
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   /** Delete agent */
@@ -350,7 +350,7 @@ export const agentNetworkRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.execute(sql`DELETE FROM agent_network WHERE id = ${input.id}`);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   /** Get agent statistics */
@@ -604,7 +604,7 @@ export const whiteLabelPreviewRouter = router({
           font_family = EXCLUDED.font_family,
           updated_at = NOW()
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   /** Generate CSS variables for a tenant's white-label config */
@@ -729,7 +729,7 @@ export const familyEnhancedRouter = router({
         UPDATE family_members SET monthly_limit = ${input.monthlyLimit}, limit_currency = ${input.currency}, updated_at = NOW()
         WHERE id = ${input.memberId} AND "userId" = ${ctx.user.id}
       `);
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   /** Get family transfer history */

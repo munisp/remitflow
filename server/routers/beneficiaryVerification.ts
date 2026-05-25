@@ -10,9 +10,10 @@
  */
 
 import { z } from "zod";
-import { router, publicProcedure } from "../_core/trpc";
+import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
-import { createAuditLog } from "../db";
+import { getDb, createAuditLog } from "../db";
+import { sql } from "drizzle-orm";
 
 // Country-specific account number patterns
 const ACCOUNT_PATTERNS: Record<string, { pattern: RegExp; description: string; example: string }> = {
@@ -89,15 +90,16 @@ function validateMobileMoneyNumber(number: string, country: string): { valid: bo
 }
 
 export const beneficiaryVerificationRouter = router({
-  // Verify bank account
-  verifyBankAccount: publicProcedure
+  // Verify bank account — persists result to DB
+  verifyBankAccount: protectedProcedure
     .input(z.object({
       accountNumber: z.string().min(4).max(34),
       bankCode: z.string().optional(),
       countryCode: z.string().length(2),
       accountName: z.string().optional(),
+      beneficiaryId: z.number().int().positive().optional(),
     }))
-    .mutation(({ input }) => {
+    .mutation(async ({ ctx, input }) => {
       const checks: Array<{ check: string; passed: boolean; detail: string }> = [];
 
       // 1. Account number format check
@@ -134,6 +136,22 @@ export const beneficiaryVerificationRouter = router({
       }
 
       const allPassed = checks.every((c) => c.passed);
+
+      // Persist verification result to DB
+      const db = await getDb();
+      if (db && input.beneficiaryId) {
+        await db.execute(sql`
+          UPDATE beneficiaries
+          SET "verifiedAt" = NOW(), "verificationStatus" = ${allPassed ? 'verified' : 'failed'}
+          WHERE id = ${input.beneficiaryId} AND "userId" = ${ctx.user.id}
+        `);
+      }
+      if (db) {
+        await db.execute(sql`
+          INSERT INTO "auditLogs" ("userId", action, metadata, "createdAt")
+          VALUES (${ctx.user.id}, 'BENEFICIARY_VERIFICATION', ${JSON.stringify({ accountNumber: input.accountNumber.slice(0, 4) + '****', countryCode: input.countryCode, verified: allPassed, checksRun: checks.length })}::jsonb, NOW())
+        `);
+      }
 
       logger.info({
         countryCode: input.countryCode,

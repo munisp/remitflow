@@ -87,7 +87,7 @@ export const paymentMethodsExtRouter = router({
       if (!existing) throw new TRPCError({ code: "NOT_FOUND" });
       await db.update(achPaymentMethods).set({ isDefault: false }).where(eq(achPaymentMethods.userId, ctx.user.id));
       await db.update(achPaymentMethods).set({ isDefault: true }).where(eq(achPaymentMethods.id, input.id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   removeAch: protectedProcedure
@@ -98,7 +98,7 @@ export const paymentMethodsExtRouter = router({
         .where(and(eq(achPaymentMethods.id, input.id), eq(achPaymentMethods.userId, ctx.user.id)))
         .returning();
       if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   listSepa: protectedProcedure.query(async ({ ctx }) => {
@@ -146,7 +146,7 @@ export const paymentMethodsExtRouter = router({
         .where(and(eq(sepaPaymentMethods.id, input.id), eq(sepaPaymentMethods.userId, ctx.user.id)))
         .returning();
       if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   listInterac: protectedProcedure.query(async ({ ctx }) => {
@@ -195,7 +195,7 @@ export const paymentMethodsExtRouter = router({
         .where(and(eq(interacPaymentMethods.id, input.id), eq(interacPaymentMethods.userId, ctx.user.id)))
         .returning();
       if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   listXofAccounts: protectedProcedure.query(async ({ ctx }) => {
@@ -245,7 +245,7 @@ export const paymentMethodsExtRouter = router({
         .where(and(eq(xofPayoutAccounts.id, input.id), eq(xofPayoutAccounts.userId, ctx.user.id)))
         .returning();
       if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   listAll: protectedProcedure.query(async ({ ctx }) => {
@@ -706,7 +706,7 @@ export const securityExtRouter = router({
         unlockedByAdminId: ctx.user.id,
       }).where(eq(userLockouts.userId, input.userId));
       await createAuditLog({ userId: ctx.user.id, action: "admin.unlock_user", targetType: "user", targetId: input.userId, severity: "warning", metadata: { reason: input.reason } });
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   requestSelfUnlock: protectedProcedure.mutation(async ({ ctx }) => {
@@ -979,7 +979,7 @@ export const crossSellExtRouter = router({
       const db = await getDb();
       await db.update(crossSellOffers).set({ shownAt: new Date(), status: "shown" })
         .where(and(eq(crossSellOffers.id, input.offerId), eq(crossSellOffers.userId, ctx.user.id)));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   respondToOffer: protectedProcedure
@@ -997,7 +997,7 @@ export const crossSellExtRouter = router({
         respondedAt: new Date(),
       }).where(eq(crossSellOffers.id, input.offerId));
       await createAuditLog({ userId: ctx.user.id, action: `cross_sell.offer_${input.response}`, targetType: "cross_sell_offer", targetId: input.offerId, severity: "info", metadata: { offerType: offer.offerType, response: input.response } });
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   listMyOffers: protectedProcedure.query(async ({ ctx }) => {
@@ -1285,7 +1285,7 @@ export const smeBulkRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot cancel batch in status: ${batch.status}` });
       }
       await db.update(smeTradeBulkBatches).set({ status: "cancelled", completedAt: new Date() }).where(eq(smeTradeBulkBatches.id, batch.id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   adminListBatches: adminProcedure

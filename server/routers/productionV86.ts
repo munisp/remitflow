@@ -180,7 +180,7 @@ export const promoCodesAdminRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(promoCodes).where(eq(promoCodes.id, input.id));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   redemptions: protectedProcedure
@@ -456,7 +456,7 @@ export const notifPrefsRouter = router({
       } else {
         await db.insert(userNotifPrefs).values({ userId: ctx.user.id, ...updateData });
       }
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });
 
@@ -523,7 +523,7 @@ export const scheduledTransfersRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(scheduledTransfers).set({ status: "paused" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   resume: auditedProcedure
@@ -533,7 +533,7 @@ export const scheduledTransfersRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(scheduledTransfers).set({ status: "active" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   cancel: auditedProcedure
@@ -543,7 +543,7 @@ export const scheduledTransfersRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(scheduledTransfers).set({ status: "cancelled" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });
 
@@ -584,7 +584,7 @@ export const rateAlertsRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(exchangeRateAlerts)
         .where(and(eq(exchangeRateAlerts.id, input.id), eq(exchangeRateAlerts.userId, ctx.user.id)));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   currentRates: publicProcedure
