@@ -297,6 +297,7 @@ import { receiptGenerationRouter } from "./routers/receiptGeneration";
 import { loyaltyPointsRouter } from "./routers/loyaltyPoints";
 import { beneficiaryVerificationRouter } from "./routers/beneficiaryVerification";
 import { futureProofingRouter } from "./routers/futureProofing";
+import { mlPipelineRouter } from "./routers/mlPipeline";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -6773,5 +6774,7 @@ Case: #${input.caseId}`,
   beneficiaryVerification: beneficiaryVerificationRouter,
   // v240 — Future-Proofing: AI, Open Banking, ISO 20022, CBDC, Compliance, Architecture, Payment Rails, Security, DX, Business
   futureProofing: futureProofingRouter,
+  // v250 — ML Pipeline: NLU, FX Forecast, GNN Fraud, Investment ML, Ray Training, MLflow Registry, Retraining
+  mlPipeline: mlPipelineRouter,
 });
 export type AppRouter = typeof appRouter;

@@ -47,13 +47,42 @@ const genId = (prefix: string) => `${prefix}-${Date.now()}-${randomBytes(4).toSt
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const conversationalPaymentsRouter = router({
-  /** 1.1 Parse natural language payment intent */
+  /** 1.1 Parse natural language payment intent (upgraded: calls NLU Transformer service, falls back to regex) */
   parseIntent: protectedProcedure
     .input(z.object({ message: z.string().min(1).max(500) }))
     .mutation(async ({ ctx, input }) => {
-      // Use Ollama or Dapr AI binding for NLU
       const correlationId = randomUUID();
-      const intent = parsePaymentIntent(input.message);
+      // Try real NLU Transformer service first (port 8110), fallback to regex
+      let intent: { action: string; amount?: number; currency?: string; beneficiaryName?: string; toCurrency?: string; frequency?: string; confidence: number };
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 3000);
+        const nluRes = await fetch(`${process.env.NLU_SERVICE_URL || "http://localhost:8110"}/classify`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: input.message, include_all_scores: false }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        if (nluRes.ok) {
+          const nluData = await nluRes.json() as { intent: string; confidence: number; entities: Record<string, unknown> };
+          intent = {
+            action: nluData.intent,
+            confidence: nluData.confidence,
+            amount: typeof nluData.entities.AMOUNT === "number" ? nluData.entities.AMOUNT : undefined,
+            currency: typeof nluData.entities.CURRENCY === "string" ? nluData.entities.CURRENCY : undefined,
+            beneficiaryName: typeof nluData.entities.BENEFICIARY === "string" ? nluData.entities.BENEFICIARY : undefined,
+            frequency: typeof nluData.entities.FREQUENCY === "string" ? nluData.entities.FREQUENCY : undefined,
+          };
+          logger.info({ correlationId, source: "nlu-transformer" }, "NLU Transformer classification");
+        } else {
+          intent = parsePaymentIntent(input.message);
+          logger.warn({ correlationId, source: "regex-fallback" }, "NLU service returned error, using regex");
+        }
+      } catch {
+        intent = parsePaymentIntent(input.message);
+        logger.info({ correlationId, source: "regex-fallback" }, "NLU service unavailable, using regex");
+      }
 
       // Store conversation state in Redis
       await redis.hSet(`conv:${ctx.user.id}`, "lastIntent", JSON.stringify(intent));
