@@ -507,6 +507,52 @@ const retrainingRouter = router({
         },
       );
     }),
+
+  /** Record prediction outcome for feedback loop training */
+  recordFeedback: protectedProcedure
+    .input(z.object({
+      modelName: z.string(),
+      inputId: z.string(),
+      prediction: z.number(),
+      actual: z.number().optional(),
+      metadata: z.record(z.string(), z.unknown()).optional(),
+    }))
+    .mutation(async ({ input }) => {
+      return callMLService<Record<string, unknown>>(
+        ML_RETRAINING_URL, "/feedback/record", "POST", {
+          model_name: input.modelName,
+          input_id: input.inputId,
+          prediction: input.prediction,
+          actual: input.actual,
+          metadata: input.metadata,
+        },
+      );
+    }),
+
+  /** Get feedback loop statistics */
+  feedbackStats: adminProcedure.query(async () => {
+    return callMLService<Record<string, unknown>>(ML_RETRAINING_URL, "/feedback/stats");
+  }),
+
+  /** Get continuous training status */
+  continuousStatus: adminProcedure.query(async () => {
+    return callMLService<Record<string, unknown>>(ML_RETRAINING_URL, "/continuous/status");
+  }),
+
+  /** Start continuous training loop */
+  startContinuousTraining: adminProcedure.mutation(async () => {
+    return callMLService<Record<string, unknown>>(ML_RETRAINING_URL, "/continuous/start", "POST");
+  }),
+
+  /** Stop continuous training loop */
+  stopContinuousTraining: adminProcedure.mutation(async () => {
+    return callMLService<Record<string, unknown>>(ML_RETRAINING_URL, "/continuous/stop", "POST");
+  }),
+
+  /** Data source availability for each model */
+  dataSources: adminProcedure.query(async () => {
+    return callMLService<Record<string, unknown>>(ML_RETRAINING_URL, "/data-sources");
+  }),
 });
 
 // ─── ML Health Dashboard ────────────────────────────────────────────────────

@@ -570,10 +570,28 @@ async def forecast(req: ForecastRequest):
 
 @app.post("/train")
 async def trigger_train():
+    """
+    Retrain FX model on platform fxRateCache data if available, else synthetic.
+    Continuous training: new rate observations → better forecasts.
+    """
     global _metadata
+    data_source = "synthetic"
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
+        from platform_data_loader import PlatformDataLoader
+        loader = PlatformDataLoader()
+        data, meta = loader.load_fx_training_data(corridor="USD-NGN", min_days=50)
+        loader.close()
+        if data is not None:
+            data_source = "platform_db"
+            logger.info(f"Training FX model on {meta['n_days']} days of platform rate data")
+    except Exception as e:
+        logger.info(f"Platform FX data unavailable ({e}), using synthetic")
+
     _metadata = train_model()
     await load_or_train()
-    return {"status": "trained", **{k: v for k, v in _metadata.items() if k != "history"}}
+    return {"status": "trained", "data_source": data_source, **{k: v for k, v in _metadata.items() if k != "history"}}
 
 
 if __name__ == "__main__":

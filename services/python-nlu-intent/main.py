@@ -922,11 +922,33 @@ async def batch_classify(req: BatchClassifyRequest):
 
 @app.post("/train")
 async def trigger_training():
-    """Trigger model retraining (admin endpoint)."""
+    """
+    Trigger model retraining.
+    Uses platform DB intent logs first, falls back to synthetic data.
+    This enables continuous training: as users interact, their intents
+    are logged to auditLogs, then fed back into training here.
+    """
+    # Try to load real labeled data from platform DB
+    training_data = None
+    data_source = "synthetic"
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
+        from platform_data_loader import PlatformDataLoader
+        loader = PlatformDataLoader()
+        samples, meta = loader.load_nlu_training_data(min_samples=200)
+        loader.close()
+        if samples:
+            training_data = samples
+            data_source = "platform_db"
+            logger.info(f"Training on {len(samples)} platform intent samples")
+    except Exception as e:
+        logger.info(f"Platform data unavailable ({e}), using synthetic")
+
     async with _model_lock:
-        metadata = train_model()
+        metadata = train_model(data=training_data)
         await load_or_train_model()
-    return {"status": "trained", **{k: v for k, v in metadata.items() if k != "history"}}
+    return {"status": "trained", "data_source": data_source, **{k: v for k, v in metadata.items() if k != "history"}}
 
 
 if __name__ == "__main__":

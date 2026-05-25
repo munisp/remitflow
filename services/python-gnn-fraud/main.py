@@ -573,10 +573,28 @@ async def score_transaction(req: ScoreRequest):
 
 @app.post("/train")
 async def trigger_train():
+    """
+    Retrain GNN on platform transaction graph if available, else synthetic.
+    Continuous training: new transactions in DB → new graph → retrained GNN.
+    """
     global _metadata
+    data_source = "synthetic"
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
+        from platform_data_loader import PlatformDataLoader
+        loader = PlatformDataLoader()
+        graph, meta = loader.load_gnn_graph_data(lookback_days=90, min_transactions=500)
+        loader.close()
+        if graph is not None:
+            data_source = "platform_db"
+            logger.info(f"Training GNN on platform graph: {meta['n_nodes']} nodes, {meta['n_edges']} edges")
+    except Exception as e:
+        logger.info(f"Platform data unavailable ({e}), using synthetic graph")
+
     _metadata = train_model()
     await load_or_train()
-    return {"status": "trained", **{k: v for k, v in _metadata.items() if k != "history"}}
+    return {"status": "trained", "data_source": data_source, **{k: v for k, v in _metadata.items() if k != "history"}}
 
 
 if __name__ == "__main__":

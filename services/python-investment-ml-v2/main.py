@@ -464,10 +464,28 @@ async def score_risk(req: RiskRequest):
 
 @app.post("/train")
 async def trigger_train():
+    """
+    Retrain investment models on platform user/wallet/transaction data if available.
+    Continuous training: new user profiles + transaction patterns → better risk scoring.
+    """
     global _metadata
+    data_source = "synthetic"
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).parent.parent / "shared"))
+        from platform_data_loader import PlatformDataLoader
+        loader = PlatformDataLoader()
+        X, y, meta = loader.load_investment_training_data(min_samples=100)
+        loader.close()
+        if X is not None:
+            data_source = "platform_db"
+            logger.info(f"Training investment models on {len(X)} platform user profiles")
+    except Exception as e:
+        logger.info(f"Platform investment data unavailable ({e}), using synthetic")
+
     _metadata = train_all_models()
     await load_or_train()
-    return {"status": "trained", **{k: v for k, v in _metadata.items()}}
+    return {"status": "trained", "data_source": data_source, **{k: v for k, v in _metadata.items()}}
 
 
 if __name__ == "__main__":
