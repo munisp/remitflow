@@ -331,19 +331,10 @@ export async function initiateTransfer(params: {
     } else {
       logger.warn({ data: err.message }, '[Mojaloop] Transfer initiation failed');
     }
-    if (IS_PRODUCTION) {
-      return {
-        transferId,
-        transferState: "ABORTED",
-        errorInformation: { errorCode: "5000", errorDescription: `Mojaloop transfer failed: ${err.message}` },
-      };
-    }
-    // Dev/sandbox fallback only
     return {
       transferId,
-      transferState: "COMMITTED",
-      completedTimestamp: new Date().toISOString(),
-      fulfilment: crypto.randomBytes(32).toString("base64url"),
+      transferState: "ABORTED",
+      errorInformation: { errorCode: "5000", errorDescription: `Mojaloop transfer failed: ${err.message}` },
     };
   }
 }
@@ -370,10 +361,7 @@ export async function getTransferStatus(transferId: string): Promise<MojaloopTra
     if (err instanceof CircuitOpenError) {
       logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — status unavailable');
     }
-    if (IS_PRODUCTION) {
-      return { transferId, transferState: "ABORTED", errorInformation: { errorCode: "5000", errorDescription: `Status check failed: ${err.message}` } };
-    }
-    return { transferId, transferState: "COMMITTED", completedTimestamp: new Date().toISOString() };
+    return { transferId, transferState: "ABORTED", errorInformation: { errorCode: "5000", errorDescription: `Status check failed: ${err.message}` } };
   }
 }
 
@@ -396,16 +384,7 @@ export async function getFSPParticipants(): Promise<Array<{
     }
   } catch { /* fallback */ }
 
-  // Well-known Mojaloop sandbox participants
+  logger.warn("[Mojaloop] Participants endpoint unavailable — returning empty list");
   return [
-    { fspId: "payerfsp", name: "Payer FSP (Test)", currency: ["USD", "KES"], country: "KE", active: true },
-    { fspId: "payeefsp", name: "Payee FSP (Test)", currency: ["USD", "KES"], country: "KE", active: true },
-    { fspId: "ecobank-ng", name: "Ecobank Nigeria", currency: ["NGN", "USD"], country: "NG", active: true },
-    { fspId: "gtbank-ng", name: "GTBank Nigeria", currency: ["NGN"], country: "NG", active: true },
-    { fspId: "kcb-ke", name: "KCB Bank Kenya", currency: ["KES", "USD"], country: "KE", active: true },
-    { fspId: "equity-ke", name: "Equity Bank Kenya", currency: ["KES", "USD"], country: "KE", active: true },
-    { fspId: "stanbic-gh", name: "Stanbic Bank Ghana", currency: ["GHS", "USD"], country: "GH", active: true },
-    { fspId: "absa-za", name: "ABSA South Africa", currency: ["ZAR", "USD"], country: "ZA", active: true },
-    { fspId: "remitflow-fsp", name: "RemitFlow FSP", currency: ["NGN", "USD", "GBP", "EUR", "KES"], country: "NG", active: true },
   ];
 }

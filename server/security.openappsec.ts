@@ -99,10 +99,10 @@ export async function openAppSecWafMiddleware(
       }
     }
   } catch {
-    // Agent unavailable — fail-open (log but don't block)
-    // In production, set OPENAPPSEC_FAIL_CLOSED=true to block on agent failure
-    if (process.env.OPENAPPSEC_FAIL_CLOSED === "true") {
-      logger.error("[OpenAppSec] Agent unavailable — fail-closed mode active");
+    const failClosed = process.env.OPENAPPSEC_FAIL_CLOSED === "true" ||
+      (process.env.NODE_ENV === "production" && process.env.OPENAPPSEC_FAIL_CLOSED !== "false");
+    if (failClosed) {
+      logger.error("[OpenAppSec] Agent unavailable — fail-closed (production default)");
       res.status(503).json({ error: "Security agent unavailable" });
       return;
     }

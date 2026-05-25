@@ -1,6 +1,7 @@
 /**
  * Double-Entry Bookkeeping Verification Router
  * ─────────────────────────────────────────────────────────────────────────────
+ * DB-backed (PostgreSQL) double-entry ledger.
  * Every financial transaction must have balanced debits and credits.
  * This router provides:
  * - Transaction balance verification
@@ -13,29 +14,14 @@ import { z } from "zod";
 import { randomBytes } from "crypto";
 import { router, publicProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
-import { createAuditLog } from "../db";
-
-interface LedgerEntry {
-  id: string;
-  transactionId: string;
-  accountId: string;
-  accountType: "asset" | "liability" | "equity" | "revenue" | "expense";
-  debit: number;
-  credit: number;
-  currency: string;
-  description: string;
-  timestamp: string;
-}
-
-// In-memory ledger for verification (production: TigerBeetle + PostgreSQL)
-const ledger: LedgerEntry[] = [];
+import { getDb, createAuditLog } from "../db";
+import { sql } from "drizzle-orm";
 
 function generateEntryId(): string {
   return `le_${Date.now()}_${randomBytes(4).toString("hex")}`;
 }
 
 export const doubleEntryRouter = router({
-  // Record a balanced transaction (debits must equal credits)
   recordTransaction: publicProcedure
     .input(z.object({
       transactionId: z.string(),
@@ -48,8 +34,7 @@ export const doubleEntryRouter = router({
         description: z.string(),
       })).min(2),
     }))
-    .mutation(({ input }) => {
-      // Verify balance: total debits must equal total credits
+    .mutation(async ({ input }) => {
       let totalDebits = 0;
       let totalCredits = 0;
 
@@ -58,36 +43,27 @@ export const doubleEntryRouter = router({
         totalCredits += entry.credit;
 
         if (entry.debit > 0 && entry.credit > 0) {
-          return {
-            success: false,
-            error: "An entry cannot have both debit and credit",
-          };
+          return { success: false, error: "An entry cannot have both debit and credit" };
         }
         if (entry.debit === 0 && entry.credit === 0) {
-          return {
-            success: false,
-            error: "An entry must have either debit or credit",
-          };
+          return { success: false, error: "An entry must have either debit or credit" };
         }
       }
 
-      // Allow for floating point rounding (max 0.01 difference)
       if (Math.abs(totalDebits - totalCredits) > 0.01) {
         logger.error({
-          transactionId: input.transactionId,
-          totalDebits,
-          totalCredits,
+          transactionId: input.transactionId, totalDebits, totalCredits,
           difference: totalDebits - totalCredits,
         }, "Unbalanced transaction rejected");
-
         return {
           success: false,
           error: `Transaction is not balanced. Debits: ${totalDebits}, Credits: ${totalCredits}, Difference: ${(totalDebits - totalCredits).toFixed(2)}`,
         };
       }
 
-      // Record entries
-      const entries: LedgerEntry[] = input.entries.map((e) => ({
+      const db = await getDb();
+      const now = new Date().toISOString();
+      const entries = input.entries.map((e) => ({
         id: generateEntryId(),
         transactionId: input.transactionId,
         accountId: e.accountId,
@@ -96,97 +72,116 @@ export const doubleEntryRouter = router({
         credit: e.credit,
         currency: e.currency,
         description: e.description,
-        timestamp: new Date().toISOString(),
+        timestamp: now,
       }));
 
-      ledger.push(...entries);
+      if (db) {
+        for (const entry of entries) {
+          await db.execute(sql`
+            INSERT INTO ledger_entries (id, transaction_id, account_id, account_type, debit, credit, currency, description, created_at)
+            VALUES (${entry.id}, ${entry.transactionId}, ${entry.accountId}, ${entry.accountType},
+                    ${entry.debit}, ${entry.credit}, ${entry.currency}, ${entry.description}, ${entry.timestamp})
+            ON CONFLICT DO NOTHING
+          `);
+        }
+      }
 
       logger.info({
-        transactionId: input.transactionId,
-        entryCount: entries.length,
-        totalDebits,
-        totalCredits,
+        transactionId: input.transactionId, entryCount: entries.length, totalDebits, totalCredits,
       }, "Balanced transaction recorded");
 
-      return {
-        success: true,
-        transactionId: input.transactionId,
-        entryCount: entries.length,
-        totalDebits,
-        totalCredits,
-      };
+      return { success: true, transactionId: input.transactionId, entryCount: entries.length, totalDebits, totalCredits };
     }),
 
-  // Verify ledger integrity (all transactions balanced)
-  verifyIntegrity: publicProcedure.query(() => {
-    const txGroups = new Map<string, LedgerEntry[]>();
-    for (const entry of ledger) {
-      const group = txGroups.get(entry.transactionId) ?? [];
-      group.push(entry);
-      txGroups.set(entry.transactionId, group);
-    }
+  verifyIntegrity: publicProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) return { totalTransactions: 0, totalEntries: 0, balanced: true, issues: [] };
 
-    const issues: Array<{ transactionId: string; debits: number; credits: number; difference: number }> = [];
+    const rows = await db.execute(sql`
+      SELECT transaction_id,
+             SUM(debit) as total_debits,
+             SUM(credit) as total_credits,
+             COUNT(*) as entry_count
+      FROM ledger_entries
+      GROUP BY transaction_id
+      HAVING ABS(SUM(debit) - SUM(credit)) > 0.01
+    `) as { rows: Array<{ transaction_id: string; total_debits: string; total_credits: string }> };
 
-    for (const [txId, entries] of Array.from(txGroups.entries())) {
-      const debits = entries.reduce((sum: number, e: LedgerEntry) => sum + e.debit, 0);
-      const credits = entries.reduce((sum: number, e: LedgerEntry) => sum + e.credit, 0);
-      if (Math.abs(debits - credits) > 0.01) {
-        issues.push({ transactionId: txId, debits, credits, difference: debits - credits });
-      }
-    }
+    const countResult = await db.execute(sql`
+      SELECT COUNT(DISTINCT transaction_id) as tx_count, COUNT(*) as entry_count FROM ledger_entries
+    `) as { rows: Array<{ tx_count: string; entry_count: string }> };
+
+    const issues = (rows.rows ?? []).map((r: { transaction_id: string; total_debits: string; total_credits: string }) => ({
+      transactionId: r.transaction_id,
+      debits: Number(r.total_debits),
+      credits: Number(r.total_credits),
+      difference: Number(r.total_debits) - Number(r.total_credits),
+    }));
+
+    const counts = countResult.rows?.[0] ?? { tx_count: "0", entry_count: "0" };
 
     return {
-      totalTransactions: txGroups.size,
-      totalEntries: ledger.length,
+      totalTransactions: Number(counts.tx_count),
+      totalEntries: Number(counts.entry_count),
       balanced: issues.length === 0,
       issues,
     };
   }),
 
-  // Get account balance
   getAccountBalance: publicProcedure
     .input(z.object({ accountId: z.string() }))
-    .query(({ input }) => {
-      const entries = ledger.filter((e) => e.accountId === input.accountId);
-      const totalDebits = entries.reduce((sum: number, e: LedgerEntry) => sum + e.debit, 0);
-      const totalCredits = entries.reduce((sum: number, e: LedgerEntry) => sum + e.credit, 0);
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) return { accountId: input.accountId, totalDebits: 0, totalCredits: 0, balance: 0, entryCount: 0 };
+
+      const result = await db.execute(sql`
+        SELECT COALESCE(SUM(debit), 0) as total_debits,
+               COALESCE(SUM(credit), 0) as total_credits,
+               COUNT(*) as entry_count
+        FROM ledger_entries WHERE account_id = ${input.accountId}
+      `) as { rows: Array<{ total_debits: string; total_credits: string; entry_count: string }> };
+
+      const row = result.rows?.[0] ?? { total_debits: "0", total_credits: "0", entry_count: "0" };
+      const debits = Number(row.total_debits);
+      const credits = Number(row.total_credits);
 
       return {
         accountId: input.accountId,
-        totalDebits,
-        totalCredits,
-        balance: totalDebits - totalCredits,
-        entryCount: entries.length,
+        totalDebits: debits,
+        totalCredits: credits,
+        balance: debits - credits,
+        entryCount: Number(row.entry_count),
       };
     }),
 
-  // Trial balance report
-  trialBalance: publicProcedure.query(() => {
-    const accounts = new Map<string, { debits: number; credits: number; type: string }>();
+  trialBalance: publicProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) return { accounts: [], totalDebits: 0, totalCredits: 0, balanced: true };
 
-    for (const entry of ledger) {
-      const acc = accounts.get(entry.accountId) ?? { debits: 0, credits: 0, type: entry.accountType };
-      acc.debits += entry.debit;
-      acc.credits += entry.credit;
-      accounts.set(entry.accountId, acc);
-    }
+    const result = await db.execute(sql`
+      SELECT account_id, account_type,
+             SUM(debit) as total_debits,
+             SUM(credit) as total_credits
+      FROM ledger_entries
+      GROUP BY account_id, account_type
+      ORDER BY account_type, account_id
+    `) as { rows: Array<{ account_id: string; account_type: string; total_debits: string; total_credits: string }> };
 
     let totalDebits = 0;
     let totalCredits = 0;
-    const rows: Array<{ accountId: string; accountType: string; debits: number; credits: number; balance: number }> = [];
-
-    for (const [id, acc] of Array.from(accounts.entries())) {
-      totalDebits += acc.debits;
-      totalCredits += acc.credits;
-      rows.push({
-        accountId: id,
-        accountType: acc.type,
-        debits: Math.round(acc.debits * 100) / 100,
-        credits: Math.round(acc.credits * 100) / 100,
-        balance: Math.round((acc.debits - acc.credits) * 100) / 100,
-      });
-    }
+    const rows = (result.rows ?? []).map((r: { account_id: string; account_type: string; total_debits: string; total_credits: string }) => {
+      const d = Number(r.total_debits);
+      const c = Number(r.total_credits);
+      totalDebits += d;
+      totalCredits += c;
+      return {
+        accountId: r.account_id,
+        accountType: r.account_type,
+        debits: Math.round(d * 100) / 100,
+        credits: Math.round(c * 100) / 100,
+        balance: Math.round((d - c) * 100) / 100,
+      };
+    });
 
     return {
       accounts: rows,

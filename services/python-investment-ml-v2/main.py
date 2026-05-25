@@ -376,6 +376,14 @@ class RiskRequest(BaseModel):
     risk_preference: str = Field(default="moderate")
     dependents: int = Field(default=1, ge=0)
     home_country: str = "NG"
+    home_ownership: int = Field(default=0, ge=0, le=1, description="0=renting, 1=owns")
+    remittance_frequency: int = Field(default=2, ge=0, description="Monthly remittances")
+    avg_remittance_usd: float = Field(default=500, ge=0)
+    portfolio_diversity: float = Field(default=0.3, ge=0, le=1)
+    market_awareness: float = Field(default=0.5, ge=0, le=1)
+    digital_literacy: float = Field(default=0.7, ge=0, le=1)
+    diaspora_years: float = Field(default=5, ge=0)
+    investment_horizon_years: float = Field(default=10, ge=0)
 
 
 class RiskResponse(BaseModel):
@@ -417,11 +425,11 @@ async def score_risk(req: RiskRequest):
     features = np.array([[
         req.age, req.monthly_income_usd, req.monthly_expenses_usd, req.savings_usd,
         req.investment_experience_years, risk_pref_score, req.dependents, dti,
-        emergency_months, 0,  # home_ownership placeholder
-        2, 500,  # remittance defaults
-        0.3, 0.5, 0.7, 5,  # diversity, market, digital, diaspora_years
-        3.5, 4.0, 15.0, 0.08,  # macro defaults
-        0, 0, 0.2, 0.7, 10,  # investment flags, tax, credit, horizon
+        emergency_months, req.home_ownership,
+        req.remittance_frequency, req.avg_remittance_usd,
+        req.portfolio_diversity, req.market_awareness, req.digital_literacy, req.diaspora_years,
+        3.5, 4.0, 15.0, 0.08,  # macro indicators (GDP growth, inflation, unemployment, interest rate)
+        0, 0, 0.2, 0.7, req.investment_horizon_years,
     ]], dtype=np.float32)
 
     # Risk classification

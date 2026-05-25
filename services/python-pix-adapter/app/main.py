@@ -108,7 +108,7 @@ def detect_key_type(key: str) -> str:
 def generate_end_to_end_id() -> str:
     """Generate BCB-compliant E2E ID: E + ISPB(8) + YYYYMMDD + HHmmss + 11 random chars"""
     now = datetime.now(timezone.utc)
-    ispb = "00000000"  # RemitFlow ISPB (placeholder)
+    ispb = os.environ.get("PIX_ISPB", "00000000")
     random_part = secrets.token_hex(6)[:11].upper()
     return f"E{ispb}{now.strftime('%Y%m%d%H%M%S')}{random_part}"
 

@@ -498,8 +498,8 @@ class PlatformDataLoader:
                 float(np.max(amounts)),                 # max_amount
                 len(uf["countries"]),                    # unique_countries
                 len(uf["channels"]),                     # unique_channels
-                0.0,                                    # placeholder
-                0.0,                                    # placeholder
+                float(np.min(amounts)),                 # min_amount
+                float(np.sum(amounts)),                 # total_volume
             ]
             node_features.append(feat)
 

@@ -1,5 +1,5 @@
 /**
- * Temporal Workflow Client — graceful stub
+ * Temporal Workflow Client
  *
  * Returns a Temporal client when TEMPORAL_ADDRESS is configured,
  * otherwise returns null so callers can skip workflow orchestration

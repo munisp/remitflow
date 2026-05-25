@@ -106,19 +106,7 @@ export const v98Router = router({
           errorTopics,
           healthStatus: errorTopics === 0 ? "healthy" : errorTopics < 3 ? "degraded" : "critical",
         },
-        // Simulate live data when no real Kafka is connected
-        simulatedTopics: Object.values(KAFKA_TOPICS).map((topic, i) => ({
-          topic,
-          groupId: "remitflow-consumers",
-          partition: 0,
-          currentOffset: 1000 + i * 47,
-          logEndOffset: 1000 + i * 47 + (i % 5),
-          lag: (i % 5),
-          messagesConsumed: 1000 + i * 47,
-          messagesPerSecond: ((i % 200) / 100).toFixed(2),
-          lastConsumedAt: new Date(Date.now() - (i % 60) * 1000).toISOString(),
-          status: "active" as const,
-        })),
+
       };
     }),
 
@@ -158,7 +146,7 @@ export const v98Router = router({
     /** Alias for getMetrics — used by CircuitBreakerDashboard */
     consumerHealth: adminProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return { topics: [], summary: { totalTopics: 0, totalLag: 0, totalConsumed: 0, errorTopics: 0, healthStatus: "unknown" }, simulatedTopics: [] };
+      if (!db) return { topics: [], summary: { totalTopics: 0, totalLag: 0, totalConsumed: 0, errorTopics: 0, healthStatus: "unknown" } };
       const rows = await db.select().from(kafkaConsumerMetrics).orderBy(desc(kafkaConsumerMetrics.recordedAt)).limit(100);
       const byTopic = new Map<string, typeof rows[0]>();
       for (const row of rows) { if (!byTopic.has(row.topic)) byTopic.set(row.topic, row); }
@@ -169,13 +157,7 @@ export const v98Router = router({
       return {
         topics,
         summary: { totalTopics: topics.length, totalLag, totalConsumed, errorTopics, healthStatus: errorTopics === 0 ? "healthy" : "degraded" },
-        simulatedTopics: Object.values(KAFKA_TOPICS).map((topic, i) => ({
-          topic, groupId: "remitflow-consumers", partition: 0,
-          currentOffset: 1000 + i * 47, logEndOffset: 1000 + i * 47 + (i % 5),
-          lag: (i % 5), messagesConsumed: 1000 + i * 47,
-          messagesPerSecond: ((i % 200) / 100).toFixed(2),
-          lastConsumedAt: new Date(Date.now() - (i % 60) * 1000).toISOString(), status: "active" as const,
-        })),
+
       };
     }),
     /** Real circuit breaker stats from in-memory CircuitBreaker instances */

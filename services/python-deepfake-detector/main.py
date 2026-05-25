@@ -385,11 +385,6 @@ async def run_deepfake_check(req: DeepfakeCheckRequest) -> DeepfakeCheckResponse
     model_loaded = await _load_model()
     if model_loaded and _model_available:
         try:
-            is_deepfake, confidence, indicators = await asyncio.to_thread(
-                lambda: asyncio.run(_check_with_model(image_bytes))
-                if False else None  # placeholder — use executor below
-            )
-            # Use thread executor for CPU-bound model inference
             loop = asyncio.get_event_loop()
             is_deepfake, confidence, indicators = await loop.run_in_executor(
                 None, lambda: asyncio.run(_check_with_model(image_bytes))

@@ -1,5 +1,5 @@
-// UPI adapter middleware (placeholder — actual middleware via tower-http layers in main.rs)
-// This module contains shared utilities used by handlers
+// UPI adapter middleware utilities
+// HMAC signature verification for NPCI callbacks and shared security helpers
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;

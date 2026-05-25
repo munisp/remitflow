@@ -595,17 +595,10 @@ def extract_mrz_data(document_b64: str) -> OCRResult:
         except ImportError:
             pass
 
-        # ── Dev stub fallback ─────────────────────────────────────────────────
-        logger.warning("[OCR] Neither passporteye nor pytesseract available — using dev stub")
+        logger.error("[OCR] Neither passporteye nor pytesseract available — OCR extraction unavailable")
         return OCRResult(
-            name="JOHN DOE",
-            dob="1990-01-15",
-            document_number="AB123456",
-            nationality="USA",
-            expiry_date="2030-01-15",
-            mrz_line1="P<USADOE<<JOHN<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<",
-            mrz_line2="AB1234567USA9001151M3001151<<<<<<<<<<<<<<<4",
-            confidence=0.40,
+            name=None, dob=None, document_number=None, nationality=None,
+            expiry_date=None, mrz_line1=None, mrz_line2=None, confidence=0.0
         )
 
     except Exception as e:

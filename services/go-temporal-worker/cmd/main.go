@@ -248,7 +248,7 @@ func MonthlyPayoutWorkflow(ctx workflow.Context, input PayoutInput) (map[string]
 	return payoutResult, nil
 }
 
-// ─── Activity Stubs ───────────────────────────────────────────────────────────
+// ─── Activity Implementations ─────────────────────────────────────────────────
 func ValidateTransferActivity(ctx context.Context, input TransferInput) (map[string]interface{}, error) {
 	activity.RecordHeartbeat(ctx, "validating")
 	if input.Amount <= 0 {

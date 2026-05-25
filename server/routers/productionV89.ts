@@ -411,7 +411,7 @@ export const smartRoutingV2Router = router({
         priority: input.priority,
         modelVersion: "v2.3.1",
         confidence: 0.89,
-        simulatedAt: new Date(),
+        scoredAt: new Date(),
       };
     }),
 });

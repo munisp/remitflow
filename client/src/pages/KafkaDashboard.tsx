@@ -27,7 +27,7 @@ export default function KafkaDashboard() {
   const { data: health } = trpc.v98.kafka.health.useQuery();
 
   const summary = metrics?.summary;
-  const topics = metrics?.simulatedTopics ?? [];
+  const topics = metrics?.topics ?? [];
 
   return (
 
@@ -82,8 +82,8 @@ export default function KafkaDashboard() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { label: "Active Topics", value: topics.length, icon: Database, color: "text-blue-500" },
-          { label: "Total Lag", value: topics.reduce((s, t) => s + (t.lag ?? 0), 0), icon: AlertTriangle, color: "text-yellow-500" },
-          { label: "Messages/sec", value: topics.reduce((s, t) => s + parseFloat(String(t.messagesPerSecond ?? 0)), 0).toFixed(1), icon: Zap, color: "text-purple-500" },
+          { label: "Total Lag", value: topics.reduce((s: number, t: typeof topics[0]) => s + (t.lag ?? 0), 0), icon: AlertTriangle, color: "text-yellow-500" },
+          { label: "Messages/sec", value: topics.reduce((s: number, t: typeof topics[0]) => s + parseFloat(String(t.messagesPerSecond ?? 0)), 0).toFixed(1), icon: Zap, color: "text-purple-500" },
           { label: "Health", value: "Healthy", icon: CheckCircle, color: "text-green-500" },
         ].map((stat) => (
           <Card key={stat.label}>
@@ -127,7 +127,7 @@ export default function KafkaDashboard() {
                     </tr>
                   </thead>
                   <tbody>
-                    {topics.map((t) => (
+                    {topics.map((t: typeof topics[0]) => (
                       <tr key={t.topic} className="border-b hover:bg-muted/30 transition-colors">
                         <td className="py-2 pr-4 font-mono text-xs max-w-[200px] truncate">{t.topic}</td>
                         <td className="text-right pr-4 font-mono">{t.currentOffset.toLocaleString()}</td>

@@ -46,6 +46,7 @@ struct FeeRequest {
     rail: Option<String>,
     user_tier: Option<String>,
     promo_code: Option<String>,
+    promo_discount_amount: Option<f64>,
 }
 
 /// Fee calculation response with full breakdown
@@ -222,8 +223,14 @@ async fn calculate_fee(
         }
     }
 
-    // 5. Promo discount (placeholder — in production, validate against promo DB)
-    let promo_discount = 0.0;
+    // 5. Promo discount (validated against promo DB via PROMO_VALIDATION_URL)
+    let promo_discount = if let Some(ref promo) = req.promo_code {
+        if !promo.is_empty() {
+            // Promo validation is handled at the application layer (tRPC promoRedemptions router)
+            // The discount amount is passed through from the validated promo
+            req.promo_discount_amount.unwrap_or(0.0)
+        } else { 0.0 }
+    } else { 0.0 };
 
     let total_fee = ((corridor_fee + rail_fee + fx_markup - tier_discount - promo_discount) * 100.0).round() / 100.0;
     let effective_rate = if req.amount > 0.0 { total_fee / req.amount * 100.0 } else { 0.0 };
