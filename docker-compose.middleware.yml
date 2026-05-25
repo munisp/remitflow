@@ -558,6 +558,52 @@ services:
       - remitflow_middleware
     logging: *default-logging
 
+  # ── TigerBeetle ─────────────────────────────────────────────────────────
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.15.6
+    container_name: remitflow_tigerbeetle
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - tigerbeetle_data:/var/lib/tigerbeetle
+    entrypoint: >
+      sh -c '
+        if [ ! -f /var/lib/tigerbeetle/0_0.tigerbeetle ]; then
+          tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /var/lib/tigerbeetle/0_0.tigerbeetle;
+        fi;
+        tigerbeetle start --addresses=0.0.0.0:3001 /var/lib/tigerbeetle/0_0.tigerbeetle
+      '
+    healthcheck:
+      test: ["CMD", "sh", "-c", "echo | nc localhost 3001"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - remitflow_middleware
+    logging: *default-logging
+
+  # ── OpenAppSec WAF Agent ───────────────────────────────────────────────
+  openappsec-agent:
+    image: openappsec/agent:latest
+    container_name: remitflow_openappsec_agent
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      OPENAPPSEC_MODE: prevent
+      OPENAPPSEC_LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - remitflow_middleware
+    logging: *default-logging
+
   # ── Dapr Placement Service ────────────────────────────────────────────────
   dapr-placement:
     image: daprio/dapr:1.13.0
@@ -570,7 +616,41 @@ services:
       - remitflow_middleware
     logging: *default-logging
 
+  # ── Dapr Sidecar (RemitFlow App) ───────────────────────────────────────
+  dapr-sidecar:
+    image: daprio/daprd:1.13.0
+    container_name: remitflow_dapr_sidecar
+    restart: unless-stopped
+    depends_on:
+      - dapr-placement
+      - redis
+      - kafka
+    command:
+      - "./daprd"
+      - "-app-id"
+      - "remitflow"
+      - "-app-port"
+      - "3000"
+      - "-dapr-http-port"
+      - "3500"
+      - "-dapr-grpc-port"
+      - "50001"
+      - "-placement-host-address"
+      - "dapr-placement:50006"
+      - "-components-path"
+      - "/components"
+      - "-config"
+      - "/config/config.yaml"
+    ports:
+      - "3500:3500"
+      - "50001:50001"
+    volumes:
+      - ./config/dapr/components:/components:ro
+    network_mode: host
+    logging: *default-logging
+
 volumes:
+  tigerbeetle_data:
   zookeeper_data:
   zookeeper_log:
   kafka_data:

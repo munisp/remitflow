@@ -8,7 +8,11 @@ import { logger } from '../_core/logger';
 
 const OPENSEARCH_URL = process.env.OPENSEARCH_URL || "http://localhost:9200";
 const OPENSEARCH_USER = process.env.OPENSEARCH_USER || "admin";
-const OPENSEARCH_PASS = process.env.OPENSEARCH_PASS || "RemitFlow@Admin2024!";
+const OPENSEARCH_PASS = process.env.OPENSEARCH_PASS || "";
+
+if (!process.env.OPENSEARCH_PASS && process.env.NODE_ENV === "production") {
+  console.warn("[OpenSearch] OPENSEARCH_PASS not set in production — authentication will fail");
+}
 
 // ── Index Names ───────────────────────────────────────────────────────────────
 

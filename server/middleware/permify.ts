@@ -53,7 +53,10 @@ class PermifyClient {
 
   async check(check: PermissionCheck): Promise<boolean> {
     if (!this.available) {
-      // Fallback: always allow when Permify not available (dev mode)
+      if (process.env.NODE_ENV === "production") {
+        logger.warn("[PERMIFY] Unavailable in production — denying by default (fail-closed)");
+        return false;
+      }
       return true;
     }
 
@@ -74,7 +77,7 @@ class PermifyClient {
       const data = (await res.json()) as { can: "CHECK_RESULT_ALLOWED" | "CHECK_RESULT_DENIED" };
       return data.can === "CHECK_RESULT_ALLOWED";
     } catch {
-      return true; // Fail open in dev, fail closed in production
+      return process.env.NODE_ENV !== "production";
     }
   }
 

@@ -101,6 +101,8 @@ let _kafka: Kafka | null = null;
 let _producer: Producer | null = null;
 let _isConnected = false;
 let _connectionFailed = false;
+let _lastConnectionAttempt = 0;
+const KAFKA_RETRY_INTERVAL_MS = 60_000;
 
 function getRealKafka(): Kafka {
   if (!_kafka) {
@@ -115,7 +117,7 @@ function getRealKafka(): Kafka {
 }
 
 export async function getKafkaProducer(): Promise<Producer | null> {
-  if (_connectionFailed) return null;
+  if (_connectionFailed && Date.now() - _lastConnectionAttempt < KAFKA_RETRY_INTERVAL_MS) return null;
   if (_producer && _isConnected) return _producer;
   try {
     _producer = getRealKafka().producer({ allowAutoTopicCreation: true });
@@ -125,13 +127,31 @@ export async function getKafkaProducer(): Promise<Producer | null> {
     return _producer;
   } catch (err) {
     _connectionFailed = true;
-    logger.warn("[Kafka] Producer unavailable — degraded mode:", (err as Error).message);
+    _lastConnectionAttempt = Date.now();
+    logger.warn(`[Kafka] Producer unavailable — will retry in ${KAFKA_RETRY_INTERVAL_MS / 1000}s:`, (err as Error).message);
     return null;
   }
 }
 
+/** Send a failed message to the Dead Letter Queue */
+export async function sendToDLQ(originalTopic: string, key: string, value: string, error: string): Promise<void> {
+  const producer = await getKafkaProducer();
+  if (!producer) {
+    logger.error({ originalTopic, key, error }, "[Kafka] Cannot send to DLQ — producer unavailable");
+    return;
+  }
+  await producer.send({
+    topic: "remitflow.dlq",
+    messages: [{
+      key,
+      value: JSON.stringify({ originalTopic, originalValue: value, error, failedAt: new Date().toISOString() }),
+      headers: { "x-original-topic": Buffer.from(originalTopic), "x-error": Buffer.from(error.slice(0, 500)) },
+    }],
+  });
+}
+
 export async function ensureTopicsExist(): Promise<void> {
-  if (_connectionFailed) return;
+  if (_connectionFailed && Date.now() - _lastConnectionAttempt < KAFKA_RETRY_INTERVAL_MS) return;
   try {
     const admin: Admin = getRealKafka().admin();
     await admin.connect();

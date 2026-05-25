@@ -14,6 +14,9 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _db: any = null;
 let _client: ReturnType<typeof postgres> | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _readDb: any = null;
+let _readClient: ReturnType<typeof postgres> | null = null;
 
 export async function closeDb() {
   if (_client) {
@@ -21,39 +24,78 @@ export async function closeDb() {
     _client = null;
     _db = null;
   }
+  if (_readClient) {
+    try { await _readClient.end(); } catch { /* ignore */ }
+    _readClient = null;
+    _readDb = null;
+  }
+}
+
+function buildPoolConfig(): { max: number; idle_timeout: number; max_lifetime: number; connect_timeout: number; prepare: boolean } {
+  return {
+    max: parseInt(process.env.DB_POOL_MAX || "50", 10),
+    idle_timeout: parseInt(process.env.DB_POOL_IDLE_TIMEOUT || "30", 10),
+    max_lifetime: parseInt(process.env.DB_POOL_MAX_LIFETIME || "1800", 10),
+    connect_timeout: 10,
+    prepare: true,
+  };
+}
+
+async function tryConnect(url: string): Promise<{ client: ReturnType<typeof postgres>; db: ReturnType<typeof drizzle> } | null> {
+  try {
+    const probe = postgres(url, { max: 1, connect_timeout: 3 });
+    await probe`SELECT 1`;
+    await probe.end();
+    const client = postgres(url, buildPoolConfig());
+    const db = drizzle(client);
+    return { client, db };
+  } catch {
+    logger.warn("[Database] Could not reach", url.replace(/:[^:@]+@/, ":***@").split("?")[0]);
+    return null;
+  }
 }
 
 export async function getDb() {
   if (!_db) {
-    // Try LOCAL_DATABASE_URL first; if unreachable, fall back to DATABASE_URL (TiDB)
     const localUrl = process.env.LOCAL_DATABASE_URL;
     const remoteUrl = process.env.DATABASE_URL;
     const urlsToTry = [localUrl, remoteUrl].filter(Boolean) as string[];
     for (const url of urlsToTry) {
-      try {
-        const probe = postgres(url, { max: 1, connect_timeout: 3 });
-        await probe`SELECT 1`;
-        await probe.end();
-        const poolMax = parseInt(process.env.DB_POOL_MAX || "50", 10);
-        const poolIdleTimeout = parseInt(process.env.DB_POOL_IDLE_TIMEOUT || "30", 10);
-        const poolMaxLifetime = parseInt(process.env.DB_POOL_MAX_LIFETIME || "1800", 10);
-        _client = postgres(url, {
-          max: poolMax,                       // production: 50 connections per instance (configurable via DB_POOL_MAX)
-          idle_timeout: poolIdleTimeout,      // close idle connections after 30s
-          max_lifetime: poolMaxLifetime,      // recycle connections every 30 min
-          connect_timeout: 10,                // fail fast if DB is unreachable
-          prepare: true,                      // use prepared statements for query plan caching
-        });
-        _db = drizzle(_client);
-        logger.info("[Database] Connected:", url.replace(/:[^:@]+@/, ":***@").split("?")[0]);
+      const result = await tryConnect(url);
+      if (result) {
+        _client = result.client;
+        _db = result.db;
+        logger.info("[Database] Primary connected:", url.replace(/:[^:@]+@/, ":***@").split("?")[0]);
         break;
-      } catch {
-        logger.warn("[Database] Could not reach", url.replace(/:[^:@]+@/, ":***@").split("?")[0], "- trying next");
       }
     }
-    if (!_db) logger.warn("[Database] All connection attempts failed");
+    if (!_db) logger.warn("[Database] All primary connection attempts failed");
+
+    // Read replica (for analytics/reporting queries)
+    const replicaUrl = process.env.DATABASE_REPLICA_URL;
+    if (replicaUrl) {
+      const replicaResult = await tryConnect(replicaUrl);
+      if (replicaResult) {
+        _readClient = replicaResult.client;
+        _readDb = replicaResult.db;
+        logger.info("[Database] Read replica connected:", replicaUrl.replace(/:[^:@]+@/, ":***@").split("?")[0]);
+      }
+    }
   }
   return _db;
+}
+
+/** Read-optimized DB connection (falls back to primary if no replica configured) */
+export async function getReadDb() {
+  await getDb();
+  return _readDb || _db;
+}
+
+/** Throws if DB unavailable instead of returning null — use for critical operations */
+export async function requireDb() {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  return db;
 }
 
 export async function upsertUser(user: InsertUser): Promise<{ isNew: boolean }> {

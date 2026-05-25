@@ -195,4 +195,139 @@ export const daprIntegrationRouter = router({
       activeActorsCount: result.data?.actors?.length || 0,
     };
   }),
+
+  /**
+   * Acquire a distributed lock
+   */
+  acquireLock: protectedProcedure
+    .input(z.object({
+      resourceId: z.string().min(1).max(200),
+      lockOwner: z.string().min(1).max(100),
+      expiryInSeconds: z.number().int().min(1).max(600).default(30),
+    }))
+    .mutation(async ({ input }) => {
+      const result = await daprFetch(
+        `/v1.0-alpha1/lock/${DEFAULT_STATESTORE}`,
+        { method: "POST", body: JSON.stringify(input) }
+      );
+      return { success: result.ok && (result.data as { success?: boolean })?.success === true, error: result.error || null };
+    }),
+
+  /**
+   * Release a distributed lock
+   */
+  releaseLock: protectedProcedure
+    .input(z.object({
+      resourceId: z.string().min(1).max(200),
+      lockOwner: z.string().min(1).max(100),
+    }))
+    .mutation(async ({ input }) => {
+      const result = await daprFetch(
+        `/v1.0-alpha1/unlock/${DEFAULT_STATESTORE}`,
+        { method: "POST", body: JSON.stringify(input) }
+      );
+      return { success: result.ok, error: result.error || null };
+    }),
+
+  /**
+   * Get a secret from Dapr secret store
+   */
+  getSecret: protectedProcedure
+    .input(z.object({
+      secretName: z.string().min(1).max(200),
+      storeName: z.string().default("kubernetes"),
+    }))
+    .query(async ({ input }) => {
+      const result = await daprFetch(`/v1.0/secrets/${input.storeName}/${encodeURIComponent(input.secretName)}`);
+      return { available: result.ok, data: result.data || null, error: result.error || null };
+    }),
+
+  /**
+   * Invoke an actor method
+   */
+  invokeActor: protectedProcedure
+    .input(z.object({
+      actorType: z.string().min(1).max(100),
+      actorId: z.string().min(1).max(200),
+      method: z.string().min(1).max(100),
+      data: z.record(z.string(), z.unknown()).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const result = await daprFetch(
+        `/v1.0/actors/${input.actorType}/${input.actorId}/method/${input.method}`,
+        { method: "POST", body: input.data ? JSON.stringify(input.data) : undefined }
+      );
+
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "dapr.invokeActor",
+        targetType: "dapr_actor",
+        description: JSON.stringify({ actorType: input.actorType, actorId: input.actorId, method: input.method, available: result.ok }),
+      });
+
+      return { success: result.ok, response: result.data, error: result.error || null };
+    }),
+
+  /**
+   * Invoke an output binding
+   */
+  invokeBinding: protectedProcedure
+    .input(z.object({
+      bindingName: z.string().min(1).max(100),
+      operation: z.string().min(1).max(50),
+      data: z.unknown().optional(),
+      metadata: z.record(z.string(), z.string()).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const result = await daprFetch(
+        `/v1.0/bindings/${input.bindingName}`,
+        { method: "POST", body: JSON.stringify({ operation: input.operation, data: input.data, metadata: input.metadata }) }
+      );
+
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "dapr.invokeBinding",
+        targetType: "dapr_binding",
+        description: JSON.stringify({ bindingName: input.bindingName, operation: input.operation, available: result.ok }),
+      });
+
+      return { success: result.ok, response: result.data, error: result.error || null };
+    }),
+
+  /**
+   * Get registered subscriptions
+   */
+  subscriptions: protectedProcedure.query(async () => {
+    const { getDaprClient } = await import("../middleware/dapr");
+    return { subscriptions: getDaprClient().getSubscriptions() };
+  }),
+
+  /**
+   * Execute a state transaction (atomic multi-key operations)
+   */
+  stateTransaction: protectedProcedure
+    .input(z.object({
+      operations: z.array(z.object({
+        operation: z.enum(["upsert", "delete"]),
+        request: z.object({
+          key: z.string().min(1),
+          value: z.unknown().optional(),
+        }),
+      })),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const result = await daprFetch(
+        `/v1.0/state/${DEFAULT_STATESTORE}/transaction`,
+        { method: "POST", body: JSON.stringify({ operations: input.operations }) }
+      );
+
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "dapr.stateTransaction",
+        targetType: "dapr_state",
+        description: JSON.stringify({ opCount: input.operations.length, available: result.ok }),
+      });
+
+      return { success: result.ok, error: result.error || null };
+    }),
 });

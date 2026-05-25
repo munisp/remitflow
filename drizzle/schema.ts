@@ -3649,7 +3649,7 @@ export const agentCashinTransactions = pgTable("agent_cashin_transactions", {
   agentFeeNgn: numeric("agent_fee_ngn", { precision: 10, scale: 2 }),
   tigerBeetleDebitEntry: bigint("tiger_beetle_debit_entry", { mode: "bigint" }),
   tigerBeetleCreditEntry: bigint("tiger_beetle_credit_entry", { mode: "bigint" }),
-  mojalooopTransferId: varchar("mojaloop_transfer_id", { length: 200 }),
+  mojaloopTransferId: varchar("mojaloop_transfer_id", { length: 200 }),
   fluvioOffset: bigint("fluvio_offset", { mode: "bigint" }),
   reference: varchar("reference", { length: 100 }).notNull(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
