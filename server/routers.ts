@@ -130,7 +130,7 @@ import { securityAuditRouter } from "./routers/securityAudit.js";
 import { tenantFlagProcedure, invalidateFlagCache } from "./routers/tenantEnforcement.js";
 import { 
   cipsRouter, upiRouter, pixRouter, kafkaAdminRouter, temporalAdminRouter,
-  permifyRouter, tigerBeetleRouter, openSearchRouter, lakehouseRouter as lakehouseExtRouter,
+  permifyRouter, tigerBeetleRouter, openSearchRouter,
   amlEngineRouter, fraudMlRouter, transferEngineRouter, pdfReceiptRouter,
   searchIndexerRouter, rateLimiterRouter, keycloakRouter, mojaloopConnectorRouter,
   extendedServicesHealthRouter
@@ -6589,7 +6589,7 @@ Case: #${input.caseId}`,
   permify: permifyRouter,
   tigerBeetle: tigerBeetleRouter,
   openSearch: openSearchRouter,
-  lakehouseExt: lakehouseExtRouter,
+  lakehouseExt: lakehouseRouter,
   amlEngine: amlEngineRouter,
   fraudMl: fraudMlRouter,
   transferEngine: transferEngineRouter,

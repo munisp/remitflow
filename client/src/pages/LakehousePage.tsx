@@ -23,17 +23,19 @@ export default function LakehousePage() {
   const { data: statusData } = trpc.lakehouse.status.useQuery();
 
   const etlMutation = trpc.lakehouse.runETL.useMutation({
-    onSuccess: (data) => {
-      setEtlResult(data);
-      toast.success(`ETL complete: ${data.totalRows} rows processed in ${data.durationMs}ms`);
+    onSuccess: (data: unknown) => {
+      const d = data as Record<string, unknown>;
+      setEtlResult(d);
+      toast.success(`ETL complete: ${d.totalRows ?? d.duration_ms ?? ""} rows processed`);
     },
     onError: (err) => toast.error(err.message),
   });
 
   const bronzeMutation = trpc.lakehouse.ingestBronze.useMutation({
-    onSuccess: (data) => {
-      setBronzeResult(data);
-      toast.success(`Bronze ingestion: ${data.rowCount} rows → ${data.key}`);
+    onSuccess: (data: unknown) => {
+      const d = data as Record<string, unknown>;
+      setBronzeResult(d);
+      toast.success(`Bronze ingestion complete`);
     },
     onError: (err) => toast.error(err.message),
   });
