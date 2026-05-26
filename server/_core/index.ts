@@ -75,13 +75,15 @@ async function startServer() {
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
-  // Health check endpoint (public, no auth)
+  // Health check endpoint (public, no auth) — returns 503 during shutdown
   app.get("/health", (_req, res) => {
+    if (isShuttingDown) return res.status(503).json({ status: "shutting_down" });
     res.json({ status: "ok", timestamp: new Date().toISOString(), version: "69.0.0" });
   });
 
   // API health alias (for smoke tests and legacy clients)
   app.get("/api/health", (_req, res) => {
+    if (isShuttingDown) return res.status(503).json({ status: "shutting_down" });
     res.json({ status: "ok", timestamp: new Date().toISOString(), version: "69.0.0" });
   });
 
@@ -1135,7 +1137,11 @@ startServer().catch(console.error);
 
 // ─── Graceful Shutdown ───────────────────────────────────────────────────────
 // Handles SIGTERM (Kubernetes pod termination) and SIGINT (Ctrl+C)
+// Steps: 1) Stop accepting new connections  2) Drain in-flight requests
+//        3) Close downstream connections (Redis, DB, Kafka)  4) Exit
 let isShuttingDown = false;
+
+export function isShutdownInProgress(): boolean { return isShuttingDown; }
 
 async function gracefulShutdown(signal: string) {
   if (isShuttingDown) return;
@@ -1150,6 +1156,15 @@ async function gracefulShutdown(signal: string) {
 
   // Stop WebSocket broadcaster
   stopServicesHealthWS();
+
+  // Disconnect Redis
+  try {
+    const { disconnectRedis } = await import("../middleware/redis");
+    await disconnectRedis();
+    logger.info("[Shutdown] Redis disconnected");
+  } catch (err: any) {
+    logger.warn({ errMsg: err.message }, "[Shutdown] Redis disconnect warning:");
+  }
 
   try {
     // Close DB connection pool

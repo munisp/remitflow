@@ -39,6 +39,7 @@ import crypto from "crypto";
 import { getDb } from "./db";
 import { auditLogs } from "../drizzle/schema";
 import { logger } from './_core/logger';
+import { cacheGet, cacheSet, getRedisClient, cacheIncr } from './middleware/redis';
 
 // ─── 1. Progressive Slow-Down (Tarpitting) ────────────────────────────────────
 // After 50 req/min, each additional request is delayed by 500ms (max 20s).
@@ -200,84 +201,80 @@ export function sanitizeUploadFilename(filename: string): string {
 }
 
 // ─── 13. Double-Spend / Replay Detection ─────────────────────────────────────
-// Idempotency keys stored in-memory with 24h TTL (Redis in production).
-const idempotencyStore = new Map<string, { result: unknown; expiresAt: number }>();
-export function checkIdempotencyKey(key: string): { duplicate: boolean; result?: unknown } {
-  const entry = idempotencyStore.get(key);
-  if (!entry) return { duplicate: false };
-  if (Date.now() > entry.expiresAt) {
-    idempotencyStore.delete(key);
-    return { duplicate: false };
-  }
-  return { duplicate: true, result: entry.result };
+// Idempotency keys stored in Redis with 24h TTL (process-local fallback).
+const _idempotencyFallback = new Map<string, { result: unknown; expiresAt: number }>();
+export async function checkIdempotencyKey(key: string): Promise<{ duplicate: boolean; result?: unknown }> {
+  const cached = await cacheGet<{ result: unknown }>(`idempotency:atk:${key}`);
+  if (cached) return { duplicate: true, result: cached.result };
+  const entry = _idempotencyFallback.get(key);
+  if (entry && Date.now() <= entry.expiresAt) return { duplicate: true, result: entry.result };
+  if (entry) _idempotencyFallback.delete(key);
+  return { duplicate: false };
 }
-export function storeIdempotencyResult(key: string, result: unknown): void {
-  idempotencyStore.set(key, { result, expiresAt: Date.now() + 24 * 60 * 60 * 1000 });
-  // Prune old entries every 1000 stores
-  if (idempotencyStore.size % 1000 === 0) {
+export async function storeIdempotencyResult(key: string, result: unknown): Promise<void> {
+  await cacheSet(`idempotency:atk:${key}`, { result }, 86400);
+  _idempotencyFallback.set(key, { result, expiresAt: Date.now() + 86400_000 });
+  if (_idempotencyFallback.size > 5000) {
     const now = Date.now();
-    for (const [k, v] of Array.from(idempotencyStore.entries())) {
-      if (now > v.expiresAt) idempotencyStore.delete(k);
+    for (const [k, v] of Array.from(_idempotencyFallback.entries())) {
+      if (now > v.expiresAt) _idempotencyFallback.delete(k);
     }
   }
 }
 
 // ─── 14. Account-Takeover (ATO) Detection ────────────────────────────────────
 interface LoginEvent { ip: string; ua: string; ts: number }
-const loginHistory = new Map<number, LoginEvent[]>();
+const _loginFallback = new Map<number, LoginEvent[]>();
 
-export function detectATO(
+export async function detectATO(
   userId: number,
   ip: string,
   ua: string
-): { suspicious: boolean; reason?: string } {
-  const history = loginHistory.get(userId) ?? [];
+): Promise<{ suspicious: boolean; reason?: string }> {
+  const redisKey = `ato:history:${userId}`;
+  let history: LoginEvent[] = await cacheGet<LoginEvent[]>(redisKey) ?? _loginFallback.get(userId) ?? [];
   const now = Date.now();
-  const recent = history.filter((e) => now - e.ts < 60 * 60 * 1000); // last 1h
+  const recent = history.filter((e) => now - e.ts < 60 * 60 * 1000);
 
-  // Impossible travel: same user from >3 different IPs in 1h
   const uniqueIPs = new Set(recent.map((e) => e.ip));
   uniqueIPs.add(ip);
   if (uniqueIPs.size > 3) {
     return { suspicious: true, reason: `Impossible travel: ${uniqueIPs.size} IPs in 1h` };
   }
 
-  // New device + new IP simultaneously
   const knownIPs = new Set(history.map((e) => e.ip));
   const knownUAs = new Set(history.map((e) => e.ua));
   if (!knownIPs.has(ip) && !knownUAs.has(ua) && history.length > 0) {
     return { suspicious: true, reason: "New device and new IP simultaneously" };
   }
 
-  // Record this event
   history.push({ ip, ua, ts: now });
-  loginHistory.set(userId, history.slice(-100)); // keep last 100
+  history = history.slice(-100);
+  await cacheSet(redisKey, history, 7200);
+  _loginFallback.set(userId, history);
   return { suspicious: false };
 }
 
 // ─── 15. BEC Beneficiary-Swap Detection ──────────────────────────────────────
-// Flags when a beneficiary's bank account changes within 24h of a transfer
-const recentBeneficiaryChanges = new Map<string, number>(); // key: userId+benefId → timestamp
-export function flagBeneficiarySwap(userId: number, beneficiaryId: number): boolean {
-  const key = `${userId}:${beneficiaryId}`;
-  const lastChange = recentBeneficiaryChanges.get(key);
-  if (lastChange && Date.now() - lastChange < 24 * 60 * 60 * 1000) {
-    return true; // Beneficiary changed within 24h — flag for review
-  }
+export async function flagBeneficiarySwap(userId: number, beneficiaryId: number): Promise<boolean> {
+  const redisKey = `bec:swap:${userId}:${beneficiaryId}`;
+  const lastChange = await cacheGet<number>(redisKey);
+  if (lastChange && Date.now() - lastChange < 86400_000) return true;
   return false;
 }
-export function recordBeneficiaryChange(userId: number, beneficiaryId: number): void {
-  recentBeneficiaryChanges.set(`${userId}:${beneficiaryId}`, Date.now());
+export async function recordBeneficiaryChange(userId: number, beneficiaryId: number): Promise<void> {
+  await cacheSet(`bec:swap:${userId}:${beneficiaryId}`, Date.now(), 86400);
 }
 
 // ─── 16. Round-Tripping / Money Laundering Velocity ──────────────────────────
 // Detects rapid send→receive→send cycles (structuring / layering)
-const transferVelocity = new Map<number, number[]>(); // userId → timestamps
-export function detectRoundTripping(userId: number): { flagged: boolean; reason?: string } {
+export async function detectRoundTripping(userId: number): Promise<{ flagged: boolean; reason?: string }> {
+  const redisKey = `velocity:transfers:${userId}`;
   const now = Date.now();
-  const times = (transferVelocity.get(userId) ?? []).filter((t) => now - t < 60 * 60 * 1000);
+  let times: number[] = await cacheGet<number[]>(redisKey) ?? [];
+  times = times.filter((t) => now - t < 3600_000);
   times.push(now);
-  transferVelocity.set(userId, times);
+  await cacheSet(redisKey, times, 3600);
   if (times.length >= 10) {
     return { flagged: true, reason: `${times.length} transfers in 1h — possible structuring` };
   }
@@ -286,12 +283,18 @@ export function detectRoundTripping(userId: number): { flagged: boolean; reason?
 
 // ─── 17. Credential Stuffing Detection ───────────────────────────────────────
 // Many different IPs attempting the same account = stuffing attack
-const accountAttempts = new Map<string, Set<string>>(); // username → Set<IP>
-export function detectCredentialStuffing(username: string, ip: string): boolean {
-  const ips = accountAttempts.get(username) ?? new Set();
-  ips.add(ip);
-  accountAttempts.set(username, ips);
-  return ips.size > 10; // >10 different IPs trying same account = stuffing
+export async function detectCredentialStuffing(username: string, ip: string): Promise<boolean> {
+  const redisKey = `stuffing:${username}`;
+  const r = getRedisClient();
+  if (r) {
+    try {
+      await r.sadd(redisKey, ip);
+      await r.expire(redisKey, 900); // 15 min window
+      const count = await r.scard(redisKey);
+      return count > 10;
+    } catch { /* fallback below */ }
+  }
+  return false; // Fail open on Redis unavailability for this non-critical check
 }
 
 // ─── 18. API Enumeration Prevention ──────────────────────────────────────────

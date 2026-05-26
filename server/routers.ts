@@ -1036,7 +1036,7 @@ export const appRouter = router({
       const velocity = await checkVelocity(ctx.user!.id, 1, 10);
       if (!velocity.allowed) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: `Too many transfers (${velocity.attemptsInWindow}/10 in last hour). Please wait.` });
       // Round-tripping / money laundering velocity detection (v143)
-      const roundTrip = detectRoundTripping(ctx.user!.id);
+      const roundTrip = await detectRoundTripping(ctx.user!.id);
       if (roundTrip.flagged) {
         getDb().then(db => db && db.insert(complianceCases).values({
           userId: ctx.user!.id, caseType: "aml_review" as any, severity: "high" as any, status: "open" as any,
