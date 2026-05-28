@@ -1,0 +1,63 @@
+groups:
+  - name: cache_alerts
+    rules:
+      # Alert when any cache hit rate drops below 70%
+      - alert: CacheHitRateLow
+        expr: >
+          (remitflow_cache_hits_total / (remitflow_cache_hits_total + remitflow_cache_misses_total)) < 0.7
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Cache hit rate below 70%"
+          description: "Cache {{ $labels.cache }} hit rate is {{ $value | humanizePercentage }} (threshold: 70%)"
+          runbook_url: "https://docs.remitflow.app/runbooks/cache-low-hit-rate"
+
+      # Alert when cache is near capacity (>90% full)
+      - alert: CacheNearCapacity
+        expr: >
+          remitflow_cache_size_total / remitflow_cache_max_size > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Cache near capacity"
+          description: "Cache {{ $labels.cache }} is {{ $value | humanizePercentage }} full. Evictions will increase."
+
+      # Alert when eviction rate is very high (>100/min)
+      - alert: CacheEvictionRateHigh
+        expr: >
+          rate(remitflow_cache_evictions_total[5m]) * 60 > 100
+        for: 10m
+        labels:
+          severity: info
+          team: platform
+        annotations:
+          summary: "High cache eviction rate"
+          description: "Cache {{ $labels.cache }} is evicting {{ $value }} entries/min. Consider increasing max size."
+
+      # Alert on slow queries (>10 per 5 min window)
+      - alert: SlowQueriesHigh
+        expr: >
+          rate(remitflow_slow_query_alerts_total[5m]) * 300 > 10
+        for: 5m
+        labels:
+          severity: critical
+          team: backend
+        annotations:
+          summary: "High slow query rate"
+          description: "{{ $value }} slow queries in the last 5 minutes. Check pg_stat_statements."
+
+      # Alert on N+1 query patterns
+      - alert: N1QueryPatternDetected
+        expr: >
+          remitflow_n1_candidate_count > 5
+        for: 15m
+        labels:
+          severity: warning
+          team: backend
+        annotations:
+          summary: "N+1 query patterns detected"
+          description: "{{ $value }} potential N+1 query patterns. Review slow query monitor report."
