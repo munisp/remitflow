@@ -2,6 +2,7 @@
  * Centralized feature flags client — P2 Frontend 3.14
  * Replaces 91 scattered feature flag references with unified system.
  */
+import { BoundedCache, registerCache } from "./boundedCache";
 
 type FlagValue = boolean | string | number;
 
@@ -48,12 +49,23 @@ const FLAG_DEFAULTS: Record<string, FlagValue> = {
   "api-access": false,
 };
 
-const flagOverrides = new Map<string, FlagValue>();
-const userFlagCache = new Map<string, Map<string, FlagValue>>();
+const flagOverrides = new BoundedCache<string, FlagValue>({
+  maxSize: 500,
+  defaultTtlMs: 3_600_000, // 1 hour (admin-set, rarely changes)
+  name: "feature-flag-overrides",
+});
+registerCache(flagOverrides as unknown as BoundedCache<unknown, unknown>);
+const userFlagCache = new BoundedCache<string, Map<string, FlagValue>>({
+  maxSize: 10_000,
+  defaultTtlMs: 300_000, // 5 minutes per user
+  name: "user-feature-flags",
+});
+registerCache(userFlagCache as unknown as BoundedCache<unknown, unknown>);
 
 export function isEnabled(flag: string, userId?: number): boolean {
-  if (flagOverrides.has(flag)) {
-    return Boolean(flagOverrides.get(flag));
+  const override = flagOverrides.get(flag);
+  if (override !== undefined) {
+    return Boolean(override);
   }
 
   if (userId) {
@@ -67,9 +79,8 @@ export function isEnabled(flag: string, userId?: number): boolean {
 }
 
 export function getFlagValue(flag: string, defaultValue?: FlagValue): FlagValue {
-  if (flagOverrides.has(flag)) {
-    return flagOverrides.get(flag)!;
-  }
+  const override = flagOverrides.get(flag);
+  if (override !== undefined) return override;
   return FLAG_DEFAULTS[flag] ?? defaultValue ?? false;
 }
 
@@ -79,17 +90,19 @@ export function setFlag(flag: string, value: FlagValue): void {
 
 export function setUserFlag(userId: number, flag: string, value: FlagValue): void {
   const key = String(userId);
-  if (!userFlagCache.has(key)) {
-    userFlagCache.set(key, new Map());
+  let userFlags = userFlagCache.get(key);
+  if (!userFlags) {
+    userFlags = new Map();
   }
-  userFlagCache.get(key)!.set(flag, value);
+  userFlags.set(flag, value);
+  userFlagCache.set(key, userFlags);
 }
 
 export function getAllFlags(): Record<string, FlagValue> {
   const result: Record<string, FlagValue> = { ...FLAG_DEFAULTS };
-  flagOverrides.forEach((value, key) => {
+  for (const [key, value] of flagOverrides.entries()) {
     result[key] = value;
-  });
+  }
   return result;
 }
 

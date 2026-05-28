@@ -242,7 +242,13 @@ export const transferLimitsRouter = router({
 });
 
 // ─── FX Rate Lock Router ──────────────────────────────────────────────────────
-const QUOTE_CACHE = new Map<string, { rate: number; fee: number; expiresAt: number; quoteId: string }>();
+import { BoundedCache, registerCache } from "../lib/boundedCache";
+const QUOTE_CACHE = new BoundedCache<string, { rate: number; fee: number; expiresAt: number; quoteId: string }>({
+  maxSize: 5000,
+  defaultTtlMs: 15 * 60 * 1000, // 15 minutes
+  name: "fx-quote-cache",
+});
+registerCache(QUOTE_CACHE as unknown as BoundedCache<unknown, unknown>);
 
 export const fxRateLockRouter = router({
   lockQuote: protectedProcedure

@@ -55,20 +55,24 @@ import {
 } from "../../drizzle/schema.js";
 import { sendAuditLog, runComplianceCheck, getFraudScore } from "../_core/polyglotClient.js";
 
-// ─── In-memory system config cache (hot-reload) ───────────────────────────────
-const configCache = new Map<string, { value: string; loadedAt: number }>();
+// ─── In-memory system config cache (hot-reload) — bounded LRU ────────────────
+import { BoundedCache, registerCache } from "../lib/boundedCache";
 const CONFIG_CACHE_TTL_MS = 30_000; // 30 seconds
+const configCache = new BoundedCache<string, string>({
+  maxSize: 500,
+  defaultTtlMs: CONFIG_CACHE_TTL_MS,
+  name: "system-config",
+});
+registerCache(configCache as unknown as BoundedCache<unknown, unknown>);
 
 export async function getSystemConfigValue(key: string): Promise<string | null> {
   const cached = configCache.get(key);
-  if (cached && Date.now() - cached.loadedAt < CONFIG_CACHE_TTL_MS) {
-    return cached.value;
-  }
+  if (cached !== undefined) return cached;
   const db = await getDb();
   if (!db) return null;
   const [row] = await db.select({ value: systemConfig.value }).from(systemConfig).where(eq(systemConfig.key, key));
   if (row) {
-    configCache.set(key, { value: row.value, loadedAt: Date.now() });
+    configCache.set(key, row.value);
     return row.value;
   }
   return null;

@@ -2,6 +2,7 @@
  * Per-endpoint rate limiting — P1 Security 5.4
  * Different limits for auth, transfers, queries, admin.
  */
+import { BoundedCache, registerCache } from "./boundedCache";
 
 interface RateLimitConfig {
   windowMs: number;
@@ -26,16 +27,12 @@ interface RateLimitEntry {
   resetAt: number;
 }
 
-const store = new Map<string, RateLimitEntry>();
-
-function cleanupExpired() {
-  const now = Date.now();
-  store.forEach((entry, key) => {
-    if (entry.resetAt <= now) store.delete(key);
-  });
-}
-
-setInterval(cleanupExpired, 60_000);
+const store = new BoundedCache<string, RateLimitEntry>({
+  maxSize: 50_000,
+  defaultTtlMs: 300_000, // 5 minutes max window
+  name: "rate-limit-per-endpoint",
+});
+registerCache(store as unknown as BoundedCache<unknown, unknown>);
 
 export function checkRateLimit(
   endpoint: string,
@@ -56,11 +53,12 @@ export function checkRateLimit(
   let entry = store.get(key);
 
   if (!entry || entry.resetAt <= now) {
-    entry = { count: 0, resetAt: now + config.windowMs };
-    store.set(key, entry);
+    entry = { count: 1, resetAt: now + config.windowMs };
+    store.set(key, entry, config.windowMs);
+  } else {
+    entry = { count: entry.count + 1, resetAt: entry.resetAt };
+    store.set(key, entry, entry.resetAt - now);
   }
-
-  entry.count++;
 
   return {
     allowed: entry.count <= config.maxRequests,

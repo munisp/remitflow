@@ -14,6 +14,7 @@ import {
   users,
 } from "../drizzle/schema.js";
 import { eq, and } from "drizzle-orm";
+import { BoundedCache, registerCache } from "./lib/boundedCache";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,15 +36,21 @@ export interface WhiteLabelConfig {
   customDomain: string | null;
 }
 
-// ─── Cache (TTL: 60 seconds) ──────────────────────────────────────────────────
+// ─── Cache (TTL: 60 seconds) — bounded LRU ───────────────────────────────────
 
 const CACHE_TTL = 60_000;
-const tenantCache = new Map<number, { data: TenantContext; ts: number }>();
-const flagCache = new Map<string, { data: Record<string, boolean>; ts: number }>();
-
-function isFresh(ts: number) {
-  return Date.now() - ts < CACHE_TTL;
-}
+const tenantCache = new BoundedCache<number, TenantContext>({
+  maxSize: 5000,
+  defaultTtlMs: CACHE_TTL,
+  name: "tenant-context",
+});
+registerCache(tenantCache as unknown as BoundedCache<unknown, unknown>);
+const flagCache = new BoundedCache<string, Record<string, boolean>>({
+  maxSize: 5000,
+  defaultTtlMs: CACHE_TTL,
+  name: "tenant-flags",
+});
+registerCache(flagCache as unknown as BoundedCache<unknown, unknown>);
 
 // ─── Core resolver ────────────────────────────────────────────────────────────
 
@@ -52,9 +59,9 @@ function isFresh(ts: number) {
  * Falls back to the default "remitflow-default" tenant.
  */
 export async function resolveTenantContext(userId: number): Promise<TenantContext> {
-  // Check cache
+  // Check cache (BoundedCache handles TTL)
   const cached = tenantCache.get(userId);
-  if (cached && isFresh(cached.ts)) return cached.data;
+  if (cached) return cached;
 
   const db = await getDb();
   if (!db) {
@@ -134,7 +141,7 @@ export async function resolveTenantContext(userId: number): Promise<TenantContex
     whiteLabelConfig,
   };
 
-  tenantCache.set(userId, { data: ctx, ts: Date.now() });
+  tenantCache.set(userId, ctx);
   return ctx;
 }
 
@@ -212,3 +219,5 @@ export async function tenantConfigHandler(req: Request, res: Response) {
 export function invalidateTenantCache(userId: number) {
   tenantCache.delete(userId);
 }
+
+export { tenantCache, flagCache as tenantFlagCacheMap };
