@@ -327,6 +327,38 @@ async function getLiveRates(base = "USD"): Promise<Record<string, number>> {
 function formatTxn(t: any) {
   return { ...t, fromAmount: Number(t.fromAmount), toAmount: t.toAmount ? Number(t.toAmount) : undefined, fee: Number(t.fee ?? 0), fxRate: t.fxRate ? Number(t.fxRate) : undefined, amount: Number(t.fromAmount ?? 0), currency: t.fromCurrency ?? "NGN" };
 }
+
+async function enforceTransferLimits(userId: number, amount: number, currency: string, _kycTier?: string | null) {
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [userRow] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, userId)).limit(1);
+  const userTier = (userRow?.kycTier ?? _kycTier ?? "tier0") as KycTier;
+  const rates = await getLiveRates("USD");
+  const fromRate = rates[currency] ?? 1;
+  const amountUSD = amount / fromRate;
+  const now = new Date();
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const [dailyRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
+  const [monthlyRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+  const dailyUsedUSD = Number(dailyRow?.total ?? 0) / fromRate;
+  const monthlyUsedUSD = Number(monthlyRow?.total ?? 0) / fromRate;
+  const limitCheck = checkTransferLimit(amountUSD, userTier, dailyUsedUSD, monthlyUsedUSD);
+  if (!limitCheck.allowed) throw new TRPCError({ code: "FORBIDDEN", message: limitCheck.reason ?? "Transfer limit exceeded" });
+  const amlFlags = getAmlFlags(amountUSD);
+  if (amlFlags.length > 0) {
+    logger.info(`[AML] Flags for user ${userId}: ${amlFlags.join(", ")}`);
+    db.insert(complianceCases).values({
+      userId, caseType: (amlFlags.includes("CTR_REQUIRED") ? "ctr" : amlFlags.includes("SAR_REVIEW") ? "sar" : "aml_review") as any,
+      severity: (amountUSD >= 10_000 ? "critical" : amountUSD >= 5_000 ? "high" : "medium") as any,
+      status: "open" as any,
+      title: `Auto-flagged: ${amlFlags[0]} — ${amount} ${currency}`,
+      description: `Transaction of ${amount} ${currency} (≈$${amountUSD.toFixed(0)} USD) triggered AML flags: ${amlFlags.join(", ")}`,
+      riskScore: Math.min(100, Math.round((amountUSD / 10_000) * 80 + 20)),
+    } as any).catch((e: unknown) => logger.warn({ err: e instanceof Error ? e.message : String(e) }, "[AML] Failed to auto-create compliance case"));
+  }
+  return { amountUSD, amlFlags };
+}
 const CURRENCY_META: Record<string, { symbol: string; flag: string; name: string }> = {
   NGN: { symbol: "\u20a6", flag: "\ud83c\uddf3\ud83c\uddec", name: "Nigerian Naira" },
   USD: { symbol: "$", flag: "\ud83c\uddfa\ud83c\uddf8", name: "US Dollar" },
@@ -3113,6 +3145,7 @@ export const appRouter = router({
       return filtered.map((w: any) => ({ ...formatWallet(w), symbol: w.currency, protocol: w.currency === "NGNT" ? "ERC-20" : "Multi-chain", network: "Ethereum/BSC/Polygon" }));
     }),
     swap: protectedProcedure.input(z.object({ from: z.string().max(16), to: z.string().max(16), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
+      await enforceTransferLimits(ctx.user.id, input.amount, input.from, ctx.user.kycTier);
       const db = await getDb();
       const swapFeeBreakdown = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       const fee = Math.max(swapFeeBreakdown.totalFee, input.amount * 0.001);
@@ -3137,6 +3170,7 @@ export const appRouter = router({
       toAddress: z.string().min(10),
       amount: z.number().positive(),
     })).mutation(async ({ ctx, input }) => {
+      await enforceTransferLimits(ctx.user.id, input.amount, input.symbol, ctx.user.kycTier);
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.symbol))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
@@ -3212,7 +3246,16 @@ export const appRouter = router({
       return { qrData, paymentLink: `https://pay.remitflow.app/qr/${qrData}`, expiresAt: new Date(Date.now() + 3600000) };
     }),
     pay: protectedProcedure.input(z.object({ qrData: z.string(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
-      const ref = await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: "NGN", fromAmount: input.amount.toString(), fee: "0", description: "QR code payment received" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      let parsed: { userId?: number; currency?: string } = {};
+      try { parsed = JSON.parse(Buffer.from(input.qrData, "base64").toString("utf-8")); } catch { /* invalid QR data */ }
+      const currency = parsed.currency ?? "NGN";
+      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, currency))).limit(1);
+      if (!wallet) throw new TRPCError({ code: "BAD_REQUEST", message: `No ${currency} wallet found` });
+      await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` })
+        .where(eq(wallets.id, wallet.id));
+      const ref = await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: currency, fromAmount: input.amount.toString(), fee: "0", description: "QR code payment received" });
       return { success: true, reference: ref };
     }),
   }),
@@ -3412,9 +3455,19 @@ export const appRouter = router({
 
   mpesa: router({
     send: protectedProcedure.input(z.object({ phone: z.string().min(7).max(20), amount: z.number().positive().max(1_000_000), currency: z.string().max(8).default("KES") })).mutation(async ({ ctx, input }) => {
+      await enforceTransferLimits(ctx.user.id, input.amount, input.currency, ctx.user.kycTier);
       const mpesaFee = calculateFee(input.amount, { from: "KE", to: "KE" });
+      const totalDebit = input.amount + mpesaFee.totalFee;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
+      if (!wallet || Number(wallet.balance) < totalDebit) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
+      const [updMpesa] = await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${totalDebit} AS VARCHAR)` })
+        .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${totalDebit}`))
+        .returning({ balance: wallets.balance });
+      if (!updMpesa) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
       const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: mpesaFee.totalFee.toFixed(2), description: `M-Pesa transfer to ${input.phone}` });
-      return { success: true, reference: ref, mpesaRef: `MP${Date.now()}`, phone: input.phone, amount: input.amount };
+      return { success: true, reference: ref, mpesaRef: `MP${Date.now()}`, phone: input.phone, amount: input.amount, fee: Math.round(mpesaFee.totalFee * 100) / 100 };
     }),
     receive: protectedProcedure.input(z.object({ phone: z.string(), amount: z.number().positive() })).query(({ ctx, input }) => ({
       paymentRequest: { phone: input.phone, amount: input.amount, currency: "KES", shortCode: "174379", accountRef: `RF${ctx.user.id}` },
@@ -3438,16 +3491,26 @@ export const appRouter = router({
       return { rate, fee: Math.round(fee * 100) / 100, toAmount: Math.round((input.amount - fee) * rate * 100) / 100, estimatedDelivery: "1-2 business days", comparison: [{ provider: "RemitFlow", rate: rate * 0.995, fee: Math.round(rfFee.totalFee * fromRate * 100) / 100, toAmount: Math.round((input.amount - rfFee.totalFee * fromRate) * rate * 0.995 * 100) / 100 }, { provider: "Wise", rate, fee: Math.round(fee * 100) / 100, toAmount: Math.round((input.amount - fee) * rate * 100) / 100 }, { provider: "Western Union", rate: rate * 0.985, fee: 4.99, toAmount: Math.round((input.amount - 4.99) * rate * 0.985 * 100) / 100 }] };
     }),
     send: protectedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number(), recipientName: z.string(), recipientAccount: z.string() })).mutation(async ({ ctx, input }) => {
+      await enforceTransferLimits(ctx.user.id, input.amount, input.from, ctx.user.kycTier);
       const wiseSendFee = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      const totalDebit = input.amount + wiseSendFee.totalFee;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.from))).limit(1);
+      if (!wallet || Number(wallet.balance) < totalDebit) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
+      const [updWise] = await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${totalDebit} AS VARCHAR)` })
+        .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${totalDebit}`))
+        .returning({ balance: wallets.balance });
+      if (!updWise) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
       const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.from, fromAmount: input.amount.toString(), toCurrency: input.to, fee: wiseSendFee.totalFee.toFixed(2), description: `Wise transfer to ${input.recipientName}` });
-      return { success: true, reference: ref, wiseRef: `WISE${Date.now()}` };
+      return { success: true, reference: ref, wiseRef: `WISE${Date.now()}`, fee: Math.round(wiseSendFee.totalFee * 100) / 100 };
     }),
   }),
 
   pos: router({
     terminals: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      const rows = await db.select().from(posTerminals).where(eq(posTerminals.userId, ctx.user.id)).orderBy(desc(posTerminals.createdAt)).limit(50).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "DB query failed, returning empty"); return []; });
+      const rows = await db.select().from(posTerminals).where(eq(posTerminals.userId, ctx.user.id)).orderBy(desc(posTerminals.createdAt)).limit(50);
       if (rows.length > 0) return rows.map((r: any) => ({ ...r, merchant: r.merchantName, dailyVolume: Number(r.totalVolume ?? 0), transactionCount: r.totalTransactions ?? 0, lastTransaction: r.lastSeen ?? r.updatedAt }));
       const defaults = [
         { userId: ctx.user.id, terminalId: "POS001", merchantName: "RemitFlow Agent Lagos", serialNumber: "POS-001-NG", location: "Lagos Main Branch", status: "active" },
@@ -3483,7 +3546,7 @@ export const appRouter = router({
   agents: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      const rows = await db.select().from(agentAccounts).orderBy(desc(agentAccounts.createdAt)).limit(100).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "DB query failed, returning empty"); return []; });
+      const rows = await db.select().from(agentAccounts).orderBy(desc(agentAccounts.createdAt)).limit(100);
       if (rows.length > 0) return rows.map((r: any) => ({ ...r, name: r.businessName, agentId: r.agentCode, rating: Number(r.rating ?? 5), transactionsToday: 0, volumeToday: 0 }));
       const defaults = [
         { userId: ctx.user.id, agentCode: "AGT001", businessName: "Adaeze Okafor", location: "Lagos Island", phone: "+234-801-234-5678", status: "active", rating: "4.80" },
@@ -3518,7 +3581,7 @@ export const appRouter = router({
     })),
     webhooks: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      const rows = await db.select().from(webhooksTable).where(eq(webhooksTable.createdBy, ctx.user.id)).orderBy(desc(webhooksTable.createdAt)).limit(50).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "DB query failed, returning empty"); return []; });
+      const rows = await db.select().from(webhooksTable).where(eq(webhooksTable.createdBy, ctx.user.id)).orderBy(desc(webhooksTable.createdAt)).limit(50);
       return rows;
     }),
     addWebhook: protectedProcedure.input(z.object({ url: z.string().url(), events: z.array(z.string()) })).mutation(async ({ ctx, input }) => {
