@@ -100,7 +100,7 @@ export const splitBillRouter = router({
   /** List all split bill groups created by the current user */
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const groups = await db
       .select()

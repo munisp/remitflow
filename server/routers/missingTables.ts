@@ -42,7 +42,7 @@ export const supportTicketsRouter = router({
     .input(z.object({ status: z.string().optional(), limit: z.number().default(50) }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db
         .select()
         .from(supportTickets)
@@ -111,7 +111,7 @@ export const supportTicketsRouter = router({
     .input(z.object({ status: z.string().optional(), limit: z.number().default(100) }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db
         .select()
         .from(supportTickets)
@@ -137,7 +137,7 @@ export const supportTicketsRouter = router({
 export const directDebitRouter = router({
   mandates: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select().from(directDebitMandates).where(eq(directDebitMandates.userId, ctx.user.id)).orderBy(desc(directDebitMandates.createdAt));
   }),
 
@@ -204,7 +204,7 @@ export const directDebitRouter = router({
 export const consentRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select().from(consentRecords).where(eq(consentRecords.userId, ctx.user.id)).orderBy(desc(consentRecords.createdAt));
   }),
 
@@ -247,7 +247,7 @@ export const paymentMetricsRouter = router({
     .input(z.object({ corridor: z.string().optional(), period: z.string().optional() }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db
         .select()
         .from(paymentMetrics)
@@ -259,7 +259,7 @@ export const paymentMetricsRouter = router({
 
   summary: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return { totalSuccess: 0, totalFailure: 0, avgProcessingMs: 0, totalVolume: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db
       .select()
       .from(paymentMetrics)
@@ -301,7 +301,7 @@ export const paymentMetricsRouter = router({
 export const bnplRouter = router({
   plans: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select().from(bnplPlans).where(eq(bnplPlans.userId, ctx.user.id)).orderBy(desc(bnplPlans.createdAt));
   }),
 
@@ -373,7 +373,7 @@ export const bnplRouter = router({
 export const stablecoinRouter = router({
   balances: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select().from(stablecoinWallets).where(eq(stablecoinWallets.userId, ctx.user.id)).orderBy(desc(stablecoinWallets.createdAt));
     // Return real DB rows only — empty array means user has no wallets yet
     return rows;
@@ -381,7 +381,7 @@ export const stablecoinRouter = router({
 
   wallets: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select().from(stablecoinWallets).where(eq(stablecoinWallets.userId, ctx.user.id));
     // Return real DB rows only — empty array means user has no wallets yet
     return rows.map((w: any) => ({ ...w, protocol: "Multi-chain", network: w.network ?? "Ethereum/BSC/Polygon" }));
@@ -427,7 +427,7 @@ export const mojaloopRouter = router({
     .input(z.object({ limit: z.number().default(20) }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(mojaloopTransfers).where(eq(mojaloopTransfers.userId, ctx.user.id)).orderBy(desc(mojaloopTransfers.createdAt)).limit(input?.limit ?? 20);
     }),
 
@@ -498,7 +498,7 @@ export const mojaloopRouter = router({
 export const kybRouter = router({
   get: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return null;
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [record] = await db.select().from(kybRecords).where(eq(kybRecords.userId, ctx.user.id)).orderBy(desc(kybRecords.createdAt)).limit(1);
     return record ?? null;
   }),
@@ -546,7 +546,7 @@ export const kybRouter = router({
     .input(z.object({ status: z.string().optional(), limit: z.number().default(50) }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(kybRecords).orderBy(desc(kybRecords.createdAt)).limit(input?.limit ?? 50);
     }),
 
@@ -572,7 +572,7 @@ export const fxAlertHistoryRouter = router({
     .input(z.object({ limit: z.number().default(50), alertId: z.number().optional() }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db
         .select()
         .from(fxAlertTriggerHistory)
@@ -588,7 +588,7 @@ export const fxAlertHistoryRouter = router({
 
   stats: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return { total: 0, last30Days: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [total] = await db.select({ count: count() }).from(fxAlertTriggerHistory).where(eq(fxAlertTriggerHistory.userId, ctx.user.id));
     const [last30] = await db.select({ count: count() }).from(fxAlertTriggerHistory).where(and(eq(fxAlertTriggerHistory.userId, ctx.user.id), gte(fxAlertTriggerHistory.triggeredAt, new Date(Date.now() - 30 * 86400000))));
     return { total: total?.count ?? 0, last30Days: last30?.count ?? 0 };
@@ -599,7 +599,7 @@ export const fxAlertHistoryRouter = router({
 export const chargebackRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select().from(chargebackCases).where(eq(chargebackCases.userId, ctx.user.id)).orderBy(desc(chargebackCases.createdAt));
   }),
 
@@ -637,7 +637,7 @@ export const chargebackRouter = router({
     .input(z.object({ status: z.string().optional(), limit: z.number().default(100) }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(chargebackCases).orderBy(desc(chargebackCases.createdAt)).limit(input?.limit ?? 100);
     }),
 
@@ -654,7 +654,7 @@ export const chargebackRouter = router({
 export const tenantConfigsRouter = router({
   list: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select().from(tenantConfigs).orderBy(tenantConfigs.tenantName);
   }),
 
@@ -662,7 +662,7 @@ export const tenantConfigsRouter = router({
     .input(z.object({ tenantId: z.string() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [config] = await db.select().from(tenantConfigs).where(eq(tenantConfigs.tenantId, input.tenantId)).limit(1);
       return config ?? null;
     }),
@@ -712,7 +712,7 @@ export const bulkBatchRouter = router({
     .input(z.object({ limit: z.number().default(20) }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(bulkPaymentBatches).where(eq(bulkPaymentBatches.userId, ctx.user.id)).orderBy(desc(bulkPaymentBatches.createdAt)).limit(input?.limit ?? 20);
     }),
 
@@ -776,7 +776,7 @@ export const regulatoryReportsRouter = router({
     .input(z.object({ type: z.string().optional(), limit: z.number().default(50) }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(regulatoryReports).orderBy(desc(regulatoryReports.createdAt)).limit(input?.limit ?? 50);
     }),
 
@@ -846,13 +846,13 @@ export const fraudModelRunsRouter = router({
     .input(z.object({ limit: z.number().default(20) }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(fraudModelRuns).orderBy(desc(fraudModelRuns.createdAt)).limit(input?.limit ?? 20);
     }),
 
   latest: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return null;
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [run] = await db.select().from(fraudModelRuns).where(eq(fraudModelRuns.status, "completed")).orderBy(desc(fraudModelRuns.completedAt)).limit(1);
     return run ?? null;
   }),
@@ -918,7 +918,7 @@ export const fraudModelRunsRouter = router({
 export const onboardingProgressRouter = router({
   get: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return null;
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [progress] = await db.select().from(userOnboardingProgress).where(eq(userOnboardingProgress.userId, ctx.user.id)).limit(1);
     return progress ?? null;
   }),
@@ -963,7 +963,7 @@ export const chatSessionMetaRouter = router({
     .input(z.object({ limit: z.number().default(50) }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // chatSessionMeta links via sessionId (FK to chatSessions.id)
       return db.select().from(chatSessionMeta).orderBy(desc(chatSessionMeta.updatedAt)).limit(input?.limit ?? 50);
     }),
@@ -999,13 +999,13 @@ export const chatSessionMetaRouter = router({
 export const chatAgentStatusRouter = router({
   list: publicProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select().from(chatAgentStatus).where(eq(chatAgentStatus.isOnline, true));
   }),
 
   myStatus: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return null;
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [status] = await db.select().from(chatAgentStatus).where(eq(chatAgentStatus.agentId, ctx.user.id)).limit(1);
     return status ?? null;
   }),
@@ -1032,7 +1032,7 @@ export const chatCannedResponsesRouter = router({
     .input(z.object({ category: z.string().optional() }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select().from(chatCannedResponses).where(eq(chatCannedResponses.isActive, true)).orderBy(chatCannedResponses.title);
       return input?.category ? rows.filter((r: any) => r.category === input.category) : rows;
     }),
@@ -1072,7 +1072,7 @@ export const securityIncidentsRouter = router({
     .input(z.object({ severity: z.string().optional(), limit: z.number().default(100), resolved: z.boolean().optional() }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select().from(securityIncidents).orderBy(desc(securityIncidents.createdAt)).limit(input?.limit ?? 100);
       if (input?.severity) return rows.filter((r: any) => r.severity === input.severity);
       if (input?.resolved !== undefined) return rows.filter((r: any) => input.resolved ? r.resolvedAt !== null : r.resolvedAt === null);
@@ -1081,7 +1081,7 @@ export const securityIncidentsRouter = router({
 
   stats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { total: 0, critical: 0, high: 0, unresolved: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select().from(securityIncidents);
     return {
       total: rows.length,
@@ -1116,7 +1116,7 @@ export const securityIncidentsRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { success: false };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.insert(securityIncidents).values({
         type: input.type,
         severity: input.severity,

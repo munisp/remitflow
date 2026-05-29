@@ -192,7 +192,7 @@ const listMyDisputes = protectedProcedure
   .input(z.object({ limit: z.number().default(20), offset: z.number().default(0) }))
   .query(async ({ input, ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT d.*, t.from_amount, t.from_currency, t.to_currency, t.status as tx_status
       FROM disputes d
@@ -216,7 +216,7 @@ const adminListDisputes = protectedProcedure
   .query(async ({ input, ctx }) => {
     if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
     const db = await getDb();
-    if (!db) return { disputes: [], total: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const statusFilter = input.status === "all"
       ? sql`1=1`
@@ -314,24 +314,34 @@ const adminUpdateDispute = protectedProcedure
 const adminDisputeStats = protectedProcedure.query(async ({ ctx }) => {
   if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
   const db = await getDb();
-  if (!db) return { open: 0, under_review: 0, resolved: 0, closed: 0, total: 0, avgResolutionHours: 0 };
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
   const rows = await db.execute(sql`
     SELECT status, COUNT(*) as cnt FROM disputes GROUP BY status
   `) as any[];
 
-  const stats: Record<string, number> = { open: 0, under_review: 0, resolved: 0, closed: 0 };
-  for (const r of rows) stats[String(r.status)] = Number(r.cnt ?? 0);
+  let open = 0, under_review = 0, resolved = 0, closed = 0;
+  for (const r of rows as any[]) {
+    const s = String(r.status);
+    const c = Number(r.cnt ?? 0);
+    if (s === "open") open = c;
+    else if (s === "under_review") under_review = c;
+    else if (s === "resolved") resolved = c;
+    else if (s === "closed") closed = c;
+  }
 
   const resRows = await db.execute(sql`
-    SELECT AVG(TIMESTAMPDIFF(HOUR, "createdAt", "updatedAt")) as avg_hours
+    SELECT AVG(EXTRACT(EPOCH FROM ("updatedAt" - "createdAt")) / 3600) as avg_hours
     FROM disputes WHERE status IN ('resolved', 'closed')
   `) as any[];
   const avgResolutionHours = Math.round(Number(resRows[0]?.avg_hours ?? 0));
 
   return {
-    ...stats,
-    total: Object.values(stats).reduce((a, b) => a + b, 0),
+    open,
+    under_review,
+    resolved,
+    closed,
+    total: open + under_review + resolved + closed,
     avgResolutionHours,
   };
 });

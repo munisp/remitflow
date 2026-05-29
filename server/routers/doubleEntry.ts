@@ -11,6 +11,7 @@
  */
 
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { randomBytes } from "crypto";
 import { router, publicProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
@@ -95,7 +96,7 @@ export const doubleEntryRouter = router({
 
   verifyIntegrity: publicProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { totalTransactions: 0, totalEntries: 0, balanced: true, issues: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const rows = await db.execute(sql`
       SELECT transaction_id,
@@ -132,7 +133,7 @@ export const doubleEntryRouter = router({
     .input(z.object({ accountId: z.string() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { accountId: input.accountId, totalDebits: 0, totalCredits: 0, balance: 0, entryCount: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const result = await db.execute(sql`
         SELECT COALESCE(SUM(debit), 0) as total_debits,
@@ -156,7 +157,7 @@ export const doubleEntryRouter = router({
 
   trialBalance: publicProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { accounts: [], totalDebits: 0, totalCredits: 0, balanced: true };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const result = await db.execute(sql`
       SELECT account_id, account_type,

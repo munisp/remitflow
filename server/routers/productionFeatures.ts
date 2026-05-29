@@ -103,7 +103,7 @@ export const bnplRouter = router({
   /** Get user's BNPL applications and installment schedules */
   myApplications: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const apps = await db.execute(sql`
       SELECT ba.*, 
         (SELECT COUNT(*) FROM bnpl_installments bi WHERE bi.application_id = ba.id AND bi.status = 'paid') as paid_count,
@@ -118,7 +118,7 @@ export const bnplRouter = router({
     .input(z.object({ applicationId: z.number() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT bi.* FROM bnpl_installments bi
         JOIN bnpl_applications ba ON ba.id = bi.application_id
@@ -211,7 +211,7 @@ export const travelRuleRouter = router({
     .input(z.object({ limit: z.number().default(20), offset: z.number().default(0) }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return { records: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT * FROM travel_rule_records WHERE "userId" = ${ctx.user.id}
         ORDER BY created_at DESC LIMIT ${input.limit} OFFSET ${input.offset}
@@ -231,7 +231,7 @@ export const travelRuleRouter = router({
     .query(async ({ input, ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) return { records: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT trr.*, u.name as user_name, u.email as user_email
         FROM travel_rule_records trr
@@ -262,7 +262,7 @@ export const agentNetworkRouter = router({
     .query(async ({ input }) => {
       const inp = input ?? {};
       const db = await getDb();
-      if (!db) return { agents: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT * FROM agent_network
         WHERE (${input!.country ?? null} IS NULL OR country = ${input!.country ?? null})
@@ -280,7 +280,7 @@ export const agentNetworkRouter = router({
     .input(z.object({ id: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM agent_network WHERE id = ${input.id}`) as any[];
       return rows[0] ?? null;
     }),
@@ -356,7 +356,7 @@ export const agentNetworkRouter = router({
   /** Get agent statistics */
   stats: publicProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { total: 0, byCountry: [], byStatus: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const total = await db.execute(sql`SELECT COUNT(*) as cnt FROM agent_network`) as any[];
     const byCountry = await db.execute(sql`SELECT country, COUNT(*) as cnt FROM agent_network GROUP BY country ORDER BY cnt DESC LIMIT 20`) as any[];
     const byStatus = await db.execute(sql`SELECT status, COUNT(*) as cnt FROM agent_network GROUP BY status`) as any[];
@@ -374,7 +374,7 @@ export const corridorAnalyticsRouter = router({
     .query(async ({ input, ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(); since.setDate(since.getDate() - input.days);
       const rows = await db.execute(sql`
         SELECT from_currency, to_currency, to_country,
@@ -397,7 +397,7 @@ export const corridorAnalyticsRouter = router({
     .query(async ({ input, ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(); since.setDate(since.getDate() - input.days);
       const rows = await db.execute(sql`
         SELECT 
@@ -430,7 +430,7 @@ export const corridorAnalyticsRouter = router({
         { method: "PAPSS",         total: 95,  completed: 93,  failed: 2,  successRate: 97.9 },
         { method: "Crypto",        total: 60,  completed: 55,  failed: 5,  successRate: 91.7 },
       ];
-      if (!db) return FALLBACK;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(); since.setDate(since.getDate() - input.days);
       try {
         const rows = await db.execute(sql`
@@ -467,7 +467,7 @@ export const referralEngineRouter = router({
   /** Get user's referral stats */
   myStats: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return { code: "", referrals: [], totalEarned: 0, pendingEarnings: 0, tier: "bronze" };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     // Generate or get referral code
     const codeRows = await db.execute(sql`
@@ -526,7 +526,7 @@ export const referralEngineRouter = router({
   /** Get referral leaderboard */
   leaderboard: publicProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT u.name, u.id,
         COUNT(r.id) as referral_count,
@@ -550,7 +550,7 @@ export const whiteLabelPreviewRouter = router({
     .query(async ({ input, ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT * FROM white_label_configs WHERE tenant_id = ${input.tenantId} LIMIT 1
       `) as any[];
@@ -612,7 +612,7 @@ export const whiteLabelPreviewRouter = router({
     .input(z.object({ tenantId: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { css: "" };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM white_label_configs WHERE tenant_id = ${input.tenantId} LIMIT 1`) as any[];
       if (rows.length === 0) return { css: "" };
       const c = rows[0];
@@ -697,7 +697,7 @@ export const familyEnhancedRouter = router({
     .input(z.object({ days: z.number().default(30) }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return { members: [], totalSent: 0, topRecipient: null };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(); since.setDate(since.getDate() - input.days);
 
       const members = await db.execute(sql`
@@ -737,7 +737,7 @@ export const familyEnhancedRouter = router({
     .input(z.object({ memberId: z.number().optional(), limit: z.number().default(20) }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT t.*, fm.nickname as member_nickname, fm.relationship
         FROM transactions t
@@ -759,7 +759,7 @@ export const tenantAnalyticsRouter = router({
     .query(async ({ input, ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(); since.setDate(since.getDate() - input.days);
 
       const userCount = await db.execute(sql`

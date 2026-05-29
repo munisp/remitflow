@@ -109,7 +109,7 @@ export const featureFlagsRouter = router({
     .input(z.object({ key: z.string(), tenantId: z.number().optional() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { enabled: true }; // fail open
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" }); // fail open
 
       const [flag] = await db.select().from(featureFlags).where(eq(featureFlags.key, input.key)).limit(1);
       if (!flag) return { enabled: true }; // unknown flags default to enabled
@@ -631,7 +631,7 @@ export const tenantsRouter = router({
   // Stats for admin dashboard
   stats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { total: 0, active: 0, trial: 0, enterprise: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select({ status: tenants.status, plan: tenants.plan, count: sql<number>`count(*)` })
       .from(tenants).groupBy(tenants.status, tenants.plan);
     const total = rows.reduce((s: any, r: any) => s + Number(r.count), 0);
@@ -712,7 +712,7 @@ export const whiteLabelRouter = router({
     .input(z.object({ slug: z.string().optional(), domain: z.string().optional() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       let query;
       if (input.slug) {
         query = db.select().from(tenants).where(eq(tenants.slug, input.slug)).limit(1);

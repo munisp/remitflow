@@ -169,7 +169,7 @@ export const embeddingIndexRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { queryTransactionId: input.transactionId, results: [], totalFound: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Find the source transaction to get its attributes for similarity matching
       const numericId = parseInt(input.transactionId.replace(/^TXN-/i, ""));
       const srcRows = await db.execute(
@@ -780,7 +780,7 @@ export const disputeManagementRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { disputes: [], total: 0, limit: input.limit, offset: input.offset };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Map "in_review" to "under_review" for DB enum compatibility
       const dbStatus = input.status === "in_review" ? "under_review" : input.status;
       const whereClause = input.status === "all"
@@ -953,7 +953,7 @@ export const beneficiaryDedupRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { query: input, candidates: [], duplicatesFound: 0, recommendation: "create_new" as const };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Real fuzzy match: find beneficiaries with similar name for this user
       const rows = await db.execute(
         `SELECT id, "fullName", "accountNumber", "bankCode", "country", "createdAt"

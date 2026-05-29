@@ -11,6 +11,7 @@
  */
 
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure } from "../_core/trpc";
 import { randomBytes } from "crypto";
 import { logger } from "../_core/logger";
@@ -139,7 +140,7 @@ export const receiptGenerationRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { transactionRef: input.transactionRef, format: input.format, content: "DB unavailable" };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(
         sql`SELECT t.*, u.name as sender_name, b.name as recipient_name, b."country" as recipient_country
             FROM transactions t

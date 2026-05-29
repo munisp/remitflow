@@ -312,7 +312,7 @@ export const partnerOnboardingRouter = router({
   // ── Get my tenants (for logged-in users) ──────────────────────────────────
   myTenants: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db
       .select({
         id: tenants.id,
@@ -384,7 +384,7 @@ export const partnerOnboardingRouter = router({
     .input(z.object({ tenantId: z.number().int().positive() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [membership] = await db.select().from(tenantUsers)
         .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, ctx.user.id)))
@@ -520,7 +520,7 @@ export const adminInviteCodesRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { codes: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const offset = (input.page - 1) * input.limit;
       const conditions = input.activeOnly ? [eq(partnerInviteCodes.isActive, true)] : [];
@@ -647,7 +647,7 @@ export const adminInviteCodesRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { tenants: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const offset = (input.page - 1) * input.limit;
       const conditions = input.status ? [eq(tenants.status, input.status as any)] : [];
@@ -702,7 +702,7 @@ export const adminInviteCodesRouter = router({
   // ── Real-time partner analytics dashboard ──────────────────────────────────
   analytics: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { summary: null, codePerformance: [], funnel: [], recentActivity: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const [totalCodes] = await db.select({ count: sql<number>`count(*)` }).from(partnerInviteCodes);
     const [activeCodes] = await db.select({ count: sql<number>`count(*)` }).from(partnerInviteCodes).where(eq(partnerInviteCodes.isActive, true));
@@ -772,7 +772,7 @@ export const adminInviteCodesRouter = router({
     .input(z.object({ months: z.number().int().min(1).max(24).default(6) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { byPartner: [], monthly: [], topPartners: [], totalRevenue: 0, totalTransactions: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Get all tenants with their invite codes
       const tenantList = await db.select({
         tenantId: tenants.id,
@@ -836,7 +836,7 @@ export const adminInviteCodesRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { sessions: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const offset = (input.page - 1) * input.limit;
       const conditions = input.status ? [eq(tenantOnboardingSessions.status, input.status)] : [];
@@ -875,7 +875,7 @@ export const travelRuleDbRouter = router({
     .input(z.object({ page: z.number().int().min(1).default(1), limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { records: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
       const records = await db.select().from(travelRuleRecords)
         .where(eq(travelRuleRecords.userId, ctx.user.id))

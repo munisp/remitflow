@@ -65,7 +65,7 @@ export const outboxEventsRouter = router({
 
   stats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { pending: 0, published: 0, failed: 0, total: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select({
       status: outboxEvents.status,
       count: sql<number>`count(*)::int`,
@@ -149,7 +149,7 @@ export const slaIncidentsRouter = router({
 
   stats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { open: 0, resolved: 0, critical: 0, avgResolutionMs: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [stats] = await db.select({
       open: sql<number>`count(*) filter (where status = 'open')::int`,
       resolved: sql<number>`count(*) filter (where status = 'resolved')::int`,
@@ -202,7 +202,7 @@ export const nifiPipelineRunsRouter = router({
 
   stats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { pending: 0, running: 0, completed: 0, failed: 0, totalRecords: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [stats] = await db.select({
       pending: sql<number>`count(*) filter (where status = 'pending')::int`,
       running: sql<number>`count(*) filter (where status = 'running')::int`,
@@ -257,7 +257,7 @@ export const dbtRunHistoryRouter = router({
 
   stats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { pending: 0, running: 0, completed: 0, failed: 0, totalModels: 0, totalErrors: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [stats] = await db.select({
       pending: sql<number>`count(*) filter (where status = 'pending')::int`,
       running: sql<number>`count(*) filter (where status = 'running')::int`,
@@ -314,7 +314,7 @@ export const airflowDagRunsRouter = router({
 
   stats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { pending: 0, running: 0, completed: 0, failed: 0, uniqueDags: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [stats] = await db.select({
       pending: sql<number>`count(*) filter (where status = 'pending')::int`,
       running: sql<number>`count(*) filter (where status = 'running')::int`,

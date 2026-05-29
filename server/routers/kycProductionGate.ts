@@ -523,7 +523,7 @@ export const enhancedKybRouter = router({
     .input(z.object({ kybRecordId: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [record] = await db
         .select()
@@ -580,7 +580,7 @@ export const enhancedKybRouter = router({
     )
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { records: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const conditions = [];
       if (input?.status) conditions.push(eq(kybRecords.status, input.status));
@@ -833,7 +833,7 @@ export const kycVerificationScoringRouter = router({
    */
   checkSLABreaches: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { breaches: [], total: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     // Get all pending KYC submissions
     const pendingDocs = await db
@@ -902,7 +902,7 @@ export const kycVerificationScoringRouter = router({
     )
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const daysBack = input?.days ?? 30;
       const since = new Date(Date.now() - daysBack * 86_400_000);

@@ -39,7 +39,7 @@ export const vapidPushRouter = router({
   }),
   listSubscriptions: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`SELECT id, device_name, endpoint, created_at FROM push_subscriptions WHERE user_id = ${ctx.user.id}`).catch(() => ({ rows: [] }));
     return (rows as any).rows ?? [];
   }),
@@ -60,7 +60,7 @@ export const vapidPushRouter = router({
 export const apiUsageRouter = router({
   summary: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const userKeys = await db.select().from(apiKeys).where(eq(apiKeys.userId, ctx.user.id)).catch(() => []);
     // Get real transaction counts as a proxy for API usage (api_usage_logs table not yet seeded)
     const [txCount] = await db.select({ value: count() }).from(transactions).where(eq(transactions.userId, ctx.user.id)).catch(() => [{ value: 0 }]);
@@ -104,7 +104,7 @@ export const apiUsageRouter = router({
 export const treasuryRouter = router({
   positions: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select().from(treasuryPositions).orderBy(desc(treasuryPositions.updatedAt)).catch(() => []);
     if (rows.length > 0) {
       return rows.map((r: any) => ({
@@ -194,7 +194,7 @@ export const slaMonitoringRouter = router({
 export const documentVaultRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT id, doc_type, filename, file_url, file_size, mime_type, expiry_date, is_verified, uploaded_at
       FROM document_vault WHERE user_id = ${ctx.user.id} ORDER BY uploaded_at DESC
@@ -219,7 +219,7 @@ export const documentVaultRouter = router({
   }),
   expiryAlerts: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT id, doc_type, filename, expiry_date FROM document_vault
       WHERE user_id = ${ctx.user.id} AND expiry_date IS NOT NULL AND expiry_date <= NOW() + INTERVAL '90 days'
@@ -233,7 +233,7 @@ export const documentVaultRouter = router({
 export const chargebackRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT id, transaction_ref, amount, currency, reason, status, evidence_url, resolution, created_at
       FROM chargebacks WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC
@@ -258,7 +258,7 @@ export const chargebackRouter = router({
   }),
   adminList: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`SELECT c.*, u.name as user_name FROM chargebacks c JOIN users u ON c.user_id = u.id ORDER BY c.created_at DESC LIMIT 50`).catch(() => ({ rows: [] }));
     return (rows as any).rows ?? [];
   }),
@@ -390,7 +390,7 @@ export const rateEngineRouter = router({
 export const offlineQueueRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`SELECT id, operation_type, payload, status, retry_count, created_at FROM offline_queue WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 50`).catch(() => ({ rows: [] }));
     return (rows as any).rows ?? [];
   }),
@@ -416,7 +416,7 @@ export const notificationCenterRouter = router({
     unreadOnly: z.boolean().default(false), limit: z.number().default(20), offset: z.number().default(0),
   })).query(async ({ ctx, input }) => {
     const db = await getDb();
-    if (!db) return { items: [], total: 0, unreadCount: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const conditions = [eq(notifications.userId, ctx.user.id)];
     if (input.type !== "all") conditions.push(eq(notifications.type, input.type as any));
     if (input.unreadOnly) conditions.push(eq(notifications.isRead, false));
@@ -429,7 +429,7 @@ export const notificationCenterRouter = router({
   }),
   markRead: auditedProcedure.input(z.object({ ids: z.array(z.number()).optional() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (!db) return { marked: true };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     if (input.ids?.length) {
       await db.execute(sql`UPDATE notifications SET is_read = true WHERE user_id = ${ctx.user.id} AND id = ANY(${input.ids})`).catch(() => null);
     } else {
@@ -444,7 +444,7 @@ export const notificationCenterRouter = router({
   }),
   preferences: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`SELECT channel, event_type, enabled FROM notification_preferences WHERE user_id = ${ctx.user.id}`).catch(() => ({ rows: [] }));
     if (!(rows as any).rows?.length) return [
       { channel: "push", eventType: "transfer.completed", enabled: true },
@@ -464,7 +464,7 @@ export const notificationCenterRouter = router({
 export const fxHedgingRouter = router({
   forwardContracts: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`SELECT id, from_currency, to_currency, amount, locked_rate, settlement_date, status FROM fx_forward_contracts WHERE user_id = ${ctx.user.id} ORDER BY settlement_date ASC`).catch(() => ({ rows: [] }));
     if (!(rows as any).rows?.length) return [
       { id: 1, fromCurrency: "USD", toCurrency: "NGN", amount: 5000, lockedRate: 1538.46, settlementDate: new Date(Date.now() + 86400000 * 30).toISOString(), status: "active" },
@@ -503,7 +503,7 @@ export const paymentOrchestrationRouter = router({
 export const biometricEnrollmentRouter = router({
   status: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return { enrolled: false, devices: [], supportedTypes: ["fingerprint", "face_id", "touch_id"] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`SELECT device_id, device_name, biometric_type, enrolled_at, is_active FROM biometric_enrollments WHERE user_id = ${ctx.user.id}`).catch(() => ({ rows: [] }));
     const devices = (rows as any).rows ?? [];
     return { enrolled: devices.length > 0, devices, supportedTypes: ["fingerprint", "face_id", "touch_id"] };
@@ -530,12 +530,12 @@ export const biometricEnrollmentRouter = router({
 export const ledgerRouter = router({
   entries: protectedProcedure.input(z.object({ limit: z.number().default(50) })).query(async ({ ctx, input }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select().from(transactions).where(eq(transactions.userId, ctx.user.id)).orderBy(desc(transactions.createdAt)).limit(input.limit).catch(() => []);
   }),
   reconciliation: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const walletRows = await db.select().from(wallets).where(eq(wallets.userId, ctx.user.id)).catch(() => []);
     return (walletRows as any[]).map((w: any) => ({
       currency: w.currency, bookBalance: w.balance, availableBalance: w.availableBalance ?? w.balance,
@@ -556,7 +556,7 @@ export const ledgerRouter = router({
 export const transferGoalsRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`SELECT id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status FROM transfer_goals WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`).catch(() => ({ rows: [] }));
     if (!(rows as any).rows?.length) return [
       { id: 1, name: "School Fees — Lagos", targetAmount: 2500, currentAmount: 1850, currency: "USD", deadline: new Date(Date.now() + 86400000 * 45).toISOString(), autoTransferEnabled: true, status: "active", progressPct: 74 },
@@ -682,7 +682,7 @@ export const corridorLiveRatesRouter = router({
 export const beneficiaryGroupsRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`SELECT g.id, g.name, g.description, g.color, COUNT(gm.beneficiary_id) as member_count FROM beneficiary_groups g LEFT JOIN beneficiary_group_members gm ON g.id = gm.group_id WHERE g.user_id = ${ctx.user.id} GROUP BY g.id ORDER BY g.created_at DESC`).catch(() => ({ rows: [] }));
     if (!(rows as any).rows?.length) return [
       { id: 1, name: "Family", description: "Immediate family members", color: "#6366f1", memberCount: 4 },

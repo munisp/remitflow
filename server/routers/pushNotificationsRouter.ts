@@ -3,6 +3,7 @@
  * Handles device subscription registration, preference management, and test notifications.
  */
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure, adminProcedure ,
   auditedProcedure, auditedAdminProcedure, rateLimitedProcedure
 } from "../_core/trpc";
@@ -68,7 +69,7 @@ export const pushNotificationsRouter = router({
    */
   listSubscriptions: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-      if (!db) return { active_subscriptions: 0, inactive_subscriptions: 0, subscribed_users: 0, last_notification_at: null };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await (db as any).execute(sql`
       SELECT id, endpoint, device_name, is_active, created_at, last_used_at
       FROM push_subscriptions
@@ -83,7 +84,7 @@ export const pushNotificationsRouter = router({
    */
   getPreferences: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return { transfer_sent: true, transfer_delivered: true, transfer_failed: true, kyc_approved: true, kyc_rejected: true, fx_rate_alert: true, security_alert: true, compliance_flag: false };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await (db as any).execute(sql`
       SELECT preference_key, is_enabled
       FROM push_notification_preferences
@@ -177,7 +178,7 @@ export const pushNotificationsRouter = router({
   getStats: adminProcedure.query(async () => {
     try {
       const db = await getDb();
-      if (!db) return { active_subscriptions: 0, inactive_subscriptions: 0, subscribed_users: 0, last_notification_at: null };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Use drizzle ORM query instead of raw SQL execute
       const allSubs = await db.select().from(pushSubscriptions).catch(() => []);
       const active = allSubs.filter((s: any) => s.isActive).length;

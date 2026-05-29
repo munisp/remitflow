@@ -160,7 +160,7 @@ const conversationalPaymentsRouter = router({
     .input(z.object({ limit: z.number().default(20) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT * FROM "auditLogs" WHERE user_id = ${ctx.user.id} AND action IN ('AI_INTENT_PARSED', 'AI_TRANSFER_EXECUTED')
         ORDER BY created_at DESC LIMIT ${input.limit}
@@ -229,7 +229,7 @@ function buildConfirmation(intent: { action: string; amount?: number; currency?:
 const predictiveTransfersRouter = router({
   getSuggestions: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return { suggestions: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     // Analyze transaction patterns from real data
     const history = await db.select().from(transactions)
@@ -1075,7 +1075,7 @@ async function localSanctionsCheck(name: string, country?: string): Promise<{ st
   // Local sanctions check using fuzzy matching
   const normalizedName = name.toLowerCase().replace(/[^a-z\s]/g, "").trim();
   const db = await getDb();
-  if (!db) return { status: "clear", matches: [], listsChecked: ["local_cache"] };
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
   const rows = await db.execute(sql`
     SELECT * FROM sanctions_list WHERE LOWER(name) LIKE ${'%' + normalizedName + '%'} OR similarity(LOWER(name), ${normalizedName}) > 0.6
@@ -1147,7 +1147,7 @@ const architectureRouter = router({
 
         // Build from source of truth (event store or DB)
         const db = await getDb();
-        if (!db) return {};
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const periodStart = new Date();
         if (input.period === "day") periodStart.setDate(periodStart.getDate() - 1);
         else if (input.period === "week") periodStart.setDate(periodStart.getDate() - 7);
@@ -1444,7 +1444,7 @@ const securityFullRouter = router({
 
     listKeys: adminProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT key_id, key_type, purpose, status, created_at FROM hsm_keys ORDER BY created_at DESC`);
       return rows;
     }),
@@ -1803,7 +1803,7 @@ async function getCorridorDemand(corridor: string): Promise<number> {
 
   // Calculate from recent transaction volume
   const db = await getDb();
-  if (!db) return 0.5;
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
   const [row] = await db.execute(sql`
     SELECT COUNT(*) as cnt FROM transactions WHERE from_currency || '-' || COALESCE(description, '') LIKE ${`%${corridor}%`} AND created_at > NOW() - INTERVAL '1 hour'
   `) as any[];

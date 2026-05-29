@@ -131,7 +131,7 @@ const notificationsV2Router = router({
     .input(z.object({ notificationId: z.number().int().optional(), markAll: z.boolean().default(false) }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { success: true, updated: 1 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       if (input.markAll) {
         await db.update(notifications).set({ isRead: true }).where(eq(notifications.userId, ctx.user.id));
         return { success: true, updated: -1 };

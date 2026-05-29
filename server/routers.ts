@@ -915,7 +915,7 @@ export const appRouter = router({
       return formatTxn(txn);
     }),
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { total: 0, sent: 0, received: 0, pending: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [total] = await db.select({ c: count() }).from(transactions).where(eq(transactions.userId, ctx.user.id));
       const [sent] = await db.select({ c: count() }).from(transactions).where(and(eq(transactions.userId, ctx.user.id), eq(transactions.type, "send")));
       const [received] = await db.select({ c: count() }).from(transactions).where(and(eq(transactions.userId, ctx.user.id), eq(transactions.type, "receive")));
@@ -1335,8 +1335,11 @@ export const appRouter = router({
       return { success: true, reference: ref, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, fxRate, orchestrated: false, mlRisk: anomalyResult ? { isAnomaly: anomalyResult.isAnomaly, confidence: anomalyResult.confidence, requiresReview: anomalyResult.isAnomaly && anomalyResult.confidence > 0.65 } : null };
     }),
     quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() })).query(async ({ input }) => {
-      const rates = await getLiveRates("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const fxRate = toRate / fromRate; const fee = input.amount * 0.005; const toAmount = (input.amount - fee) * fxRate;
-      return { fxRate, fee, toAmount, fromAmount: input.amount, estimatedTime: "1-3 minutes" };
+      const rates = await getLiveRates("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const fxRate = toRate / fromRate;
+      const feeBreakdown = calculateFee(input.amount / fromRate, { from: input.fromCurrency.slice(0, 2), to: input.toCurrency.slice(0, 2) });
+      const fee = feeBreakdown.totalFee * fromRate;
+      const toAmount = (input.amount - fee) * fxRate;
+      return { fxRate, fee: Math.round(fee * 100) / 100, toAmount: Math.round(toAmount * 100) / 100, fromAmount: input.amount, estimatedTime: "1-3 minutes" };
     }),
   }),
 
@@ -1380,12 +1383,12 @@ export const appRouter = router({
       return { success: true, lockedRate: rate, expiry: expiresAt, lockId: `LOCK${Date.now()}` };
     }),
     locks: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM rate_locks WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 20`);
       return (rows as any[]).map((r: any) => ({ ...r, lockedRate: Number(r.locked_rate), amount: Number(r.amount), fromCurrency: r.from_currency, toCurrency: r.to_currency, expiresAt: r.expires_at }));
     }),
     getLockedRates: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM rate_locks WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 20`);
       return (rows as any[]).map((r: any) => ({ ...r, lockedRate: Number(r.locked_rate), amount: Number(r.amount) }));
     }),
@@ -2059,7 +2062,7 @@ export const appRouter = router({
 
   referral: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { referralCode: "REMIT" + ctx.user.id, totalReferrals: 0, totalEarned: 0, pendingEarnings: 0, tier: "Bronze", tierProgress: 0, nextTierAt: 5, nextTierName: "Silver" };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select().from(referrals).where(eq(referrals.referrerId, ctx.user.id));
       const dbUser = await getUserByOpenId(ctx.user.openId);
       const totalReferrals = rows.length;
@@ -2074,7 +2077,7 @@ export const appRouter = router({
       return { referralCode: dbUser?.referralCode ?? `RF${ctx.user.id.toString().padStart(6, "0")}`, totalReferrals, totalEarned, pendingEarnings, tier, tierProgress, nextTierAt, nextTierName: tc.next };
     }),
     leaderboard: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { leaderboard: [], myRank: null };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Use SQL aggregation instead of loading all rows into memory
       const rows = await db
         .select({
@@ -2268,7 +2271,7 @@ export const appRouter = router({
       return { success: true, scheduleId: input.id, status: "cancelled" };
     }),
     runs: protectedProcedure.input(z.object({ scheduleId: z.number(), limit: z.number().default(20) })).query(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const runs = await db.select().from(scheduledTransferRuns)
         .where(and(eq(scheduledTransferRuns.scheduleId, input.scheduleId), eq(scheduledTransferRuns.userId, ctx.user.id)))
         .orderBy(desc(scheduledTransferRuns.executedAt)).limit(input.limit);
@@ -2342,7 +2345,7 @@ export const appRouter = router({
     }),
     sessions: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT id, device, ip_address, last_active_at, created_at, is_revoked FROM user_sessions WHERE user_id = ${ctx.user.id} AND is_revoked = false ORDER BY last_active_at DESC LIMIT 10`);
       const sessions = (rows as any[]);
       if (sessions.length === 0) {
@@ -2355,7 +2358,7 @@ export const appRouter = router({
       }));
     }),
     events: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM audit_logs WHERE user_id = ${ctx.user.id} AND action IN ('LOGIN','FAILED_LOGIN','PASSWORD_CHANGE','2FA_ENABLED','2FA_DISABLED','SESSION_REVOKED') ORDER BY created_at DESC LIMIT 20`);
       return (rows as any[]).map((r: any) => ({ event: r.action, ipAddress: r.ip_address ?? '—', severity: r.action === 'FAILED_LOGIN' ? 'high' : 'low', createdAt: r.created_at }));
     }),
@@ -2470,7 +2473,7 @@ export const appRouter = router({
 
   support: router({
     tickets: protectedProcedure.input(z.object({ status: z.string().optional(), limit: z.number().default(20) }).optional()).query(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM support_tickets WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT ${input?.limit ?? 20}`);
       return rows as any[];
     }),
@@ -2506,11 +2509,11 @@ export const appRouter = router({
       return { id: (result as any).insertId, title: input.title };
     }),
     listSessions: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(chatSessions).where(eq(chatSessions.userId, ctx.user.id)).orderBy(desc(chatSessions.updatedAt)).limit(50);
     }),
     getMessages: protectedProcedure.input(z.object({ sessionId: z.number() })).query(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Verify session belongs to user
       const [session] = await db.select().from(chatSessions).where(and(eq(chatSessions.id, input.sessionId), eq(chatSessions.userId, ctx.user.id)));
       if (!session) throw new TRPCError({ code: "NOT_FOUND" });
@@ -2590,7 +2593,7 @@ export const appRouter = router({
 
   directDebit: router({
     mandates: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM direct_debit_mandates WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`);
       return (rows as any[]).map(r => {
         const isOverdue = r.next_debit_date && new Date(r.next_debit_date) < new Date() && r.status === 'active';
@@ -2642,7 +2645,7 @@ export const appRouter = router({
   }),
   consent: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM consent_records WHERE user_id = ${ctx.user.id} ORDER BY consent_type ASC`);
       return rows as any[];
     }),
@@ -2694,7 +2697,7 @@ export const appRouter = router({
     }),
     erasureStatus: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return { hasPendingRequest: false, request: null };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM erasure_requests WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 1`);
       const requests = rows as any[];
       if (requests.length === 0) return { hasPendingRequest: false, request: null };
@@ -2706,14 +2709,14 @@ export const appRouter = router({
       return { success: true, message: "Account deletion request submitted. Your account will be deleted within 30 days." };
     }),
     overview: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { consents: [], dataRequests: [], lastUpdated: new Date() };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM consent_records WHERE user_id = ${ctx.user.id}`);
       return { consents: rows as any[], dataRequests: [], lastUpdated: new Date() };
     }),
     pendingErasures: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
       const db = await getDb();
-      if (!db) return { requests: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT er.*, u.name as user_name, u.email as user_email
         FROM erasure_requests er
@@ -2752,7 +2755,7 @@ export const appRouter = router({
 
   paymentPerformance: router({
     metrics: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { corridors: [], overall: { successRate: 0, avgTime: 0, totalVolume: 0 } };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM payment_metrics WHERE user_id = ${ctx.user.id} ORDER BY total_volume DESC`);
       const metrics = (rows as any[]).map(r => ({ corridor: r.corridor, successRate: r.success_count / Math.max(r.success_count + r.failure_count, 1) * 100, avgProcessingMs: r.avg_processing_ms, totalVolume: Number(r.total_volume), successCount: r.success_count, failureCount: r.failure_count }));
       const totalSuccess = metrics.reduce((s, m) => s + m.successCount, 0);
@@ -3049,7 +3052,7 @@ export const appRouter = router({
     }),
     receiveRateStatus: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return { used: 0, remaining: 10, limit: 10, resetsAt: new Date(Date.now() + 3600_000) };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const windowStart = new Date(Date.now() - 3600_000);
       const rows = await db.select().from(idempotencyKeys)
         .where(and(
@@ -3111,7 +3114,8 @@ export const appRouter = router({
     }),
     swap: protectedProcedure.input(z.object({ from: z.string().max(16), to: z.string().max(16), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      const fee = input.amount * 0.001;
+      const swapFeeBreakdown = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      const fee = Math.max(swapFeeBreakdown.totalFee, input.amount * 0.001);
       const toAmount = input.amount - fee;
       // Debit from-wallet
       const [fromWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.from))).limit(1);
@@ -3136,7 +3140,8 @@ export const appRouter = router({
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.symbol))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
-      const fee = input.amount * 0.002;
+      const sendFeeBreakdown = calculateFee(input.amount, { from: input.symbol.slice(0, 2), to: "US" });
+      const fee = Math.max(sendFeeBreakdown.totalFee, input.amount * 0.002);
       const deducted = input.amount + fee;
       if (Number(wallet.balance) < deducted) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance for amount + fee" });
       const [updStable] = await db.update(wallets)
@@ -3244,7 +3249,7 @@ export const appRouter = router({
       return { registrationNumber: "FCA-REG-123456", status: "active", lastAudit: new Date(Date.now() - 86400000 * 90), nextAudit: new Date(Date.now() + 86400000 * 275), kycCompliance: docs.filter((d: any) => d.status === "approved").length > 0, amlStatus: "clear", psdCompliance: true };
     }),
     gdpr: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { consents: [], dataRequests: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM consent_records WHERE user_id = ${ctx.user.id}`);
       return { consents: rows as any[], dataRequests: [], lastUpdated: new Date() };
     }),
@@ -3256,7 +3261,7 @@ export const appRouter = router({
       ],
     })),
     listReports: protectedProcedure.input(z.object({ type: z.string().optional() }).optional()).query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { reports: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { complianceReports } = await import("../drizzle/schema");
       const reports = await db.select().from(complianceReports).where(eq(complianceReports.generatedBy, ctx.user.id)).orderBy(desc(complianceReports.createdAt)).limit(50);
       return { reports };
@@ -3407,23 +3412,34 @@ export const appRouter = router({
 
   mpesa: router({
     send: protectedProcedure.input(z.object({ phone: z.string().min(7).max(20), amount: z.number().positive().max(1_000_000), currency: z.string().max(8).default("KES") })).mutation(async ({ ctx, input }) => {
-      const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: (input.amount * 0.01).toString(), description: `M-Pesa transfer to ${input.phone}` });
+      const mpesaFee = calculateFee(input.amount, { from: "KE", to: "KE" });
+      const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: mpesaFee.totalFee.toFixed(2), description: `M-Pesa transfer to ${input.phone}` });
       return { success: true, reference: ref, mpesaRef: `MP${Date.now()}`, phone: input.phone, amount: input.amount };
     }),
     receive: protectedProcedure.input(z.object({ phone: z.string(), amount: z.number().positive() })).query(({ ctx, input }) => ({
       paymentRequest: { phone: input.phone, amount: input.amount, currency: "KES", shortCode: "174379", accountRef: `RF${ctx.user.id}` },
       instructions: ["Open M-Pesa on your phone", "Select Lipa na M-Pesa", "Enter Business No: 174379", `Enter Account: RF${ctx.user.id}`, `Enter Amount: KES ${input.amount}`, "Enter your M-Pesa PIN"],
     })),
-    status: protectedProcedure.input(z.object({ reference: z.string() })).query(({ input }) => ({ reference: input.reference, status: "completed", amount: 1000, currency: "KES", completedAt: new Date() })),
+    status: protectedProcedure.input(z.object({ reference: z.string() })).query(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const rows = await db.execute(sql`SELECT * FROM transactions WHERE reference = ${input.reference} AND user_id = ${ctx.user.id} LIMIT 1`);
+      const txn = (rows as any[])[0];
+      if (!txn) throw new TRPCError({ code: "NOT_FOUND", message: "M-Pesa transaction not found" });
+      return { reference: txn.reference, status: txn.status, amount: Number(txn.fromAmount ?? 0), currency: txn.fromCurrency ?? "KES", completedAt: txn.updatedAt ?? txn.createdAt };
+    }),
   }),
 
   wise: router({
     quote: protectedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive() })).query(async ({ input }) => {
-      const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate; const fee = Math.max(input.amount * 0.0041, 0.5);
-      return { rate, fee, toAmount: (input.amount - fee) * rate, estimatedDelivery: "1-2 business days", comparison: [{ provider: "RemitFlow", rate: rate * 0.995, fee: input.amount * 0.005, toAmount: (input.amount - input.amount * 0.005) * rate * 0.995 }, { provider: "Wise", rate, fee, toAmount: (input.amount - fee) * rate }, { provider: "Western Union", rate: rate * 0.985, fee: 4.99, toAmount: (input.amount - 4.99) * rate * 0.985 }] };
+      const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate;
+      const wiseFeeBreakdown = calculateFee(input.amount / fromRate, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      const fee = Math.max(wiseFeeBreakdown.totalFee * fromRate, 0.5);
+      const rfFee = calculateFee(input.amount / fromRate, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      return { rate, fee: Math.round(fee * 100) / 100, toAmount: Math.round((input.amount - fee) * rate * 100) / 100, estimatedDelivery: "1-2 business days", comparison: [{ provider: "RemitFlow", rate: rate * 0.995, fee: Math.round(rfFee.totalFee * fromRate * 100) / 100, toAmount: Math.round((input.amount - rfFee.totalFee * fromRate) * rate * 0.995 * 100) / 100 }, { provider: "Wise", rate, fee: Math.round(fee * 100) / 100, toAmount: Math.round((input.amount - fee) * rate * 100) / 100 }, { provider: "Western Union", rate: rate * 0.985, fee: 4.99, toAmount: Math.round((input.amount - 4.99) * rate * 0.985 * 100) / 100 }] };
     }),
     send: protectedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number(), recipientName: z.string(), recipientAccount: z.string() })).mutation(async ({ ctx, input }) => {
-      const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.from, fromAmount: input.amount.toString(), toCurrency: input.to, fee: (input.amount * 0.0041).toString(), description: `Wise transfer to ${input.recipientName}` });
+      const wiseSendFee = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.from, fromAmount: input.amount.toString(), toCurrency: input.to, fee: wiseSendFee.totalFee.toFixed(2), description: `Wise transfer to ${input.recipientName}` });
       return { success: true, reference: ref, wiseRef: `WISE${Date.now()}` };
     }),
   }),
@@ -3544,7 +3560,7 @@ export const appRouter = router({
       page: z.number().default(1),
       limit: z.number().default(20),
     })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return { alerts: [], total: 0, stats: {} };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
       const statusVal = input.status !== "all" ? input.status : null;
       const riskVal = input.riskLevel !== "all" ? input.riskLevel : null;
@@ -3586,7 +3602,7 @@ export const appRouter = router({
       return { success: true, alertId: input.alertId, action: input.action, newStatus };
     }),
     stats: protectedProcedure.query(async () => {
-      const db = await getDb(); if (!db) return { totalAlerts: 0, pendingReview: 0, blockedToday: 0, amountBlocked: 0, riskDistribution: [], recentActivity: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [statsRows] = await db.execute(sql`SELECT COUNT(*) as total_alerts, SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_review, SUM(CASE WHEN status = 'blocked' AND DATE(created_at) = CURRENT_DATE THEN 1 ELSE 0 END) as blocked_today, SUM(CASE WHEN status = 'blocked' THEN transaction_amount ELSE 0 END) as amount_blocked, AVG(risk_score) as avg_risk_score FROM fraud_alerts`);
       const [riskDist] = await db.execute(sql`SELECT risk_level, COUNT(*) as count FROM fraud_alerts GROUP BY risk_level`);
       const [recent] = await db.execute(sql`SELECT fa.*, u.name as user_name FROM fraud_alerts fa LEFT JOIN users u ON fa.user_id = u.id ORDER BY fa.created_at DESC LIMIT 5`);
@@ -3602,7 +3618,7 @@ export const appRouter = router({
       };
     }),
     exportAlerts: protectedProcedure.input(z.object({ format: z.enum(["json","csv"]).default("json") })).query(async () => {
-      const db = await getDb(); if (!db) return { data: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [rows] = await db.execute(sql`SELECT fa.*, u.name as user_name, u.email as user_email FROM fraud_alerts fa LEFT JOIN users u ON fa.user_id = u.id ORDER BY fa.created_at DESC`);
       return { data: rows as any[], exportedAt: new Date() };
     }),
@@ -3611,7 +3627,7 @@ export const appRouter = router({
   // ─── ENHANCED RECURRING PAYMENTS SCHEDULER ────────────────────────────────
   scheduler: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { payments: [], executions: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [payments] = await db.execute(sql`SELECT * FROM recurring_payments WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`);
       const [executions] = await db.execute(sql`SELECT * FROM recurring_payment_executions WHERE user_id = ${ctx.user.id} ORDER BY executed_at DESC LIMIT 20`);
       return { payments: payments as any[], executions: executions as any[] };
@@ -3666,7 +3682,7 @@ export const appRouter = router({
       return { success: true, scheduleId: input.id, status: "cancelled" };
     }),
     executions: protectedProcedure.input(z.object({ paymentId: z.number() })).query(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [rows] = await db.execute(sql`SELECT * FROM recurring_payment_executions WHERE recurring_payment_id = ${input.paymentId} AND user_id = ${ctx.user.id} ORDER BY executed_at DESC LIMIT 50`);
       return rows as any[];
     }),
@@ -3675,7 +3691,7 @@ export const appRouter = router({
   // ─── FX RATE ALERT SYSTEM ─────────────────────────────────────────────────
   rateAlerts: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [rows] = await db.execute(sql`SELECT * FROM fx_rate_alert_targets WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`);
       return rows as any[];
     }),
@@ -3717,7 +3733,7 @@ export const appRouter = router({
       return { success: true, deletedAlertId: input.id };
     }),
     checkNow: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { checked: 0, triggered: 0, rates: {} };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [alerts] = await db.execute(sql`SELECT * FROM fx_rate_alert_targets WHERE user_id = ${ctx.user.id} AND is_active = 1`);
       const rates = await getLiveRates("USD");
       let triggered = 0;
@@ -3787,7 +3803,7 @@ export const appRouter = router({
     revenueBreakdown: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
       const db = await getDb();
-      if (!db) return { sources: [{ name: "Transfer Fees", value: 62, color: "#3b82f6" }, { name: "FX Spread", value: 24, color: "#10b981" }, { name: "Card Fees", value: 8, color: "#f59e0b" }, { name: "Premium Plans", value: 6, color: "#8b5cf6" }] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const txRows = await db.execute(sql`SELECT COALESCE(SUM(CAST(fee AS DECIMAL)), 0) as total_fees, COUNT(*) as tx_count FROM transactions WHERE created_at > NOW() - INTERVAL '30 days' AND status IN ('completed', 'settled')`);
       const cardRows = await db.execute(sql`SELECT COUNT(*) as card_count FROM cards WHERE created_at > NOW() - INTERVAL '30 days'`);
       const totalFees = Number((txRows as any[])[0]?.total_fees ?? 0);
@@ -4218,7 +4234,7 @@ Case: #${input.caseId}`,
     getAnalyticsThresholds: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(analyticsThresholds).orderBy(analyticsThresholds.metric);
     }),
     upsertAnalyticsThreshold: protectedProcedure
@@ -4983,7 +4999,7 @@ Case: #${input.caseId}`,
     livenessAuditStats: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
       const db = await getDb();
-      if (!db) return { total: 0, passed: 0, failed: 0, deepfakeDetected: 0, spoofingDetected: 0, passRate: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { kycLivenessAudit } = await import("../drizzle/schema.js");
       const [totalRow] = await db.select({ total: count() }).from(kycLivenessAudit);
       const [passedRow] = await db.select({ total: count() }).from(kycLivenessAudit).where(eq(kycLivenessAudit.overallLive, true));
@@ -5041,7 +5057,7 @@ Case: #${input.caseId}`,
         }
         // DB fallback: aggregate from kyc_liveness_audit directly
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const since = new Date(Date.now() - input.hours * 60 * 60 * 1000);
         const rows = await db
@@ -5076,7 +5092,7 @@ Case: #${input.caseId}`,
       .query(async ({ ctx, input }) => {
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
         const rows = await db
@@ -5144,7 +5160,7 @@ Case: #${input.caseId}`,
       .query(async ({ ctx, input }) => {
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
-        if (!db) return { rows: [], total: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const rows = await db
           .select()
@@ -5168,7 +5184,7 @@ Case: #${input.caseId}`,
       .query(async ({ ctx, input }) => {
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
         // Build 10 buckets: [0,0.1), [0.1,0.2), ..., [0.9,1.0]
@@ -5210,7 +5226,7 @@ Case: #${input.caseId}`,
       .query(async ({ ctx, input }) => {
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const db = await getDb();
-        if (!db) return { transactions: [], total: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const whereClauses: any[] = [];
         if (input.status && input.status !== "all") whereClauses.push(eq(transactions.status, input.status as any));
         const whereExpr = whereClauses.length > 0 ? and(...whereClauses) : undefined;
@@ -5228,7 +5244,7 @@ Case: #${input.caseId}`,
     monitorStats: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) return { totalVolume24h: 0, transactionCount24h: 0, successRate: 98.5, avgProcessingTime: 1.2, activeCorridors: 8, flaggedCount: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const oneDayAgo = new Date(Date.now() - 86400000);
       const [volumeRow] = await db.select({ total: sql<number>`COALESCE(SUM(${transactions.fromAmount}), 0)` }).from(transactions).where(sql`${transactions.createdAt} >= ${oneDayAgo}`);
       const [countRow] = await db.select({ total: count() }).from(transactions).where(sql`${transactions.createdAt} >= ${oneDayAgo}`);
@@ -5257,7 +5273,7 @@ Case: #${input.caseId}`,
       }).optional())
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return { listings: [], total: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { marketListings, users: usersTable } = await import("../drizzle/schema.js");
         const { ilike, or } = await import("drizzle-orm");
         const page = input?.page ?? 1;
@@ -5298,7 +5314,7 @@ Case: #${input.caseId}`,
       .input(z.object({ id: z.number() }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return null;
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { marketListings, users: usersTable } = await import("../drizzle/schema.js");
         const [listing] = await db.select({
           id: marketListings.id,
@@ -5400,7 +5416,7 @@ Case: #${input.caseId}`,
 
     myOrders: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { marketOrders, marketListings } = await import("../drizzle/schema.js");
       return db.select({
         id: marketOrders.id,
@@ -5420,7 +5436,7 @@ Case: #${input.caseId}`,
 
     myListings: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { marketListings } = await import("../drizzle/schema.js");
       return db.select().from(marketListings)
         .where(eq(marketListings.sellerId, ctx.user.id))
@@ -5439,7 +5455,7 @@ Case: #${input.caseId}`,
       return { success: true, orderId: input.orderId, rating: input.rating };
     }),
     getSellerRating: publicProcedure.input(z.object({ sellerId: z.number() })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return { avgRating: 0, totalRatings: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { marketRatings } = await import("../drizzle/schema.js");
       const rows = await db.select().from(marketRatings).where(eq(marketRatings.ratedUserId, input.sellerId));
       if (!rows.length) return { avgRating: 0, totalRatings: 0, ratings: [] };
@@ -5458,7 +5474,7 @@ Case: #${input.caseId}`,
     }),
     adminListOrders: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role !== "admin") throw new Error("Forbidden");
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { marketOrders, marketListings } = await import("../drizzle/schema.js");
       return db.select({ id: marketOrders.id, status: marketOrders.status, amount: marketOrders.amount, currency: marketOrders.currency, escrowHeld: marketOrders.escrowHeld, createdAt: marketOrders.createdAt, listingTitle: marketListings.title }).from(marketOrders).leftJoin(marketListings, eq(marketOrders.listingId, marketListings.id)).orderBy(desc(marketOrders.createdAt)).limit(200);
     }),
@@ -5466,7 +5482,7 @@ Case: #${input.caseId}`,
 
   family: router({
     listMembers: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { familyMembers, familyBudgets } = await import("../drizzle/schema.js");
       const members = await db.select().from(familyMembers).where(eq(familyMembers.userId, ctx.user.id)).orderBy(desc(familyMembers.createdAt));
       const budgets = await db.select().from(familyBudgets).where(eq(familyBudgets.userId, ctx.user.id));
@@ -5503,7 +5519,7 @@ Case: #${input.caseId}`,
       return { success: true, familyMemberId: input.familyMemberId };
     }),
     getDashboard: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { members: [], totalSentThisMonth: 0, totalSentAllTime: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { familyMembers, familyBudgets } = await import("../drizzle/schema.js");
       const members = await db.select().from(familyMembers).where(eq(familyMembers.userId, ctx.user.id));
       const budgets = await db.select().from(familyBudgets).where(eq(familyBudgets.userId, ctx.user.id));
@@ -5518,7 +5534,7 @@ Case: #${input.caseId}`,
 
   talent: router({
     getProfile: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return null;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { talentProfiles } = await import("../drizzle/schema.js");
       const [p] = await db.select().from(talentProfiles).where(eq(talentProfiles.userId, ctx.user.id)).limit(1);
       return p ?? null;
@@ -5533,12 +5549,12 @@ Case: #${input.caseId}`,
       return { success: true, profileUpdated: true };
     }),
     listExperts: publicProcedure.input(z.object({ sector: z.string().optional(), country: z.string().optional(), limit: z.number().default(20), offset: z.number().default(0) }).optional()).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { talentProfiles, users: usersTable } = await import("../drizzle/schema.js");
       return db.select({ id: talentProfiles.id, userId: talentProfiles.userId, bio: talentProfiles.bio, expertise: talentProfiles.expertise, countries: talentProfiles.countries, availability: talentProfiles.availability, hourlyRate: talentProfiles.hourlyRate, currency: talentProfiles.currency, verified: talentProfiles.verified, avgRating: talentProfiles.avgRating, totalBookings: talentProfiles.totalBookings, name: usersTable.name }).from(talentProfiles).leftJoin(usersTable, eq(talentProfiles.userId, usersTable.id)).orderBy(desc(talentProfiles.totalBookings)).limit(input?.limit ?? 20).offset(input?.offset ?? 0);
     }),
     listOpportunities: publicProcedure.input(z.object({ sector: z.string().optional(), country: z.string().optional(), engagementType: z.string().optional() }).optional()).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { talentOpportunities } = await import("../drizzle/schema.js");
       return db.select().from(talentOpportunities).where(eq(talentOpportunities.status, "open")).orderBy(desc(talentOpportunities.createdAt)).limit(50);
     }),
@@ -5556,7 +5572,7 @@ Case: #${input.caseId}`,
       return booking;
     }),
     listMyBookings: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { talentBookings, talentOpportunities } = await import("../drizzle/schema.js");
       return db.select({ id: talentBookings.id, status: talentBookings.status, message: talentBookings.message, proposedRate: talentBookings.proposedRate, currency: talentBookings.currency, createdAt: talentBookings.createdAt, opportunityTitle: talentOpportunities.title, institutionName: talentOpportunities.institutionName }).from(talentBookings).leftJoin(talentOpportunities, eq(talentBookings.opportunityId, talentOpportunities.id)).where(eq(talentBookings.expertUserId, ctx.user.id)).orderBy(desc(talentBookings.createdAt)).limit(50);
     }),
@@ -5570,7 +5586,7 @@ Case: #${input.caseId}`,
 
   community: router({
     listFunds: publicProcedure.query(async () => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { communityFunds } = await import("../drizzle/schema.js");
       return db.select().from(communityFunds).where(eq(communityFunds.status, "active")).orderBy(desc(communityFunds.totalRaised)).limit(20);
     }),
@@ -5588,7 +5604,7 @@ Case: #${input.caseId}`,
       return { success: true, fundId: input.fundId, amount: input.amount };
     }),
     listProposals: publicProcedure.input(z.object({ fundId: z.number() })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundProposals } = await import("../drizzle/schema.js");
       return db.select().from(fundProposals).where(eq(fundProposals.fundId, input.fundId)).orderBy(desc(fundProposals.createdAt)).limit(50);
     }),
@@ -5653,14 +5669,14 @@ Case: #${input.caseId}`,
       return { success: true, votesFor: Number(updated?.votesFor ?? 0), votesAgainst: Number(updated?.votesAgainst ?? 0) };
     }),
     liveVotes: publicProcedure.input(z.object({ proposalId: z.number() })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return { votesFor: 0, votesAgainst: 0, total: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundProposals } = await import("../drizzle/schema.js");
       const [p] = await db.select({ votesFor: fundProposals.votesFor, votesAgainst: fundProposals.votesAgainst }).from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1);
       const vf = Number(p?.votesFor ?? 0); const va = Number(p?.votesAgainst ?? 0);
       return { votesFor: vf, votesAgainst: va, total: vf + va };
     }),
     getImpactMetrics: publicProcedure.input(z.object({ fundId: z.number() })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return null;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { communityFunds, fundProposals } = await import("../drizzle/schema.js");
       const [fund] = await db.select().from(communityFunds).where(eq(communityFunds.id, input.fundId)).limit(1);
       if (!fund) return null;
@@ -5710,7 +5726,7 @@ Case: #${input.caseId}`,
 
     listDisbursementRequests: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundProposals, communityFunds, users } = await import("../drizzle/schema.js");
       return db.select({ proposal: fundProposals, fund: communityFunds }).from(fundProposals)
         .innerJoin(communityFunds, eq(fundProposals.fundId, communityFunds.id))
@@ -5720,7 +5736,7 @@ Case: #${input.caseId}`,
 
     // ── Community Leaderboard ─────────────────────────────────────────────────
     communityLeaderboard: publicProcedure.query(async () => {
-      const db = await getDb(); if (!db) return { topVoters: [], topContributors: [], topProposers: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundVotes, fundProposals, users } = await import("../drizzle/schema.js");
       // Top voters — SQL aggregation + JOIN (no N+1)
       const topVoterRows = await db
@@ -5759,7 +5775,7 @@ Case: #${input.caseId}`,
       return { topVoters, topContributors: topVoters, topProposers };
     }),
     listMyVotes: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundVotes, fundProposals, communityFunds } = await import("../drizzle/schema.js");
       const votes = await db.select({
         id: fundVotes.id,
@@ -5781,12 +5797,12 @@ Case: #${input.caseId}`,
   }),
   diaspora: router({
     listOpportunities: publicProcedure.input(z.object({ sector: z.string().optional(), country: z.string().optional(), stage: z.string().optional() }).optional()).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { investmentOpportunities } = await import("../drizzle/schema.js");
       return db.select().from(investmentOpportunities).where(eq(investmentOpportunities.status, "open")).orderBy(desc(investmentOpportunities.raisedAmount)).limit(20);
     }),
     listCollectives: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { diasporaCollectives } = await import("../drizzle/schema.js");
       return db.select().from(diasporaCollectives).where(eq(diasporaCollectives.status, "active")).orderBy(desc(diasporaCollectives.totalContributed)).limit(20);
     }),
@@ -5807,7 +5823,7 @@ Case: #${input.caseId}`,
       return { success: true, collectiveId: input.collectiveId };
     }),
     getCollectiveDetails: publicProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return null;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { diasporaCollectives, diasporaCollectiveMembers, users: usersTable } = await import("../drizzle/schema.js");
       const [collective] = await db.select().from(diasporaCollectives).where(eq(diasporaCollectives.id, input.id)).limit(1);
       if (!collective) return null;
@@ -5900,8 +5916,9 @@ Case: #${input.caseId}`,
         const { fetchLiveRates } = await import("./fx-rates.service.js");
         const ratesResult = await fetchLiveRates(input.from);
         const rate = (ratesResult as any)?.rates?.[input.to] ?? (ratesResult as any)?.[input.to] ?? 1;
-        const fee = Math.max(0.5, input.amount * 0.005);
-        return { from: input.from, to: input.to, sendAmount: input.amount, receiveAmount: parseFloat(((input.amount - fee) * rate).toFixed(2)), fxRate: rate, fee, totalCost: fee, spread: 0.005, fsp: "internal", expiresAt: Math.floor(Date.now() / 1000) + 60, _fallback: true };
+        const fxFallbackFee = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+        const fee = Math.max(0.5, fxFallbackFee.totalFee);
+        return { from: input.from, to: input.to, sendAmount: input.amount, receiveAmount: parseFloat(((input.amount - fee) * rate).toFixed(2)), fxRate: rate, fee: Math.round(fee * 100) / 100, totalCost: Math.round(fee * 100) / 100, spread: fxFallbackFee.feeRate, fsp: "internal", expiresAt: Math.floor(Date.now() / 1000) + 60, _fallback: true };
       }
     }),
   }),
@@ -6048,7 +6065,7 @@ Case: #${input.caseId}`,
     listAssets: publicProcedure
       .input(z.object({ assetType: z.string().optional(), search: z.string().optional(), featured: z.boolean().optional(), limit: z.number().int().min(1).max(100).default(50) }).optional())
       .query(async ({ input }) => {
-        const db = await getDb(); if (!db) return [];
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { investmentAssets } = await import("../drizzle/schema.js");
         const rows = await db.select().from(investmentAssets).where(eq(investmentAssets.isActive, true)).orderBy(desc(investmentAssets.isFeatured), investmentAssets.symbol).limit(input?.limit ?? 50);
         return rows.filter((r: any) => {
@@ -6098,7 +6115,7 @@ Case: #${input.caseId}`,
         return { success: true, symbol: asset?.symbol, quantity: qty, price: currentPrice, total: total - fee, fee };
       }),
     getPortfolio: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { holdings: [], totalValue: 0, totalCost: 0, totalPnl: 0, totalPnlPct: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { userInvestments, investmentAssets } = await import("../drizzle/schema.js");
       const holdings = await db.select({ inv: userInvestments, asset: investmentAssets }).from(userInvestments).innerJoin(investmentAssets, eq(userInvestments.assetId, investmentAssets.id)).where(and(eq(userInvestments.userId, ctx.user.id), eq(userInvestments.status, "active"))).orderBy(desc(userInvestments.purchasedAt));
       const totalValue = holdings.reduce((s: any, h: any) => s + Number(h.asset.currentPrice ?? 0) * Number(h.inv.quantity), 0);
@@ -6106,7 +6123,7 @@ Case: #${input.caseId}`,
       return { holdings, totalValue, totalCost, totalPnl: totalValue - totalCost, totalPnlPct: totalCost > 0 ? ((totalValue - totalCost) / totalCost) * 100 : 0 };
     }),
     analyzePortfolio: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return null;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { userInvestments, investmentAssets } = await import("../drizzle/schema.js");
       const holdings = await db.select({ inv: userInvestments, asset: investmentAssets }).from(userInvestments).innerJoin(investmentAssets, eq(userInvestments.assetId, investmentAssets.id)).where(and(eq(userInvestments.userId, ctx.user.id), eq(userInvestments.status, "active")));
       if (!holdings.length) return null;
@@ -6154,7 +6171,7 @@ Case: #${input.caseId}`,
         return { success: true, removedAssetId: input.assetId };
       }),
     getWatchlist: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { investmentWatchlist, investmentAssets } = await import("../drizzle/schema.js");
       return db.select({ watchlist: investmentWatchlist, asset: investmentAssets }).from(investmentWatchlist).innerJoin(investmentAssets, eq(investmentWatchlist.assetId, investmentAssets.id)).where(eq(investmentWatchlist.userId, ctx.user.id)).orderBy(desc(investmentWatchlist.createdAt));
     }),
@@ -6182,7 +6199,7 @@ Case: #${input.caseId}`,
     getOrderHistory: protectedProcedure
       .input(z.object({ limit: z.number().int().min(1).max(100).default(50) }).optional())
       .query(async ({ ctx, input }) => {
-        const db = await getDb(); if (!db) return [];
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { investmentOrders, investmentAssets } = await import("../drizzle/schema.js");
         return db.select({ order: investmentOrders, asset: investmentAssets }).from(investmentOrders).innerJoin(investmentAssets, eq(investmentOrders.assetId, investmentAssets.id)).where(eq(investmentOrders.userId, ctx.user.id)).orderBy(desc(investmentOrders.createdAt)).limit(input?.limit ?? 50);
       }),
@@ -6210,7 +6227,7 @@ Case: #${input.caseId}`,
       }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { investmentPriceHistory, investmentAssets } = await import("../drizzle/schema.js");
         const [asset] = await db.select({ id: investmentAssets.id }).from(investmentAssets).where(eq(investmentAssets.symbol, input.symbol)).limit(1);
         if (!asset) return [];
@@ -6293,7 +6310,7 @@ Case: #${input.caseId}`,
       .input(z.object({ days: z.number().int().min(7).max(365).default(90) }).optional())
       .query(async ({ input, ctx }) => {
         const db = await getDb();
-        if (!db) return { dataPoints: [], totalValue: 0, totalCost: 0, pnl: 0, pnlPct: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { userInvestments, investmentAssets, investmentPriceHistory } = await import("../drizzle/schema.js");
         const days = input?.days ?? 90;
         const since = new Date(Date.now() - days * 86400000);
@@ -6323,7 +6340,7 @@ Case: #${input.caseId}`,
   }),
   agentNetwork: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try {
         const rows = await db.execute(sql`SELECT * FROM agent_network WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 50`);
         return (rows as any[]).map((r: any) => ({ ...r, commissionRate: Number(r.commission_rate ?? 0.02) }));
@@ -6335,7 +6352,7 @@ Case: #${input.caseId}`,
       return { success: true, status: "pending" };
     }),
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { totalAgents: 0, activeAgents: 0, totalVolume: 0, totalCommissions: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try {
         const rows = await db.execute(sql`SELECT COUNT(*) as total, SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) as active FROM agent_network WHERE user_id = ${ctx.user.id}`) as any[];
         const row = rows[0] ?? {};
@@ -6352,23 +6369,37 @@ Case: #${input.caseId}`,
 
   corridorPricing: router({
     list: publicProcedure.query(async () => {
-      return [
-        { id: 1, from: "GBP", to: "NGN", rate: 1950.5, fee: 0.005, minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", provider: "RemitFlow", popular: true },
-        { id: 2, from: "USD", to: "KES", rate: 129.3, fee: 0.004, minAmount: 10, maxAmount: 10000, deliveryTime: "Instant", provider: "RemitFlow", popular: true },
-        { id: 3, from: "EUR", to: "GHS", rate: 16.8, fee: 0.006, minAmount: 10, maxAmount: 5000, deliveryTime: "2-4 hours", provider: "RemitFlow", popular: false },
-        { id: 4, from: "USD", to: "NGN", rate: 1620.0, fee: 0.005, minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", provider: "RemitFlow", popular: true },
-        { id: 5, from: "GBP", to: "KES", rate: 163.2, fee: 0.004, minAmount: 10, maxAmount: 10000, deliveryTime: "Instant", provider: "RemitFlow", popular: false },
-        { id: 6, from: "USD", to: "GHS", rate: 15.6, fee: 0.005, minAmount: 10, maxAmount: 5000, deliveryTime: "2-4 hours", provider: "RemitFlow", popular: false },
-        { id: 7, from: "EUR", to: "NGN", rate: 1750.0, fee: 0.005, minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", provider: "RemitFlow", popular: false },
-        { id: 8, from: "GBP", to: "ZAR", rate: 23.5, fee: 0.006, minAmount: 10, maxAmount: 10000, deliveryTime: "Same day", provider: "RemitFlow", popular: false },
+      const corridors = [
+        { id: 1, from: "GBP", to: "NGN", minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", popular: true },
+        { id: 2, from: "USD", to: "KES", minAmount: 10, maxAmount: 10000, deliveryTime: "Instant", popular: true },
+        { id: 3, from: "EUR", to: "GHS", minAmount: 10, maxAmount: 5000, deliveryTime: "2-4 hours", popular: false },
+        { id: 4, from: "USD", to: "NGN", minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", popular: true },
+        { id: 5, from: "GBP", to: "KES", minAmount: 10, maxAmount: 10000, deliveryTime: "Instant", popular: false },
+        { id: 6, from: "USD", to: "GHS", minAmount: 10, maxAmount: 5000, deliveryTime: "2-4 hours", popular: false },
+        { id: 7, from: "EUR", to: "NGN", minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", popular: false },
+        { id: 8, from: "GBP", to: "ZAR", minAmount: 10, maxAmount: 10000, deliveryTime: "Same day", popular: false },
       ];
+      const rates = await getLiveRates("USD");
+      return corridors.map((c) => {
+        const fromRate = rates[c.from] ?? 1;
+        const toRate = rates[c.to] ?? 1;
+        const liveRate = toRate / fromRate;
+        const feeInfo = calculateFee(100, { from: c.from.slice(0, 2), to: c.to.slice(0, 2) });
+        return { ...c, rate: Math.round(liveRate * 100) / 100, fee: feeInfo.feeRate, provider: "RemitFlow" };
+      });
     }),
     compare: publicProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number() })).query(async ({ input }) => {
+      const rates = await getLiveRates("USD");
+      const fromRate = rates[input.from] ?? 1;
+      const toRate = rates[input.to] ?? 1;
+      const liveRate = toRate / fromRate;
+      const rfFee = calculateFee(input.amount / fromRate, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      const rfFeeAmt = rfFee.totalFee * fromRate;
       const providers = [
-        { name: "RemitFlow", rate: 1950.5, fee: input.amount * 0.005, total: input.amount * 1950.5, deliveryTime: "1-2 hours", rating: 4.8 },
-        { name: "Wise", rate: 1940.2, fee: input.amount * 0.007, total: input.amount * 1940.2, deliveryTime: "2-3 hours", rating: 4.6 },
-        { name: "WorldRemit", rate: 1920.0, fee: input.amount * 0.01, total: input.amount * 1920.0, deliveryTime: "Same day", rating: 4.3 },
-        { name: "Western Union", rate: 1890.0, fee: input.amount * 0.015 + 5, total: input.amount * 1890.0, deliveryTime: "Minutes", rating: 4.0 },
+        { name: "RemitFlow", rate: liveRate, fee: Math.round(rfFeeAmt * 100) / 100, total: Math.round((input.amount - rfFeeAmt) * liveRate * 100) / 100, deliveryTime: "1-2 hours", rating: 4.8 },
+        { name: "Wise", rate: liveRate * 0.997, fee: Math.round(input.amount * 0.007 * 100) / 100, total: Math.round((input.amount - input.amount * 0.007) * liveRate * 0.997 * 100) / 100, deliveryTime: "2-3 hours", rating: 4.6 },
+        { name: "WorldRemit", rate: liveRate * 0.99, fee: Math.round(input.amount * 0.01 * 100) / 100, total: Math.round((input.amount - input.amount * 0.01) * liveRate * 0.99 * 100) / 100, deliveryTime: "Same day", rating: 4.3 },
+        { name: "Western Union", rate: liveRate * 0.97, fee: Math.round((input.amount * 0.015 + 5) * 100) / 100, total: Math.round((input.amount - input.amount * 0.015 - 5) * liveRate * 0.97 * 100) / 100, deliveryTime: "Minutes", rating: 4.0 },
       ];
       return { from: input.from, to: input.to, amount: input.amount, providers };
     }),
@@ -6387,7 +6418,7 @@ Case: #${input.caseId}`,
 
   consentManagement: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try {
         const rows = await db.execute(sql`SELECT * FROM consent_records WHERE user_id = ${ctx.user.id} ORDER BY updated_at DESC`) as any[];
         if (!rows.length) return [
@@ -6413,7 +6444,7 @@ Case: #${input.caseId}`,
 
   propertyKYC: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try {
         const rows = await db.execute(sql`SELECT * FROM property_kyc WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`) as any[];
         return rows;

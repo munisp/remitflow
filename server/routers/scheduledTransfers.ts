@@ -81,7 +81,7 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ status: z.enum(["active", "paused", "completed", "cancelled", "all"]).default("all") }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const query = db
         .select()
         .from(scheduledTransfers)
@@ -189,7 +189,7 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ scheduleId: z.number().int().positive(), limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db
         .select()
         .from(scheduledTransferRuns)

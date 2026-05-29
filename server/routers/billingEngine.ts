@@ -292,7 +292,7 @@ export const billingEngineRouter = router({
     .input(z.object({ tenantId: z.string().default("default") }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const configs = await db
         .select()
         .from(billingConfigs)
@@ -386,7 +386,7 @@ export const billingEngineRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { events: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const conditions = [eq(billingEvents.tenantId, input.tenantId)];
       if (input.corridor) conditions.push(eq(billingEvents.corridor, input.corridor));
@@ -414,7 +414,7 @@ export const billingEngineRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const fromMs = Date.now() - input.periodDays * 24 * 60 * 60 * 1000;
 
@@ -467,7 +467,7 @@ export const billingEngineRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const fromMs = Date.now() - input.periodDays * 24 * 60 * 60 * 1000;
 
@@ -501,7 +501,7 @@ export const billingEngineRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db
         .select()
         .from(billingConfigHistory)
@@ -519,7 +519,7 @@ export const billingEngineRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { entries: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const conditions = input.tenantId ? [eq(billingAuditLog.tenantId, input.tenantId)] : [];
 

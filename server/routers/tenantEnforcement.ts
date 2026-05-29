@@ -25,7 +25,7 @@ async function isFlagEnabled(flagKey: string, tenantId: number | null): Promise<
   if (cached !== undefined) return cached;
 
   const db = await getDb();
-  if (!db) return true; // Fail open if DB is unavailable
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" }); // Fail open if DB is unavailable
 
   try {
     // Check tenant-specific override first

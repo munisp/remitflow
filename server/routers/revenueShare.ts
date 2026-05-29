@@ -26,7 +26,7 @@ export const revenueShareRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { agreements: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       let q = db
         .select({
           agreement: revenueShareAgreements,
@@ -223,7 +223,7 @@ export const revenueShareRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { entries: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions = [];
       if (input.agreementId) conditions.push(eq(revenueShareLedger.agreementId, input.agreementId));
       if (input.tenantId) conditions.push(eq(revenueShareLedger.tenantId, input.tenantId));
@@ -303,7 +303,7 @@ export const revenueShareRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { reports: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions = [];
       if (input.tenantId) conditions.push(eq(revenueShareReports.tenantId, input.tenantId));
       if (input.agreementId) conditions.push(eq(revenueShareReports.agreementId, input.agreementId));
@@ -343,7 +343,7 @@ export const revenueShareRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { summary: null, byTenant: [], monthlyTrend: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Aggregate by tenant for the year
       const byTenant = await db
         .select({
@@ -404,7 +404,7 @@ export const revenueShareRouter = router({
   myAgreement: protectedProcedure
     .query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Find tenant for this user
       const [tenantUser] = await db
         .select({ tenantId: sql<number>`tenant_users.tenant_id` })
@@ -458,7 +458,7 @@ export const revenueShareRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { reports: [], summary: null };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [tenantUser] = await db
         .select({ tenantId: sql<number>`tenant_users.tenant_id` })
         .from(sql`tenant_users`)

@@ -289,7 +289,7 @@ export const corridorPricingRouter = router({
     )
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { rows: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { eq, desc, count: countFn } = await import("drizzle-orm");
       const where = input.corridorId
         ? eq(corridorMarginHistory.corridorId, input.corridorId)

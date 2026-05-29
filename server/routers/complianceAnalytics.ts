@@ -4,6 +4,7 @@
  * analytics for the /admin/compliance-analytics dashboard.
  */
 import { router, protectedProcedure } from "../_core/trpc";
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { getDb } from "../db";
 import { complianceAlerts } from "../../drizzle/schema";
@@ -15,7 +16,7 @@ export const complianceAnalyticsRouter = router({
     .input(z.object({ days: z.number().min(7).max(90).default(30) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
       const rows = await db.execute(sql`
         SELECT
@@ -47,7 +48,7 @@ export const complianceAnalyticsRouter = router({
     .input(z.object({ days: z.number().min(7).max(90).default(30) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
       const rows = await db.execute(sql`
         SELECT
@@ -74,7 +75,7 @@ export const complianceAnalyticsRouter = router({
     .input(z.object({ days: z.number().min(7).max(90).default(30) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
       const rows = await db.execute(sql`
         SELECT
@@ -107,7 +108,7 @@ export const complianceAnalyticsRouter = router({
     .input(z.object({ days: z.number().min(7).max(90).default(30) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { total: 0, open: 0, resolved: 0, escalated: 0, avgResolutionHours: 0, criticalOpen: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
       const [row] = await db.execute(sql`
         SELECT
@@ -139,7 +140,7 @@ export const complianceAnalyticsRouter = router({
     .input(z.object({ days: z.number().min(7).max(90).default(30) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
       const rows = await db.execute(sql`
         SELECT
@@ -161,7 +162,7 @@ export const complianceAnalyticsRouter = router({
   // Officer performance trend: weekly resolution rate per officer (last 4 weeks)
   officerPerformanceTrend: protectedProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT
         u.name AS officer_name,
@@ -197,7 +198,7 @@ export const complianceAnalyticsRouter = router({
     .input(z.object({ days: z.number().min(7).max(90).default(30) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
       const rows = await db.execute(sql`
         SELECT

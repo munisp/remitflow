@@ -47,7 +47,7 @@ function getNextRun(schedule: string): Date {
 export const cronJobsRouter = router({
   list: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return DEFAULT_JOBS.map(j => ({ ...j, lastRunAt: null, lastRunStatus: null, lastRunDurationMs: null, lastRunError: null, nextRunAt: getNextRun(j.schedule), runCount: 0, errorCount: 0, metadata: null, createdAt: new Date(), updatedAt: new Date() }));
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     
     // Seed default jobs if table is empty
     const existing = await db.select({ id: cronJobs.id }).from(cronJobs);
@@ -209,7 +209,7 @@ export const cronJobsRouter = router({
 
   getStats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { total: 10, active: 8, paused: 1, error: 1, totalRuns: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     
     const stats = await db.select({
       total: sql<number>`count(*)`,

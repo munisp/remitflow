@@ -30,7 +30,7 @@ export const apiChangelogRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { items: DEFAULT_CHANGELOGS.map((c, i) => ({ ...c, id: i + 1, isPublished: true, createdAt: new Date() })), total: DEFAULT_CHANGELOGS.length };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       
       // Seed if empty
       const existing = await db.select({ id: apiChangelogs.id }).from(apiChangelogs).limit(1);

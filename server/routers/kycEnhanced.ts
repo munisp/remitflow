@@ -241,7 +241,7 @@ export const continuousMonitoringRouter = router({
     .input(z.object({ userId: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const records = await db.execute(sql`
         SELECT * FROM continuous_monitoring WHERE user_id = ${input.userId} ORDER BY created_at DESC
@@ -257,7 +257,7 @@ export const continuousMonitoringRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { processed: 0, flagged: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Get users due for re-screening
       const dueUsers = await db.execute(sql`
@@ -316,7 +316,7 @@ export const reKYCSchedulerRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Users whose KYC is expiring or expired
       const dueUsers = await db.execute(sql`
@@ -371,7 +371,7 @@ export const reKYCSchedulerRouter = router({
 
   getSchedule: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { schedule: [], stats: {} };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const stats = await db.execute(sql`
       SELECT 
@@ -398,7 +398,7 @@ export const reKYCSchedulerRouter = router({
 export const kycSelfServiceRouter = router({
   getMyStatus: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return null;
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const [lifecycle] = await db
       .select()
@@ -473,7 +473,7 @@ export const kycDataQualityRouter = router({
     .input(z.object({ userId: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { score: 0, issues: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [user] = await db.select().from(users).where(eq(users.id, input.userId)).limit(1);
       if (!user) return { score: 0, issues: ["User not found"] };
@@ -512,7 +512,7 @@ export const kycDataQualityRouter = router({
     .input(z.object({ limit: z.number().min(1).max(500).default(100) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { results: [], averageScore: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const allUsers = await db.select({ id: users.id, name: users.name })
         .from(users)
@@ -541,7 +541,7 @@ export const kycAnalyticsRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const start = input.startDate || new Date(Date.now() - 30 * 86_400_000).toISOString();
       const end = input.endDate || new Date().toISOString();
@@ -575,7 +575,7 @@ export const kycAnalyticsRouter = router({
 
   conversionRate: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return null;
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const rates = await db.execute(sql`
       SELECT 

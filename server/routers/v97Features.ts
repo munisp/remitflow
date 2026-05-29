@@ -69,7 +69,7 @@ export async function getSystemConfigValue(key: string): Promise<string | null> 
   const cached = configCache.get(key);
   if (cached !== undefined) return cached;
   const db = await getDb();
-  if (!db) return null;
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
   const [row] = await db.select({ value: systemConfig.value }).from(systemConfig).where(eq(systemConfig.key, key));
   if (row) {
     configCache.set(key, row.value);
@@ -91,7 +91,7 @@ export const velocityCheckAdminRouter = router({
   // List all velocity rules
   listRules: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select().from(velocityRules).orderBy(desc(velocityRules.createdAt));
   }),
 
@@ -180,7 +180,7 @@ export const velocityCheckAdminRouter = router({
     .input(z.object({ userId: z.number().optional(), ruleId: z.number().optional() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions = [];
       if (input.userId) conditions.push(eq(velocityOverrides.userId, input.userId));
       if (input.ruleId) conditions.push(eq(velocityOverrides.ruleId, input.ruleId));
@@ -227,7 +227,7 @@ export const velocityCheckAdminRouter = router({
   // List whitelist
   listWhitelist: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select({
       entry: velocityWhitelist,
       userName: users.name,
@@ -252,7 +252,7 @@ export const velocityCheckAdminRouter = router({
     .input(z.object({ userId: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { whitelisted: false };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const now = new Date();
       const [entry] = await db.select().from(velocityWhitelist)
         .where(and(
@@ -268,7 +268,7 @@ export const kycLifecycleRouter = router({
   // Get or create lifecycle record for current user
   getMyLifecycle: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return null;
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [lifecycle] = await db.select().from(kycLifecycle)
       .where(eq(kycLifecycle.userId, ctx.user.id)).limit(1);
     if (lifecycle) return lifecycle;
@@ -449,7 +449,7 @@ export const kycLifecycleRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { lifecycles: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions = [];
       if (input.stage) conditions.push(eq(kycLifecycle.stage, input.stage));
       if (input.tier) conditions.push(eq(kycLifecycle.tier, input.tier));
@@ -471,7 +471,7 @@ export const kycLifecycleRouter = router({
     .input(z.object({ userId: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [lifecycle] = await db.select().from(kycLifecycle)
         .where(eq(kycLifecycle.userId, input.userId)).limit(1);
       if (!lifecycle) return [];
@@ -566,7 +566,7 @@ export const documentVaultRenewalRouter = router({
   // List renewals for current user
   listMyRenewals: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select().from(documentRenewals)
       .where(eq(documentRenewals.userId, ctx.user.id))
       .orderBy(desc(documentRenewals.initiatedAt));
@@ -577,7 +577,7 @@ export const documentVaultRenewalRouter = router({
     .input(z.object({ status: z.enum(["pending", "completed", "cancelled"]).optional(), limit: z.number().default(50) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const where = input.status ? eq(documentRenewals.status, input.status) : undefined;
       return db.select({
         renewal: documentRenewals,
@@ -598,7 +598,7 @@ export const featureFlagEvaluationRouter = router({
     .input(z.object({ key: z.string().min(1) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { enabled: false, reason: "db_unavailable" };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Check user-level override first
       const [userOverride] = await db.select({ enabled: userFeatureFlags.enabled })
@@ -632,7 +632,7 @@ export const featureFlagEvaluationRouter = router({
     .input(z.object({ keys: z.array(z.string()).min(1).max(50) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return Object.fromEntries(input.keys.map(k => [k, false]));
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const flags = await db.select().from(featureFlags)
         .where(sql`${featureFlags.key} = ANY(${input.keys})`);
@@ -708,7 +708,7 @@ export const systemConfigHotReloadRouter = router({
     .input(z.object({ key: z.string().optional(), limit: z.number().default(50) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const where = input.key ? eq(systemConfigAuditLog.configKey, input.key) : undefined;
       return db.select({
         log: systemConfigAuditLog,
@@ -750,7 +750,7 @@ export const webhookRetryRouter = router({
   // Process pending retries (called by scheduler)
   processPending: adminProcedure.mutation(async () => {
     const db = await getDb();
-    if (!db) return { processed: 0, succeeded: 0, failed: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const now = new Date();
     const pending = await db.select().from(webhookRetryQueue)
       .where(and(eq(webhookRetryQueue.status, "pending"), lte(webhookRetryQueue.nextAttemptAt, now)))
@@ -845,7 +845,7 @@ export const webhookRetryRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions = [];
       if (input.status) conditions.push(eq(webhookRetryQueue.status, input.status));
       if (input.endpointId) conditions.push(eq(webhookRetryQueue.endpointId, input.endpointId));
@@ -858,7 +858,7 @@ export const webhookRetryRouter = router({
   // Stats
   stats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { pending: 0, succeeded: 0, exhausted: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select({ status: webhookRetryQueue.status, count: count() })
       .from(webhookRetryQueue)
       .groupBy(webhookRetryQueue.status);
@@ -940,7 +940,7 @@ export const apiKeyRotationRouter = router({
     .input(z.object({ keyId: z.number() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(apiKeyRotationLog)
         .where(and(
           eq(apiKeyRotationLog.userId, ctx.user.id),
@@ -954,7 +954,7 @@ export const apiKeyRotationRouter = router({
     .input(z.object({ keyId: z.number(), days: z.number().int().min(1).max(90).default(30) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { total: 0, byEndpoint: [], byDay: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [key] = await db.select().from(apiKeys)
         .where(and(eq(apiKeys.id, input.keyId), eq(apiKeys.userId, ctx.user.id))).limit(1);
       if (!key) throw new TRPCError({ code: "NOT_FOUND" });
@@ -1093,7 +1093,7 @@ export const batchPaymentV97Router = router({
     .input(z.object({ batchId: z.number() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [batch] = await db.select().from(batchPayments)
         .where(and(eq(batchPayments.id, input.batchId), eq(batchPayments.userId, ctx.user.id))).limit(1);
       if (!batch) return null;
@@ -1182,7 +1182,7 @@ export const adminComplianceTriggerRouter = router({
   // Get compliance overview stats
   complianceOverview: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return null;
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const now = new Date();
     const thirtyDaysOut = new Date(now.getTime() + 30 * 86400000);
 

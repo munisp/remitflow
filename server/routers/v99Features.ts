@@ -81,7 +81,7 @@ export const feeNegotiationRouter = router({
     .input(z.object({ days: z.number().int().min(1).max(365).default(30) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { transactions: [], summary: { count: 0, totalFees: 0, avgFeeRate: 0 } };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(Date.now() - input.days * 86400000);
       const rows = await db.select({
         id: transactions.id,
@@ -385,7 +385,7 @@ export const auditTrailV2Router = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { logs: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions = [];
       if (input.action) conditions.push(like(auditLogs.action, `%${input.action}%`));
       if (input.fromDate) conditions.push(gte(auditLogs.createdAt, new Date(input.fromDate)));
@@ -403,7 +403,7 @@ export const auditTrailV2Router = router({
 
   stats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { total: 0, today: 0, topActions: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [totalResult] = await db.select({ c: count() }).from(auditLogs);
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     const [todayResult] = await db.select({ c: count() }).from(auditLogs).where(gte(auditLogs.createdAt, todayStart));
@@ -424,7 +424,7 @@ export const auditTrailV2Router = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { data: "", format: input.format, count: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions = [];
       if (input.fromDate) conditions.push(gte(auditLogs.createdAt, new Date(input.fromDate)));
       if (input.toDate) conditions.push(lte(auditLogs.createdAt, new Date(input.toDate)));
@@ -595,7 +595,7 @@ export const partnerWebhooksV2Router = router({
     .input(z.object({ limit: z.number().int().min(1).max(100).default(50) }))
     .query(async () => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(partnerWebhooks).orderBy(desc(partnerWebhooks.createdAt)).limit(50);
     }),
 
@@ -668,7 +668,7 @@ export const partnerWebhooksV2Router = router({
 export const beneficiaryGroupsV2Router = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const userBeneficiaries = await db.select().from(beneficiaries)
       .where(eq(beneficiaries.userId, ctx.user.id))
       .orderBy(desc(beneficiaries.createdAt));

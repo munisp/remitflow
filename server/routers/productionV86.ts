@@ -86,7 +86,7 @@ export const promoCodesAdminRouter = router({
     .query(async ({ ctx, input }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) return { items: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
       const conditions = [];
       if (input.activeOnly) conditions.push(eq(promoCodes.isActive, true));
@@ -188,7 +188,7 @@ export const promoCodesAdminRouter = router({
     .query(async ({ ctx, input }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select({
         id: promoRedemptions.id,
         userId: promoRedemptions.userId,
@@ -207,7 +207,7 @@ export const promoCodesAdminRouter = router({
   stats: protectedProcedure.query(async ({ ctx }) => {
     if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
     const db = await getDb();
-    if (!db) return { total: 0, active: 0, totalRedemptions: 0, totalDiscountUsd: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [[totals], [active], [redemptionStats]] = await Promise.all([
       db.select({ total: sql<string>`COUNT(*)` }).from(promoCodes),
       db.select({ count: sql<string>`COUNT(*)` }).from(promoCodes).where(eq(promoCodes.isActive, true)),
@@ -279,7 +279,7 @@ export const volumeWidgetRouter = router({
     .input(z.object({ days: z.number().min(7).max(90).default(30) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { data: [], summary: { totalVolume: 0, totalTxns: 0, avgDailyVolume: 0, peakDay: null } };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Try to get from snapshots first, fall back to live query
       const cutoff = new Date(Date.now() - input.days * 86400000);
@@ -344,7 +344,7 @@ export const volumeWidgetRouter = router({
     .query(async ({ ctx, input }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) return { data: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const data = [];
       for (let i = input.days - 1; i >= 0; i--) {
         const dayStart = new Date(Date.now() - i * 86400000);
@@ -422,7 +422,7 @@ export const fxCalculatorRouter = router({
 export const notifPrefsRouter = router({
   get: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return null;
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [prefs] = await db.select().from(userNotifPrefs)
       .where(eq(userNotifPrefs.userId, ctx.user.id)).limit(1);
     return prefs ?? {
@@ -464,7 +464,7 @@ export const notifPrefsRouter = router({
 export const scheduledTransfersRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select({
       id: scheduledTransfers.id,
       fromCurrency: scheduledTransfers.fromCurrency,
@@ -551,7 +551,7 @@ export const scheduledTransfersRouter = router({
 export const rateAlertsRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     return db.select().from(exchangeRateAlerts)
       .where(eq(exchangeRateAlerts.userId, ctx.user.id))
       .orderBy(desc(exchangeRateAlerts.createdAt));

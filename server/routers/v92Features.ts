@@ -204,7 +204,7 @@ export const transferLimitsRouter = router({
   // v92: getAdminLimits — all tier overrides
   getAdminLimits: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { limits: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     try {
       const rows = await db.execute(sql`SELECT * FROM transfer_limit_overrides ORDER BY tier`);
       return { limits: rows as any[] };
@@ -356,7 +356,7 @@ export const complianceTriggersRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { reports: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
       const typeFilter = input.reportType === "all" ? sql`1=1` : sql`report_type = ${input.reportType}`;
       const statusFilter = input.status === "all" ? sql`1=1` : sql`status = ${input.status}`;
@@ -395,7 +395,7 @@ export const beneficiaryCrudRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { id: null, success: false };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         INSERT INTO beneficiaries ("userId", name, "accountNumber", "bankName", "bankCode", currency, country, phone, email)
         VALUES (${ctx.user.id}, ${input.name}, ${input.accountNumber ?? null}, ${input.bankName ?? null},
@@ -415,7 +415,7 @@ export const beneficiaryCrudRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { beneficiaries: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
       const searchFilter = input.search
         ? sql`AND (name ILIKE ${'%' + input.search + '%'} OR "accountNumber" ILIKE ${'%' + input.search + '%'} OR "bankName" ILIKE ${'%' + input.search + '%'})`
@@ -494,7 +494,7 @@ export const beneficiaryCrudRouter = router({
 export const walletCrudRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return { wallets: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`SELECT * FROM wallets WHERE "userId" = ${ctx.user.id} ORDER BY "isDefault" DESC, "createdAt" ASC`);
     return { wallets: rows as any[] };
   }),
@@ -565,7 +565,7 @@ export const transactionSearchRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { transfers: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
 
       const conditions: string[] = [String(`t."userId" = ${ctx.user.id}`)]; // userId from ctx
@@ -640,7 +640,7 @@ export const kycAdminRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { submissions: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
       const statusFilter = input.status === "all" ? sql`1=1` : sql`ks.status = ${input.status}`;
       const tierFilter = input.tier === "all" ? sql`1=1` : sql`ks.tier = ${input.tier}`;
@@ -738,7 +738,7 @@ export const kycAdminRouter = router({
 
   getStats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { total: 0, pending: 0, approved: 0, rejected: 0, underReview: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT
         COUNT(*) as total,
@@ -761,7 +761,7 @@ export const partnerAnalyticsRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const days = { "7d": 7, "30d": 30, "90d": 90, "1y": 365 }[input.period];
       const rows = await db.execute(sql`
         SELECT
@@ -826,7 +826,7 @@ export const partnerAnalyticsRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { breakdown: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const days = { "7d": 7, "30d": 30, "90d": 90, "1y": 365 }[input.period];
       const rows = await db.execute(sql`
         SELECT
@@ -852,7 +852,7 @@ export const partnerAnalyticsRouter = router({
     .input(z.object({ tenantId: z.number().int() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { keys: [], totalRequests: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT id, name, key_prefix, environment, status, request_count, last_used_at, created_at
         FROM partner_api_keys
@@ -954,7 +954,7 @@ export const auditLogRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { logs: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
       const userFilter = input.userId ? sql`AND al."userId" = ${input.userId}` : sql``;
       const actionFilter = input.action ? sql`AND al.action ILIKE ${'%' + input.action + '%'}` : sql``;
@@ -980,7 +980,7 @@ export const auditLogRouter = router({
 
   getStats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { total: 0, today: 0, topActions: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const totalRows = await db.execute(sql`SELECT COUNT(*) as total FROM "auditLogs"`);
     const todayRows = await db.execute(sql`SELECT COUNT(*) as today FROM "auditLogs" WHERE "createdAt" >= CURRENT_DATE`);
     const topRows = await db.execute(sql`
@@ -997,7 +997,7 @@ export const auditLogRouter = router({
   // v92: getSecuritySummary — recent security events for SecurityAuditReport page
   getSecuritySummary: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { events: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     try {
       const rows = await db.execute(sql`
         SELECT id, action, description as details, severity, "createdAt"

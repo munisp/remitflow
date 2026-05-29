@@ -23,7 +23,7 @@ export const abTestingRouter = router({
     .input(z.object({ status: z.enum(["draft", "running", "paused", "completed", "all"]).default("all") }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { experiments: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = input?.status && input.status !== "all"
         ? await db.select().from(abExperiments).where(eq(abExperiments.status, input.status as any)).orderBy(desc(abExperiments.createdAt))
         : await db.select().from(abExperiments).orderBy(desc(abExperiments.createdAt));
@@ -85,7 +85,7 @@ export const abTestingRouter = router({
     .input(z.object({ experimentId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { variantId: "control" };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Check existing assignment
       const [existing] = await db.select().from(abAssignments)
         .where(and(eq(abAssignments.experimentId, input.experimentId), eq(abAssignments.userId, ctx.user.id)))
@@ -138,7 +138,7 @@ export const abTestingRouter = router({
     .input(z.object({ experimentId: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { results: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [exp] = await db.select().from(abExperiments).where(eq(abExperiments.id, input.experimentId)).limit(1);
       if (!exp) throw new TRPCError({ code: "NOT_FOUND" });
       const events = await db.select().from(abEvents).where(eq(abEvents.experimentId, input.experimentId));
@@ -173,7 +173,7 @@ export const referralBonusRouter = router({
     .input(z.object({ status: z.string().optional() }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { bonuses: [], totalEarned: 0, pendingAmount: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select().from(referralBonuses)
         .where(eq(referralBonuses.referrerId, ctx.user.id))
         .orderBy(desc(referralBonuses.createdAt));
@@ -187,7 +187,7 @@ export const referralBonusRouter = router({
     .input(z.object({ status: z.string().optional(), page: z.number().default(1) }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { bonuses: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select().from(referralBonuses).orderBy(desc(referralBonuses.createdAt)).limit(50).offset(((input?.page ?? 1) - 1) * 50);
       return { bonuses: rows, total: rows.length };
     }),
@@ -216,7 +216,7 @@ export const referralBonusRouter = router({
   // Leaderboard
   leaderboard: protectedProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { leaders: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select({
       referrerId: referralBonuses.referrerId,
       totalBonuses: sql<number>`COUNT(*)`,
@@ -247,7 +247,7 @@ export const documentVaultRouter = router({
     .input(z.object({ category: z.string().optional() }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { documents: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select().from(documentVaultTable)
         .where(eq(documentVaultTable.userId, ctx.user.id))
         .orderBy(desc(documentVaultTable.createdAt));
@@ -357,7 +357,7 @@ export const documentVaultRouter = router({
     .input(z.object({ daysAhead: z.number().min(1).max(90).default(30) }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { documents: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const cutoff = new Date(Date.now() + (input?.daysAhead ?? 30) * 24 * 60 * 60 * 1000);
       const rows = await db.select().from(documentVaultTable)
         .where(and(
@@ -379,7 +379,7 @@ export const documentVaultRouter = router({
   // Get reminder preferences
   getReminderPrefs: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return null;
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [prefs] = await db.select().from(docReminderPrefs).where(eq(docReminderPrefs.userId, ctx.user.id)).limit(1);
     return prefs ?? {
       remind30d: true, remind14d: true, remind7d: true, remind3d: true, remind1d: true,
@@ -428,7 +428,7 @@ export const documentVaultRouter = router({
     .input(z.object({ limit: z.number().default(50) }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { logs: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select({
         id: docReminderLog.id,
         documentId: docReminderLog.documentId,
@@ -471,7 +471,7 @@ export const rateAlertHistoryRouter = router({
     }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { history: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select().from(rateAlertHistory)
         .where(eq(rateAlertHistory.userId, ctx.user.id))
         .orderBy(desc(rateAlertHistory.triggeredAt))
@@ -510,7 +510,7 @@ export const rateAlertHistoryRouter = router({
   // Get stats
   stats: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return { total: 0, triggered: 0, snoozed: 0, dismissed: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select().from(rateAlertHistory).where(eq(rateAlertHistory.userId, ctx.user.id));
     return {
       total: rows.length,
