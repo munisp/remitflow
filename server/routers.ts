@@ -2190,10 +2190,28 @@ export const appRouter = router({
     }),
     claim: protectedProcedure.input(z.object({ code: z.string() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const [existing] = await db.select().from(referrals).where(eq(referrals.referrerId, ctx.user.id)).limit(1);
-      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Invalid referral code" });
-      if (existing?.referredId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot use your own referral code" });
-      return { success: true, reward: 500, message: "Referral applied! ₦500 bonus added to your wallet." };
+      const referrerIdMatch = input.code.match(/^RF(\d+)$/);
+      if (!referrerIdMatch) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid referral code format" });
+      const referrerId = Number(referrerIdMatch[1]);
+      if (referrerId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot use your own referral code" });
+      const [referrer] = await db.select().from(users).where(eq(users.id, referrerId)).limit(1);
+      if (!referrer) throw new TRPCError({ code: "NOT_FOUND", message: "Invalid referral code" });
+      const [alreadyClaimed] = await db.select().from(referrals).where(and(eq(referrals.referrerId, referrerId), eq(referrals.referredId, ctx.user.id))).limit(1);
+      if (alreadyClaimed) throw new TRPCError({ code: "BAD_REQUEST", message: "Referral already claimed" });
+      const rewardNGN = 500;
+      const referralCount = await db.select({ cnt: sql<number>`count(*)` }).from(referrals).where(eq(referrals.referrerId, referrerId)).then((r: { cnt: number }[]) => Number(r[0]?.cnt ?? 0));
+      const tier = getReferralTier(referralCount);
+      const finalReward = Math.round(rewardNGN * (1 + tier.bonus / 100));
+      await db.insert(referrals).values({ referrerId, referredId: ctx.user.id, rewardAmount: finalReward.toString(), status: "completed" as any } as any);
+      const [ngnWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "NGN"))).limit(1);
+      if (ngnWallet) {
+        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, ngnWallet.id));
+      }
+      const [referrerWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, referrerId), eq(wallets.currency, "NGN"))).limit(1);
+      if (referrerWallet) {
+        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, referrerWallet.id));
+      }
+      return { success: true, reward: finalReward, message: `Referral applied! ₦${finalReward} bonus added to your wallet.` };
     }),
   }),
 
