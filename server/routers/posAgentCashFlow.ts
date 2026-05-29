@@ -44,7 +44,7 @@ export const posAgentCashFlowRouter = router({
       .from(agentAccounts)
       .where(eq(agentAccounts.userId, ctx.user.id))
       .limit(1)
-      .catch(() => [null]);
+      ;
 
     // Get wallet balance (float)
     const [wallet] = await db
@@ -52,7 +52,7 @@ export const posAgentCashFlowRouter = router({
       .from(wallets)
       .where(eq(wallets.userId, ctx.user.id))
       .limit(1)
-      .catch(() => [null]);
+      ;
 
     // Today's POS transactions
     const todayTxs = await db
@@ -64,7 +64,7 @@ export const posAgentCashFlowRouter = router({
           gte(transactions.createdAt, todayStart()),
         )
       )
-      .catch(() => []);
+      ;
 
     const todayVolume = todayTxs.reduce((s: any, t: any) => s + Number(t.amount ?? 0), 0);
     const commissionRate = Number(agent?.commissionRate ?? 1.5);
@@ -75,13 +75,13 @@ export const posAgentCashFlowRouter = router({
       .select({ c: count() })
       .from(transactions)
       .where(eq(transactions.userId, ctx.user.id))
-      .catch(() => [{ c: 0 }]);
+      ;
 
     const [totalCommRow] = await db
       .select({ total: sum(transactions.toAmount) })
       .from(transactions)
       .where(eq(transactions.userId, ctx.user.id))
-      .catch(() => [{ total: "0" }]);
+      ;
 
     const totalCommission = Number(totalCommRow?.total ?? 0) * commissionRate / 100;
 
@@ -124,7 +124,7 @@ export const posAgentCashFlowRouter = router({
         .from(agentAccounts)
         .where(eq(agentAccounts.userId, ctx.user.id))
         .limit(1)
-        .catch(() => [null]);
+        ;
 
       if (!agent || agent.status === "suspended") {
         throw new TRPCError({ code: "FORBIDDEN", message: "Agent account not active. Please contact support." });
@@ -135,7 +135,7 @@ export const posAgentCashFlowRouter = router({
         .select({ total: sum(transactions.toAmount) })
         .from(transactions)
         .where(and(eq(transactions.userId, ctx.user.id), gte(transactions.createdAt, todayStart())))
-        .catch(() => [{ total: "0" }]);
+        ;
 
       const todayVolume = Number(todayTxs[0]?.total ?? 0);
       const dailyLimit = Number(agent.dailyLimit ?? 1_000_000);
@@ -191,7 +191,7 @@ export const posAgentCashFlowRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(agentAccounts.id, agent.id))
-        .catch(() => {});
+        ;
 
       return {
         success: true,
@@ -227,7 +227,7 @@ export const posAgentCashFlowRouter = router({
         .from(agentAccounts)
         .where(eq(agentAccounts.userId, ctx.user.id))
         .limit(1)
-        .catch(() => [null]);
+        ;
 
       if (!agent || agent.status === "suspended") {
         throw new TRPCError({ code: "FORBIDDEN", message: "Agent account not active." });
@@ -239,7 +239,7 @@ export const posAgentCashFlowRouter = router({
         .from(wallets)
         .where(eq(wallets.userId, ctx.user.id))
         .limit(1)
-        .catch(() => [null]);
+        ;
 
       const floatBalance = Number(wallet?.balance ?? 0);
       if (floatBalance < input.amount) {
@@ -288,7 +288,7 @@ export const posAgentCashFlowRouter = router({
           .update(wallets)
           .set({ balance: sql`${wallets.balance} - ${input.amount}`, updatedAt: new Date() })
           .where(eq(wallets.id, wallet.id))
-          .catch(() => {});
+          ;
       }
 
       // Update agent totals
@@ -300,7 +300,7 @@ export const posAgentCashFlowRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(agentAccounts.id, agent.id))
-        .catch(() => {});
+        ;
 
       return {
         success: true,
@@ -328,7 +328,7 @@ export const posAgentCashFlowRouter = router({
       .where(and(eq(transactions.userId, ctx.user.id), gte(transactions.createdAt, todayStart())))
       .orderBy(desc(transactions.createdAt))
       .limit(100)
-      .catch(() => []);
+      ;
 
     return rows.map((r: any) => {
       let meta: any = {};
@@ -366,7 +366,7 @@ export const transfersListRouter = router({
         .orderBy(desc(transactions.createdAt))
         .limit(input.limit)
         .offset(input.offset)
-        .catch(() => []);
+        ;
 
       const transfers = rows.map((r: any) => {
         let meta: any = {};
@@ -403,7 +403,7 @@ export const transfersListRouter = router({
         .from(transactions)
         .where(and(eq(transactions.id, input.id), eq(transactions.userId, ctx.user.id)))
         .limit(1)
-        .catch(() => [null]);
+        ;
 
       if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Transfer not found." });
       if (tx.status !== "pending") {
@@ -414,7 +414,7 @@ export const transfersListRouter = router({
         .update(transactions)
         .set({ status: "cancelled" as any, updatedAt: new Date() })
         .where(eq(transactions.id, input.id))
-        .catch(() => {});
+        ;
 
       return { success: true, id: input.id };
     }),
@@ -433,7 +433,7 @@ export const transfersListRouter = router({
         .where(eq(transactions.userId, ctx.user.id))
         .orderBy(desc(transactions.createdAt))
         .limit(5000)
-        .catch(() => []);
+        ;
 
       const header = ["ID","Date","Reference","Type","Status","Amount","Currency",
         "To Amount","To Currency","Exchange Rate","Fee","Recipient","Gateway"].join(",");

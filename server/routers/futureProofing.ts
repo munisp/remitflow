@@ -411,7 +411,7 @@ const openBankingFullRouter = router({
     // Get user's connected bank accounts from DB
     const accounts = await db.execute(sql`
       SELECT * FROM open_banking_accounts WHERE user_id = ${ctx.user.id} AND status = 'active' ORDER BY connected_at DESC
-    `).catch(() => []);
+    `);
 
     // Sync balances via Dapr service invocation
     const synced = [];
@@ -1080,7 +1080,7 @@ async function localSanctionsCheck(name: string, country?: string): Promise<{ st
   const rows = await db.execute(sql`
     SELECT * FROM sanctions_list WHERE LOWER(name) LIKE ${'%' + normalizedName + '%'} OR similarity(LOWER(name), ${normalizedName}) > 0.6
     LIMIT 10
-  `).catch(() => []);
+  `);
 
   const matches = (rows as any[]).map((r: any) => ({
     name: r.name,

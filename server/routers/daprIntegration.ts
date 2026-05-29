@@ -30,7 +30,7 @@ async function daprFetch(path: string, options?: RequestInit): Promise<{ ok: boo
       const text = await res.text().catch(() => "");
       return { ok: false, error: `Dapr returned ${res.status}: ${text}` };
     }
-    const data = res.status !== 204 ? await res.json().catch(() => null) : null;
+    const data = res.status !== 204 ? await res.json() : null;
     return { ok: true, data };
   } catch (err: any) {
     return { ok: false, error: err?.message || "Dapr sidecar not available" };

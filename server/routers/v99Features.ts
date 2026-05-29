@@ -283,7 +283,7 @@ export const transferLimitsV2Router = router({
         }),
         ipAddress: null,
         userAgent: null,
-      }).catch(() => {});
+      });
       return {
         success: true,
         message: "Limit increase request submitted. Our compliance team will review within 1–2 business days.",

@@ -698,7 +698,7 @@ export const kycAdminRouter = router({
           status: "approved",
           tier: input.tier,
           nextSteps: "You can now send larger amounts. Log in to start transacting.",
-        }).catch(() => {}); // non-blocking
+        }); // non-blocking
       }
       return { success: true, updatedAt: new Date().toISOString() };
     }),
@@ -731,7 +731,7 @@ export const kycAdminRouter = router({
           status: "rejected",
           rejectionReason: input.rejectionReason,
           nextSteps: "Please resubmit with the correct documents. Contact support if you need help.",
-        }).catch(() => {});
+        });
       }
       return { success: true, updatedAt: new Date().toISOString() };
     }),

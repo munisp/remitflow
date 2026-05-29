@@ -107,7 +107,7 @@ export const agentOnboardingRouter = router({
       await notifyOwner({
         title: `New Agent Application: ${input.businessName}`,
         content: `Agent Code: ${agentCode}\nTier: ${input.tier}\nLocation: ${input.location}, ${input.country}\nPhone: ${input.phone}\nEmail: ${input.email ?? "—"}\nCAC: ${input.cacNumber ?? "—"}\nBank: ${input.bankName ?? "—"} ${input.bankAccountNumber ?? ""}\n\nPlease review and approve/reject in the admin panel.`,
-      }).catch(() => {}); // non-blocking
+      }); // non-blocking
 
       return {
         success: true,

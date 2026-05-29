@@ -435,7 +435,7 @@ export const complianceAlertsRouter = router({
       await notifyOwner({
         title: `SAR Submitted — ${sarRef}`,
         content: `A Suspicious Activity Report has been filed for alert #${input.alertId} by ${ctx.user.name ?? 'MLRO'}. Reference: ${input.fiuReference ?? sarRef}. Activity: ${input.suspiciousActivityType}.`,
-      }).catch(() => {});
+      });
       return { sarReference: input.fiuReference ?? sarRef, submittedAt: now };
     }),
 

@@ -980,7 +980,7 @@ export const searchIndexerV127Router = router({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ index: input.index }),
       signal: AbortSignal.timeout(10000),
-    }).catch(() => null);
+    });
     if (!res || !res.ok) {
       throw new TRPCError({ code: "BAD_GATEWAY", message: `Search indexer reindex request failed.` });
     }

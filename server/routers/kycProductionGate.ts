@@ -212,7 +212,7 @@ export const accountOpeningGateRouter = router({
           eventType: "account.opened",
           tier: "tier1",
           metadata: { accountId, productType: input.productType },
-        }).catch(() => {});
+        });
 
         return {
           status: "approved",
@@ -245,13 +245,13 @@ export const accountOpeningGateRouter = router({
             status: "pending_kyc",
             requiredLevel: productReq.kycLevel,
           },
-        }).catch(() => {});
+        });
         await publishKYCEvent({
           userId: ctx.user.id,
           eventType: "kyc.verification.required",
           tier: productReq.tier,
           metadata: { kycLevel: productReq.kycLevel },
-        }).catch(() => {});
+        });
 
         return {
           status: "pending_kyc",
@@ -283,7 +283,7 @@ export const accountOpeningGateRouter = router({
             userId: ctx.user.id,
             eventType: "kyb.verification.required",
             metadata: { productType: input.productType },
-          }).catch(() => {});
+          });
           return {
             status: "pending_kyb",
             accountId: null,
@@ -309,7 +309,7 @@ export const accountOpeningGateRouter = router({
         eventType: "account.opened",
         tier: productReq.tier,
         metadata: { accountId, productType: input.productType },
-      }).catch(() => {});
+      });
 
       return {
         status: "approved",
@@ -377,7 +377,7 @@ export const accountOpeningGateRouter = router({
         eventType: "account.kyc.verified",
         tier: input.verifiedTier,
         metadata: { level: input.verifiedLevel },
-      }).catch(() => {});
+      });
 
       await createAuditLog({
         userId: input.userId,
@@ -496,7 +496,7 @@ export const enhancedKybRouter = router({
           circularOwnership: ownershipAnalysis.circularOwnership,
           riskFlags: ownershipAnalysis.riskFlags,
         },
-      }).catch(() => {});
+      });
 
       await createAuditLog({
         userId: ctx.user.id,

@@ -29,12 +29,12 @@ export const vapidPushRouter = router({
       INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, device_name, created_at)
       VALUES (${ctx.user.id}, ${input.endpoint}, ${input.keys.p256dh}, ${input.keys.auth}, ${input.deviceName ?? "Browser"}, NOW())
       ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth
-    `).catch(() => null);
+    `);
     return { subscribed: true, deviceName: input.deviceName ?? "Browser" };
   }),
   unsubscribe: auditedProcedure.input(z.object({ endpoint: z.string() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`DELETE FROM push_subscriptions WHERE user_id = ${ctx.user.id} AND endpoint = ${input.endpoint}`).catch(() => null);
+    if (db) await db.execute(sql`DELETE FROM push_subscriptions WHERE user_id = ${ctx.user.id} AND endpoint = ${input.endpoint}`);
     return { unsubscribed: true };
   }),
   listSubscriptions: protectedProcedure.query(async ({ ctx }) => {
@@ -51,7 +51,7 @@ export const vapidPushRouter = router({
     if (db) await db.insert(notifications).values({
       userId: ctx.user.id, type: "system", title: input.title,
       message: input.body, isRead: false, createdAt: new Date(),
-    }).catch(() => null);
+    });
     return { sent: true };
   }),
 });
@@ -61,9 +61,9 @@ export const apiUsageRouter = router({
   summary: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const userKeys = await db.select().from(apiKeys).where(eq(apiKeys.userId, ctx.user.id)).catch(() => []);
+    const userKeys = await db.select().from(apiKeys).where(eq(apiKeys.userId, ctx.user.id));
     // Get real transaction counts as a proxy for API usage (api_usage_logs table not yet seeded)
-    const [txCount] = await db.select({ value: count() }).from(transactions).where(eq(transactions.userId, ctx.user.id)).catch(() => [{ value: 0 }]);
+    const [txCount] = await db.select({ value: count() }).from(transactions).where(eq(transactions.userId, ctx.user.id));
     const totalTx = Number(txCount?.value ?? 0);
     return (userKeys as any[]).map((k: any) => ({
       keyId: k.id, keyName: k.name, keyPrefix: k.keyPrefix,
@@ -91,7 +91,7 @@ export const apiUsageRouter = router({
       if (db) {
         const [row] = await db.select({ value: count() }).from(transactions)
           .where(and(eq(transactions.userId, ctx.user.id), sql`${transactions.createdAt} >= ${dayStart}`, sql`${transactions.createdAt} <= ${dayEnd}`))
-          .catch(() => [{ value: 0 }]);
+          ;
         dayCount = Number(row?.value ?? 0);
       }
       results.push({ date: d.toISOString().split("T")[0], requests: dayCount * 3 + 10, errors: Math.max(0, Math.floor(dayCount * 0.02)), latencyP50: 85, latencyP99: 320 });
@@ -105,7 +105,7 @@ export const treasuryRouter = router({
   positions: adminProcedure.query(async () => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.select().from(treasuryPositions).orderBy(desc(treasuryPositions.updatedAt)).catch(() => []);
+    const rows = await db.select().from(treasuryPositions).orderBy(desc(treasuryPositions.updatedAt));
     if (rows.length > 0) {
       return rows.map((r: any) => ({
         currency: r.currency,
@@ -131,7 +131,7 @@ export const treasuryRouter = router({
       provider: "RemitFlow Treasury",
       accountRef: `TREAS-${ccy}-001`,
     }));
-    await db.insert(treasuryPositions).values(defaults).onConflictDoNothing().catch(() => {});
+    await db.insert(treasuryPositions).values(defaults).onConflictDoNothing();
     return defaults.map(d => ({
       currency: d.currency,
       nostroBalance: d.balance,
@@ -209,12 +209,12 @@ export const documentVaultRouter = router({
     if (db) await db.execute(sql`
       INSERT INTO document_vault (user_id, doc_type, filename, file_url, file_size, mime_type, expiry_date, is_verified, uploaded_at)
       VALUES (${ctx.user.id}, ${input.docType}, ${input.filename}, ${input.fileUrl}, ${input.fileSize}, ${input.mimeType}, ${input.expiryDate ?? null}, false, NOW())
-    `).catch(() => null);
+    `);
     return { uploaded: true };
   }),
   delete: auditedProcedure.input(z.object({ docId: z.number() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`DELETE FROM document_vault WHERE id = ${input.docId} AND user_id = ${ctx.user.id}`).catch(() => null);
+    if (db) await db.execute(sql`DELETE FROM document_vault WHERE id = ${input.docId} AND user_id = ${ctx.user.id}`);
     return { deleted: true };
   }),
   expiryAlerts: protectedProcedure.query(async ({ ctx }) => {
@@ -253,7 +253,7 @@ export const chargebackRouter = router({
     if (db) await db.execute(sql`
       INSERT INTO chargebacks (user_id, transaction_ref, amount, currency, reason, description, evidence_url, status, created_at)
       VALUES (${ctx.user.id}, ${input.transactionRef}, ${input.amount}, ${input.currency}, ${input.reason}, ${input.description}, ${input.evidenceUrl ?? null}, 'submitted', NOW())
-    `).catch(() => null);
+    `);
     return { chargebackRef: genId("CB"), status: "submitted", estimatedResolution: "5-10 business days" };
   }),
   adminList: adminProcedure.query(async () => {
@@ -268,7 +268,7 @@ export const chargebackRouter = router({
     notes: z.string().min(0).max(1000).trim(),
   })).mutation(async ({ input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`UPDATE chargebacks SET status = 'resolved', resolution = ${input.resolution}, merchant_response = ${input.notes}, updated_at = NOW() WHERE id = ${input.chargebackId}`).catch(() => null);
+    if (db) await db.execute(sql`UPDATE chargebacks SET status = 'resolved', resolution = ${input.resolution}, merchant_response = ${input.notes}, updated_at = NOW() WHERE id = ${input.chargebackId}`);
     return { resolved: true, resolution: input.resolution };
   }),
 });
@@ -292,7 +292,7 @@ export const developerSandboxRouter = router({
       title: `[SANDBOX] ${input.eventType}`,
       message: `Simulated: ${input.eventType}. Payload: ${JSON.stringify(input.payload ?? {})}`,
       isRead: false, createdAt: new Date(),
-    }).catch(() => null);
+    });
     return { eventId: genId("evt_test"), eventType: input.eventType, simulated: true, timestamp: new Date().toISOString() };
   }),
   resetTestData: auditedProcedure.mutation(async () => ({
@@ -399,12 +399,12 @@ export const offlineQueueRouter = router({
     payload: z.record(z.string(), z.unknown()), scheduledAt: z.string().optional(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO offline_queue (user_id, operation_type, payload, status, retry_count, created_at) VALUES (${ctx.user.id}, ${input.operationType}, ${JSON.stringify(input.payload)}, 'pending', 0, NOW())`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO offline_queue (user_id, operation_type, payload, status, retry_count, created_at) VALUES (${ctx.user.id}, ${input.operationType}, ${JSON.stringify(input.payload)}, 'pending', 0, NOW())`);
     return { queueId: genId("oq"), status: "queued" };
   }),
   cancel: auditedProcedure.input(z.object({ queueId: z.number() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`UPDATE offline_queue SET status = 'cancelled' WHERE id = ${input.queueId} AND user_id = ${ctx.user.id}`).catch(() => null);
+    if (db) await db.execute(sql`UPDATE offline_queue SET status = 'cancelled' WHERE id = ${input.queueId} AND user_id = ${ctx.user.id}`);
     return { cancelled: true };
   }),
 });
@@ -424,22 +424,22 @@ export const notificationCenterRouter = router({
       db.select().from(notifications).where(and(...conditions)).orderBy(desc(notifications.createdAt)).limit(input.limit).offset(input.offset),
       db.select({ count: count() }).from(notifications).where(and(...conditions)),
       db.select({ count: count() }).from(notifications).where(and(eq(notifications.userId, ctx.user.id), eq(notifications.isRead, false))),
-    ]).catch(() => [[], [{ count: 0 }], [{ count: 0 }]]);
+    ]);
     return { items, total: (totalResult as any)[0]?.count ?? 0, unreadCount: (unreadResult as any)[0]?.count ?? 0 };
   }),
   markRead: auditedProcedure.input(z.object({ ids: z.array(z.number()).optional() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     if (input.ids?.length) {
-      await db.execute(sql`UPDATE notifications SET is_read = true WHERE user_id = ${ctx.user.id} AND id = ANY(${input.ids})`).catch(() => null);
+      await db.execute(sql`UPDATE notifications SET is_read = true WHERE user_id = ${ctx.user.id} AND id = ANY(${input.ids})`);
     } else {
-      await db.execute(sql`UPDATE notifications SET is_read = true WHERE user_id = ${ctx.user.id}`).catch(() => null);
+      await db.execute(sql`UPDATE notifications SET is_read = true WHERE user_id = ${ctx.user.id}`);
     }
     return { marked: true };
   }),
   delete: auditedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`DELETE FROM notifications WHERE id = ${input.id} AND user_id = ${ctx.user.id}`).catch(() => null);
+    if (db) await db.execute(sql`DELETE FROM notifications WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
     return { deleted: true };
   }),
   preferences: protectedProcedure.query(async ({ ctx }) => {
@@ -455,7 +455,7 @@ export const notificationCenterRouter = router({
   }),
   updatePreference: auditedProcedure.input(z.object({ channel: z.string(), eventType: z.string(), enabled: z.boolean() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO notification_preferences (user_id, channel, event_type, enabled) VALUES (${ctx.user.id}, ${input.channel}, ${input.eventType}, ${input.enabled}) ON CONFLICT (user_id, channel, event_type) DO UPDATE SET enabled = EXCLUDED.enabled`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO notification_preferences (user_id, channel, event_type, enabled) VALUES (${ctx.user.id}, ${input.channel}, ${input.eventType}, ${input.enabled}) ON CONFLICT (user_id, channel, event_type) DO UPDATE SET enabled = EXCLUDED.enabled`);
     return { updated: true };
   }),
 });
@@ -522,12 +522,12 @@ export const biometricEnrollmentRouter = router({
     biometricType: z.enum(["fingerprint", "face_id", "touch_id"]), publicKey: z.string(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO biometric_enrollments (user_id, device_id, device_name, biometric_type, public_key, enrolled_at, is_active) VALUES (${ctx.user.id}, ${input.deviceId}, ${input.deviceName}, ${input.biometricType}, ${input.publicKey}, NOW(), true) ON CONFLICT (user_id, device_id) DO UPDATE SET is_active = true`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO biometric_enrollments (user_id, device_id, device_name, biometric_type, public_key, enrolled_at, is_active) VALUES (${ctx.user.id}, ${input.deviceId}, ${input.deviceName}, ${input.biometricType}, ${input.publicKey}, NOW(), true) ON CONFLICT (user_id, device_id) DO UPDATE SET is_active = true`);
     return { enrolled: true, deviceId: input.deviceId };
   }),
   revoke: auditedProcedure.input(z.object({ deviceId: z.string() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`UPDATE biometric_enrollments SET is_active = false WHERE user_id = ${ctx.user.id} AND device_id = ${input.deviceId}`).catch(() => null);
+    if (db) await db.execute(sql`UPDATE biometric_enrollments SET is_active = false WHERE user_id = ${ctx.user.id} AND device_id = ${input.deviceId}`);
     return { revoked: true };
   }),
   generateChallenge: auditedProcedure.mutation(async () => ({
@@ -540,12 +540,12 @@ export const ledgerRouter = router({
   entries: protectedProcedure.input(z.object({ limit: z.number().default(50) })).query(async ({ ctx, input }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    return db.select().from(transactions).where(eq(transactions.userId, ctx.user.id)).orderBy(desc(transactions.createdAt)).limit(input.limit).catch(() => []);
+    return db.select().from(transactions).where(eq(transactions.userId, ctx.user.id)).orderBy(desc(transactions.createdAt)).limit(input.limit);
   }),
   reconciliation: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const walletRows = await db.select().from(wallets).where(eq(wallets.userId, ctx.user.id)).catch(() => []);
+    const walletRows = await db.select().from(wallets).where(eq(wallets.userId, ctx.user.id));
     return (walletRows as any[]).map((w: any) => ({
       currency: w.currency, bookBalance: w.balance, availableBalance: w.availableBalance ?? w.balance,
       pendingDebits: 0, pendingCredits: 0, lastReconciled: new Date().toISOString(), status: "balanced",
@@ -581,17 +581,17 @@ export const transferGoalsRouter = router({
     autoTransferAmount: z.number().positive().optional(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO transfer_goals (user_id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status, created_at) VALUES (${ctx.user.id}, ${input.name}, ${input.targetAmount}, 0, ${input.currency}, ${input.deadline ?? null}, ${input.autoTransferEnabled}, 'active', NOW())`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO transfer_goals (user_id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status, created_at) VALUES (${ctx.user.id}, ${input.name}, ${input.targetAmount}, 0, ${input.currency}, ${input.deadline ?? null}, ${input.autoTransferEnabled}, 'active', NOW())`);
     return { goalId: genId("TG"), name: input.name, status: "active" };
   }),
   topup: auditedProcedure.input(z.object({ goalId: z.number(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`UPDATE transfer_goals SET current_amount = current_amount + ${input.amount} WHERE id = ${input.goalId} AND user_id = ${ctx.user.id}`).catch(() => null);
+    if (db) await db.execute(sql`UPDATE transfer_goals SET current_amount = current_amount + ${input.amount} WHERE id = ${input.goalId} AND user_id = ${ctx.user.id}`);
     return { topped: true, amount: input.amount };
   }),
   delete: auditedProcedure.input(z.object({ goalId: z.number() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`DELETE FROM transfer_goals WHERE id = ${input.goalId} AND user_id = ${ctx.user.id}`).catch(() => null);
+    if (db) await db.execute(sql`DELETE FROM transfer_goals WHERE id = ${input.goalId} AND user_id = ${ctx.user.id}`);
     return { deleted: true };
   }),
 });
@@ -662,7 +662,7 @@ export const analyticsPipelineRouter = router({
     eventName: z.string(), properties: z.record(z.string(), z.unknown()).optional(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO analytics_events (user_id, event_name, properties, created_at) VALUES (${ctx.user.id}, ${input.eventName}, ${JSON.stringify(input.properties ?? {})}, NOW())`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO analytics_events (user_id, event_name, properties, created_at) VALUES (${ctx.user.id}, ${input.eventName}, ${JSON.stringify(input.properties ?? {})}, NOW())`);
     return { tracked: true };
   }),
 });
@@ -701,12 +701,12 @@ export const beneficiaryGroupsRouter = router({
   }),
   create: auditedProcedure.input(z.object({ name: z.string().min(1).max(50), description: z.string().optional(), color: z.string().default("#6366f1") })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO beneficiary_groups (user_id, name, description, color, created_at) VALUES (${ctx.user.id}, ${input.name}, ${input.description ?? null}, ${input.color}, NOW())`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO beneficiary_groups (user_id, name, description, color, created_at) VALUES (${ctx.user.id}, ${input.name}, ${input.description ?? null}, ${input.color}, NOW())`);
     return { groupId: genId("BG"), name: input.name };
   }),
   addMember: auditedProcedure.input(z.object({ groupId: z.number(), beneficiaryId: z.number() })).mutation(async ({ input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO beneficiary_group_members (group_id, beneficiary_id, added_at) VALUES (${input.groupId}, ${input.beneficiaryId}, NOW()) ON CONFLICT DO NOTHING`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO beneficiary_group_members (group_id, beneficiary_id, added_at) VALUES (${input.groupId}, ${input.beneficiaryId}, NOW()) ON CONFLICT DO NOTHING`);
     return { added: true };
   }),
   bulkSend: auditedProcedure.input(z.object({ groupId: z.number(), amount: z.number().positive(), currency: z.string().length(3), note: z.string().optional() })).mutation(async ({ input }) => ({
@@ -731,7 +731,7 @@ export const whiteLabelConfigRouter = router({
     features: z.record(z.string(), z.boolean()).optional(),
   })).mutation(async ({ input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`UPDATE white_label_configs SET primary_color = COALESCE(${input.primaryColor ?? null}, primary_color), secondary_color = COALESCE(${input.secondaryColor ?? null}, secondary_color), app_name = COALESCE(${input.appName ?? null}, app_name), updated_at = NOW() WHERE tenant_id = ${input.tenantId}`).catch(() => null);
+    if (db) await db.execute(sql`UPDATE white_label_configs SET primary_color = COALESCE(${input.primaryColor ?? null}, primary_color), secondary_color = COALESCE(${input.secondaryColor ?? null}, secondary_color), app_name = COALESCE(${input.appName ?? null}, app_name), updated_at = NOW() WHERE tenant_id = ${input.tenantId}`);
     return { updated: true };
   }),
 });

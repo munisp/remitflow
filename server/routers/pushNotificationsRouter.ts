@@ -180,7 +180,7 @@ export const pushNotificationsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Use drizzle ORM query instead of raw SQL execute
-      const allSubs = await db.select().from(pushSubscriptions).catch(() => []);
+      const allSubs = await db.select().from(pushSubscriptions);
       const active = allSubs.filter((s: any) => s.isActive).length;
       const inactive = allSubs.filter((s: any) => !s.isActive).length;
       const uniqueUsers = new Set(allSubs.filter((s: any) => s.isActive).map((s: any) => s.userId)).size;

@@ -191,7 +191,7 @@ export const newRailsRouter = router({
       }),
 
     getCorridors: protectedProcedure.query(async () => {
-      const res = await callRailService(MICROSERVICE_URLS.bricspay, "/corridors", {}).catch(() => null);
+      const res = await callRailService(MICROSERVICE_URLS.bricspay, "/corridors", {});
       return res || {
         corridors: [
           { corridor: "CN-IN", currencies: "CNY-INR" },
@@ -411,7 +411,7 @@ export const newRailsRouter = router({
       }),
 
     getCorridors: protectedProcedure.query(async () => {
-      const res = await callRailService(MICROSERVICE_URLS.papss, "/corridors", {}).catch(() => null);
+      const res = await callRailService(MICROSERVICE_URLS.papss, "/corridors", {});
       return res || {
         corridors: [
           { corridor: "NG-GH", currencies: "NGN-GHS" },

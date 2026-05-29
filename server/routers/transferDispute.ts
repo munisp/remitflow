@@ -70,7 +70,7 @@ const raiseDispute = protectedProcedure
       throw new TRPCError({ code: "NOT_FOUND", message: "Transaction not found or does not belong to you" });
     }
     // PBAC: grant Permify access record for this user<>transaction pair (idempotent)
-    await grantTransactionAccess(String(ctx.user.id), String(input.transactionId)).catch(() => {});
+    await grantTransactionAccess(String(ctx.user.id), String(input.transactionId));
     // Verify access via Permify (non-blocking fallback: allow if Permify is unavailable)
     const pbacAllowed = await canAccessDispute(String(ctx.user.id), String(input.transactionId)).catch(() => true);
     if (!pbacAllowed) {

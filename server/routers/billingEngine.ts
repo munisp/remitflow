@@ -370,7 +370,7 @@ export const billingEngineRouter = router({
         description: `Billing config updated for tenant ${tenantId}: ${changeReason}`,
         severity: "warning",
         metadata: { tenantId, changeReason },
-      }).catch(() => {});
+      });
       return { success: true, version: newVersion, updatedAt: now };
     }),
 
@@ -669,7 +669,7 @@ export const billingEngineRouter = router({
         description: `Tenant ${input.companyName} provisioned via onboarding wizard`,
         severity: "info",
         metadata: { tenantId, companyType: input.companyType, corridors: input.corridors, workflowId },
-      }).catch(() => {});
+      });
       try {
         const { getTemporalClient } = await import("../_core/temporal");
         const client = await getTemporalClient();

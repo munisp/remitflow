@@ -309,7 +309,7 @@ export const kycLifecycleRouter = router({
         reason: "User submitted documents",
       });
       // Fire compliance check via Python sidecar
-      await runComplianceCheck({ transferId: `kyc-${ctx.user.id}-${Date.now()}`, userId: ctx.user.id, amount: 0, fromCurrency: "USD", toCurrency: "USD", fromCountry: "US", toCountry: "US" }).catch(() => null);
+      await runComplianceCheck({ transferId: `kyc-${ctx.user.id}-${Date.now()}`, userId: ctx.user.id, amount: 0, fromCurrency: "USD", toCurrency: "USD", fromCountry: "US", toCountry: "US" });
       await sendAuditLog({ userId: ctx.user.id, action: "kyc_lifecycle.submit", resource: "kyc_lifecycle", resourceId: String(lifecycle.id), severity: "info", details: { tier: input.tier } });
       return lifecycle;
     }),
