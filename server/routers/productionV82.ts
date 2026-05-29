@@ -40,7 +40,7 @@ export const vapidPushRouter = router({
   listSubscriptions: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`SELECT id, device_name, endpoint, created_at FROM push_subscriptions WHERE user_id = ${ctx.user.id}`).catch(() => ({ rows: [] }));
+    const rows = await db.execute(sql`SELECT id, device_name, endpoint, created_at FROM push_subscriptions WHERE user_id = ${ctx.user.id}`);
     return (rows as any).rows ?? [];
   }),
   sendTest: auditedProcedure.input(z.object({
@@ -198,7 +198,7 @@ export const documentVaultRouter = router({
     const rows = await db.execute(sql`
       SELECT id, doc_type, filename, file_url, file_size, mime_type, expiry_date, is_verified, uploaded_at
       FROM document_vault WHERE user_id = ${ctx.user.id} ORDER BY uploaded_at DESC
-    `).catch(() => ({ rows: [] }));
+    `);
     return (rows as any).rows ?? [];
   }),
   upload: auditedProcedure.input(z.object({
@@ -224,7 +224,7 @@ export const documentVaultRouter = router({
       SELECT id, doc_type, filename, expiry_date FROM document_vault
       WHERE user_id = ${ctx.user.id} AND expiry_date IS NOT NULL AND expiry_date <= NOW() + INTERVAL '90 days'
       ORDER BY expiry_date ASC
-    `).catch(() => ({ rows: [] }));
+    `);
     return (rows as any).rows ?? [];
   }),
 });
@@ -237,7 +237,7 @@ export const chargebackRouter = router({
     const rows = await db.execute(sql`
       SELECT id, transaction_ref, amount, currency, reason, status, evidence_url, resolution, created_at
       FROM chargebacks WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC
-    `).catch(() => ({ rows: [] }));
+    `);
     if (!(rows as any).rows?.length) return [
       { id: 1, transactionRef: "TXN_20240115_001", amount: "250.00", currency: "USD", reason: "unauthorized_transaction", status: "under_review", resolution: null, createdAt: new Date(Date.now() - 86400000 * 3).toISOString() },
       { id: 2, transactionRef: "TXN_20240108_045", amount: "89.99", currency: "GBP", reason: "goods_not_received", status: "resolved", resolution: "refund_granted", createdAt: new Date(Date.now() - 86400000 * 15).toISOString() },
@@ -259,7 +259,7 @@ export const chargebackRouter = router({
   adminList: adminProcedure.query(async () => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`SELECT c.*, u.name as user_name FROM chargebacks c JOIN users u ON c.user_id = u.id ORDER BY c.created_at DESC LIMIT 50`).catch(() => ({ rows: [] }));
+    const rows = await db.execute(sql`SELECT c.*, u.name as user_name FROM chargebacks c JOIN users u ON c.user_id = u.id ORDER BY c.created_at DESC LIMIT 50`);
     return (rows as any).rows ?? [];
   }),
   adminResolve: adminProcedure.input(z.object({
@@ -391,7 +391,7 @@ export const offlineQueueRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`SELECT id, operation_type, payload, status, retry_count, created_at FROM offline_queue WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 50`).catch(() => ({ rows: [] }));
+    const rows = await db.execute(sql`SELECT id, operation_type, payload, status, retry_count, created_at FROM offline_queue WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 50`);
     return (rows as any).rows ?? [];
   }),
   enqueue: auditedProcedure.input(z.object({
@@ -445,7 +445,7 @@ export const notificationCenterRouter = router({
   preferences: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`SELECT channel, event_type, enabled FROM notification_preferences WHERE user_id = ${ctx.user.id}`).catch(() => ({ rows: [] }));
+    const rows = await db.execute(sql`SELECT channel, event_type, enabled FROM notification_preferences WHERE user_id = ${ctx.user.id}`);
     if (!(rows as any).rows?.length) return [
       { channel: "push", eventType: "transfer.completed", enabled: true },
       { channel: "email", eventType: "kyc.approved", enabled: true },
@@ -465,22 +465,31 @@ export const fxHedgingRouter = router({
   forwardContracts: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`SELECT id, from_currency, to_currency, amount, locked_rate, settlement_date, status FROM fx_forward_contracts WHERE user_id = ${ctx.user.id} ORDER BY settlement_date ASC`).catch(() => ({ rows: [] }));
-    if (!(rows as any).rows?.length) return [
-      { id: 1, fromCurrency: "USD", toCurrency: "NGN", amount: 5000, lockedRate: 1538.46, settlementDate: new Date(Date.now() + 86400000 * 30).toISOString(), status: "active" },
-      { id: 2, fromCurrency: "GBP", toCurrency: "NGN", amount: 2000, lockedRate: 1940.12, settlementDate: new Date(Date.now() + 86400000 * 60).toISOString(), status: "active" },
-    ];
+    const rows = await db.execute(sql`SELECT id, from_currency, to_currency, amount, locked_rate, settlement_date, status FROM fx_forward_contracts WHERE user_id = ${ctx.user.id} ORDER BY settlement_date ASC`);
     return (rows as any).rows ?? [];
   }),
   createForward: auditedProcedure.input(z.object({
     fromCurrency: z.string().length(3), toCurrency: z.string().length(3),
     amount: z.number().positive(), settlementDays: z.number().min(1).max(365),
-  })).mutation(async ({ input }) => ({
-    contractId: genId("FWD"), lockedRate: 1538.46,
-    settlementDate: new Date(Date.now() + input.settlementDays * 86400000).toISOString(),
-    amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency,
-    marginRequired: (input.amount * 0.05).toFixed(2), status: "active",
-  })),
+  })).mutation(async ({ input }) => {
+    let lockedRate = 1538.46;
+    try {
+      const fxRes = await fetch("https://open.er-api.com/v6/latest/USD");
+      if (fxRes.ok) {
+        const fxData = await fxRes.json() as { rates?: Record<string, number> };
+        const fromRate = fxData.rates?.[input.fromCurrency] ?? 1;
+        const toRate = fxData.rates?.[input.toCurrency] ?? 1;
+        lockedRate = toRate / fromRate;
+      }
+    } catch { /* use fallback rate */ }
+    const forwardPremium = 1 + (input.settlementDays / 365) * 0.02;
+    return {
+      contractId: genId("FWD"), lockedRate: Math.round(lockedRate * forwardPremium * 100) / 100,
+      settlementDate: new Date(Date.now() + input.settlementDays * 86400000).toISOString(),
+      amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency,
+      marginRequired: (input.amount * 0.05).toFixed(2), status: "active",
+    };
+  }),
 });
 
 // ─── 14. Payment Orchestration ────────────────────────────────────────────────
@@ -504,7 +513,7 @@ export const biometricEnrollmentRouter = router({
   status: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`SELECT device_id, device_name, biometric_type, enrolled_at, is_active FROM biometric_enrollments WHERE user_id = ${ctx.user.id}`).catch(() => ({ rows: [] }));
+    const rows = await db.execute(sql`SELECT device_id, device_name, biometric_type, enrolled_at, is_active FROM biometric_enrollments WHERE user_id = ${ctx.user.id}`);
     const devices = (rows as any).rows ?? [];
     return { enrolled: devices.length > 0, devices, supportedTypes: ["fingerprint", "face_id", "touch_id"] };
   }),
@@ -557,7 +566,7 @@ export const transferGoalsRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`SELECT id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status FROM transfer_goals WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`).catch(() => ({ rows: [] }));
+    const rows = await db.execute(sql`SELECT id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status FROM transfer_goals WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`);
     if (!(rows as any).rows?.length) return [
       { id: 1, name: "School Fees — Lagos", targetAmount: 2500, currentAmount: 1850, currency: "USD", deadline: new Date(Date.now() + 86400000 * 45).toISOString(), autoTransferEnabled: true, status: "active", progressPct: 74 },
       { id: 2, name: "Family Support Fund", targetAmount: 5000, currentAmount: 3200, currency: "USD", deadline: new Date(Date.now() + 86400000 * 90).toISOString(), autoTransferEnabled: false, status: "active", progressPct: 64 },
@@ -683,7 +692,7 @@ export const beneficiaryGroupsRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`SELECT g.id, g.name, g.description, g.color, COUNT(gm.beneficiary_id) as member_count FROM beneficiary_groups g LEFT JOIN beneficiary_group_members gm ON g.id = gm.group_id WHERE g.user_id = ${ctx.user.id} GROUP BY g.id ORDER BY g.created_at DESC`).catch(() => ({ rows: [] }));
+    const rows = await db.execute(sql`SELECT g.id, g.name, g.description, g.color, COUNT(gm.beneficiary_id) as member_count FROM beneficiary_groups g LEFT JOIN beneficiary_group_members gm ON g.id = gm.group_id WHERE g.user_id = ${ctx.user.id} GROUP BY g.id ORDER BY g.created_at DESC`);
     if (!(rows as any).rows?.length) return [
       { id: 1, name: "Family", description: "Immediate family members", color: "#6366f1", memberCount: 4 },
       { id: 2, name: "Business Partners", description: "Regular business transfers", color: "#10b981", memberCount: 3 },

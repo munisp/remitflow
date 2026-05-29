@@ -173,16 +173,33 @@ export const ngxStockRouter = router({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const [stock] = await (await getDbConn()).select().from(ngxStocks).where(eq(ngxStocks.id, input.stockId));
+      const db = await getDbConn();
+      const [stock] = await db.select().from(ngxStocks).where(eq(ngxStocks.id, input.stockId));
       if (!stock) throw new TRPCError({ code: "NOT_FOUND", message: "Stock not found" });
 
       const qty = parseFloat(input.quantityUnits);
       const price = parseFloat(input.pricePerUnitNgn);
       const totalNgn = qty * price;
-      // Approximate USD (1 USD ≈ 1600 NGN — will use live rate in production)
-      const approxUsd = totalNgn / 1600;
+      let ngnRate = 1600;
+      try {
+        const fxRes = await fetch("https://open.er-api.com/v6/latest/USD");
+        if (fxRes.ok) {
+          const fxData = await fxRes.json() as { rates?: Record<string, number> };
+          if (fxData.rates?.NGN) ngnRate = fxData.rates.NGN;
+        }
+      } catch { /* use fallback rate */ }
+      const approxUsd = totalNgn / ngnRate;
 
-      const [order] = await (await getDbConn())
+      if (input.orderType === "buy" || input.orderType === "limit_buy") {
+        const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "NGN"))).limit(1);
+        if (!wallet || Number(wallet.balance) < totalNgn) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient NGN wallet balance" });
+        await db.execute(sql`
+          UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) - ${totalNgn} AS VARCHAR)
+          WHERE id = ${wallet.id} AND CAST(balance AS DECIMAL(18,4)) >= ${totalNgn}
+        `);
+      }
+
+      const [order] = await db
         .insert(ngxOrders)
         .values({
           userId: ctx.user.id,
@@ -193,7 +210,7 @@ export const ngxStockRouter = router({
           pricePerUnitNgn: input.pricePerUnitNgn,
           totalAmountNgn: totalNgn.toFixed(2),
           totalAmountUsd: approxUsd.toFixed(2),
-          fxRateUsed: "1600.000000",
+          fxRateUsed: ngnRate.toFixed(6),
           brokerName: input.brokerName,
           notes: input.notes,
         })

@@ -261,6 +261,15 @@ export const cardsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const user = await getUser(ctx.user.openId);
       const db = await getDb();
+      const walletRows = await db.execute(sql`
+        SELECT id, balance FROM wallets WHERE user_id = ${user.id} AND currency = 'USD' LIMIT 1
+      `);
+      const wallet = walletRows.rows[0] as { id: number; balance: string } | undefined;
+      if (!wallet || Number(wallet.balance) < input.amountUsd) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient USD wallet balance" });
+      await db.execute(sql`
+        UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) - ${input.amountUsd} AS VARCHAR)
+        WHERE id = ${wallet.id} AND CAST(balance AS DECIMAL(18,4)) >= ${input.amountUsd}
+      `);
       await db.execute(sql`
         UPDATE virtual_cards SET balance = balance + ${input.amountUsd} WHERE id = ${input.cardId} AND user_id = ${user.id}
       `);
@@ -372,11 +381,29 @@ export const bnplFullRouter = router({
     .mutation(async ({ ctx, input }) => {
       const user = await getUser(ctx.user.openId);
       const db = await getDb();
+      const installmentRows = await db.execute(sql`
+        SELECT bi.amount_ngn, bi.status FROM bnpl_installments bi
+        JOIN bnpl_plans bp ON bp.id = bi.plan_id
+        WHERE bi.id = ${input.installmentId} AND bp.user_id = ${user.id}
+      `);
+      const installment = installmentRows.rows[0] as { amount_ngn: number; status: string } | undefined;
+      if (!installment) throw new TRPCError({ code: "NOT_FOUND", message: "Installment not found" });
+      if (installment.status === "paid") throw new TRPCError({ code: "BAD_REQUEST", message: "Installment already paid" });
+      const amount = Number(installment.amount_ngn);
+      const walletRows = await db.execute(sql`
+        SELECT id, balance FROM wallets WHERE user_id = ${user.id} AND currency = 'NGN' LIMIT 1
+      `);
+      const wallet = walletRows.rows[0] as { id: number; balance: string } | undefined;
+      if (!wallet || Number(wallet.balance) < amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient NGN wallet balance" });
+      await db.execute(sql`
+        UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) - ${amount} AS VARCHAR)
+        WHERE id = ${wallet.id} AND CAST(balance AS DECIMAL(18,4)) >= ${amount}
+      `);
       await db.execute(sql`
         UPDATE bnpl_installments SET status = 'paid', paid_at = NOW()
-        WHERE id = ${input.installmentId} AND user_id = ${user.id} AND status = 'pending'
+        WHERE id = ${input.installmentId} AND user_id = ${user.id} AND status IN ('pending', 'overdue')
       `);
-      return { success: true, message: "Installment paid successfully" };
+      return { success: true, message: "Installment paid successfully", amountDebited: amount };
     }),
 });
 
