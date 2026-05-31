@@ -390,10 +390,27 @@ async def health():
     return {
         "status": "ok",
         "service": "python-property-risk",
-        "version": "1.0.0",
-        "models_loaded": True,
+        "version": "1.1.0",
+        "models_loaded": _builder_model is not None and _fraud_model is not None,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+
+@app.get("/readiness")
+async def readiness():
+    try:
+        # Verify models can perform inference
+        import numpy as np
+        test_input = np.zeros((1, 5))
+        _builder_model.predict(test_input)
+        _fraud_model.predict(test_input)
+        return {"status": "ready", "models": "operational"}
+    except Exception as e:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "error": str(e)},
+        )
 
 
 @app.get("/model/info")

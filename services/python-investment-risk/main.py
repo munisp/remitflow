@@ -367,7 +367,29 @@ def _cat(score: float) -> str:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "python-investment-risk", "version": "1.0.0", "models_loaded": True}
+    return {
+        "status": "ok",
+        "service": "python-investment-risk",
+        "version": "1.1.0",
+        "models_loaded": _bnpl_model is not None and _mortgage_model is not None and _agent_fraud_model is not None,
+    }
+
+
+@app.get("/readiness")
+async def readiness():
+    try:
+        import numpy as np
+        test_input = np.zeros((1, 5))
+        _bnpl_model.predict(test_input)
+        _mortgage_model.predict(test_input)
+        _agent_fraud_model.predict(test_input)
+        return {"status": "ready", "models": "operational"}
+    except Exception as e:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "error": str(e)},
+        )
 
 
 @app.get("/model/info")

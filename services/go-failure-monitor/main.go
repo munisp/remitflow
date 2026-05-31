@@ -34,10 +34,58 @@ import (
 // Port: 8097
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const (
-	defaultPort         = "8097"
-	scanIntervalMinutes = 30
-)
+// Configuration loaded from environment variables
+type Config struct {
+	Port                string
+	ScanIntervalMinutes int
+	BnplLateFeeRate     float64
+	CollectionDaysThreshold int
+	StuckTransferHours  int
+	AutoRefundDays      int
+	ForeclosureMissCount int
+	BondCouponWindowDays int
+}
+
+func loadConfig() *Config {
+	c := &Config{
+		Port:                envOrDefault("PORT", "8097"),
+		ScanIntervalMinutes: envOrDefaultInt("SCAN_INTERVAL_MINUTES", 30),
+		BnplLateFeeRate:     envOrDefaultFloat("BNPL_LATE_FEE_RATE", 0.02),
+		CollectionDaysThreshold: envOrDefaultInt("COLLECTION_DAYS_THRESHOLD", 7),
+		StuckTransferHours:  envOrDefaultInt("STUCK_TRANSFER_HOURS", 48),
+		AutoRefundDays:      envOrDefaultInt("AUTO_REFUND_DAYS", 7),
+		ForeclosureMissCount: envOrDefaultInt("FORECLOSURE_MISS_COUNT", 3),
+		BondCouponWindowDays: envOrDefaultInt("BOND_COUPON_WINDOW_DAYS", 30),
+	}
+	return c
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envOrDefaultInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	parsed := def
+	fmt.Sscanf(v, "%d", &parsed)
+	return parsed
+}
+
+func envOrDefaultFloat(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	parsed := def
+	fmt.Sscanf(v, "%f", &parsed)
+	return parsed
+}
 
 type Metrics struct {
 	mu                    sync.Mutex
@@ -57,8 +105,10 @@ type Metrics struct {
 }
 
 type FailureMonitor struct {
-	db      *sql.DB
-	metrics *Metrics
+	db        *sql.DB
+	metrics   *Metrics
+	config    *Config
+	startTime time.Time
 }
 
 // ─── 1. BNPL Overdue Detection ──────────────────────────────────────────────
@@ -95,7 +145,7 @@ func (m *FailureMonitor) scanBnplOverdue(ctx context.Context) (int, int, error) 
 		if err := rows.Scan(&id, &planId, &userId, &amountNgn); err != nil {
 			continue
 		}
-		lateFee := amountNgn * 0.02
+		lateFee := amountNgn * m.config.BnplLateFeeRate
 		_, err := m.db.ExecContext(ctx, `
 			INSERT INTO bnpl_late_fees (installment_id, plan_id, user_id, fee_amount_ngn, reason, created_at)
 			VALUES ($1, $2, $3, $4, 'overdue_penalty', NOW())
@@ -119,7 +169,7 @@ func (m *FailureMonitor) escalateBnplCollections(ctx context.Context) (int, erro
 		       EXTRACT(DAY FROM (NOW() - bi.due_date)) as days_overdue
 		FROM bnpl_installments bi
 		WHERE bi.status = 'overdue'
-		  AND bi.due_date < NOW() - INTERVAL '7 days'
+		  AND bi.due_date < NOW() - INTERVAL '` + fmt.Sprintf("%d", m.config.CollectionDaysThreshold) + ` days'
 		  AND NOT EXISTS (SELECT 1 FROM bnpl_collections WHERE installment_id = bi.id)
 	`)
 	if err != nil {
@@ -161,7 +211,7 @@ func (m *FailureMonitor) scanStuckTransfers(ctx context.Context) (int, error) {
 		UPDATE transactions
 		SET status = 'stuck', "updatedAt" = NOW()
 		WHERE status = 'processing'
-		  AND "updatedAt" < NOW() - INTERVAL '48 hours'
+		  AND "updatedAt" < NOW() - INTERVAL '` + fmt.Sprintf("%d", m.config.StuckTransferHours) + ` hours'
 	`)
 	if err != nil {
 		return 0, err
@@ -196,7 +246,7 @@ func (m *FailureMonitor) autoRefundStuck(ctx context.Context) (int, error) {
 		SELECT id, "userId", amount, from_currency, reference
 		FROM transactions
 		WHERE status = 'stuck'
-		  AND "updatedAt" < NOW() - INTERVAL '7 days'
+		  AND "updatedAt" < NOW() - INTERVAL '` + fmt.Sprintf("%d", m.config.AutoRefundDays) + ` days'
 		LIMIT 100
 	`)
 	if err != nil {
@@ -266,7 +316,7 @@ func (m *FailureMonitor) scanMortgageOverdue(ctx context.Context) (int, int, err
 		WHERE mr.status = 'overdue'
 		  AND ma.status = 'active'
 		GROUP BY mr.application_id, ma.applicant_id
-		HAVING COUNT(*) >= 3
+		HAVING COUNT(*) >= ` + fmt.Sprintf("%d", m.config.ForeclosureMissCount) + `
 	`)
 	if err != nil {
 		return int(overdueCount), 0, err
@@ -343,7 +393,7 @@ func (m *FailureMonitor) scanBondMissedCoupons(ctx context.Context) (int, error)
 		  AND db.next_coupon_date < NOW()
 		  AND NOT EXISTS (
 		    SELECT 1 FROM bond_default_events bde
-		    WHERE bde.bond_id = db.id AND bde.created_at > NOW() - INTERVAL '30 days'
+		    WHERE bde.bond_id = db.id AND bde.created_at > NOW() - INTERVAL '` + fmt.Sprintf("%d", m.config.BondCouponWindowDays) + ` days'
 		  )
 		GROUP BY db.id, db.name, db.coupon_rate
 	`)
@@ -437,7 +487,25 @@ func (m *FailureMonitor) healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "ok",
 		"service": "go-failure-monitor",
-		"uptime":  time.Since(time.Now()).String(),
+		"uptime":  time.Since(m.startTime).String(),
+	})
+}
+
+func (m *FailureMonitor) readinessHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := m.db.PingContext(ctx); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "not_ready",
+			"error":  err.Error(),
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "ready",
+		"database": "connected",
 	})
 }
 
@@ -459,10 +527,8 @@ func (m *FailureMonitor) triggerScanHandler(w http.ResponseWriter, r *http.Reque
 }
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = defaultPort
-	}
+	cfg := loadConfig()
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://remitflow:remitflow@localhost:5432/remitflow?sslmode=disable"
@@ -482,8 +548,10 @@ func main() {
 	}
 
 	monitor := &FailureMonitor{
-		db:      db,
-		metrics: &Metrics{},
+		db:        db,
+		metrics:   &Metrics{},
+		config:    cfg,
+		startTime: time.Now(),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -491,7 +559,7 @@ func main() {
 
 	go func() {
 		monitor.runScan(ctx)
-		ticker := time.NewTicker(time.Duration(scanIntervalMinutes) * time.Minute)
+		ticker := time.NewTicker(time.Duration(cfg.ScanIntervalMinutes) * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
@@ -505,11 +573,12 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", monitor.healthHandler)
+	mux.HandleFunc("/readiness", monitor.readinessHandler)
 	mux.HandleFunc("/metrics", monitor.metricsHandler)
 	mux.HandleFunc("/scan", monitor.triggerScanHandler)
 
 	srv := &http.Server{
-		Addr:         ":" + port,
+		Addr:         ":" + cfg.Port,
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
@@ -524,7 +593,7 @@ func main() {
 		srv.Shutdown(context.Background())
 	}()
 
-	log.Printf("[START] Unified Failure Monitor listening on :%s (scan every %d min)", port, scanIntervalMinutes)
+	log.Printf("[START] Unified Failure Monitor listening on :%s (scan every %d min)", cfg.Port, cfg.ScanIntervalMinutes)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}

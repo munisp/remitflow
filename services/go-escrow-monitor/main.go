@@ -31,13 +31,41 @@ import (
 // Port: 8095
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const (
-	defaultPort          = "8095"
-	cureNoticeDays       = 14
-	gracePeriodDays      = 90
-	stalePlanDays        = 60
-	scanIntervalMinutes  = 60
-)
+// Configuration loaded from environment variables
+type EscrowConfig struct {
+	Port                string
+	CureNoticeDays      int
+	GracePeriodDays     int
+	StalePlanDays       int
+	ScanIntervalMinutes int
+}
+
+func loadEscrowConfig() *EscrowConfig {
+	return &EscrowConfig{
+		Port:                envOrDefault("PORT", "8095"),
+		CureNoticeDays:      envOrDefaultInt("CURE_NOTICE_DAYS", 14),
+		GracePeriodDays:     envOrDefaultInt("GRACE_PERIOD_DAYS", 90),
+		StalePlanDays:       envOrDefaultInt("STALE_PLAN_DAYS", 60),
+		ScanIntervalMinutes: envOrDefaultInt("SCAN_INTERVAL_MINUTES", 60),
+	}
+}
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envOrDefaultInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	parsed := def
+	fmt.Sscanf(v, "%d", &parsed)
+	return parsed
+}
 
 type Metrics struct {
 	mu                   sync.Mutex
@@ -53,8 +81,10 @@ type Metrics struct {
 }
 
 type EscrowMonitor struct {
-	db      *sql.DB
-	metrics *Metrics
+	db        *sql.DB
+	metrics   *Metrics
+	config    *EscrowConfig
+	startTime time.Time
 }
 
 // ─── Overdue Milestone Detection ─────────────────────────────────────────────
@@ -107,7 +137,7 @@ func (m *EscrowMonitor) scanOverdueMilestones(ctx context.Context) (int, error) 
 }
 
 func (m *EscrowMonitor) sendCureNotice(ctx context.Context, ms OverdueMilestone) error {
-	cureExpiry := time.Now().Add(time.Duration(cureNoticeDays) * 24 * time.Hour)
+	cureExpiry := time.Now().Add(time.Duration(m.config.CureNoticeDays) * 24 * time.Hour)
 
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -151,7 +181,7 @@ func (m *EscrowMonitor) sendCureNotice(ctx context.Context, ms OverdueMilestone)
 		"CURE NOTICE: Milestone \"%s\" for plan %s is overdue (deadline: %s). "+
 			"You have %d days to submit evidence and resolve this. "+
 			"Failure to comply may result in funds being frozen and refunded to the buyer.",
-		ms.Name, ms.PlanID, ms.Deadline.Format("2006-01-02"), cureNoticeDays))
+		ms.Name, ms.PlanID, ms.Deadline.Format("2006-01-02"), m.config.CureNoticeDays))
 	if err != nil {
 		log.Printf("[WARN] notification insert: %v", err)
 		// Non-fatal: notification failure shouldn't block the cure notice
@@ -164,7 +194,7 @@ func (m *EscrowMonitor) sendCureNotice(ctx context.Context, ms OverdueMilestone)
 	`, ms.BuyerID, fmt.Sprintf(
 		"A cure notice has been sent to your builder for milestone \"%s\" (plan %s). "+
 			"The builder has %d days to respond. If unresolved, you may request a refund after the %d-day grace period.",
-		ms.Name, ms.PlanID, cureNoticeDays, gracePeriodDays))
+		ms.Name, ms.PlanID, m.config.CureNoticeDays, m.config.GracePeriodDays))
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit: %w", err)
@@ -301,7 +331,7 @@ func (m *EscrowMonitor) executeAutoRefund(ctx context.Context, disputeID string,
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO transactions ("userId", type, status, from_amount, from_currency, to_amount, to_currency, description, reference, "createdAt", "updatedAt")
 		VALUES ($1, 'refund', 'completed', $2, 'USD', $2, 'USD', $3, $4, NOW(), NOW())
-	`, buyerID, amount, fmt.Sprintf("Auto-refund for property escrow plan %s (dispute %s) — %d-day grace period elapsed", planID, disputeID, gracePeriodDays), refRef)
+	`, buyerID, amount, fmt.Sprintf("Auto-refund for property escrow plan %s (dispute %s) — %d-day grace period elapsed", planID, disputeID, m.config.GracePeriodDays), refRef)
 	if err != nil {
 		return fmt.Errorf("insert refund tx: %w", err)
 	}
@@ -360,7 +390,7 @@ func (m *EscrowMonitor) scanStalePlans(ctx context.Context) (int, error) {
 		  AND pep.updated_at < NOW() - INTERVAL '%d days'
 		LIMIT 100
 	`
-	rows, err := m.db.QueryContext(ctx, fmt.Sprintf(query, stalePlanDays))
+	rows, err := m.db.QueryContext(ctx, fmt.Sprintf(query, m.config.StalePlanDays))
 	if err != nil {
 		return 0, fmt.Errorf("query stale plans: %w", err)
 	}
@@ -430,7 +460,25 @@ func (m *EscrowMonitor) healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":  "ok",
 		"service": "go-escrow-monitor",
-		"uptime":  time.Since(time.Now()).String(),
+		"uptime":  time.Since(m.startTime).String(),
+	})
+}
+
+func (m *EscrowMonitor) readinessHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := m.db.PingContext(ctx); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status": "not_ready",
+			"error":  err.Error(),
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":   "ready",
+		"database": "connected",
 	})
 }
 
@@ -452,10 +500,8 @@ func (m *EscrowMonitor) triggerScanHandler(w http.ResponseWriter, r *http.Reques
 }
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = defaultPort
-	}
+	cfg := loadEscrowConfig()
+
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
 		dbURL = "postgres://remitflow:remitflow@localhost:5432/remitflow?sslmode=disable"
@@ -475,8 +521,10 @@ func main() {
 	}
 
 	monitor := &EscrowMonitor{
-		db:      db,
-		metrics: &Metrics{},
+		db:        db,
+		metrics:   &Metrics{},
+		config:    cfg,
+		startTime: time.Now(),
 	}
 
 	// Start periodic scanner
@@ -486,7 +534,7 @@ func main() {
 	go func() {
 		// Run immediately on startup
 		monitor.runScan(ctx)
-		ticker := time.NewTicker(time.Duration(scanIntervalMinutes) * time.Minute)
+		ticker := time.NewTicker(time.Duration(cfg.ScanIntervalMinutes) * time.Minute)
 		defer ticker.Stop()
 		for {
 			select {
@@ -501,11 +549,12 @@ func main() {
 	// HTTP endpoints
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", monitor.healthHandler)
+	mux.HandleFunc("/readiness", monitor.readinessHandler)
 	mux.HandleFunc("/metrics", monitor.metricsHandler)
 	mux.HandleFunc("/scan", monitor.triggerScanHandler)
 
 	srv := &http.Server{
-		Addr:         ":" + port,
+		Addr:         ":" + cfg.Port,
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
@@ -521,7 +570,7 @@ func main() {
 		srv.Shutdown(context.Background())
 	}()
 
-	log.Printf("[START] Property Escrow Deadline Monitor listening on :%s (scan every %d min)", port, scanIntervalMinutes)
+	log.Printf("[START] Property Escrow Deadline Monitor listening on :%s (scan every %d min)", cfg.Port, cfg.ScanIntervalMinutes)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
