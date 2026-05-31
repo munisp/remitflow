@@ -256,19 +256,32 @@ export const ngxStockRouter = router({
   cancelOrder: auditedProcedure
     .input(z.object({ orderId: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
-      const [order] = await (await getDbConn())
+      const db = await getDbConn();
+      const [order] = await db
         .select()
         .from(ngxOrders)
         .where(and(eq(ngxOrders.id, input.orderId), eq(ngxOrders.userId, ctx.user.id)));
       if (!order) throw new TRPCError({ code: "NOT_FOUND" });
       if (order.status !== "pending")
         throw new TRPCError({ code: "BAD_REQUEST", message: "Only pending orders can be cancelled" });
-      const [updated] = await (await getDbConn())
+
+      // Refund wallet if this was a buy order (funds were debited at order time)
+      if (order.orderType === "buy" || order.orderType === "limit_buy") {
+        const refundAmount = Number(order.totalAmountNgn);
+        if (refundAmount > 0) {
+          await db.execute(sql`
+            UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) + ${refundAmount} AS VARCHAR), "updatedAt" = NOW()
+            WHERE "userId" = ${ctx.user.id} AND currency = 'NGN'
+          `);
+        }
+      }
+
+      const [updated] = await db
         .update(ngxOrders)
         .set({ status: "cancelled" })
         .where(eq(ngxOrders.id, input.orderId))
         .returning();
-      return updated;
+      return { ...updated, refunded: order.orderType === "buy" || order.orderType === "limit_buy" };
     }),
 });
 

@@ -298,6 +298,7 @@ import { loyaltyPointsRouter } from "./routers/loyaltyPoints";
 import { beneficiaryVerificationRouter } from "./routers/beneficiaryVerification";
 import { futureProofingRouter } from "./routers/futureProofing";
 import { propertyEscrowRouter } from "./routers/propertyEscrow";
+import { failureProtectionRouter } from "./routers/failureProtection";
 import { mlPipelineRouter } from "./routers/mlPipeline";
 
 
@@ -6931,5 +6932,7 @@ Case: #${input.caseId}`,
   mlPipeline: mlPipelineRouter,
   // v260 — Property Escrow: Builder KYB, Escrow Plans, Milestone Verification, Property Disputes, Auto-Refund
   propertyEscrow: propertyEscrowRouter,
+  // v270 — Failure Protection: BNPL, Agent, Transfer, Payroll, Investor, Bond, Mortgage, SplitBill, Card
+  failureProtection: failureProtectionRouter,
 });
 export type AppRouter = typeof appRouter;
