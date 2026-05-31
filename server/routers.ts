@@ -297,6 +297,7 @@ import { receiptGenerationRouter } from "./routers/receiptGeneration";
 import { loyaltyPointsRouter } from "./routers/loyaltyPoints";
 import { beneficiaryVerificationRouter } from "./routers/beneficiaryVerification";
 import { futureProofingRouter } from "./routers/futureProofing";
+import { propertyEscrowRouter } from "./routers/propertyEscrow";
 import { mlPipelineRouter } from "./routers/mlPipeline";
 
 
@@ -6928,5 +6929,7 @@ Case: #${input.caseId}`,
   futureProofing: futureProofingRouter,
   // v250 — ML Pipeline: NLU, FX Forecast, GNN Fraud, Investment ML, Ray Training, MLflow Registry, Retraining
   mlPipeline: mlPipelineRouter,
+  // v260 — Property Escrow: Builder KYB, Escrow Plans, Milestone Verification, Property Disputes, Auto-Refund
+  propertyEscrow: propertyEscrowRouter,
 });
 export type AppRouter = typeof appRouter;
