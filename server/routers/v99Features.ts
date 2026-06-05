@@ -451,15 +451,7 @@ export const reconciliationV2Router = router({
       const from = new Date(input.fromDate);
       const to = new Date(input.toDate + "T23:59:59Z");
 
-      if (!db) {
-        return {
-          status: "clean",
-          period: { from: from.toISOString(), to: to.toISOString() },
-          summary: { totalTransactions: 0, totalVolume: 0, completedCount: 0, pendingCount: 0, failedCount: 0 },
-          discrepancies: [],
-          duration: Date.now() - start,
-        };
-      }
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [totals] = await db.select({
         total: count(),
