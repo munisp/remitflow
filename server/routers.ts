@@ -300,6 +300,7 @@ import { futureProofingRouter } from "./routers/futureProofing";
 import { propertyEscrowRouter } from "./routers/propertyEscrow";
 import { failureProtectionRouter } from "./routers/failureProtection";
 import { mlPipelineRouter } from "./routers/mlPipeline";
+import { secretsRotationRouter } from "./secrets-rotation";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -6934,5 +6935,7 @@ Case: #${input.caseId}`,
   propertyEscrow: propertyEscrowRouter,
   // v270 — Failure Protection: BNPL, Agent, Transfer, Payroll, Investor, Bond, Mortgage, SplitBill, Card
   failureProtection: failureProtectionRouter,
+  // v280 — Secrets Rotation: Registry, Expiry Alerts, Auto-Rotation, Audit Log
+  secretsRotation: secretsRotationRouter,
 });
 export type AppRouter = typeof appRouter;

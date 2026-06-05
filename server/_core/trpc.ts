@@ -2,13 +2,41 @@ import { NOT_ADMIN_ERR_MSG, UNAUTHED_ERR_MSG } from '@shared/const';
 import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import type { TrpcContext } from "./context";
+import { trace, SpanStatusCode } from "@opentelemetry/api";
+
+const trpcTracer = trace.getTracer("remitflow-trpc", "2.0.0");
 
 const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
 });
 
+// ── OpenTelemetry tracing middleware ──────────────────────────────────────────
+const tracingMiddleware = t.middleware(async (opts) => {
+  const { path, type, next, ctx } = opts;
+  return trpcTracer.startActiveSpan(`trpc.${type}.${path}`, async (span) => {
+    span.setAttribute("rpc.system", "trpc");
+    span.setAttribute("rpc.method", path);
+    span.setAttribute("rpc.type", type);
+    if (ctx.user) {
+      span.setAttribute("user.id", ctx.user.id);
+      span.setAttribute("user.role", String(ctx.user.role ?? "unknown"));
+    }
+    try {
+      const result = await next();
+      span.setStatus({ code: SpanStatusCode.OK });
+      return result;
+    } catch (err: any) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
+      span.recordException(err);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+});
+
 export const router = t.router;
-export const publicProcedure = t.procedure;
+export const publicProcedure = t.procedure.use(tracingMiddleware);
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
 
