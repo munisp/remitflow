@@ -1,0 +1,96 @@
+# RemitFlow — Chaos Experiment: Pod Kill
+# ═══════════════════════════════════════════════════════════════════════════════
+# Validates that the platform survives pod failures with no data loss.
+# Uses LitmusChaos engine for controlled fault injection.
+#
+# Hypothesis: Killing any single pod should result in <5s recovery with
+# zero failed transactions (due to retry + circuit breaker patterns).
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: remitflow-pod-kill
+  namespace: remitflow
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    chaos.litmus.io/category: pod
+spec:
+  engineState: active
+  appinfo:
+    appns: remitflow
+    applabel: app.kubernetes.io/part-of=remitflow
+    appkind: deployment
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-delete
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "60"
+            - name: CHAOS_INTERVAL
+              value: "15"
+            - name: FORCE
+              value: "true"
+            - name: TARGET_PODS
+              value: "1"
+            - name: PODS_AFFECTED_PERC
+              value: "50"
+            - name: SEQUENCE
+              value: "parallel"
+        probe:
+          - name: transfer-availability
+            type: httpProbe
+            httpProbe/inputs:
+              url: "http://remitflow-api:5000/api/trpc/systemHealth.getStatus"
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+            mode: Continuous
+            runProperties:
+              probeTimeout: 5
+              interval: 3
+              retry: 2
+              probePollingInterval: 2
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: remitflow-api-pod-kill
+  namespace: remitflow
+  labels:
+    chaos.litmus.io/category: api-resilience
+spec:
+  engineState: active
+  appinfo:
+    appns: remitflow
+    applabel: app=remitflow-api
+    appkind: deployment
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-delete
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "120"
+            - name: CHAOS_INTERVAL
+              value: "30"
+            - name: FORCE
+              value: "false"
+            - name: TARGET_PODS
+              value: "1"
+        probe:
+          - name: api-health
+            type: httpProbe
+            httpProbe/inputs:
+              url: "http://remitflow-api:5000/health"
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+            mode: Continuous
+            runProperties:
+              probeTimeout: 3
+              interval: 2

@@ -301,6 +301,7 @@ import { propertyEscrowRouter } from "./routers/propertyEscrow";
 import { failureProtectionRouter } from "./routers/failureProtection";
 import { mlPipelineRouter } from "./routers/mlPipeline";
 import { secretsRotationRouter } from "./secrets-rotation";
+import { soc2EvidenceRouter } from "./compliance/soc2-evidence";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -6937,5 +6938,7 @@ Case: #${input.caseId}`,
   failureProtection: failureProtectionRouter,
   // v280 — Secrets Rotation: Registry, Expiry Alerts, Auto-Rotation, Audit Log
   secretsRotation: secretsRotationRouter,
+  // v290 — SOC2 Evidence: Automated compliance evidence collection
+  soc2Evidence: soc2EvidenceRouter,
 });
 export type AppRouter = typeof appRouter;
