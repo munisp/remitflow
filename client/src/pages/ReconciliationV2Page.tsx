@@ -164,7 +164,7 @@ export default function ReconciliationV2Page() {
                     </tr>
                   </thead>
                   <tbody>
-                    {history.map((run) => (
+                    {history.map((run: any) => (
                       <tr key={run.id} className="border-b last:border-0 hover:bg-muted/30">
                         <td className="p-3">{new Date(run.runAt).toLocaleDateString()}</td>
                         <td className="p-3 text-right">{run.txCount.toLocaleString()}</td>

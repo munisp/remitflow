@@ -31,7 +31,8 @@ import {
   transactions, wallets, users, beneficiaries, auditLogs,
   recurringPayments, partnerWebhooks, fxRateCache,
   kycDocuments, notifications, fxAlerts, cards, savingsGoals,
-  disputes, batchPayments, virtualAccounts,
+  disputes, batchPayments, virtualAccounts, openBankingConsents,
+  referralBonuses,
 } from "../../drizzle/schema.js";
 import { eq, desc, and, gte, lte, like, sql, count, sum, avg } from "drizzle-orm";
 
@@ -42,13 +43,7 @@ const complianceScoringV2Router = router({
     .query(async ({ ctx, input }) => {
       const db = await getDb();
       const targetUserId = input.userId ?? ctx.user.id;
-      if (!db) {
-        return {
-          userId: targetUserId, overallScore: 72, riskLevel: "medium" as const,
-          breakdown: { kycScore: 85, transactionScore: 70, velocityScore: 65, sanctionsScore: 100, pepScore: 90 },
-          lastUpdated: new Date().toISOString(), recommendations: ["Complete enhanced due diligence", "Verify source of funds"],
-        };
-      }
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Real calculation from DB
       const [userRow] = await db.select().from(users).where(eq(users.id, targetUserId)).limit(1);
       const txCount = await db.select({ count: count() }).from(transactions).where(eq(transactions.userId, targetUserId));
@@ -83,12 +78,7 @@ const complianceScoringV2Router = router({
     .input(z.object({ limit: z.number().int().min(1).max(100).default(20), riskLevel: z.enum(["low", "medium", "high", "all"]).default("all") }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) {
-        return Array.from({ length: input.limit }, (_, i) => ({
-          userId: i + 1, email: `user${i + 1}@example.com`, overallScore: 50 + (i % 50),
-          riskLevel: i % 3 === 0 ? "high" : i % 3 === 1 ? "medium" : "low",
-        }));
-      }
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const allUsers = await db.select({ id: users.id, email: users.email, name: users.name }).from(users).limit(input.limit);
       return allUsers.map((u: any) => {
         const score = ((u.id * 37) % 50) + 50;
@@ -104,14 +94,7 @@ const notificationsV2Router = router({
     .input(z.object({ page: z.number().int().min(1).default(1), limit: z.number().int().min(1).max(50).default(20), unreadOnly: z.boolean().default(false) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) {
-        const items = Array.from({ length: input.limit }, (_, i) => ({
-          id: i + 1, title: `Notification ${i + 1}`, message: `Your transfer of $${(i + 1) * 100} has been processed.`,
-          type: ["transfer", "security", "promo", "system"][i % 4], isRead: i % 3 !== 0,
-          createdAt: new Date(Date.now() - i * 3600000).toISOString(), channel: ["push", "email", "sms"][i % 3],
-        }));
-        return { items: input.unreadOnly ? items.filter(n => !n.isRead) : items, total: input.limit, unreadCount: Math.floor(input.limit / 3) };
-      }
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const userNotifs = await db.select().from(notifications)
         .where(eq(notifications.userId, ctx.user.id))
         .orderBy(desc(notifications.createdAt))
@@ -175,15 +158,7 @@ const fraudEngineV2Router = router({
     .query(async ({ input }) => {
       const db = await getDb();
       const ruleTypes = ["velocity_breach", "geo_anomaly", "device_fingerprint", "amount_spike", "sanctions_hit", "account_takeover"];
-      if (!db) {
-        return Array.from({ length: input.limit }, (_, i) => ({
-          id: i + 1, userId: (i % 10) + 1, transactionId: (i % 50) + 1,
-          ruleTriggered: ruleTypes[i % ruleTypes.length], riskScore: 60 + (i % 40),
-          status: ["open", "investigating", "resolved", "false_positive"][i % 4],
-          amount: (i + 1) * 250, currency: "USD", createdAt: new Date(Date.now() - i * 3600000).toISOString(),
-          details: { ip: `192.168.${i}.1`, device: `device-${i}`, country: ["NG", "GH", "KE", "ZA"][i % 4] },
-        })).filter(a => input.status === "all" || a.status === input.status);
-      }
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Use transactions table as proxy for fraud alerts
       const txs = await db.select().from(transactions).orderBy(desc(transactions.createdAt)).limit(input.limit);
       return txs.map((tx: any, i: any) => ({
@@ -273,16 +248,7 @@ const swiftSepaRailsRouter = router({
     .input(z.object({ rail: z.enum(["SWIFT", "SEPA", "CHAPS", "ACH", "all"]).default("all"), limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) {
-        return Array.from({ length: input.limit }, (_, i) => ({
-          id: i + 1, rail: ["SWIFT", "SEPA", "CHAPS", "ACH"][i % 4],
-          reference: `SWIFT${Date.now()}${i}`, amount: (i + 1) * 500, currency: ["USD", "EUR", "GBP"][i % 3],
-          status: ["pending", "processing", "settled", "failed"][i % 4],
-          beneficiaryName: `Beneficiary ${i + 1}`, beneficiaryBIC: `GTBINGLA${i}`,
-          estimatedSettlement: new Date(Date.now() + (i + 1) * 86400000).toISOString(),
-          createdAt: new Date(Date.now() - i * 3600000).toISOString(),
-        })).filter(p => input.rail === "all" || p.rail === input.rail);
-      }
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const txs = await db.select().from(transactions)
         .where(eq(transactions.userId, ctx.user.id))
         .orderBy(desc(transactions.createdAt)).limit(input.limit);
@@ -311,11 +277,16 @@ const swiftSepaRailsRouter = router({
 // ── 6. Open Banking ──────────────────────────────────────────────────────────
 const openBankingRouter = router({
   getConnectedAccounts: protectedProcedure.query(async ({ ctx }) => {
-    return [
-      { id: 1, bankName: "GTBank", accountNumber: "****4521", accountType: "current", currency: "NGN", balance: 450000, lastSync: new Date(Date.now() - 3600000).toISOString(), status: "connected", provider: "Mono" },
-      { id: 2, bankName: "Access Bank", accountNumber: "****7832", accountType: "savings", currency: "NGN", balance: 1200000, lastSync: new Date(Date.now() - 7200000).toISOString(), status: "connected", provider: "Okra" },
-      { id: 3, bankName: "Barclays UK", accountNumber: "****2019", accountType: "current", currency: "GBP", balance: 8500, lastSync: new Date(Date.now() - 1800000).toISOString(), status: "connected", provider: "TrueLayer" },
-    ];
+    const db = await getDb();
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const consents = await db.select().from(openBankingConsents).where(eq(openBankingConsents.userId, ctx.user.id));
+    return consents.map((c: any, i: number) => ({
+      id: c.id, bankName: c.bankName, accountNumber: `****${String(c.id).padStart(4, '0')}`,
+      accountType: "current", currency: "GBP", balance: null,
+      lastSync: c.authorisedAt?.toISOString() ?? c.createdAt?.toISOString(),
+      status: c.status === "authorised" ? "connected" : c.status,
+      provider: c.bankId,
+    }));
   }),
 
   connectAccount: auditedProcedure
@@ -336,12 +307,18 @@ const openBankingRouter = router({
 
   getTransactionHistory: protectedProcedure
     .input(z.object({ accountId: z.number().int(), from: z.string().optional(), to: z.string().optional() }))
-    .query(async ({ input }) => {
-      return Array.from({ length: 20 }, (_, i) => ({
-        id: i + 1, date: new Date(Date.now() - i * 86400000).toISOString(),
-        description: ["Salary Credit", "Rent Payment", "Grocery Store", "ATM Withdrawal", "Transfer Out"][i % 5],
-        amount: (i % 2 === 0 ? 1 : -1) * (i + 1) * 1000,
-        currency: "NGN", balance: 450000 - i * 500, category: ["income", "housing", "food", "cash", "transfer"][i % 5],
+    .query(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const txs = await db.select().from(transactions)
+        .where(eq(transactions.userId, ctx.user.id))
+        .orderBy(desc(transactions.createdAt)).limit(20);
+      return txs.map((tx: any, i: number) => ({
+        id: tx.id, date: tx.createdAt?.toISOString() ?? new Date().toISOString(),
+        description: tx.description ?? "Transaction",
+        amount: Number(tx.fromAmount ?? tx.amount ?? 0),
+        currency: tx.fromCurrency ?? tx.currency ?? "NGN",
+        balance: null, category: tx.type ?? "transfer",
       }));
     }),
 });
@@ -524,14 +501,7 @@ const beneficiaryVerificationRouter = router({
     .input(z.object({ limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) {
-        return Array.from({ length: input.limit }, (_, i) => ({
-          id: i + 1, type: i % 2 === 0 ? "bank_account" : "mobile_money",
-          identifier: i % 2 === 0 ? `****${1000 + i}` : `+234****${1000 + i}`,
-          accountName: `Beneficiary ${i + 1}`, verified: i % 5 !== 0,
-          verifiedAt: new Date(Date.now() - i * 3600000).toISOString(),
-        }));
-      }
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const bens = await db.select().from(beneficiaries)
         .where(eq(beneficiaries.userId, ctx.user.id))
         .orderBy(desc(beneficiaries.createdAt)).limit(input.limit);
@@ -586,16 +556,26 @@ const settlementEngineRouter = router({
   getSettlements: adminProcedure
     .input(z.object({ status: z.enum(["pending", "processing", "settled", "failed", "all"]).default("all"), limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ input }) => {
-      return Array.from({ length: input.limit }, (_, i) => ({
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const txData = await db.select({
+        currency: transactions.fromCurrency,
+        grossAmount: sum(transactions.fromAmount),
+        txCount: count(),
+      }).from(transactions)
+        .where(eq(transactions.status, "completed"))
+        .groupBy(transactions.fromCurrency).limit(input.limit);
+      return txData.map((row: any, i: number) => ({
         id: i + 1, settlementId: `SET-${Date.now()}-${i}`,
-        partnerName: ["GTBank", "Access Bank", "Zenith Bank", "UBA", "First Bank"][i % 5],
-        currency: ["USD", "EUR", "GBP", "NGN"][i % 4],
-        grossAmount: (i + 1) * 10000, fees: (i + 1) * 150, netAmount: (i + 1) * 9850,
-        transactionCount: (i + 1) * 5,
-        status: ["pending", "processing", "settled", "failed"][i % 4],
-        settlementDate: new Date(Date.now() + (i % 3) * 86400000).toISOString(),
-        createdAt: new Date(Date.now() - i * 3600000).toISOString(),
-      })).filter(s => input.status === "all" || s.status === input.status);
+        partnerName: row.currency === "NGN" ? "GTBank" : row.currency === "USD" ? "Wells Fargo" : "Barclays",
+        currency: row.currency ?? "USD",
+        grossAmount: Number(row.grossAmount ?? 0), fees: Number(row.grossAmount ?? 0) * 0.015,
+        netAmount: Number(row.grossAmount ?? 0) * 0.985,
+        transactionCount: row.txCount,
+        status: "settled",
+        settlementDate: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+      })).filter((s: any) => input.status === "all" || s.status === input.status);
     }),
 
   runNetting: auditedAdminProcedure
@@ -615,14 +595,19 @@ const merchantOnboardingRouter = router({
   getMerchants: adminProcedure
     .input(z.object({ status: z.enum(["pending", "active", "suspended", "rejected", "all"]).default("all"), limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ input }) => {
-      return Array.from({ length: input.limit }, (_, i) => ({
-        id: i + 1, businessName: `Merchant ${i + 1} Ltd`, businessType: ["retail", "ecommerce", "services", "food"][i % 4],
-        country: ["NG", "GH", "KE", "ZA", "SN"][i % 5], email: `merchant${i + 1}@example.com`,
-        status: ["pending", "active", "suspended", "rejected"][i % 4],
-        monthlyVolume: (i + 1) * 50000, feeRate: 1.5 + (i % 5) * 0.1,
-        kybStatus: i % 3 === 0 ? "pending" : "verified",
-        createdAt: new Date(Date.now() - i * 86400000).toISOString(),
-      })).filter(m => input.status === "all" || m.status === input.status);
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const docs = await db.select().from(kycDocuments)
+        .where(input.status !== "all" ? eq(kycDocuments.status, input.status as "pending" | "approved" | "rejected") : undefined)
+        .orderBy(desc(kycDocuments.createdAt)).limit(input.limit);
+      return docs.map((doc: any) => ({
+        id: doc.id, businessName: doc.fullName ?? `Merchant ${doc.id}`,
+        businessType: doc.documentType ?? "retail",
+        country: doc.country ?? "NG", email: null,
+        status: doc.status === "approved" ? "active" : doc.status,
+        monthlyVolume: null, feeRate: 1.5,
+        kybStatus: doc.status, createdAt: doc.createdAt?.toISOString() ?? new Date().toISOString(),
+      }));
     }),
 
   approveMerchant: auditedAdminProcedure
@@ -650,9 +635,7 @@ const merchantOnboardingRouter = router({
 const loyaltyRewardsV2Router = router({
   getBalance: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) {
-      return { points: 2450, tier: "Gold", nextTier: "Platinum", pointsToNextTier: 550, cashValue: 24.50, expiringPoints: 200, expiringDate: new Date(Date.now() + 30 * 86400000).toISOString() };
-    }
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [userRow] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
     const txCount = await db.select({ count: count() }).from(transactions).where(eq(transactions.userId, ctx.user.id));
     const points = (txCount[0]?.count ?? 0) * 50 + 500;
@@ -670,14 +653,7 @@ const loyaltyRewardsV2Router = router({
     .input(z.object({ limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) {
-        return Array.from({ length: input.limit }, (_, i) => ({
-          id: i + 1, type: i % 3 === 0 ? "redemption" : "earned",
-          points: i % 3 === 0 ? -(i + 1) * 50 : (i + 1) * 50,
-          description: i % 3 === 0 ? "Redeemed for cashback" : `Transfer to ${["Nigeria", "Ghana", "Kenya"][i % 3]}`,
-          balance: 2450 - i * 10, createdAt: new Date(Date.now() - i * 86400000).toISOString(),
-        }));
-      }
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const txs = await db.select().from(transactions).where(eq(transactions.userId, ctx.user.id)).orderBy(desc(transactions.createdAt)).limit(input.limit);
       return txs.map((tx: any, i: any) => ({
         id: tx.id, type: "earned", points: Math.round(Number(tx.amount) * 0.01),
@@ -703,13 +679,7 @@ const loyaltyRewardsV2Router = router({
 const referralEngineV2Router = router({
   getStats: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) {
-      return {
-        referralCode: `RF${ctx.user.id}ABCD`, totalReferrals: 12, activeReferrals: 8,
-        pendingReferrals: 2, totalEarned: 240, pendingEarnings: 40,
-        tier: "Silver", nextTierAt: 20, conversionRate: 66.7,
-      };
-    }
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [userRow] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
     return {
       referralCode: `RF${ctx.user.id}${String(ctx.user.id * 7).padStart(4, '0')}`,
@@ -722,13 +692,18 @@ const referralEngineV2Router = router({
   getReferrals: protectedProcedure
     .input(z.object({ limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ ctx, input }) => {
-      return Array.from({ length: input.limit }, (_, i) => ({
-        id: i + 1, referredEmail: `referred${i + 1}@example.com`,
-        status: ["signed_up", "first_transfer", "active", "churned"][i % 4],
-        joinedAt: new Date(Date.now() - i * 7 * 86400000).toISOString(),
-        firstTransferAt: i % 4 !== 0 ? new Date(Date.now() - i * 5 * 86400000).toISOString() : null,
-        earningsGenerated: i % 4 !== 0 ? (i + 1) * 20 : 0,
-        country: ["NG", "GH", "KE", "ZA"][i % 4],
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const refs = await db.select().from(referralBonuses)
+        .where(eq(referralBonuses.referrerId, ctx.user.id))
+        .orderBy(desc(referralBonuses.createdAt)).limit(input.limit);
+      return refs.map((r: any) => ({
+        id: r.id, referredEmail: null,
+        status: r.status ?? "active",
+        joinedAt: r.createdAt?.toISOString() ?? new Date().toISOString(),
+        firstTransferAt: r.convertedAt?.toISOString() ?? null,
+        earningsGenerated: Number(r.amount ?? 0),
+        country: null,
       }));
     }),
 
@@ -752,15 +727,7 @@ const referralEngineV2Router = router({
 const carbonOffsetRouter = router({
   getFootprint: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) {
-      return {
-        totalTransfers: 47, totalCO2Kg: 2.35, offsetPurchased: 2.35, netCO2: 0,
-        status: "carbon_neutral", monthlyFootprint: [
-          { month: "Jan", co2Kg: 0.45 }, { month: "Feb", co2Kg: 0.52 }, { month: "Mar", co2Kg: 0.38 },
-          { month: "Apr", co2Kg: 0.61 }, { month: "May", co2Kg: 0.39 },
-        ],
-      };
-    }
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const txCount = await db.select({ count: count() }).from(transactions).where(eq(transactions.userId, ctx.user.id));
     const total = txCount[0]?.count ?? 0;
     const co2 = total * 0.05; // 50g CO2 per transfer
@@ -800,16 +767,7 @@ const documentOCRRouter = router({
     .input(z.object({ limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) {
-        return Array.from({ length: input.limit }, (_, i) => ({
-          id: i + 1, documentType: ["passport", "national_id", "drivers_license", "utility_bill"][i % 4],
-          userId: (i % 10) + 1, status: ["queued", "processing", "completed", "failed"][i % 4],
-          confidence: i % 4 === 2 ? 0.95 + (i % 5) * 0.01 : null,
-          extractedFields: i % 4 === 2 ? { name: "JOHN DOE", dob: "1990-01-15", idNumber: "A12345678" } : null,
-          processingTimeMs: i % 4 === 2 ? 1200 + i * 100 : null,
-          createdAt: new Date(Date.now() - i * 3600000).toISOString(),
-        }));
-      }
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const docs = await db.select().from(kycDocuments).orderBy(desc(kycDocuments.createdAt)).limit(input.limit);
       return docs.map((doc: any, i: any) => ({
         id: doc.id, documentType: doc.documentType ?? "passport",
@@ -923,19 +881,7 @@ const corridorAnalyticsRouter = router({
     .input(z.object({ sortBy: z.enum(["volume", "revenue", "margin", "growth"]).default("volume"), limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) {
-        const corridors = [
-          { from: "GB", to: "NG", volume: 2500000, revenue: 37500, margin: 1.5, growth: 12.3, txCount: 1250, avgAmount: 2000 },
-          { from: "US", to: "NG", volume: 3200000, revenue: 48000, margin: 1.5, growth: 18.7, txCount: 1600, avgAmount: 2000 },
-          { from: "US", to: "GH", volume: 1800000, revenue: 27000, margin: 1.5, growth: 22.1, txCount: 900, avgAmount: 2000 },
-          { from: "GB", to: "KE", volume: 950000, revenue: 14250, margin: 1.5, growth: 8.4, txCount: 475, avgAmount: 2000 },
-          { from: "CA", to: "NG", volume: 1100000, revenue: 16500, margin: 1.5, growth: 15.2, txCount: 550, avgAmount: 2000 },
-          { from: "DE", to: "GH", volume: 650000, revenue: 9750, margin: 1.5, growth: 31.5, txCount: 325, avgAmount: 2000 },
-          { from: "FR", to: "SN", volume: 420000, revenue: 6300, margin: 1.5, growth: 9.8, txCount: 210, avgAmount: 2000 },
-          { from: "US", to: "KE", volume: 780000, revenue: 11700, margin: 1.5, growth: 27.4, txCount: 390, avgAmount: 2000 },
-        ];
-        return corridors.sort((a, b) => (b[input.sortBy] as number) - (a[input.sortBy] as number)).slice(0, input.limit);
-      }
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Real DB query
       const txData = await db.select({
         recipientCountry: transactions.recipientCountry,

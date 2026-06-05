@@ -164,7 +164,7 @@ export default function FeeRulesCRUDV2Page() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(rules ?? []).map((rule) => {
+                  {(rules ?? []).map((rule: any) => {
                     const FeeIcon = feeTypeIcon[rule.feeType as keyof typeof feeTypeIcon] ?? DollarSign;
                     return (
                       <tr key={rule.id} className={`border-b last:border-0 hover:bg-muted/30 ${!rule.active ? "opacity-50" : ""}`}>

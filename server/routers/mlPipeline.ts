@@ -5,7 +5,7 @@
  *   - NLU Intent Classifier (Transformer, port 8110)
  *   - FX Forecasting (LSTM+Transformer, port 8111)
  *   - GNN Fraud Detection (GAT, port 8112)
- *   - Investment ML (XGBoost/MLP, port 8113)
+ *   - Investment ML (XGBoost/MLP, port 8122)
  *   - Ray Training Pipeline (port 8114)
  *   - MLflow Model Registry (port 8115)
  *   - ML Retraining Orchestrator (port 8116)
@@ -24,7 +24,7 @@ import { logger } from "../_core/logger.js";
 const NLU_URL = process.env.NLU_SERVICE_URL || "http://localhost:8110";
 const FX_FORECAST_URL = process.env.FX_FORECAST_SERVICE_URL || "http://localhost:8111";
 const GNN_FRAUD_URL = process.env.GNN_FRAUD_SERVICE_URL || "http://localhost:8112";
-const INVESTMENT_ML_URL = process.env.INVESTMENT_ML_SERVICE_URL || "http://localhost:8113";
+const INVESTMENT_ML_URL = process.env.INVESTMENT_ML_SERVICE_URL || "http://localhost:8122";
 const RAY_TRAINING_URL = process.env.RAY_TRAINING_SERVICE_URL || "http://localhost:8114";
 const MLFLOW_REGISTRY_URL = process.env.MLFLOW_REGISTRY_SERVICE_URL || "http://localhost:8115";
 const ML_RETRAINING_URL = process.env.ML_RETRAINING_SERVICE_URL || "http://localhost:8116";
@@ -565,7 +565,7 @@ const mlHealthRouter = router({
       { name: "NLU Intent Classifier", url: NLU_URL, port: 8110 },
       { name: "FX Forecasting (LSTM+Transformer)", url: FX_FORECAST_URL, port: 8111 },
       { name: "GNN Fraud Detection (GAT)", url: GNN_FRAUD_URL, port: 8112 },
-      { name: "Investment ML (XGBoost/MLP)", url: INVESTMENT_ML_URL, port: 8113 },
+      { name: "Investment ML (XGBoost/MLP)", url: INVESTMENT_ML_URL, port: 8122 },
       { name: "Ray Training Pipeline", url: RAY_TRAINING_URL, port: 8114 },
       { name: "MLflow Model Registry", url: MLFLOW_REGISTRY_URL, port: 8115 },
       { name: "ML Retraining Orchestrator", url: ML_RETRAINING_URL, port: 8116 },

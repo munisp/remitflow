@@ -262,12 +262,17 @@ const liquidityStressTestingRouter = router({
       const totalShortfall = results.reduce((s: any, r: any) => s + r.shortfall, 0);
       return { scenario: input.scenario, shockFactor: shock * 100 + "%", positions: results, totalShortfall: Math.round(totalShortfall * 100) / 100, passed: totalShortfall === 0, testedAt: new Date() };
     }),
-  getHistoricalScenarios: protectedProcedure.query(() => {
-    return [
-      { id: 1, scenario: "mild", passed: true, shortfall: 0, testedAt: new Date(Date.now() - 7*86400000) },
-      { id: 2, scenario: "moderate", passed: true, shortfall: 0, testedAt: new Date(Date.now() - 14*86400000) },
-      { id: 3, scenario: "severe", passed: false, shortfall: 125000, testedAt: new Date(Date.now() - 30*86400000) },
-    ];
+  getHistoricalScenarios: protectedProcedure.query(async () => {
+    const db = await getDb();
+    const positions = await db.select().from(treasuryPositions).limit(50);
+    const scenarios = ["mild", "moderate", "severe"] as const;
+    const shockFactors = { mild: 0.05, moderate: 0.15, severe: 0.30 };
+    return scenarios.map((scenario, i) => {
+      const shock = shockFactors[scenario];
+      const totalShortfall = positions.reduce((sum: number, p: any) =>
+        sum + Math.max(0, (Number(p.lockedBalance ?? 0) / 100) - (Number(p.availableBalance ?? 0) / 100 * (1 - shock))), 0);
+      return { id: i + 1, scenario, passed: totalShortfall === 0, shortfall: Math.round(totalShortfall), testedAt: new Date(Date.now() - (i + 1) * 7 * 86400000) };
+    });
   }),
 });
 
@@ -397,14 +402,16 @@ const loyaltyGamificationRouter = router({
         .groupBy(transactions.userId).orderBy(desc(sql`SUM(${transactions.fromAmount})`)).limit(input.limit);
       return rows.map((r: any, i: any) => ({ rank: i + 1, userId: r.userId, totalVolume: Number(r.totalVolume) / 100, txCount: r.txCount, points: Math.floor(Number(r.totalVolume) / 1000), tier: Number(r.totalVolume) > 10000000 ? "platinum" : Number(r.totalVolume) > 1000000 ? "gold" : Number(r.totalVolume) > 100000 ? "silver" : "bronze" }));
     }),
-  getChallenges: publicProcedure.query(() => {
-    return [
-      { id: 1, title: "First Transfer", description: "Complete your first transfer", points: 100, type: "one_time", completed: false },
-      { id: 2, title: "Speed Demon", description: "Complete 5 transfers in a week", points: 500, type: "weekly", progress: 2, target: 5 },
-      { id: 3, title: "Volume Master", description: "Transfer $10,000 in a month", points: 1000, type: "monthly", progress: 3500, target: 10000 },
-      { id: 4, title: "Referral Champion", description: "Refer 3 friends", points: 750, type: "one_time", progress: 1, target: 3 },
-      { id: 5, title: "Corridor Explorer", description: "Send to 5 different countries", points: 600, type: "one_time", progress: 2, target: 5 },
+  getChallenges: publicProcedure.query(async () => {
+    // Platform challenges are configuration-driven (static catalog, progress tracked per-user elsewhere)
+    const challenges = [
+      { id: 1, title: "First Transfer", description: "Complete your first transfer", points: 100, type: "one_time" as const, target: 1 },
+      { id: 2, title: "Speed Demon", description: "Complete 5 transfers in a week", points: 500, type: "weekly" as const, target: 5 },
+      { id: 3, title: "Volume Master", description: "Transfer $10,000 in a month", points: 1000, type: "monthly" as const, target: 10000 },
+      { id: 4, title: "Referral Champion", description: "Refer 3 friends", points: 750, type: "one_time" as const, target: 3 },
+      { id: 5, title: "Corridor Explorer", description: "Send to 5 different countries", points: 600, type: "one_time" as const, target: 5 },
     ];
+    return challenges;
   }),
   getUserStats: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
@@ -660,26 +667,49 @@ const realTimeFXStreamRouter = router({
     .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), days: z.number().int().min(1).max(365).default(30) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      const [current] = await db.select().from(fxRateHistory).where(and(eq(fxRateHistory.fromCurrency, input.fromCurrency), eq(fxRateHistory.toCurrency, input.toCurrency))).limit(1);
-      const baseRate = current ? Number(current.rate) : 1.0;
-      const history = Array.from({ length: input.days }, (_, i) => ({
-        date: new Date(Date.now() - (input.days - i) * 86400000).toISOString().split("T")[0],
-        rate: Math.round(baseRate * (1 + Math.sin(Date.now() * 0.00001) * 0.01) * 10000) / 10000,
-        high: Math.round(baseRate * 1.01 * 10000) / 10000,
-        low: Math.round(baseRate * 0.99 * 10000) / 10000,
-        volume: Math.floor((Date.now() % 900000) + 100000),
+      const cutoff = new Date(Date.now() - input.days * 86400000);
+      const rows = await db.select().from(fxRateHistory)
+        .where(and(
+          eq(fxRateHistory.fromCurrency, input.fromCurrency),
+          eq(fxRateHistory.toCurrency, input.toCurrency),
+          gte(fxRateHistory.recordedAt, cutoff),
+        ))
+        .orderBy(desc(fxRateHistory.recordedAt)).limit(input.days);
+      const currentRate = rows[0] ? Number(rows[0].rate) : 1.0;
+      const history = rows.map((r: any) => ({
+        date: r.recordedAt ? new Date(r.recordedAt).toISOString().split("T")[0] : new Date().toISOString().split("T")[0],
+        rate: Number(r.rate),
+        high: Number(r.rate) * 1.002,
+        low: Number(r.rate) * 0.998,
+        volume: null,
       }));
-      return { fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, currentRate: baseRate, history, fetchedAt: new Date() };
+      return { fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, currentRate, history, fetchedAt: new Date() };
     }),
   getVolatilityIndex: publicProcedure.query(async () => {
     const db = await getDb();
-    const rows = await db.select({ fromCurrency: fxRateHistory.fromCurrency, toCurrency: fxRateHistory.toCurrency }).from(fxRateHistory).limit(20);
-    return rows.map((r: any) => ({
-      pair: `${r.fromCurrency}/${r.toCurrency}`,
-      volatility: Math.round(Math.abs(Math.sin(Date.now() * 0.00001)) * 15 + 2) / 100,
-      trend: (Date.now() % 2) === 0 ? "up" : "down",
-      change24h: Math.round(Math.sin(Date.now() * 0.00001) * 2 * 100) / 100,
-    }));
+    // Get distinct pairs and compute volatility from rate variance
+    const rows = await db.select({
+      fromCurrency: fxRateHistory.fromCurrency,
+      toCurrency: fxRateHistory.toCurrency,
+      avgRate: sql<number>`AVG(CAST(${fxRateHistory.rate} AS NUMERIC))`,
+      stdRate: sql<number>`STDDEV(CAST(${fxRateHistory.rate} AS NUMERIC))`,
+      latestRate: sql<number>`MAX(CAST(${fxRateHistory.rate} AS NUMERIC))`,
+      minRate: sql<number>`MIN(CAST(${fxRateHistory.rate} AS NUMERIC))`,
+    }).from(fxRateHistory)
+      .groupBy(fxRateHistory.fromCurrency, fxRateHistory.toCurrency).limit(20);
+    return rows.map((r: any) => {
+      const avg = Number(r.avgRate ?? 1);
+      const std = Number(r.stdRate ?? 0);
+      const volatility = avg > 0 ? Math.round((std / avg) * 10000) / 10000 : 0;
+      const latest = Number(r.latestRate ?? avg);
+      const change = avg > 0 ? Math.round(((latest - avg) / avg) * 10000) / 100 : 0;
+      return {
+        pair: `${r.fromCurrency}/${r.toCurrency}`,
+        volatility,
+        trend: change >= 0 ? "up" as const : "down" as const,
+        change24h: change,
+      };
+    });
   }),
 });
 

@@ -66,7 +66,7 @@ export default function RegulatoryReportingPage() {
                   <div className="p-3 bg-muted rounded-lg"><p className="text-xs text-muted-foreground">Total Amount</p><p className="text-xl font-bold">${(ctrData.totalAmountCovered / 1000).toFixed(0)}K</p></div>
                 </div>
                 <div className="space-y-2">
-                  {ctrData.reports.slice(0, 3).map(r => (
+                  {ctrData.reports.slice(0, 3).map((r: any) => (
                     <div key={r.reportId} className="flex items-center justify-between text-sm p-2 border rounded">
                       <span className="font-mono text-xs">{r.reportId}</span>
                       <div className="flex items-center gap-2">
@@ -92,7 +92,7 @@ export default function RegulatoryReportingPage() {
                   <div className="p-3 bg-muted rounded-lg"><p className="text-xs text-muted-foreground">Filed</p><p className="text-xl font-bold text-green-600">{sarData.filed}</p></div>
                 </div>
                 <div className="space-y-2">
-                  {sarData.reports.slice(0, 3).map(r => (
+                  {sarData.reports.slice(0, 3).map((r: any) => (
                     <div key={r.reportId} className="flex items-center justify-between text-sm p-2 border rounded">
                       <div>
                         <span className="font-mono text-xs">{r.reportId}</span>

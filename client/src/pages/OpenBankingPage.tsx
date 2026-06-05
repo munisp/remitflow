@@ -90,7 +90,7 @@ export default function OpenBankingPage() {
           <CardHeader><CardTitle>Transactions — {selectedAccountId}</CardTitle></CardHeader>
           <CardContent>
             <div className="space-y-2">
-              {txQuery.data.transactions.map(tx => (
+              {txQuery.data.transactions.map((tx: any) => (
                 <div key={tx.transactionId} className="flex items-center justify-between p-2 border rounded text-sm">
                   <div>
                     <p className="font-medium">{tx.description}</p>
