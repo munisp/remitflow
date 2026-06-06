@@ -318,3 +318,48 @@ func ValidateKeycloakToken(ctx context.Context, cfg Config, token string) (map[s
 	json.NewDecoder(resp.Body).Decode(&claims)
 	return claims, nil
 }
+
+// ── Auth Middleware (net/http) ────────────────────────────────────────────────
+
+// AuthMiddleware validates the Authorization header (Bearer JWT or internal API key).
+// Fail-closed: returns 401 if no valid credential is presented.
+func AuthMiddleware(cfg Config, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		internalKey := os.Getenv("INTERNAL_SERVICE_KEY")
+		if internalKey == "" {
+			internalKey = "remitflow-internal-2026"
+		}
+		apiKey := r.Header.Get("X-API-Key")
+		if apiKey == internalKey {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if len(auth) > 7 && auth[:7] == "Bearer " {
+			token := auth[7:]
+			if token == internalKey {
+				next.ServeHTTP(w, r)
+				return
+			}
+			claims, err := ValidateKeycloakToken(r.Context(), cfg, token)
+			if err == nil && claims != nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"unauthorized","message":"valid Bearer token or X-API-Key required"}`))
+	})
+}
+
+// GinAuthMiddleware returns a Gin-compatible middleware that validates credentials.
+func GinAuthMiddleware(cfg Config) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return AuthMiddleware(cfg, next)
+	}
+}

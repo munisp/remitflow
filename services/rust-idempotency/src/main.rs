@@ -164,12 +164,27 @@ async fn main() -> std::io::Result<()> {
     tracing::info!(port = port, "Idempotency service starting");
 
     HttpServer::new(move || {
+        let auth_key = std::env::var("INTERNAL_SERVICE_KEY")
+            .unwrap_or_else(|_| "remitflow-internal-2026".to_string());
         App::new()
             .app_data(state.clone())
-            .route("/check", web::post().to(check_key))
-            .route("/store", web::post().to(store_response))
-            .route("/purge", web::delete().to(purge_expired))
+            .app_data(web::Data::new(auth_key))
             .route("/health", web::get().to(health))
+            .service(
+                web::scope("")
+                    .wrap(actix_web::middleware::from_fn(|req: actix_web::dev::ServiceRequest, next: actix_web::middleware::Next<actix_web::body::BoxBody>| async move {
+                        let key = req.app_data::<web::Data<String>>().map(|k| k.as_str().to_string()).unwrap_or_default();
+                        let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                        let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                        if api_key == key || (auth.starts_with("Bearer ") && auth[7..] == key) {
+                            return next.call(req).await;
+                        }
+                        Err(actix_web::error::ErrorUnauthorized("unauthorized"))
+                    }))
+                    .route("/check", web::post().to(check_key))
+                    .route("/store", web::post().to(store_response))
+                    .route("/purge", web::delete().to(purge_expired))
+            )
     })
     .bind(("0.0.0.0", port))?
     .run()

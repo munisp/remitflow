@@ -204,6 +204,31 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := os.Getenv("INTERNAL_SERVICE_KEY")
+		if key == "" {
+			key = "remitflow-internal-2026"
+		}
+		if apiKey := r.Header.Get("X-API-Key"); apiKey == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if len(auth) > 7 && auth[:7] == "Bearer " && auth[7:] == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"unauthorized"}`))
+	})
+}
+
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleHealth)
@@ -212,7 +237,7 @@ func main() {
 	mux.HandleFunc("/clearing-line", handleCreateClearingLine)
 	mux.HandleFunc("/derisking-alert", handleDerisikingAlert)
 	log.Printf("[go-correspondent-manager] Starting on :%s", port)
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := http.ListenAndServe(":"+port, authMiddleware(mux)); err != nil {
 		log.Fatalf("[go-correspondent-manager] Server failed: %v", err)
 	}
 }

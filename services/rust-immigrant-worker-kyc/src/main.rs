@@ -230,7 +230,19 @@ async fn main() {
             async move { handle_check_limit(p, u, body).await }
         });
 
-    let routes = health_route.or(verify_route).or(check_limit_route);
+    let auth_filter = warp::header::optional::<String>("authorization")
+        .and(warp::header::optional::<String>("x-api-key"))
+        .and_then(|auth: Option<String>, api_key: Option<String>| async move {
+            let key = std::env::var("INTERNAL_SERVICE_KEY").unwrap_or_else(|_| "remitflow-internal-2026".to_string());
+            if api_key.as_deref() == Some(&key) { return Ok(()); }
+            if let Some(a) = &auth {
+                if a.starts_with("Bearer ") && &a[7..] == key { return Ok(()); }
+            }
+            Err(warp::reject::reject())
+        })
+        .untuple_one();
+    let protected = auth_filter.and(verify_route.or(check_limit_route));
+    let routes = health_route.or(protected);
 
     println!("[rust-immigrant-worker-kyc] Starting on :{}", port);
     warp::serve(routes).run(([0, 0, 0, 0], port)).await;

@@ -374,6 +374,32 @@ func ssePricesHandler(w http.ResponseWriter, r *http.Request) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := os.Getenv("INTERNAL_SERVICE_KEY")
+		if key == "" {
+			key = "remitflow-internal-2026"
+		}
+		if apiKey := r.Header.Get("X-API-Key"); apiKey == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if len(auth) > 7 && auth[:7] == "Bearer " && auth[7:] == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"unauthorized"}`))
+	})
+}
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 	initPrices()
@@ -394,7 +420,7 @@ func main() {
 
 	log.Printf("🚀 Go Investment Price Feed running on :%s", port)
 	log.Printf("📊 Serving %d assets across 8 asset classes", len(livePrices))
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
+	if err := http.ListenAndServe(":"+port, authMiddleware(mux)); err != nil {
 		log.Fatal(err)
 	}
 }

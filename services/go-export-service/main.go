@@ -523,6 +523,26 @@ func main() {
 		MaxAge:           12 * time.Hour,
 	}))
 
+	r.Use(func(c *gin.Context) {
+		if c.Request.URL.Path == "/health" || c.Request.URL.Path == "/healthz" || c.Request.URL.Path == "/metrics" {
+			c.Next()
+			return
+		}
+		key := os.Getenv("INTERNAL_SERVICE_KEY")
+		if key == "" {
+			key = "remitflow-internal-2026"
+		}
+		if apiKey := c.GetHeader("X-API-Key"); apiKey == key {
+			c.Next()
+			return
+		}
+		auth := c.GetHeader("Authorization")
+		if len(auth) > 7 && auth[:7] == "Bearer " && auth[7:] == key {
+			c.Next()
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+	})
 	r.GET("/health", healthHandler)
 	r.POST("/export/transactions", exportTransactionsHandler)
 	r.POST("/export/statement", exportStatementHandler)

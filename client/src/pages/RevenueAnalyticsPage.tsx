@@ -59,8 +59,8 @@ export default function RevenueAnalyticsPage() {
             <Card><CardHeader><CardTitle>Daily Revenue (30 days)</CardTitle></CardHeader>
               <CardContent>
                 <div className="flex items-end gap-1 h-32">
-                  {daily.points.slice(-30).map((p, i) => {
-                    const max = Math.max(...daily.points.map(x => x.revenue));
+                  {daily.points.slice(-30).map((p: { date: string; revenue: number; transactions: number; feeRevenue: number; fxRevenue: number }, i: number) => {
+                    const max = Math.max(...daily.points.map((x: { revenue: number }) => x.revenue));
                     return <div key={i} className="flex-1 bg-primary/70 rounded-t hover:bg-primary transition-colors" style={{ height: `${(p.revenue/max)*100}%` }} title={`${p.date}: $${p.revenue.toLocaleString()}`} />;
                   })}
                 </div>

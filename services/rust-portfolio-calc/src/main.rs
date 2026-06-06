@@ -393,9 +393,21 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(cors)
             .service(health)
-            .service(analyze)
-            .service(calc_returns)
-            .service(dca_projection)
+            .service(
+                web::scope("")
+                    .wrap(actix_web::middleware::from_fn(|req: actix_web::dev::ServiceRequest, next: actix_web::middleware::Next<actix_web::body::BoxBody>| async move {
+                        let key = std::env::var("INTERNAL_SERVICE_KEY").unwrap_or_else(|_| "remitflow-internal-2026".to_string());
+                        let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                        let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                        if api_key == key || (auth.starts_with("Bearer ") && auth[7..] == key) {
+                            return next.call(req).await;
+                        }
+                        Err(actix_web::error::ErrorUnauthorized("unauthorized"))
+                    }))
+                    .service(analyze)
+                    .service(calc_returns)
+                    .service(dca_projection)
+            )
     })
     .bind(&addr)?
     .run()

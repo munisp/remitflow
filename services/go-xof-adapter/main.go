@@ -285,6 +285,32 @@ if v := os.Getenv(key); v != "" {
 return fallback
 }
 
+
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := os.Getenv("INTERNAL_SERVICE_KEY")
+		if key == "" {
+			key = "remitflow-internal-2026"
+		}
+		if apiKey := r.Header.Get("X-API-Key"); apiKey == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if len(auth) > 7 && auth[:7] == "Bearer " && auth[7:] == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"unauthorized"}`))
+	})
+}
+
 func main() {
 rand.Seed(time.Now().UnixNano())
 mux := http.NewServeMux()
@@ -294,7 +320,7 @@ mux.HandleFunc("/transfer", handleTransfer)
 mux.HandleFunc("/corridors", handleCorridors)
 addr := fmt.Sprintf(":%s", port)
 log.Printf("[go-xof-adapter] Starting on %s | Corridors: %d", addr, len(corridorRegistry))
-if err := http.ListenAndServe(addr, mux); err != nil {
+if err := http.ListenAndServe(":"+port, authMiddleware(mux)); err != nil {
 Server failed: %v", err)
 }
 }

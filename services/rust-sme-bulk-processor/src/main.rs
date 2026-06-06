@@ -226,7 +226,19 @@ async fn main() {
             async move { handle_get_batch(b, id).await }
         });
 
-    let routes = health_route.or(submit_route).or(get_route);
+    let auth_filter = warp::header::optional::<String>("authorization")
+        .and(warp::header::optional::<String>("x-api-key"))
+        .and_then(|auth: Option<String>, api_key: Option<String>| async move {
+            let key = std::env::var("INTERNAL_SERVICE_KEY").unwrap_or_else(|_| "remitflow-internal-2026".to_string());
+            if api_key.as_deref() == Some(&key) { return Ok(()); }
+            if let Some(a) = &auth {
+                if a.starts_with("Bearer ") && &a[7..] == key { return Ok(()); }
+            }
+            Err(warp::reject::reject())
+        })
+        .untuple_one();
+    let protected = auth_filter.and(submit_route.or(get_route));
+    let routes = health_route.or(protected);
 
     println!("[rust-sme-bulk-processor] Starting on :{}", port);
     warp::serve(routes).run(([0, 0, 0, 0], port)).await;

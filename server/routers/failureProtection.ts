@@ -21,11 +21,12 @@ import {
   wallets, transactions, users, notifications,
 } from "../../drizzle/schema";
 import { logger } from "../_core/logger.js";
+import { randomBytes } from "crypto";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function genId(prefix: string): string {
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 }
 
 async function notify(db: ReturnType<typeof import("drizzle-orm/node-postgres").drizzle>, userId: number, type: string, message: string) {

@@ -25,8 +25,8 @@ import { router, protectedProcedure, adminProcedure, publicProcedure ,
   auditedProcedure, auditedAdminProcedure, rateLimitedProcedure
 } from "../_core/trpc";
 import { getDb } from "../db";
-import { eq, desc, count, sum, gte, and } from "drizzle-orm";
-import { kycLifecycle, transactions as txSchema } from "../../drizzle/schema";
+import { eq, desc, count, sum, gte, and, sql } from "drizzle-orm";
+import { kycLifecycle, transactions, transactions as txSchema } from "../../drizzle/schema";
 import { invokeLLM } from "../_core/llm";
 import { notifyOwner } from "../_core/notification";
 
@@ -724,20 +724,27 @@ export const revenueAnalyticsRouter = router({
   getRevenueByDay: adminProcedure
     .input(z.object({ days: z.number().min(7).max(365).default(30) }))
     .query(async ({ input }) => {
-      const points = [];
-      for (let i = input.days; i >= 0; i--) {
-        const date = new Date();
-        date.setDate(date.getDate() - i);
-        const isWeekend = date.getDay() === 0 || date.getDay() === 6;
-        const base = isWeekend ? 8000 : 14000;
-        points.push({
-          date: date.toISOString().split("T")[0],
-          revenue: parseFloat((base + Math.sin(Date.now() * 0.00001) * 1500).toFixed(2)),
-          transactions: Math.floor((isWeekend ? 120 : 220) + Math.sin(Date.now() * 0.00001) * 25),
-          feeRevenue: parseFloat((base * 0.79 + Math.sin(Date.now() * 0.00002) * 1000).toFixed(2)),
-          fxRevenue: parseFloat((base * 0.21 + Math.sin(Date.now() * 0.00003) * 250).toFixed(2)),
-        });
-      }
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const since = new Date(Date.now() - input.days * 86400000);
+      const dailyData = await db.select({
+        day: sql<string>`DATE(${transactions.createdAt})`,
+        totalAmount: sum(transactions.fromAmount),
+        txCount: count(),
+      }).from(transactions)
+        .where(and(eq(transactions.status, "completed"), gte(transactions.createdAt, since)))
+        .groupBy(sql`DATE(${transactions.createdAt})`)
+        .orderBy(sql`DATE(${transactions.createdAt})`);
+      const points = dailyData.map((d: any) => {
+        const revenue = Number(d.totalAmount ?? 0) * 0.015;
+        return {
+          date: d.day,
+          revenue: parseFloat(revenue.toFixed(2)),
+          transactions: d.txCount,
+          feeRevenue: parseFloat((revenue * 0.79).toFixed(2)),
+          fxRevenue: parseFloat((revenue * 0.21).toFixed(2)),
+        };
+      });
       return { days: input.days, points };
     }),
 });
