@@ -2,6 +2,7 @@
  * Referral Engine — P2 Business 9.7
  * Multi-tier referral program with reward tracking and fraud detection.
  */
+import { randomBytes } from "crypto";
 
 interface Referral {
   id: string;
@@ -50,7 +51,7 @@ export function generateReferralCode(userId: number): string {
   const existing = userCodes.get(userId);
   if (existing) return existing;
 
-  const code = `RF-${userId.toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  const code = `RF-${userId.toString(36).toUpperCase()}-${randomBytes(3).toString("hex").toUpperCase()}`;
   userCodes.set(userId, code);
   return code;
 }
@@ -61,7 +62,7 @@ export function createReferral(referrerId: number, refereeEmail: string): Referr
   const tierConfig = PROGRAM.tiers.find((t) => t.tier === tier) ?? PROGRAM.tiers[0];
 
   const referral: Referral = {
-    id: `ref_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: `ref_${Date.now()}_${randomBytes(4).toString("hex")}`,
     referrerId,
     referralCode: code,
     refereeEmail,

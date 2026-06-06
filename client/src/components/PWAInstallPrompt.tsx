@@ -18,8 +18,8 @@ export function PWAUpdateBanner() {
     needRefresh: [needRefresh],
     updateServiceWorker,
   } = useRegisterSW({
-    onRegistered(r) { console.log("[PWA] SW registered:", r?.scope); },
-    onRegisterError(err) { console.warn("[PWA] SW error:", err); },
+    onRegistered(_r) { /* SW registered */ },
+    onRegisterError(_err) { /* SW error — silent in production */ },
   });
 
   if (!needRefresh) return null;

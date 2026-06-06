@@ -2,6 +2,7 @@
  * Dispute Engine — P2 Business 9.8
  * End-to-end dispute management with SLA tracking and auto-escalation.
  */
+import { randomBytes } from "crypto";
 
 type DisputeStatus = "open" | "under_review" | "awaiting_info" | "escalated" | "resolved" | "closed" | "rejected";
 type DisputeType = "unauthorized" | "not_received" | "wrong_amount" | "duplicate" | "fraud" | "service_issue" | "other";
@@ -49,7 +50,7 @@ export function createDispute(params: {
   currency: string;
   description: string;
 }): Dispute {
-  const id = `DSP-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  const id = `DSP-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString("hex").toUpperCase()}`;
   const now = Date.now();
   const slaHours = SLA_HOURS[params.type];
 

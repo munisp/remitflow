@@ -5,6 +5,7 @@
 import { exec } from "child_process";
 import { promisify } from "util";
 import { logger } from "../_core/logger";
+import { randomBytes } from "crypto";
 
 const execAsync = promisify(exec);
 
@@ -41,7 +42,7 @@ export function configureBackup(config: Partial<typeof backupConfig>): void {
 
 export async function createBackup(type: BackupRecord["type"]): Promise<BackupRecord> {
   const record: BackupRecord = {
-    id: `bak_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    id: `bak_${Date.now()}_${randomBytes(4).toString("hex")}`,
     type,
     status: "pending",
     startTime: Date.now(),

@@ -2,6 +2,7 @@
  * In-App Support — P2 Business 9.6
  * Ticketing system with auto-categorization, smart routing, and canned responses.
  */
+import { randomBytes } from "crypto";
 
 type TicketCategory = "transfer" | "kyc" | "wallet" | "fees" | "security" | "account" | "technical" | "general";
 type TicketPriority = "low" | "medium" | "high" | "urgent";
@@ -89,7 +90,7 @@ export function createTicket(params: {
   const priority = autoPriority(category);
 
   const ticket: SupportTicket = {
-    id: `TKT-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+    id: `TKT-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString("hex").toUpperCase()}`,
     userId: params.userId,
     category,
     priority,
