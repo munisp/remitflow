@@ -721,6 +721,11 @@ function Router() {
         <Route path="/diaspora-mortgage" component={lazy(() => import('./pages/DiasporaMortgage'))} />
         <Route path="/credit-scoring" component={lazy(() => import('./pages/BusinessCreditScoring'))} />
         <Route path="/esg-reporting" component={lazy(() => import('./pages/ESGReporting'))} />
+        <Route path="/bill-payment" component={lazy(() => import('./pages/BillPayment'))} />
+        <Route path="/qr-pay" component={lazy(() => import('./pages/QRPay'))} />
+        <Route path="/transaction-history" component={lazy(() => import('./pages/TransactionHistory'))} />
+        <Route path="/hnw-private-banking" component={lazy(() => import('./pages/HNWPrivateBanking'))} />
+        <Route path="/trisa-compliance" component={lazy(() => import('./pages/TrisaCompliance'))} />
         <Route component={NotFound} />
         </Switch>
     </Suspense>
