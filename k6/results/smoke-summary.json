@@ -1,0 +1,342 @@
+{
+    "root_group": {
+        "checks": {},
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {
+                "Auth Flow": {
+                    "name": "Auth Flow",
+                    "path": "::Auth Flow",
+                    "id": "5c11e31c00a627a5c2755b3235403ac9",
+                    "groups": {},
+                    "checks": {
+                            "Auth login responded": {
+                                "passes": 0,
+                                "fails": 5,
+                                "name": "Auth login responded",
+                                "path": "::Auth Flow::Auth login responded",
+                                "id": "9ace44c6de9968416a2677678ed78d7b"
+                            },
+                            "Auth me success": {
+                                "fails": 5,
+                                "name": "Auth me success",
+                                "path": "::Auth Flow::Auth me success",
+                                "id": "27ac93c59010689810706d46924ca065",
+                                "passes": 0
+                            }
+                        }
+                },
+                "Compliance Flow": {
+                    "groups": {},
+                    "checks": {
+                            "KYC status success": {
+                                "name": "KYC status success",
+                                "path": "::Compliance Flow::KYC status success",
+                                "id": "c956f47112e452971e0eae7b416aea25",
+                                "passes": 0,
+                                "fails": 4
+                            },
+                            "Beneficiary list success": {
+                                "name": "Beneficiary list success",
+                                "path": "::Compliance Flow::Beneficiary list success",
+                                "id": "f1e6b8b79f6457cd09d8690892056145",
+                                "passes": 0,
+                                "fails": 4
+                            }
+                        },
+                    "name": "Compliance Flow",
+                    "path": "::Compliance Flow",
+                    "id": "9884a56629d3895f2690c5f523baf0b7"
+                },
+                "Wallet Flow": {
+                    "path": "::Wallet Flow",
+                    "id": "87f82d0dcb80b8b50962d68aed5c778b",
+                    "groups": {},
+                    "checks": {
+                            "Wallet list success": {
+                                "name": "Wallet list success",
+                                "path": "::Wallet Flow::Wallet list success",
+                                "id": "f148ad50215b9d8d502320479f5381b4",
+                                "passes": 0,
+                                "fails": 7
+                            },
+                            "Wallet balance success": {
+                                "passes": 0,
+                                "fails": 7,
+                                "name": "Wallet balance success",
+                                "path": "::Wallet Flow::Wallet balance success",
+                                "id": "f3d71eddfca08ab3be9b3e89ac946c55"
+                            },
+                            "Wallet transactions success": {
+                                "name": "Wallet transactions success",
+                                "path": "::Wallet Flow::Wallet transactions success",
+                                "id": "ea55984ab35b4cd8e4170254ebf84286",
+                                "passes": 0,
+                                "fails": 7
+                            }
+                        },
+                    "name": "Wallet Flow"
+                },
+                "FX Rate Flow": {
+                    "name": "FX Rate Flow",
+                    "path": "::FX Rate Flow",
+                    "id": "1b6e183824ea13a19dbb808fe05c2bea",
+                    "groups": {},
+                    "checks": {
+                            "FX rate fetched": {
+                                "fails": 0,
+                                "name": "FX rate fetched",
+                                "path": "::FX Rate Flow::FX rate fetched",
+                                "id": "13e1a00bfe7496e59bdff8abcada0ad7",
+                                "passes": 25
+                            }
+                        }
+                },
+                "Transfer Flow": {
+                    "name": "Transfer Flow",
+                    "path": "::Transfer Flow",
+                    "id": "47c736947bf50ff59438975431ab6adf",
+                    "groups": {},
+                    "checks": {
+                            "FX rate success": {
+                                "name": "FX rate success",
+                                "path": "::Transfer Flow::FX rate success",
+                                "id": "1c202da13f9b1ccce31ff5e3087a8672",
+                                "passes": 11,
+                                "fails": 0
+                            },
+                            "Transfer initiated": {
+                                "name": "Transfer initiated",
+                                "path": "::Transfer Flow::Transfer initiated",
+                                "id": "78ee9d7d623a2cad311074b50fef8425",
+                                "passes": 0,
+                                "fails": 11
+                            },
+                            "Transfer list success": {
+                                "fails": 11,
+                                "name": "Transfer list success",
+                                "path": "::Transfer Flow::Transfer list success",
+                                "id": "114843d1aa9597ca00d088f5a7ff487e",
+                                "passes": 0
+                            }
+                        }
+                },
+                "Admin Flow": {
+                    "name": "Admin Flow",
+                    "path": "::Admin Flow",
+                    "id": "bb69cd9117ef4a3d0be0f2190194261e",
+                    "groups": {},
+                    "checks": {
+                            "System health success": {
+                                "path": "::Admin Flow::System health success",
+                                "id": "26fb5a7bdf02255cd30f007f102fc8a0",
+                                "passes": 2,
+                                "fails": 0,
+                                "name": "System health success"
+                            },
+                            "Fee rules success": {
+                                "passes": 0,
+                                "fails": 2,
+                                "name": "Fee rules success",
+                                "path": "::Admin Flow::Fee rules success",
+                                "id": "6a505ef12ecdef95c5f8f9676682e3f7"
+                            },
+                            "Secrets status success": {
+                                "path": "::Admin Flow::Secrets status success",
+                                "id": "94d03678088248a16a4691b598899770",
+                                "passes": 0,
+                                "fails": 2,
+                                "name": "Secrets status success"
+                            }
+                        }
+                }
+            }
+    },
+    "metrics": {
+        "p99_latency": {
+            "p(90)": 4.021617,
+            "p(95)": 1004.5491629999999,
+            "avg": 184.3710221818182,
+            "min": 0.947061,
+            "med": 2.594599,
+            "max": 2005.076709
+        },
+        "fx_rate_latency": {
+            "max": 17006.881192,
+            "p(90)": 12505.715811499998,
+            "p(95)": 14756.31268525,
+            "avg": 4186.876647972222,
+            "min": 3.155105,
+            "med": 1254.8593915,
+            "thresholds": {
+                "p(95)<200": true,
+                "p(99)<500": true
+            }
+        },
+        "vus": {
+            "value": 1,
+            "min": 1,
+            "max": 5
+        },
+        "http_req_blocked": {
+            "avg": 0.028351970873786405,
+            "min": 0.001643,
+            "med": 0.003947,
+            "max": 0.563055,
+            "p(90)": 0.005804799999999999,
+            "p(95)": 0.04031829999999973
+        },
+        "iterations": {
+            "count": 34,
+            "rate": 0.4527401376970638
+        },
+        "vus_max": {
+            "value": 5,
+            "min": 5,
+            "max": 5
+        },
+        "http_req_waiting": {
+            "p(95)": 14456.157832699997,
+            "avg": 2895.3192875048544,
+            "min": 0.847616,
+            "med": 5.045523,
+            "max": 17006.656202,
+            "p(90)": 11905.585032199999
+        },
+        "group_duration": {
+            "max": 44534.093905,
+            "p(90)": 33377.43985169999,
+            "p(95)": 40480.474167149994,
+            "avg": 9974.05056614706,
+            "min": 508.718489,
+            "med": 2028.0788015
+        },
+        "http_req_sending": {
+            "avg": 0.03571370873786408,
+            "min": 0.008616,
+            "med": 0.035837,
+            "max": 0.109364,
+            "p(90)": 0.055004,
+            "p(95)": 0.0721177999999999
+        },
+        "http_req_duration": {
+            "avg": 2895.4591009611654,
+            "min": 0.947061,
+            "med": 5.20001,
+            "max": 17006.881192,
+            "p(90)": 11905.896871199999,
+            "p(95)": 14456.371123699997,
+            "thresholds": {
+                "p(95)<500": true,
+                "p(99)<1500": true
+            }
+        },
+        "transfer_latency": {
+            "p(95)": 1004.5491629999999,
+            "avg": 184.3710221818182,
+            "min": 0.947061,
+            "med": 2.594599,
+            "max": 2005.076709,
+            "p(90)": 4.021617,
+            "thresholds": {
+                "p(95)<800": true,
+                "p(99)<2000": false
+            }
+        },
+        "http_req_failed": {
+            "passes": 65,
+            "fails": 38,
+            "value": 0.6310679611650486
+        },
+        "http_req_receiving": {
+            "min": 0.055383,
+            "med": 0.098695,
+            "max": 0.339092,
+            "p(90)": 0.15882979999999997,
+            "p(95)": 0.18638129999999997,
+            "avg": 0.10409974757281554
+        },
+        "errors": {
+            "passes": 29,
+            "fails": 25,
+            "thresholds": {
+                "rate<0.01": true
+            },
+            "value": 0.5370370370370371
+        },
+        "http_req_tls_handshaking": {
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0,
+            "min": 0,
+            "med": 0
+        },
+        "checks": {
+            "passes": 38,
+            "fails": 65,
+            "value": 0.36893203883495146
+        },
+        "wallet_latency": {
+            "p(90)": 13503.42114,
+            "p(95)": 16003.985936,
+            "avg": 2720.325677285714,
+            "min": 2.362623,
+            "med": 3.669471,
+            "max": 16504.302918,
+            "thresholds": {
+                "p(95)<200": true,
+                "p(99)<500": true
+            }
+        },
+        "data_received": {
+            "count": 803554,
+            "rate": 10700.0337825596
+        },
+        "http_req_duration{expected_response:true}": {
+            "p(95)": 14656.28480715,
+            "avg": 4546.044048210526,
+            "min": 3.155105,
+            "med": 2005.2742665,
+            "max": 17006.881192,
+            "p(90)": 12654.679772400003
+        },
+        "iteration_duration": {
+            "p(90)": 33377.5461476,
+            "p(95)": 40480.541397149995,
+            "avg": 9974.133923323529,
+            "min": 508.774424,
+            "med": 2028.1542915,
+            "max": 44534.180306
+        },
+        "auth_latency": {
+            "avg": 71.65560780000001,
+            "min": 3.500853,
+            "med": 9.945615,
+            "max": 503.957575,
+            "p(90)": 102.68595189999985,
+            "p(95)": 303.32176344999954,
+            "thresholds": {
+                "p(95)<300": true,
+                "p(99)<800": false
+            }
+        },
+        "http_req_connecting": {
+            "min": 0,
+            "med": 0,
+            "max": 0.276594,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0.010555019417475728
+        },
+        "http_reqs": {
+            "rate": 1.371536299494046,
+            "count": 103
+        },
+        "data_sent": {
+            "count": 28321,
+            "rate": 377.11921881525126
+        }
+    }
+}

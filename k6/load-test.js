@@ -296,27 +296,38 @@ export function handleSummary(data) {
   };
 }
 
-function textSummary(data, opts) {
-  const metrics = data.metrics || {};
-  const lines = [
+function safeGet(obj, path, fallback) {
+  var parts = path.split(".");
+  var cur = obj;
+  for (var i = 0; i < parts.length; i++) {
+    if (cur == null) return fallback;
+    cur = cur[parts[i]];
+  }
+  return cur == null ? fallback : cur;
+}
+
+function textSummary(data) {
+  var metrics = data.metrics || {};
+  var state = data.state || {};
+  var lines = [
     "═══════════════════════════════════════════════════════════════",
     "  RemitFlow Load Test Results",
     "═══════════════════════════════════════════════════════════════",
-    `  Stage: ${STAGE}`,
-    `  Duration: ${Math.round((data.state?.testRunDurationMs || 0) / 1000)}s`,
-    `  VUs: ${data.metrics?.vus?.values?.max || 0} max`,
+    "  Stage: " + STAGE,
+    "  Duration: " + Math.round((state.testRunDurationMs || 0) / 1000) + "s",
+    "  VUs: " + safeGet(metrics, "vus.values.max", 0) + " max",
     "───────────────────────────────────────────────────────────────",
-    `  HTTP Reqs:        ${metrics.http_reqs?.values?.count || 0}`,
-    `  Avg Duration:     ${Math.round(metrics.http_req_duration?.values?.avg || 0)}ms`,
-    `  P95 Duration:     ${Math.round(metrics.http_req_duration?.values?.["p(95)"] || 0)}ms`,
-    `  P99 Duration:     ${Math.round(metrics.http_req_duration?.values?.["p(99)"] || 0)}ms`,
-    `  Error Rate:       ${((metrics.errors?.values?.rate || 0) * 100).toFixed(2)}%`,
-    `  Transfers:        ${metrics.successful_transfers?.values?.count || 0}`,
+    "  HTTP Reqs:        " + safeGet(metrics, "http_reqs.values.count", 0),
+    "  Avg Duration:     " + Math.round(safeGet(metrics, "http_req_duration.values.avg", 0)) + "ms",
+    "  P95 Duration:     " + Math.round(safeGet(metrics, "http_req_duration.values.p(95)", 0)) + "ms",
+    "  P99 Duration:     " + Math.round(safeGet(metrics, "http_req_duration.values.p(99)", 0)) + "ms",
+    "  Error Rate:       " + ((safeGet(metrics, "errors.values.rate", 0)) * 100).toFixed(2) + "%",
+    "  Transfers:        " + safeGet(metrics, "successful_transfers.values.count", 0),
     "───────────────────────────────────────────────────────────────",
-    `  Transfer P95:     ${Math.round(metrics.transfer_latency?.values?.["p(95)"] || 0)}ms`,
-    `  FX Rate P95:      ${Math.round(metrics.fx_rate_latency?.values?.["p(95)"] || 0)}ms`,
-    `  Auth P95:         ${Math.round(metrics.auth_latency?.values?.["p(95)"] || 0)}ms`,
-    `  Wallet P95:       ${Math.round(metrics.wallet_latency?.values?.["p(95)"] || 0)}ms`,
+    "  Transfer P95:     " + Math.round(safeGet(metrics, "transfer_latency.values.p(95)", 0)) + "ms",
+    "  FX Rate P95:      " + Math.round(safeGet(metrics, "fx_rate_latency.values.p(95)", 0)) + "ms",
+    "  Auth P95:         " + Math.round(safeGet(metrics, "auth_latency.values.p(95)", 0)) + "ms",
+    "  Wallet P95:       " + Math.round(safeGet(metrics, "wallet_latency.values.p(95)", 0)) + "ms",
     "═══════════════════════════════════════════════════════════════",
   ];
   return lines.join("\n") + "\n";
