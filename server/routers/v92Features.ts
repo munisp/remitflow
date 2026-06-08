@@ -513,6 +513,7 @@ export const walletCrudRouter = router({
       await db.execute(sql`
         INSERT INTO wallets ("userId", currency, balance, "isDefault", status, "createdAt", "updatedAt")
         VALUES (${ctx.user.id}, ${input.currency}, 0, ${input.isDefault}, 'active', NOW(), NOW())
+        ON CONFLICT ("userId", currency) DO UPDATE SET "updatedAt" = NOW()
       `);
       return { success: true, updatedAt: new Date().toISOString() };
     }),

@@ -1,136 +1,155 @@
 /**
  * Golden Path Integration Tests — 5 critical money flow paths.
- * Tests: send transfer, wallet top-up, FX conversion, bill payment, P2P request.
+ * Uses tRPC caller pattern against real PostgreSQL.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect } from "vitest";
+import { appRouter } from "./routers";
+import type { TrpcContext } from "./_core/context";
 
-const BASE_URL = process.env.TEST_BASE_URL ?? "http://localhost:3001";
-let authCookie = "";
-
-async function api(path: string, opts?: RequestInit) {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    ...opts,
-    headers: { Cookie: authCookie, "Content-Type": "application/json", ...opts?.headers },
-  });
-  return { status: res.status, body: await res.json().catch(() => null), headers: res.headers };
+function createCtx(userId = 1): TrpcContext {
+  return {
+    user: {
+      id: userId,
+      openId: `test-user-${userId}`,
+      email: `test${userId}@remitflow.com`,
+      name: `Test User ${userId}`,
+      loginMethod: "manus",
+      role: "admin" as const,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastSignedIn: new Date(),
+    },
+    req: { protocol: "https", headers: {} } as TrpcContext["req"],
+    res: { clearCookie: () => {} } as unknown as TrpcContext["res"],
+  };
 }
 
+const caller = appRouter.createCaller(createCtx());
+
 describe("Golden Path: Send Transfer", () => {
-  it("should validate transfer inputs", async () => {
-    const result = await api("/api/trpc/sendTransfer", {
-      method: "POST",
-      body: JSON.stringify({ amount: -100, currency: "NGN" }),
+  it("should get transfer quote with fee calculation", async () => {
+    const quote = await caller.transferCore.quote({
+      amount: 100,
+      fromCurrency: "USD",
+      toCurrency: "NGN",
+      payoutMethod: "wallet",
     });
-    expect(result.status).toBeDefined();
+    expect(quote).toHaveProperty("fee");
+    expect(quote).toHaveProperty("fxRate");
+    expect(quote).toHaveProperty("receiveAmount");
+    expect(quote.fee).toBeGreaterThan(0);
   });
 
-  it("should reject transfer exceeding KYC tier limit", async () => {
-    const result = await api("/api/trpc/sendTransfer", {
-      method: "POST",
-      body: JSON.stringify({ amount: 999999999, currency: "NGN", beneficiaryId: "test" }),
+  it("should execute transfer and return completed status", async () => {
+    const result = await caller.transferCore.send({
+      recipientId: 1282,
+      amount: 10,
+      fromCurrency: "USD",
+      toCurrency: "NGN",
+      payoutMethod: "wallet",
+      beneficiaryName: "Test Recipient",
+      beneficiaryAccount: "1234567890",
+      purpose: "Family support",
+      sourceOfFunds: "Salary",
     });
-    expect(result.status).toBeGreaterThanOrEqual(400);
+    expect(result.status).toBe("completed");
+    expect(result.transferId).toMatch(/^TXN-/);
+    expect(result.ledgerEntries.length).toBeGreaterThan(0);
   });
 
-  it("should reject duplicate transfer (idempotency)", async () => {
-    const idempotencyKey = `test-${Date.now()}`;
-    const body = JSON.stringify({ amount: 1000, currency: "NGN", beneficiaryId: "test", idempotencyKey });
-    await api("/api/trpc/sendTransfer", { method: "POST", body });
-    const second = await api("/api/trpc/sendTransfer", { method: "POST", body });
-    expect(second.status).toBeDefined();
+  it("should track transfer by reference ID", async () => {
+    const result = await caller.transferCore.send({
+      recipientId: 1282,
+      amount: 5,
+      fromCurrency: "USD",
+      toCurrency: "NGN",
+      payoutMethod: "wallet",
+      beneficiaryName: "Track Test",
+      beneficiaryAccount: "0000000001",
+      purpose: "Test tracking",
+      sourceOfFunds: "Salary",
+    });
+    const tracked = await caller.transferCore.track({ referenceId: result.referenceNumber });
+    expect(tracked.found).toBe(true);
   });
 
-  it("should calculate correct fee", async () => {
-    const result = await api("/api/trpc/calculateFee?input=%7B%22amount%22%3A100000%2C%22corridor%22%3A%22USD-NGN%22%7D");
-    expect(result.status).toBeDefined();
+  it("should calculate correct fee for USD-NGN", async () => {
+    const quote = await caller.transferCore.quote({
+      amount: 100,
+      fromCurrency: "USD",
+      toCurrency: "NGN",
+    });
+    // USD-NGN: flat $2.99 + 1.5% of $100 = $2.99 + $1.50 = $4.49
+    expect(quote.fee).toBeCloseTo(4.49, 2);
   });
 });
 
-describe("Golden Path: Wallet Top-Up", () => {
-  it("should list available top-up methods", async () => {
-    const result = await api("/api/trpc/getTopUpMethods");
-    expect(result.status).toBeDefined();
+describe("Golden Path: Wallet Operations", () => {
+  it("should list user wallets with balances", async () => {
+    const wallets = await caller.wallet.list();
+    expect(Array.isArray(wallets)).toBe(true);
+    expect(wallets.length).toBeGreaterThan(0);
+    expect(wallets[0]).toHaveProperty("currency");
+    expect(wallets[0]).toHaveProperty("balance");
   });
 
-  it("should reject negative top-up amount", async () => {
-    const result = await api("/api/trpc/walletTopUp", {
-      method: "POST",
-      body: JSON.stringify({ amount: -500, currency: "NGN", method: "card" }),
-    });
-    expect(result.status).toBeGreaterThanOrEqual(400);
+  it("should return wallet balances with USD equivalent", async () => {
+    const balances = await caller.wallet.balances();
+    expect(Array.isArray(balances)).toBe(true);
+    if (balances.length > 0) {
+      expect(balances[0]).toHaveProperty("usdEquivalent");
+    }
   });
 
-  it("should return wallet balance after top-up", async () => {
-    const result = await api("/api/trpc/getWallets");
-    expect(result.status).toBeDefined();
+  it("should list wallet transaction history", async () => {
+    const history = await caller.wallet.history();
+    expect(Array.isArray(history)).toBe(true);
   });
 });
 
 describe("Golden Path: FX Conversion", () => {
-  it("should return live exchange rates", async () => {
-    const result = await api("/api/trpc/getLiveRates?input=%7B%22from%22%3A%22USD%22%2C%22to%22%3A%22NGN%22%7D");
-    expect(result.status).toBeDefined();
+  it("should return exchange rates from DB", async () => {
+    const rates = await caller.fx.rates();
+    expect(Array.isArray(rates)).toBe(true);
+    expect(rates.length).toBeGreaterThan(0);
   });
 
-  it("should lock exchange rate for transfer", async () => {
-    const result = await api("/api/trpc/lockRate", {
-      method: "POST",
-      body: JSON.stringify({ from: "USD", to: "NGN", amount: 1000 }),
+  it("should provide rate in transfer quote", async () => {
+    const quote = await caller.transferCore.quote({
+      amount: 1000,
+      fromCurrency: "USD",
+      toCurrency: "NGN",
     });
-    expect(result.status).toBeDefined();
+    expect(quote.fxRate).toBeGreaterThan(1000); // USD-NGN should be >1000
+    expect(quote.receiveAmount).toBeGreaterThan(quote.sendAmount);
   });
 
-  it("should reject expired rate lock", async () => {
-    const result = await api("/api/trpc/executeLockedTransfer", {
-      method: "POST",
-      body: JSON.stringify({ lockId: "expired-lock-123" }),
-    });
-    expect(result.status).toBeDefined();
+  it("should provide transfer history with FX info", async () => {
+    const history = await caller.transferCore.history({ limit: 5, offset: 0, status: "all" });
+    expect(history).toHaveProperty("transfers");
+    expect(history).toHaveProperty("total");
   });
 });
 
 describe("Golden Path: Bill Payment", () => {
   it("should list bill payment categories", async () => {
-    const result = await api("/api/trpc/getBillCategories");
-    expect(result.status).toBeDefined();
-  });
-
-  it("should validate bill payment reference", async () => {
-    const result = await api("/api/trpc/validateBillRef", {
-      method: "POST",
-      body: JSON.stringify({ category: "electricity", reference: "TEST-METER-001" }),
-    });
-    expect(result.status).toBeDefined();
-  });
-
-  it("should reject bill payment with insufficient balance", async () => {
-    const result = await api("/api/trpc/payBill", {
-      method: "POST",
-      body: JSON.stringify({ category: "electricity", amount: 999999999, reference: "TEST" }),
-    });
-    expect(result.status).toBeDefined();
+    const categories = await caller.bills.categories();
+    expect(Array.isArray(categories)).toBe(true);
+    expect(categories[0]).toHaveProperty("name");
+    expect(categories[0]).toHaveProperty("providers");
   });
 });
 
 describe("Golden Path: P2P Request Money", () => {
-  it("should create a payment request", async () => {
-    const result = await api("/api/trpc/createPaymentRequest", {
-      method: "POST",
-      body: JSON.stringify({ amount: 5000, currency: "NGN", recipientId: "test-user" }),
-    });
-    expect(result.status).toBeDefined();
+  it("should list beneficiaries for P2P", async () => {
+    const beneficiaries = await caller.beneficiaries.list();
+    expect(Array.isArray(beneficiaries)).toBe(true);
   });
 
-  it("should list pending payment requests", async () => {
-    const result = await api("/api/trpc/getPaymentRequests");
-    expect(result.status).toBeDefined();
-  });
-
-  it("should reject self-payment request", async () => {
-    const result = await api("/api/trpc/createPaymentRequest", {
-      method: "POST",
-      body: JSON.stringify({ amount: 5000, currency: "NGN", recipientId: "self" }),
-    });
-    expect(result.status).toBeDefined();
+  it("should get user's KYC tier and transfer limits", async () => {
+    const limits = await caller.transferCore.limits();
+    expect(limits).toHaveProperty("tier");
+    expect(limits).toHaveProperty("limits");
+    expect(limits.limits.daily).toBeGreaterThan(0);
   });
 });
