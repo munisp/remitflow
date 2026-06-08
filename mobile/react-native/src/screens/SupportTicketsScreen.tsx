@@ -1,148 +1,61 @@
-import React, { useState, useEffect } from 'react';
-import {
-  View,
-  Text,
-  FlatList,
-  TouchableOpacity,
-  StyleSheet,
-  ActivityIndicator,
-  RefreshControl,
-} from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, Text, ScrollView, RefreshControl, StyleSheet, ActivityIndicator, TouchableOpacity } from 'react-native';
 
-interface SupportTicketsItem {
-  id: number;
-  subject: string;
-  status?: string;
-  description?: string;
-}
+const API_BASE = process.env.API_URL || 'http://localhost:3001';
 
-export const SupportTicketsScreen: React.FC = () => {
-  const [items, setItems] = useState<SupportTicketsItem[]>([]);
+export default function SupportTicketsScreen() {
+  const [data, setData] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const load = async (isRefresh = false) => {
-    if (isRefresh) setRefreshing(true);
-    else setLoading(true);
-    setError(null);
+  const loadData = async () => {
     try {
-      const response = await fetch('/trpc/supportTickets.list');
-      const data = await response.json();
-      setItems(data?.result?.data ?? []);
-    } catch (e: any) {
-      setError(e.message ?? 'Failed to load data');
+      setError(null);
+      const res = await fetch(`${API_BASE}/api/trpc/support-tickets`);
+      const json = await res.json();
+      setData(json.result?.data ?? json);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load');
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { loadData(); }, []);
 
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color="#6C63FF" />
-      </View>
-    );
-  }
-
-  if (error) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.errorText}>{error}</Text>
-        <TouchableOpacity style={styles.retryBtn} onPress={() => load()}>
-          <Text style={styles.retryText}>Retry</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
-  return (
-    <View style={styles.container}>
-      <Text style={styles.header}>Support Tickets</Text>
-      <FlatList
-        data={items}
-        keyExtractor={(item) => item.id?.toString()}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={() => load(true)} tintColor="#6C63FF" />
-        }
-        ListEmptyComponent={
-          <View style={styles.center}>
-            <Text style={styles.emptyText}>No Support Tickets data yet</Text>
-          </View>
-        }
-        renderItem={({ item }) => (
-          <TouchableOpacity style={styles.card}>
-            <Text style={styles.cardTitle}>
-              {item['subject' as keyof SupportTicketsItem]?.toString() ?? item.description ?? `Item ${item.id}`}
-            </Text>
-            {item.status && (
-              <Text style={styles.cardStatus}>{item.status}</Text>
-            )}
-          </TouchableOpacity>
-        )}
-        contentContainerStyle={{ paddingBottom: 80 }}
-      />
+  if (loading) return <View style={styles.center}><ActivityIndicator size="large" color="#6366f1" /></View>;
+  if (error) return (
+    <View style={styles.center}>
+      <Text style={styles.errorText}>{error}</Text>
+      <TouchableOpacity style={styles.retryBtn} onPress={loadData}><Text style={styles.retryText}>Retry</Text></TouchableOpacity>
     </View>
   );
-};
+
+  return (
+    <ScrollView style={styles.container} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadData(); }} />}>
+      <Text style={styles.title}>Support Tickets</Text>
+      {data && Object.entries(data).map(([key, value]) => (
+        <View key={key} style={styles.row}>
+          <Text style={styles.label}>{key}</Text>
+          <Text style={styles.value}>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</Text>
+        </View>
+      ))}
+      {!data && <Text style={styles.emptyText}>No data available</Text>}
+    </ScrollView>
+  );
+}
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#0F0F23',
-    padding: 16,
-  },
-  center: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#0F0F23',
-  },
-  header: {
-    fontSize: 22,
-    fontWeight: '700',
-    color: '#E2E8F0',
-    marginBottom: 16,
-  },
-  card: {
-    backgroundColor: '#1A1A2E',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 12,
-  },
-  cardTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#E2E8F0',
-  },
-  cardStatus: {
-    fontSize: 12,
-    color: '#94A3B8',
-    marginTop: 4,
-  },
-  errorText: {
-    color: '#EF4444',
-    fontSize: 14,
-    textAlign: 'center',
-    marginBottom: 16,
-  },
-  emptyText: {
-    color: '#94A3B8',
-    fontSize: 14,
-  },
-  retryBtn: {
-    backgroundColor: '#6C63FF',
-    paddingHorizontal: 24,
-    paddingVertical: 10,
-    borderRadius: 8,
-  },
-  retryText: {
-    color: '#FFFFFF',
-    fontWeight: '600',
-  },
+  container: { flex: 1, backgroundColor: '#f9fafb', padding: 16 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f9fafb' },
+  title: { fontSize: 24, fontWeight: '700', color: '#111827', marginBottom: 16 },
+  row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
+  label: { fontSize: 14, color: '#6b7280' },
+  value: { fontSize: 14, fontWeight: '500', color: '#111827', maxWidth: '60%', textAlign: 'right' },
+  errorText: { fontSize: 16, color: '#ef4444', marginBottom: 16 },
+  retryBtn: { backgroundColor: '#6366f1', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8 },
+  retryText: { color: '#fff', fontWeight: '600' },
+  emptyText: { fontSize: 16, color: '#9ca3af', textAlign: 'center', marginTop: 48 },
 });
-
-export default SupportTicketsScreen;

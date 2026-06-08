@@ -3,7 +3,7 @@ import { View, Text, ScrollView, RefreshControl, StyleSheet, ActivityIndicator, 
 
 const API_BASE = process.env.API_URL || 'http://localhost:3001';
 
-export default function ReferralDashboardScreen() {
+export default function OnboardingFunnelScreen() {
   const [data, setData] = useState<Record<string, unknown> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -12,7 +12,7 @@ export default function ReferralDashboardScreen() {
   const loadData = async () => {
     try {
       setError(null);
-      const res = await fetch(`${API_BASE}/api/trpc/referral-dashboard`);
+      const res = await fetch(`${API_BASE}/api/trpc/onboarding`);
       const json = await res.json();
       setData(json.result?.data ?? json);
     } catch (e) {
@@ -35,7 +35,7 @@ export default function ReferralDashboardScreen() {
 
   return (
     <ScrollView style={styles.container} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadData(); }} />}>
-      <Text style={styles.title}>Referral Dashboard</Text>
+      <Text style={styles.title}>Welcome to RemitFlow</Text>
       {data && Object.entries(data).map(([key, value]) => (
         <View key={key} style={styles.row}>
           <Text style={styles.label}>{key}</Text>

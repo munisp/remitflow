@@ -1,7 +1,9 @@
 /**
  * Per-endpoint rate limiting — P1 Security 5.4
- * Different limits for auth, transfers, queries, admin.
+ * Redis-backed sliding window rate limiter for multi-instance deployment.
+ * Falls back to in-memory BoundedCache if Redis is unavailable.
  */
+import { createClient, type RedisClientType } from "redis";
 import { BoundedCache, registerCache } from "./boundedCache";
 
 interface RateLimitConfig {
@@ -27,18 +29,39 @@ interface RateLimitEntry {
   resetAt: number;
 }
 
-const store = new BoundedCache<string, RateLimitEntry>({
+// Redis client — lazy initialized
+let redisClient: RedisClientType | null = null;
+let redisAvailable = false;
+
+async function getRedis(): Promise<RedisClientType | null> {
+  if (redisClient && redisAvailable) return redisClient;
+  if (redisClient === null) {
+    const url = process.env.REDIS_URL ?? "redis://localhost:6379";
+    try {
+      redisClient = createClient({ url }) as RedisClientType;
+      redisClient.on("error", () => { redisAvailable = false; });
+      redisClient.on("connect", () => { redisAvailable = true; });
+      await redisClient.connect();
+      redisAvailable = true;
+      return redisClient;
+    } catch {
+      redisAvailable = false;
+      return null;
+    }
+  }
+  return redisAvailable ? redisClient : null;
+}
+
+// In-memory fallback (for single-instance or when Redis is down)
+const memStore = new BoundedCache<string, RateLimitEntry>({
   maxSize: 50_000,
-  defaultTtlMs: 300_000, // 5 minutes max window
+  defaultTtlMs: 300_000,
   name: "rate-limit-per-endpoint",
 });
-registerCache(store as unknown as BoundedCache<unknown, unknown>);
+registerCache(memStore as unknown as BoundedCache<unknown, unknown>);
 
-export function checkRateLimit(
-  endpoint: string,
-  clientKey: string
-): { allowed: boolean; remaining: number; resetAt: number; limit: number } {
-  const config =
+function resolveConfig(endpoint: string): RateLimitConfig {
+  return (
     ENDPOINT_LIMITS[endpoint] ??
     Object.entries(ENDPOINT_LIMITS).find(([pattern]) => {
       if (pattern.endsWith(".*")) {
@@ -46,18 +69,64 @@ export function checkRateLimit(
       }
       return false;
     })?.[1] ??
-    ENDPOINT_LIMITS.default;
+    ENDPOINT_LIMITS.default
+  );
+}
 
+/**
+ * Redis-backed sliding window rate limit check.
+ * Uses INCR + PEXPIRE for atomic window management.
+ */
+export async function checkRateLimitAsync(
+  endpoint: string,
+  clientKey: string
+): Promise<{ allowed: boolean; remaining: number; resetAt: number; limit: number }> {
+  const config = resolveConfig(endpoint);
   const key = `${config.keyPrefix}:${clientKey}`;
   const now = Date.now();
-  let entry = store.get(key);
+
+  const redis = await getRedis();
+  if (redis) {
+    try {
+      const redisKey = `ratelimit:${key}`;
+      const count = await redis.incr(redisKey);
+      if (count === 1) {
+        await redis.pExpire(redisKey, config.windowMs);
+      }
+      const ttl = await redis.pTTL(redisKey);
+      const resetAt = now + Math.max(ttl, 0);
+
+      return {
+        allowed: count <= config.maxRequests,
+        remaining: Math.max(0, config.maxRequests - count),
+        resetAt,
+        limit: config.maxRequests,
+      };
+    } catch {
+      // Fall through to in-memory
+    }
+  }
+
+  // In-memory fallback
+  return checkRateLimit(endpoint, clientKey);
+}
+
+/** Synchronous in-memory rate limit check (fallback) */
+export function checkRateLimit(
+  endpoint: string,
+  clientKey: string
+): { allowed: boolean; remaining: number; resetAt: number; limit: number } {
+  const config = resolveConfig(endpoint);
+  const key = `${config.keyPrefix}:${clientKey}`;
+  const now = Date.now();
+  let entry = memStore.get(key);
 
   if (!entry || entry.resetAt <= now) {
     entry = { count: 1, resetAt: now + config.windowMs };
-    store.set(key, entry, config.windowMs);
+    memStore.set(key, entry, config.windowMs);
   } else {
     entry = { count: entry.count + 1, resetAt: entry.resetAt };
-    store.set(key, entry, entry.resetAt - now);
+    memStore.set(key, entry, entry.resetAt - now);
   }
 
   return {

@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
 
-class SupportTicketsScreen extends StatefulWidget {
-  const SupportTicketsScreen({super.key});
+class RemitAiChatScreen extends StatefulWidget {
+  const RemitAiChatScreen({super.key});
   @override
-  State<SupportTicketsScreen> createState() => _SupportTicketsScreenState();
+  State<RemitAiChatScreen> createState() => _RemitAiChatScreenState();
 }
 
-class _SupportTicketsScreenState extends State<SupportTicketsScreen> {
+class _RemitAiChatScreenState extends State<RemitAiChatScreen> {
   bool _loading = true;
   Map<String, dynamic>? _data;
   String? _error;
@@ -22,7 +22,7 @@ class _SupportTicketsScreenState extends State<SupportTicketsScreen> {
     setState(() => _loading = true);
     try {
       final api = ApiService();
-      final result = await api.get('/support-tickets');
+      final result = await api.get('/remit-ai-chat');
       setState(() { _data = result; _loading = false; });
     } catch (e) {
       setState(() { _error = e.toString(); _loading = false; });
@@ -32,7 +32,7 @@ class _SupportTicketsScreenState extends State<SupportTicketsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Support Tickets'), elevation: 0),
+      appBar: AppBar(title: const Text('RemitAI Chat'), elevation: 0),
       body: RefreshIndicator(
         onRefresh: _loadData,
         child: _loading
@@ -77,7 +77,7 @@ class _SupportTicketsScreenState extends State<SupportTicketsScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Support Tickets', style: Theme.of(context).textTheme.headlineSmall),
+                Text('RemitAI Chat', style: Theme.of(context).textTheme.headlineSmall),
                 const SizedBox(height: 8),
                 ..._data!.entries.map((e) => Padding(
                   padding: const EdgeInsets.symmetric(vertical: 4),

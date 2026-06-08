@@ -302,6 +302,21 @@ import { failureProtectionRouter } from "./routers/failureProtection";
 import { mlPipelineRouter } from "./routers/mlPipeline";
 import { secretsRotationRouter } from "./secrets-rotation";
 import { soc2EvidenceRouter } from "./compliance/soc2-evidence";
+import { businessKpiRouter } from "./lib/business-kpi";
+import { nudgeEngineRouter } from "./lib/nudge-engine";
+import { recipientExperienceRouter } from "./lib/recipient-experience";
+import { advancedFxRouter } from "./lib/advanced-fx";
+import { agentIntelligenceRouter } from "./lib/agent-intelligence";
+import { smeDashboardRouter } from "./lib/sme-dashboard";
+import { remitAiRouter } from "./lib/remit-ai";
+import { microInsuranceRouter } from "./lib/micro-insurance";
+import { socialRemittanceRouter } from "./lib/social-remittance";
+import { baasApiRouter } from "./lib/baas-api";
+import { programmableMoneyRouter } from "./lib/programmable-money";
+import { regulatoryReportsRouter as regReportsV2Router } from "./lib/regulatory-reports";
+import { supportTicketingRouter } from "./lib/support-ticketing";
+import { abTestingRouter as abTestingV2Router } from "./lib/ab-testing";
+import { quickWinsRouter } from "./lib/quick-wins";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -6940,5 +6955,21 @@ Case: #${input.caseId}`,
   secretsRotation: secretsRotationRouter,
   // v290 — SOC2 Evidence: Automated compliance evidence collection
   soc2Evidence: soc2EvidenceRouter,
+  // v300 — Strategic Enhancements: Business KPIs, AI, Insurance, Social, BaaS, Programmable Money
+  businessKpi: businessKpiRouter,
+  nudgeEngine: nudgeEngineRouter,
+  recipientExperience: recipientExperienceRouter,
+  advancedFx: advancedFxRouter,
+  agentIntelligence: agentIntelligenceRouter,
+  smeDashboard: smeDashboardRouter,
+  remitAi: remitAiRouter,
+  microInsurance: microInsuranceRouter,
+  socialRemittance: socialRemittanceRouter,
+  baasApi: baasApiRouter,
+  programmableMoney: programmableMoneyRouter,
+  regReportsV2: regReportsV2Router,
+  supportTicketing: supportTicketingRouter,
+  abTestingV2: abTestingV2Router,
+  quickWins: quickWinsRouter,
 });
 export type AppRouter = typeof appRouter;
