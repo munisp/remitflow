@@ -1,0 +1,193 @@
+# ─── RemitFlow Staging Environment ──────────────────────────────────────────────
+# 
+# Mirrors production topology for pre-release validation.
+# 
+# Usage:
+#   docker compose -f docker-compose.staging.yml up -d
+#   docker compose -f docker-compose.staging.yml run --rm seed  # Seed staging DB
+#   docker compose -f docker-compose.staging.yml down -v         # Tear down
+#
+# Differences from production:
+# - Single replica per service (production uses HPA)
+# - Local volumes instead of EBS/persistent disks
+# - Debug logging enabled
+# - Self-signed TLS (production uses ACM/Let's Encrypt)
+# - No HSM — uses env-var DEKs (production uses CloudHSM)
+#
+
+version: "3.9"
+
+x-common-env: &common-env
+  NODE_ENV: staging
+  DATABASE_URL: postgresql://remitflow:remitflow_staging@postgres:5432/remitflow_staging
+  REDIS_URL: redis://redis:6379/0
+  LOG_LEVEL: debug
+  TLS_MIN_VERSION: "1.2"
+  SESSION_TIMEOUT_MS: "3600000"
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  WAF_ENABLED: "true"
+  IDS_ENABLED: "true"
+
+services:
+  # ─── Database ─────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: remitflow
+      POSTGRES_PASSWORD: remitflow_staging
+      POSTGRES_DB: remitflow_staging
+    volumes:
+      - pg_staging_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U remitflow -d remitflow_staging"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # ─── Cache ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass redis_staging
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis_staging", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── Connection Pooler ────────────────────────────────────────────────────────
+  pgbouncer:
+    image: edoburu/pgbouncer:1.21.0
+    environment:
+      DATABASE_URL: postgresql://remitflow:remitflow_staging@postgres:5432/remitflow_staging
+      MAX_CLIENT_CONN: "200"
+      DEFAULT_POOL_SIZE: "25"
+      POOL_MODE: transaction
+    ports:
+      - "6433:6432"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ─── API Server ──────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    environment:
+      <<: *common-env
+      PORT: "3000"
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_placeholder}
+      FLUTTERWAVE_SECRET_KEY: ${FLUTTERWAVE_SECRET_KEY:-FLWSECK_TEST-placeholder}
+      MPESA_CONSUMER_KEY: ${MPESA_CONSUMER_KEY:-placeholder}
+      MPESA_CONSUMER_SECRET: ${MPESA_CONSUMER_SECRET:-placeholder}
+      MTN_MOMO_API_KEY: ${MTN_MOMO_API_KEY:-placeholder}
+      PCI_MASTER_KEY: ${PCI_MASTER_KEY:-staging-key-change-in-prod}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-remitflow-staging-backups}
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2"
+
+  # ─── Worker (background jobs) ─────────────────────────────────────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    command: ["node", "dist/worker.js"]
+    environment:
+      <<: *common-env
+      WORKER_MODE: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Seed Runner ─────────────────────────────────────────────────────────────
+  seed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    command: ["node", "scripts/seed-master.mjs"]
+    environment:
+      DATABASE_URL: postgresql://remitflow:remitflow_staging@postgres:5432/remitflow_staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["seed"]
+
+  # ─── Migrations ──────────────────────────────────────────────────────────────
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    command: ["npx", "drizzle-kit", "push"]
+    environment:
+      DATABASE_URL: postgresql://remitflow:remitflow_staging@postgres:5432/remitflow_staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["migrate"]
+
+  # ─── OpenTelemetry Collector ──────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./config/otel-collector-staging.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4318:4318"   # OTLP HTTP
+      - "4317:4317"   # OTLP gRPC
+      - "8889:8889"   # Prometheus metrics
+
+  # ─── Prometheus (staging monitoring) ──────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    volumes:
+      - ./config/prometheus-staging.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  # ─── Load Testing Runner ─────────────────────────────────────────────────────
+  k6:
+    image: grafana/k6:0.49.0
+    volumes:
+      - ./k6:/scripts:ro
+      - ./k6/results:/results
+    environment:
+      K6_OUT: json=/results/staging-run.json
+      BASE_URL: http://api:3000
+    entrypoint: ["k6", "run", "/scripts/load-test.js"]
+    depends_on:
+      api:
+        condition: service_healthy
+    profiles: ["loadtest"]
+
+volumes:
+  pg_staging_data:
