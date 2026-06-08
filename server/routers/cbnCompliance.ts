@@ -848,7 +848,8 @@ export const cbnComplianceRouter = router({
         deleted_by: ctx.user.id,
       });
 
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   checkRateAlerts: protectedProcedure

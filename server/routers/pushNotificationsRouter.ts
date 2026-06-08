@@ -47,7 +47,8 @@ export const pushNotificationsRouter = router({
               is_active = TRUE,
               last_used_at = NOW()
       `);
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   /**
@@ -61,7 +62,8 @@ export const pushNotificationsRouter = router({
         SET is_active = FALSE
         WHERE endpoint = ${input.endpoint} AND user_id = ${ctx.user.id}
       `);
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   /**
@@ -125,7 +127,8 @@ export const pushNotificationsRouter = router({
           ON CONFLICT (user_id, preference_key) DO UPDATE SET is_enabled = ${enabled}
         `);
       }
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   /**

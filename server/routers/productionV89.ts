@@ -208,7 +208,8 @@ export const tenantWhiteLabelRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       await db.update(tenants).set({ status: "suspended", updatedAt: new Date() }).where(eq(tenants.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -246,7 +247,8 @@ export const partnerPayoutAutomationRouter = router({
       await db.update(partnerPayouts)
         .set({ status: "rejected", notes: input.reason })
         .where(eq(partnerPayouts.id, input.payoutId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   getHistory: adminProcedure
@@ -455,7 +457,8 @@ export const notificationCenterV2Router = router({
     await db.update(notifications)
       .set({ isRead: true })
       .where(and(eq(notifications.userId, ctx.user.id), eq(notifications.isRead, false)));
-    return { success: true, updatedAt: new Date().toISOString() };
+    const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
   }),
 
   deleteNotification: auditedProcedure
@@ -465,7 +468,8 @@ export const notificationCenterV2Router = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       await db.delete(notifications)
         .where(and(eq(notifications.id, input.notificationId), eq(notifications.userId, ctx.user.id)));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   getUnreadCount: protectedProcedure.query(async ({ ctx }) => {
@@ -626,7 +630,8 @@ export const fraudRulesCrudRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       await db.delete(feeRules).where(eq(feeRules.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -680,7 +685,8 @@ export const kycLifecycleRouter = router({
       await db.update(kycDocuments)
         .set({ status: "rejected", rejectionReason: input.reason, reviewedAt: new Date() })
         .where(eq(kycDocuments.id, input.documentId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   getStats: adminProcedure.query(async () => {

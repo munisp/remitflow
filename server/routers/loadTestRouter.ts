@@ -220,7 +220,7 @@ export const loadTestRouter = router({
   /**
    * Get the default test endpoints.
    */
-  endpoints: publicProcedure.query(() => {
+  endpoints: adminProcedure.query(() => {
     return { endpoints: DEFAULT_ENDPOINTS };
   }),
 });

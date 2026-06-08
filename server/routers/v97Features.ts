@@ -150,7 +150,8 @@ export const velocityCheckAdminRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(velocityRules).where(eq(velocityRules.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Grant override for a user on a specific rule
@@ -201,7 +202,8 @@ export const velocityCheckAdminRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(velocityOverrides).where(eq(velocityOverrides.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Add user to whitelist
@@ -244,7 +246,8 @@ export const velocityCheckAdminRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(velocityWhitelist).where(eq(velocityWhitelist.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Check if user is whitelisted

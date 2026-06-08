@@ -66,7 +66,8 @@ export const pushNotificationsRouter = router({
           eq(schema.pushSubscriptions.id, input.subscriptionId),
           eq(schema.pushSubscriptions.userId, ctx.user.id)
         ));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   sendTest: auditedProcedure.mutation(async ({ ctx }) => {
@@ -275,7 +276,8 @@ export const complianceRouter = router({
       await db.update(schema.complianceReports)
         .set({ status: "submitted", submittedAt: new Date() })
         .where(eq(schema.complianceReports.id, input.reportId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 

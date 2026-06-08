@@ -15,6 +15,7 @@ import Stripe from "stripe";
 import crypto from "crypto";
 import { getDb } from "../db";
 import { eq } from "drizzle-orm";
+import { resilientFetch } from "./resilientFetch";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -134,15 +135,16 @@ const FLW_BASE = process.env.FLUTTERWAVE_BASE_URL ?? "https://api.flutterwave.co
 async function flwFetch(path: string, method: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> {
   const key = process.env.FLUTTERWAVE_SECRET_KEY ?? "";
   if (!key) throw new Error("FLUTTERWAVE_SECRET_KEY not configured");
-  const res = await fetch(`${FLW_BASE}${path}`, {
+  const { data } = await resilientFetch<Record<string, unknown>>("flutterwave", `${FLW_BASE}${path}`, {
     method,
     headers: {
       "Authorization": `Bearer ${key}`,
       "Content-Type": "application/json",
     },
     body: body ? JSON.stringify(body) : undefined,
+    retry: { maxRetries: 3, baseDelayMs: 1000 },
   });
-  return (await res.json()) as Record<string, unknown>;
+  return data;
 }
 
 export const flutterwaveProvider: PaymentProvider = {
@@ -255,10 +257,11 @@ async function getMpesaToken(): Promise<string> {
   if (!consumerKey || !consumerSecret) throw new Error("MPESA_CONSUMER_KEY/SECRET not configured");
 
   const auth = Buffer.from(`${consumerKey}:${consumerSecret}`).toString("base64");
-  const res = await fetch(`${MPESA_BASE}/oauth/v1/generate?grant_type=client_credentials`, {
+  const { data } = await resilientFetch<{ access_token: string; expires_in: string }>("mpesa-auth", `${MPESA_BASE}/oauth/v1/generate?grant_type=client_credentials`, {
     headers: { "Authorization": `Basic ${auth}` },
+    retry: { maxRetries: 3, baseDelayMs: 1000 },
+    skipAuth: true,
   });
-  const data = (await res.json()) as { access_token: string; expires_in: string };
   mpesaAccessToken = {
     token: data.access_token,
     expiresAt: Date.now() + (parseInt(data.expires_in, 10) - 60) * 1000,
@@ -298,15 +301,16 @@ export const mpesaProvider: PaymentProvider = {
         TransactionDesc: req.description ?? "RemitFlow Payment",
       };
 
-      const res = await fetch(`${MPESA_BASE}/mpesa/stkpush/v1/processrequest`, {
+      const { data: result } = await resilientFetch<Record<string, unknown>>("mpesa-stkpush", `${MPESA_BASE}/mpesa/stkpush/v1/processrequest`, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${token}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(stkPayload),
+        retry: { maxRetries: 2, baseDelayMs: 2000 },
+        skipAuth: true,
       });
-      const result = (await res.json()) as Record<string, unknown>;
 
       const db = await getDb();
       await db.execute({
@@ -340,7 +344,7 @@ export const mpesaProvider: PaymentProvider = {
     const timestamp = new Date().toISOString().replace(/[-:T.Z]/g, "").slice(0, 14);
     const password = generateMpesaPassword(shortcode, passkey, timestamp);
 
-    const res = await fetch(`${MPESA_BASE}/mpesa/stkpushquery/v1/query`, {
+    const { data: result } = await resilientFetch<Record<string, unknown>>("mpesa-query", `${MPESA_BASE}/mpesa/stkpushquery/v1/query`, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${token}`,
@@ -352,8 +356,9 @@ export const mpesaProvider: PaymentProvider = {
         Timestamp: timestamp,
         CheckoutRequestID: providerRef,
       }),
+      retry: { maxRetries: 3, baseDelayMs: 1000 },
+      skipAuth: true,
     });
-    const result = (await res.json()) as Record<string, unknown>;
     const resultCode = result.ResultCode as string;
     return {
       success: resultCode === "0",
@@ -371,7 +376,7 @@ export const mpesaProvider: PaymentProvider = {
     const shortcode = process.env.MPESA_SHORTCODE ?? "174379";
     const callbackUrl = `${process.env.APP_URL ?? "https://app.remitflow.com"}/api/mpesa/reversal-callback`;
 
-    const res = await fetch(`${MPESA_BASE}/mpesa/reversal/v1/request`, {
+    const { data: result } = await resilientFetch<Record<string, unknown>>("mpesa-reversal", `${MPESA_BASE}/mpesa/reversal/v1/request`, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${token}`,
@@ -389,8 +394,9 @@ export const mpesaProvider: PaymentProvider = {
         QueueTimeOutURL: callbackUrl,
         Remarks: "RemitFlow reversal",
       }),
+      retry: { maxRetries: 2, baseDelayMs: 2000 },
+      skipAuth: true,
     });
-    const result = (await res.json()) as Record<string, unknown>;
     return {
       success: (result.ResponseCode as string) === "0",
       providerRef: (result.ConversationID as string) ?? providerRef,
@@ -412,14 +418,15 @@ async function getMomoToken(product: string): Promise<string> {
   if (!subscriptionKey || !apiUser || !apiKey) throw new Error("MTN_MOMO credentials not configured");
 
   const auth = Buffer.from(`${apiUser}:${apiKey}`).toString("base64");
-  const res = await fetch(`${MOMO_BASE}/${product}/token/`, {
+  const { data } = await resilientFetch<{ access_token: string }>("mtn-momo-auth", `${MOMO_BASE}/${product}/token/`, {
     method: "POST",
     headers: {
       "Authorization": `Basic ${auth}`,
       "Ocp-Apim-Subscription-Key": subscriptionKey,
     },
+    retry: { maxRetries: 3, baseDelayMs: 1000 },
+    skipAuth: true,
   });
-  const data = (await res.json()) as { access_token: string };
   return data.access_token;
 }
 
@@ -435,7 +442,7 @@ export const mtnMomoProvider: PaymentProvider = {
     const targetEnv = process.env.MTN_MOMO_ENVIRONMENT ?? "sandbox";
 
     try {
-      const res = await fetch(`${MOMO_BASE}/collection/v1_0/requesttopay`, {
+      const { status } = await resilientFetch<Record<string, unknown>>("mtn-momo-pay", `${MOMO_BASE}/collection/v1_0/requesttopay`, {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${token}`,
@@ -455,17 +462,19 @@ export const mtnMomoProvider: PaymentProvider = {
           payerMessage: req.description ?? "RemitFlow payment",
           payeeNote: "RemitFlow",
         }),
+        retry: { maxRetries: 2, baseDelayMs: 2000 },
+        skipAuth: true,
       });
 
       const db = await getDb();
       await db.execute({
         sql: `INSERT INTO payment_provider_logs (provider, action, reference, amount, currency, user_id, status, raw_response, created_at)
               VALUES ('mtn_momo', 'request_to_pay', $1, $2, $3, $4, 'pending', $5, NOW())`,
-        args: [referenceId, req.amount, req.currency, req.userId, JSON.stringify({ statusCode: res.status })],
+        args: [referenceId, req.amount, req.currency, req.userId, JSON.stringify({ statusCode: status })],
       });
 
       return {
-        success: res.status === 202,
+        success: status === 202,
         providerRef: referenceId,
         status: "pending",
         providerName: "mtn_momo",
@@ -481,14 +490,15 @@ export const mtnMomoProvider: PaymentProvider = {
     const subscriptionKey = process.env.MTN_MOMO_SUBSCRIPTION_KEY ?? "";
     const targetEnv = process.env.MTN_MOMO_ENVIRONMENT ?? "sandbox";
 
-    const res = await fetch(`${MOMO_BASE}/collection/v1_0/requesttopay/${providerRef}`, {
+    const { data } = await resilientFetch<Record<string, unknown>>("mtn-momo-status", `${MOMO_BASE}/collection/v1_0/requesttopay/${providerRef}`, {
       headers: {
         "Authorization": `Bearer ${token}`,
         "X-Target-Environment": targetEnv,
         "Ocp-Apim-Subscription-Key": subscriptionKey,
       },
+      retry: { maxRetries: 3, baseDelayMs: 1000 },
+      skipAuth: true,
     });
-    const data = (await res.json()) as Record<string, unknown>;
     const status = data.status as string;
     return {
       success: status === "SUCCESSFUL",
@@ -510,7 +520,7 @@ export const mtnMomoProvider: PaymentProvider = {
     const rawData = statusResult.rawResponse as Record<string, unknown> | undefined;
     const payerNumber = (rawData?.payer as Record<string, unknown>)?.partyId as string ?? "";
 
-    const res = await fetch(`${MOMO_BASE}/disbursement/v1_0/transfer`, {
+    const { status: httpStatus } = await resilientFetch<Record<string, unknown>>("mtn-momo-refund", `${MOMO_BASE}/disbursement/v1_0/transfer`, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${token}`,
@@ -527,10 +537,12 @@ export const mtnMomoProvider: PaymentProvider = {
         payerMessage: "RemitFlow refund",
         payeeNote: "Refund",
       }),
+      retry: { maxRetries: 2, baseDelayMs: 2000 },
+      skipAuth: true,
     });
 
     return {
-      success: res.status === 202,
+      success: httpStatus === 202,
       providerRef: refundId,
       status: "pending",
       providerName: "mtn_momo",

@@ -154,7 +154,8 @@ export const featureFlagsRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(featureFlags.id, input.flagId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Admin: set tenant-level override
@@ -184,7 +185,8 @@ export const featureFlagsRouter = router({
           expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
         });
       }
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Admin: remove tenant override (revert to global default)
@@ -195,7 +197,8 @@ export const featureFlagsRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(tenantFeatureFlags)
         .where(and(eq(tenantFeatureFlags.tenantId, input.tenantId), eq(tenantFeatureFlags.flagId, input.flagId)));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Admin: set user-level override (beta access, early access)
@@ -211,7 +214,8 @@ export const featureFlagsRouter = router({
       } else {
         await db.insert(userFeatureFlags).values({ userId: input.userId, flagId: input.flagId, enabled: input.enabled });
       }
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Admin: create or update a custom flag
@@ -246,7 +250,8 @@ export const featureFlagsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(featureFlags).where(eq(featureFlags.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Get categories for filter UI
@@ -579,7 +584,8 @@ export const tenantsRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const { id, ...data } = input;
       await db.update(tenants).set({ ...data, updatedAt: new Date() }).where(eq(tenants.id, id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   suspend: adminProcedure
@@ -588,7 +594,8 @@ export const tenantsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(tenants).set({ status: "suspended", updatedAt: new Date() }).where(eq(tenants.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   activate: adminProcedure
@@ -597,7 +604,8 @@ export const tenantsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(tenants).set({ status: "active", updatedAt: new Date() }).where(eq(tenants.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   delete: adminProcedure
@@ -606,7 +614,8 @@ export const tenantsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(tenants).where(eq(tenants.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   addMember: adminProcedure
@@ -615,7 +624,8 @@ export const tenantsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.insert(tenantUsers).values(input).onConflictDoNothing();
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   removeMember: adminProcedure
@@ -625,7 +635,8 @@ export const tenantsRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(tenantUsers)
         .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.userId)));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Stats for admin dashboard
@@ -704,7 +715,8 @@ export const whiteLabelRouter = router({
       } else {
         await db.insert(whiteLabelConfigs).values({ tenantId, ...configData });
       }
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Get effective branding for a given slug/domain (used by frontend on load)

@@ -345,7 +345,8 @@ export const digitalAgreementsRouter = router({
           .set({ status: "viewed", viewedAt: now, auditTrail, updatedAt: now })
           .where(eq(partnerDigitalAgreements.id, input.id));
       }
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Partner digitally signs (checkbox acceptance)

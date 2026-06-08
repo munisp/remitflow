@@ -157,7 +157,8 @@ export const ngxStockRouter = router({
         .where(and(eq(stockWatchlists.id, input.watchlistId), eq(stockWatchlists.userId, ctx.user.id)));
       if (!item) throw new TRPCError({ code: "NOT_FOUND", message: "Watchlist item not found" });
       await (await getDbConn()).delete(stockWatchlists).where(eq(stockWatchlists.id, input.watchlistId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Orders

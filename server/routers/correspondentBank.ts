@@ -97,7 +97,8 @@ export const correspondentBankRouter = router({
       await db.update(correspondentBanks)
         .set({ status: input.status })
         .where(eq(correspondentBanks.correspondentId, input.correspondentId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   triggerRebalance: protectedProcedure

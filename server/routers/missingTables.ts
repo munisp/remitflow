@@ -104,7 +104,8 @@ export const supportTicketsRouter = router({
         .update(supportTickets)
         .set({ status: "closed" as any, resolvedAt: new Date() })
         .where(and(eq(supportTickets.id, input.id), eq(supportTickets.userId, ctx.user.id)));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   adminList: adminProcedure
@@ -129,7 +130,8 @@ export const supportTicketsRouter = router({
         .update(supportTickets)
         .set({ status: "resolved" as any, resolution: input.resolution, resolvedAt: new Date(), agentId: ctx.user.id })
         .where(eq(supportTickets.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -178,7 +180,8 @@ export const directDebitRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(directDebitMandates).set({ status: "paused" as any }).where(and(eq(directDebitMandates.id, input.mandateId), eq(directDebitMandates.userId, ctx.user.id)));
       await createAuditLog({ userId: ctx.user.id, action: "direct_debit.pause", metadata: { mandateId: input.mandateId } });
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
   resume: protectedProcedure
     .input(z.object({ mandateId: z.number() }))
@@ -187,7 +190,8 @@ export const directDebitRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(directDebitMandates).set({ status: "active" as any }).where(and(eq(directDebitMandates.id, input.mandateId), eq(directDebitMandates.userId, ctx.user.id)));
       await createAuditLog({ userId: ctx.user.id, action: "direct_debit.resume", metadata: { mandateId: input.mandateId } });
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
   cancel: protectedProcedure
     .input(z.object({ mandateId: z.number() }))
@@ -196,7 +200,8 @@ export const directDebitRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(directDebitMandates).set({ status: "cancelled" as any }).where(and(eq(directDebitMandates.id, input.mandateId), eq(directDebitMandates.userId, ctx.user.id)));
       await createAuditLog({ userId: ctx.user.id, action: "direct_debit.cancel", metadata: { mandateId: input.mandateId } });
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -220,7 +225,8 @@ export const consentRouter = router({
             ON CONFLICT (user_id, consent_type) DO UPDATE
             SET granted = ${input.granted}, granted_at = ${input.granted ? now : null}, revoked_at = ${!input.granted ? now : null}`
       );
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   bulkUpdate: protectedProcedure
@@ -293,7 +299,8 @@ export const paymentMetricsRouter = router({
                 avg_processing_ms = (payment_metrics.avg_processing_ms + ${input.processingMs}) / 2,
                 total_volume = payment_metrics.total_volume + ${input.amount}`
       );
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -365,7 +372,8 @@ export const bnplRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(bnplPlans).set({ status: "cancelled", updatedAt: new Date() }).where(and(eq(bnplPlans.id, input.id), eq(bnplPlans.userId, ctx.user.id)));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -562,7 +570,8 @@ export const kybRouter = router({
         rejectionReason: input.rejectionReason,
         updatedAt: new Date(),
       }).where(eq(kybRecords.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -647,7 +656,8 @@ export const chargebackRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(chargebackCases).set({ status: input.status, notes: input.notes, resolvedAt: new Date() }).where(eq(chargebackCases.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 // ─── Tenant Configs ─────────────────────────────────────────────────────────────
@@ -703,7 +713,8 @@ export const tenantConfigsRouter = router({
       } else {
         await db.insert(tenantConfigs).values({ tenantId, tenantName: tenantName ?? tenantId, ...updates });
       }
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 // ─── Bulk Payment Batches ─────────────────────────────────────────────────────
@@ -766,7 +777,8 @@ export const bulkBatchRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(bulkPaymentBatches).set({ status: "cancelled", updatedAt: new Date() }).where(and(eq(bulkPaymentBatches.batchId, input.batchId), eq(bulkPaymentBatches.userId, ctx.user.id)));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -836,7 +848,8 @@ export const regulatoryReportsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(regulatoryReports).set({ status: "filed" as any, filedAt: new Date() }).where(eq(regulatoryReports.reportId, input.reportId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -953,7 +966,8 @@ export const onboardingProgressRouter = router({
       } else {
         await db.insert(userOnboardingProgress).values({ userId: ctx.user.id, status: "in_progress", ...updates }).onConflictDoUpdate({ target: userOnboardingProgress.userId, set: updates });
       }
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -991,7 +1005,8 @@ export const chatSessionMetaRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const { sessionId, ...updates } = input;
       await db.update(chatSessionMeta).set({ ...updates, updatedAt: new Date() }).where(eq(chatSessionMeta.sessionId, sessionId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -1022,7 +1037,8 @@ export const chatAgentStatusRouter = router({
             SET is_online = ${input.isOnline}, is_available = ${input.isAvailable ?? true},
                 last_seen_at = NOW(), status_message = ${input.statusMessage ?? null}, updated_at = NOW()`
       );
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -1053,7 +1069,8 @@ export const chatCannedResponsesRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const { id, ...updates } = input;
       await db.update(chatCannedResponses).set({ ...updates, updatedAt: new Date() }).where(eq(chatCannedResponses.id, id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   delete: adminProcedure
@@ -1062,7 +1079,8 @@ export const chatCannedResponsesRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(chatCannedResponses).set({ isActive: false }).where(eq(chatCannedResponses.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });
 
@@ -1098,7 +1116,8 @@ export const securityIncidentsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.update(securityIncidents).set({ resolvedAt: new Date() }).where(eq(securityIncidents.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Internal: log a new security incident (called by security middleware)
@@ -1128,6 +1147,7 @@ export const securityIncidentsRouter = router({
         responseCode: input.responseCode,
         details: input.details,
       });
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 });

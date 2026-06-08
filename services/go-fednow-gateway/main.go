@@ -182,9 +182,17 @@ func (g *FedNowGateway) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	// Simulate instant settlement (FedNow settles in <30 seconds)
 	go func() {
 		time.Sleep(2 * time.Second)
+		now := time.Now()
+		// DB-primary update (middleware-ready: TigerBeetle two-phase commit in production)
+		if db != nil {
+			_ = dbUpsert("transfer:"+txID, map[string]interface{}{
+				"transactionId": txID, "endToEndId": e2eID,
+				"amount": amount, "currency": currency, "status": "ACSC",
+				"settledAt": now.Format(time.RFC3339),
+			})
+		}
 		g.mu.Lock()
 		if t, ok := g.transfers[txID]; ok {
-			now := time.Now()
 			t.Status = "ACSC" // Accepted Settlement Completed
 			t.SettledAt = &now
 		}
@@ -196,7 +204,7 @@ func (g *FedNowGateway) handleSubmit(w http.ResponseWriter, r *http.Request) {
 			"endToEndId":    e2eID,
 			"amount":        amount,
 			"status":        "ACSC",
-			"settledAt":     time.Now().Format(time.RFC3339),
+			"settledAt":     now.Format(time.RFC3339),
 		})
 	}()
 
@@ -281,31 +289,44 @@ func (g *FedNowGateway) handleReturn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	g.mu.Lock()
-	transfer, ok := g.transfers[req.TransactionID]
-	if ok {
-		transfer.Status = "RJCT"
+	// DB-primary read and update (middleware-ready: TigerBeetle in production)
+	found := false
+	if db != nil {
+		var dbTransfer FedNowTransfer
+		if err := dbGet("transfer:"+req.TransactionID, &dbTransfer); err == nil {
+			found = true
+		}
 	}
-	g.mu.Unlock()
-
-	if !ok {
+	if !found {
+		g.mu.RLock()
+		_, found = g.transfers[req.TransactionID]
+		g.mu.RUnlock()
+	}
+	if !found {
 		jsonError(w, "Transaction not found", http.StatusNotFound)
 		return
 	}
 
+	// Update status in both DB and in-memory cache
+	g.mu.Lock()
+	if t, ok := g.transfers[req.TransactionID]; ok {
+		t.Status = "RJCT"
+	}
+	g.mu.Unlock()
+
 	returnID := generateID("RTN")
 	// Persist return to PostgreSQL (middleware-ready)
 	if db != nil {
-		go func() {
-			_ = dbUpsert("transfer:"+req.TransactionID, transfer)
-			_ = dbUpsert("return:"+returnID, map[string]interface{}{
-				"returnId": returnID, "transactionId": req.TransactionID,
-				"status": "RJCT", "reason": req.Reason,
-			})
-			_ = dbLogEvent("fednow_transfer_returned", map[string]interface{}{
-				"transactionId": req.TransactionID, "returnId": returnID,
-			})
-		}()
+		_ = dbUpsert("transfer:"+req.TransactionID, map[string]interface{}{
+			"transactionId": req.TransactionID, "status": "RJCT",
+		})
+		_ = dbUpsert("return:"+returnID, map[string]interface{}{
+			"returnId": returnID, "transactionId": req.TransactionID,
+			"status": "RJCT", "reason": req.Reason,
+		})
+		_ = dbLogEvent("fednow_transfer_returned", map[string]interface{}{
+			"transactionId": req.TransactionID, "returnId": returnID,
+		})
 	}
 	g.publishEvent("remitflow.transfers.fednow.returned", map[string]interface{}{
 		"transactionId": req.TransactionID,

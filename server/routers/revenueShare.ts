@@ -151,7 +151,8 @@ export const revenueShareRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(revenueShareAgreements.id, id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   approveAgreement: adminProcedure
@@ -162,7 +163,8 @@ export const revenueShareRouter = router({
       await db.update(revenueShareAgreements)
         .set({ status: "active", approvedBy: ctx.user.id, approvedAt: new Date(), updatedAt: new Date() })
         .where(eq(revenueShareAgreements.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   terminateAgreement: adminProcedure
@@ -173,7 +175,8 @@ export const revenueShareRouter = router({
       await db.update(revenueShareAgreements)
         .set({ status: "terminated", effectiveTo: new Date(), notes: input.reason, updatedAt: new Date() })
         .where(eq(revenueShareAgreements.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // ── Tiers ────────────────────────────────────────────────────────────────────
@@ -208,7 +211,8 @@ export const revenueShareRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(revenueShareTiers).where(eq(revenueShareTiers.id, input.id));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // ── Ledger ────────────────────────────────────────────────────────────────────
@@ -333,7 +337,8 @@ export const revenueShareRouter = router({
       await db.update(revenueShareReports)
         .set({ status: "paid", paidAt: new Date(), ...(input.payoutId ? { payoutId: input.payoutId } : {}) })
         .where(eq(revenueShareReports.id, input.reportId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // ── Analytics ─────────────────────────────────────────────────────────────────

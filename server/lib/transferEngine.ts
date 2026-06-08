@@ -3,6 +3,10 @@
  * 
  * Flow: Initiate → Validate → Debit Sender → FX Convert → Credit Recipient → Settle
  * 
+ * All financial operations (steps 5-10) run inside a single PostgreSQL transaction
+ * with SERIALIZABLE isolation. On failure, the entire transaction rolls back —
+ * no partial debits or orphaned ledger entries.
+ * 
  * Middleware layers:
  * - Ledger: PostgreSQL (dev) → TigerBeetle (production)
  * - Events: PostgreSQL events table (dev) → Kafka (production)
@@ -10,6 +14,7 @@
  * - Service mesh: HTTP (dev) → Dapr sidecar (production)
  */
 import { sql } from "drizzle-orm";
+import crypto from "crypto";
 import { getDb } from "../db";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -269,10 +274,10 @@ async function validateCompliance(senderId: number, amount: number): Promise<{ a
 export async function executeTransfer(req: TransferRequest): Promise<TransferResult> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
-  const transferId = `TXN-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const transferId = `TXN-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   const corridor = `${req.fromCurrency}-${req.toCurrency}`;
 
-  // Step 1: Compliance validation
+  // Step 1: Compliance validation (read-only, outside transaction)
   const compliance = await validateCompliance(req.senderId, req.amount);
   if (!compliance.allowed) {
     await events.publish("transfer.rejected", { transferId, reason: compliance.reason, userId: req.senderId });
@@ -285,15 +290,15 @@ export async function executeTransfer(req: TransferRequest): Promise<TransferRes
     };
   }
 
-  // Step 2: Calculate fees
+  // Step 2: Calculate fees (pure computation, outside transaction)
   const fee = calculateFee(req.amount, corridor);
   const totalCharged = req.amount + fee.totalFee;
 
-  // Step 3: Get FX rate
+  // Step 3: Get FX rate (read-only, outside transaction)
   const fxRate = await getFxRate(req.fromCurrency, req.toCurrency);
   const creditAmount = req.amount * fxRate;
 
-  // Step 4: Verify sender has sufficient balance
+  // Step 4: Verify sender has sufficient balance (read-only pre-check)
   const senderBalance = await ledger.getBalance(req.senderId, req.fromCurrency);
   if (senderBalance < totalCharged) {
     await events.publish("transfer.insufficient_funds", { transferId, userId: req.senderId, required: totalCharged, available: senderBalance });
@@ -304,36 +309,19 @@ export async function executeTransfer(req: TransferRequest): Promise<TransferRes
     };
   }
 
-  // Step 5: Create transfer record
-  await db.execute(sql`
-    INSERT INTO transfers (
-      "userId", "beneficiaryId", "fromCurrency", "toCurrency", "fromAmount", "toAmount",
-      "exchangeRate", fee, status, corridor, "payoutMethod", purpose, "referenceId", "createdAt"
-    ) VALUES (
-      ${req.senderId}, ${req.recipientId}, ${req.fromCurrency}, ${req.toCurrency},
-      ${req.amount.toString()}, ${creditAmount.toString()}, ${fxRate.toString()},
-      ${fee.totalFee.toString()}, 'processing', ${corridor}, ${req.payoutMethod},
-      ${req.purpose}, ${transferId}, NOW()
-    )
-  `);
-
-  // Step 6: Debit sender (atomic — in production this is a TigerBeetle two-phase transfer)
-  const debitRef = `${transferId}-debit`;
-  await ledger.debit(req.senderId, totalCharged, req.fromCurrency, debitRef);
-
-  // Step 7: Record fee as separate ledger entry (revenue)
+  // ── BEGIN TRANSACTION ──────────────────────────────────────────────────────
+  // Steps 5-10 run inside a single SERIALIZABLE transaction.
+  // If any step fails, the entire transaction rolls back — no partial debits.
+  // Middleware-ready: in production, swap to TigerBeetle two-phase commit.
   const feeEntry: LedgerEntry = {
     id: `${transferId}-fee`,
     debitAccountId: req.senderId,
-    creditAccountId: 0, // Platform revenue account
+    creditAccountId: 0,
     amount: fee.totalFee,
     currency: req.fromCurrency,
     type: "fee",
     timestamp: new Date(),
   };
-  await ledger.createTransfer(feeEntry);
-
-  // Step 8: FX conversion ledger entry
   const fxEntry: LedgerEntry = {
     id: `${transferId}-fx`,
     debitAccountId: req.senderId,
@@ -343,26 +331,109 @@ export async function executeTransfer(req: TransferRequest): Promise<TransferRes
     type: "fx_conversion",
     timestamp: new Date(),
   };
-  await ledger.createTransfer(fxEntry);
 
-  // Step 9: Credit recipient
-  const creditRef = `${transferId}-credit`;
-  await ledger.credit(req.recipientId, creditAmount, req.toCurrency, creditRef);
+  try {
+    await db.execute(sql`BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
 
-  // Step 10: Update transfer status
-  await db.execute(sql`
-    UPDATE transfers SET status = 'completed', "updatedAt" = NOW()
-    WHERE "referenceId" = ${transferId}
-  `);
+    // Step 5: Create transfer record
+    await db.execute(sql`
+      INSERT INTO transfers (
+        "userId", "beneficiaryId", "fromCurrency", "toCurrency", "fromAmount", "toAmount",
+        "exchangeRate", fee, status, corridor, "payoutMethod", purpose, "referenceId", "createdAt"
+      ) VALUES (
+        ${req.senderId}, ${req.recipientId}, ${req.fromCurrency}, ${req.toCurrency},
+        ${req.amount.toString()}, ${creditAmount.toString()}, ${fxRate.toString()},
+        ${fee.totalFee.toString()}, 'processing', ${corridor}, ${req.payoutMethod},
+        ${req.purpose}, ${transferId}, NOW()
+      )
+    `);
 
-  // Step 11: Publish events (Kafka in production)
+    // Step 6: Debit sender with balance re-check under lock
+    const debitResult = await db.execute(sql`
+      UPDATE wallets 
+      SET balance = balance - ${totalCharged.toString()}::numeric,
+          "updatedAt" = NOW()
+      WHERE "userId" = ${req.senderId} AND currency = ${req.fromCurrency}
+        AND balance >= ${totalCharged.toString()}::numeric
+      RETURNING balance
+    `);
+    const debitRows = debitResult as unknown as { balance: string }[];
+    if (!debitRows || debitRows.length === 0) {
+      await db.execute(sql`ROLLBACK`);
+      return {
+        transferId, status: "failed",
+        debitAmount: 0, creditAmount: 0, fxRate, fee: fee.totalFee, totalCharged,
+        estimatedDelivery: "", referenceNumber: transferId, ledgerEntries: [],
+      };
+    }
+
+    // Step 6b: Record debit transaction
+    const debitRef = `${transferId}-debit`;
+    await db.execute(sql`
+      INSERT INTO transactions ("userId", type, "fromAmount", "fromCurrency", status, description, reference, "createdAt", "updatedAt")
+      VALUES (${req.senderId}, 'send', ${totalCharged.toString()}, ${req.fromCurrency}, 'completed', 
+              ${'Transfer debit: ' + debitRef}, ${debitRef}, NOW(), NOW())
+    `);
+
+    // Step 7: Record fee ledger entry
+    await db.execute(sql`
+      INSERT INTO ledger_entries (id, debit_account_id, credit_account_id, amount, currency, type, created_at)
+      VALUES (${feeEntry.id}, ${feeEntry.debitAccountId}, ${feeEntry.creditAccountId}, 
+              ${feeEntry.amount.toString()}, ${feeEntry.currency}, ${feeEntry.type}, NOW())
+    `);
+
+    // Step 8: FX conversion ledger entry
+    await db.execute(sql`
+      INSERT INTO ledger_entries (id, debit_account_id, credit_account_id, amount, currency, type, created_at)
+      VALUES (${fxEntry.id}, ${fxEntry.debitAccountId}, ${fxEntry.creditAccountId}, 
+              ${fxEntry.amount.toString()}, ${fxEntry.currency}, ${fxEntry.type}, NOW())
+    `);
+
+    // Step 9: Credit recipient (ensure wallet exists, then credit)
+    await db.execute(sql`
+      INSERT INTO wallets ("userId", currency, balance, "createdAt", "updatedAt")
+      VALUES (${req.recipientId}, ${req.toCurrency}, 0, NOW(), NOW())
+      ON CONFLICT ("userId", currency) DO NOTHING
+    `);
+    await db.execute(sql`
+      UPDATE wallets 
+      SET balance = balance + ${creditAmount.toString()}::numeric,
+          "updatedAt" = NOW()
+      WHERE "userId" = ${req.recipientId} AND currency = ${req.toCurrency}
+    `);
+    const creditRef = `${transferId}-credit`;
+    await db.execute(sql`
+      INSERT INTO transactions ("userId", type, "fromAmount", "fromCurrency", status, description, reference, "createdAt", "updatedAt")
+      VALUES (${req.recipientId}, 'receive', ${creditAmount.toString()}, ${req.toCurrency}, 'completed', 
+              ${'Transfer credit: ' + creditRef}, ${creditRef}, NOW(), NOW())
+    `);
+
+    // Step 10: Update transfer status to completed
+    await db.execute(sql`
+      UPDATE transfers SET status = 'completed', "updatedAt" = NOW()
+      WHERE "referenceId" = ${transferId}
+    `);
+
+    await db.execute(sql`COMMIT`);
+  } catch (err) {
+    // Rollback on any failure — no partial debits or orphaned entries
+    try { await db.execute(sql`ROLLBACK`); } catch { /* already rolled back */ }
+    await events.publish("transfer.failed", { transferId, userId: req.senderId, error: String(err) });
+    return {
+      transferId, status: "failed",
+      debitAmount: 0, creditAmount: 0, fxRate, fee: fee.totalFee, totalCharged,
+      estimatedDelivery: "", referenceNumber: transferId, ledgerEntries: [],
+    };
+  }
+  // ── END TRANSACTION ────────────────────────────────────────────────────────
+
+  // Step 11: Publish events outside transaction (Kafka in production)
   await events.publish("transfer.completed", {
     transferId, userId: req.senderId,
     amount: req.amount, fromCurrency: req.fromCurrency, toCurrency: req.toCurrency,
     creditAmount, fxRate, fee: fee.totalFee, corridor: req.corridor,
   });
 
-  // Estimated delivery based on payout method
   const deliveryMap: Record<string, string> = {
     wallet: "Instant",
     mobile_money: "Within 5 minutes",

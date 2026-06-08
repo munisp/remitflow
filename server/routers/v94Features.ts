@@ -77,7 +77,8 @@ export const abTestingRouter = router({
       await db.update(abExperiments)
         .set({ status: input.status as any, updatedAt: new Date() })
         .where(eq(abExperiments.id, input.experimentId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Public: assign variant for a user/session
@@ -130,7 +131,8 @@ export const abTestingRouter = router({
         eventType: input.eventType as any,
         metadata: input.metadata ?? {},
       });
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Admin: get experiment results
@@ -210,7 +212,8 @@ export const referralBonusRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(referralBonuses.id, input.bonusId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Leaderboard
@@ -314,7 +317,8 @@ export const documentVaultRouter = router({
       await db.update(documentVaultTable)
         .set({ sharedWith, status: "shared" as any, updatedAt: new Date() })
         .where(eq(documentVaultTable.id, input.documentId));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Set expiry
@@ -326,7 +330,8 @@ export const documentVaultRouter = router({
       await db.update(documentVaultTable)
         .set({ expiresAt: new Date(input.expiresAt), updatedAt: new Date() })
         .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id)));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Delete document
@@ -337,7 +342,8 @@ export const documentVaultRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(documentVaultTable)
         .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id)));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Archive document
@@ -349,7 +355,8 @@ export const documentVaultRouter = router({
       await db.update(documentVaultTable)
         .set({ status: "archived" as any, updatedAt: new Date() })
         .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id)));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Get documents expiring within N days
@@ -420,7 +427,8 @@ export const documentVaultRouter = router({
           notifyPush: input.notifyPush ?? false,
         });
       }
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // List reminder log (history of sent reminders)
@@ -504,7 +512,8 @@ export const rateAlertHistoryRouter = router({
       await db.update(rateAlertHistory)
         .set({ status: "dismissed" as any })
         .where(and(eq(rateAlertHistory.id, input.alertHistoryId), eq(rateAlertHistory.userId, ctx.user.id)));
-      return { success: true, updatedAt: new Date().toISOString() };
+      const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
     }),
 
   // Get stats

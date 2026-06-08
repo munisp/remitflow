@@ -429,7 +429,8 @@ export const extendedCrudRouter = router({
               .values({ userId: ctx.user.id, category: pref.key, inAppEnabled: pref.enabled, pushEnabled: pref.enabled })
               .onConflictDoUpdate({ target: [schema.notificationPreferences.userId, schema.notificationPreferences.category], set: { inAppEnabled: pref.enabled, pushEnabled: pref.enabled } });
           }
-          return { success: true, updatedAt: new Date().toISOString() };
+          const ts = new Date();
+      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
         }),
   }),
 
