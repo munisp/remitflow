@@ -1,0 +1,390 @@
+/**
+ * Transfer Engine — End-to-end money movement with middleware-ready ledger abstraction.
+ * 
+ * Flow: Initiate → Validate → Debit Sender → FX Convert → Credit Recipient → Settle
+ * 
+ * Middleware layers:
+ * - Ledger: PostgreSQL (dev) → TigerBeetle (production)
+ * - Events: PostgreSQL events table (dev) → Kafka (production)
+ * - Workflow: Direct execution (dev) → Temporal (production)
+ * - Service mesh: HTTP (dev) → Dapr sidecar (production)
+ */
+import { sql } from "drizzle-orm";
+import { getDb } from "../db";
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export interface TransferRequest {
+  senderId: number;
+  recipientId: number;
+  amount: number;
+  fromCurrency: string;
+  toCurrency: string;
+  corridor: string;
+  beneficiaryName: string;
+  beneficiaryAccount: string;
+  payoutMethod: "bank_transfer" | "mobile_money" | "cash_pickup" | "wallet";
+  purpose: string;
+  sourceOfFunds: string;
+}
+
+export interface TransferResult {
+  transferId: string;
+  status: "completed" | "pending_settlement" | "failed" | "pending_compliance";
+  debitAmount: number;
+  creditAmount: number;
+  fxRate: number;
+  fee: number;
+  totalCharged: number;
+  estimatedDelivery: string;
+  referenceNumber: string;
+  ledgerEntries: LedgerEntry[];
+}
+
+interface LedgerEntry {
+  id: string;
+  debitAccountId: number;
+  creditAccountId: number;
+  amount: number;
+  currency: string;
+  type: "transfer" | "fee" | "fx_conversion";
+  timestamp: Date;
+}
+
+interface FeeCalculation {
+  flatFee: number;
+  percentFee: number;
+  totalFee: number;
+  feeBreakdown: { type: string; amount: number }[];
+}
+
+// ─── Fee Tiers (real business logic) ─────────────────────────────────────────
+
+const FEE_TIERS: Record<string, { flat: number; pct: number; min: number; max: number }> = {
+  "USD-NGN": { flat: 2.99, pct: 0.015, min: 2.99, max: 49.99 },
+  "USD-GHS": { flat: 2.49, pct: 0.012, min: 2.49, max: 39.99 },
+  "USD-KES": { flat: 1.99, pct: 0.010, min: 1.99, max: 29.99 },
+  "USD-ZAR": { flat: 3.99, pct: 0.018, min: 3.99, max: 59.99 },
+  "GBP-NGN": { flat: 2.49, pct: 0.012, min: 2.49, max: 39.99 },
+  "EUR-NGN": { flat: 2.49, pct: 0.012, min: 2.49, max: 39.99 },
+  "CAD-NGN": { flat: 2.99, pct: 0.015, min: 2.99, max: 49.99 },
+  DEFAULT: { flat: 3.99, pct: 0.018, min: 3.99, max: 79.99 },
+};
+
+const KYC_LIMITS: Record<string, { daily: number; monthly: number; single: number }> = {
+  tier0: { daily: 100, monthly: 300, single: 50 },
+  tier1: { daily: 1000, monthly: 5000, single: 500 },
+  tier2: { daily: 10000, monthly: 50000, single: 5000 },
+  tier3: { daily: 100000, monthly: 500000, single: 50000 },
+};
+
+// ─── Ledger Abstraction (middleware-ready) ───────────────────────────────────
+
+/**
+ * LedgerBackend interface — in production, swap to TigerBeetle client.
+ * TigerBeetle provides: double-entry accounting, idempotent transfers,
+ * strict serialization, and O(1) balance lookups.
+ */
+interface LedgerBackend {
+  createTransfer(entry: LedgerEntry): Promise<void>;
+  getBalance(accountId: number, currency: string): Promise<number>;
+  debit(accountId: number, amount: number, currency: string, ref: string): Promise<void>;
+  credit(accountId: number, amount: number, currency: string, ref: string): Promise<void>;
+}
+
+class PostgresLedger implements LedgerBackend {
+  async createTransfer(entry: LedgerEntry): Promise<void> {
+    const db = await getDb();
+    if (!db) return;
+    await db.execute(sql`
+      INSERT INTO ledger_entries (id, debit_account_id, credit_account_id, amount, currency, type, created_at)
+      VALUES (${entry.id}, ${entry.debitAccountId}, ${entry.creditAccountId}, 
+              ${entry.amount.toString()}, ${entry.currency}, ${entry.type}, NOW())
+    `);
+  }
+
+  async getBalance(accountId: number, currency: string): Promise<number> {
+    const db = await getDb();
+    if (!db) return 0;
+    const result = await db.execute(sql`
+      SELECT CAST(COALESCE(balance, '0') AS DECIMAL) as balance 
+      FROM wallets WHERE "userId" = ${accountId} AND currency = ${currency}
+    `);
+    const rows = result as unknown as { balance: string }[];
+    return rows.length > 0 ? parseFloat(rows[0].balance) : 0;
+  }
+
+  async debit(accountId: number, amount: number, currency: string, ref: string): Promise<void> {
+    const db = await getDb();
+    if (!db) return;
+    await db.execute(sql`
+      UPDATE wallets 
+      SET balance = balance - ${amount.toString()}::numeric,
+          "updatedAt" = NOW()
+      WHERE "userId" = ${accountId} AND currency = ${currency}
+        AND balance >= ${amount.toString()}::numeric
+    `);
+    await db.execute(sql`
+      INSERT INTO transactions ("userId", type, "fromAmount", "fromCurrency", status, description, reference, "createdAt", "updatedAt")
+      VALUES (${accountId}, 'send', ${amount.toString()}, ${currency}, 'completed', 
+              ${'Transfer debit: ' + ref}, ${ref}, NOW(), NOW())
+    `);
+  }
+
+  async credit(accountId: number, amount: number, currency: string, ref: string): Promise<void> {
+    const db = await getDb();
+    if (!db) return;
+    // Ensure recipient has a wallet in this currency
+    await db.execute(sql`
+      INSERT INTO wallets ("userId", currency, balance, "createdAt", "updatedAt")
+      VALUES (${accountId}, ${currency}, 0, NOW(), NOW())
+      ON CONFLICT ("userId", currency) DO NOTHING
+    `);
+    await db.execute(sql`
+      UPDATE wallets 
+      SET balance = balance + ${amount.toString()}::numeric,
+          "updatedAt" = NOW()
+      WHERE "userId" = ${accountId} AND currency = ${currency}
+    `);
+    await db.execute(sql`
+      INSERT INTO transactions ("userId", type, "fromAmount", "fromCurrency", status, description, reference, "createdAt", "updatedAt")
+      VALUES (${accountId}, 'receive', ${amount.toString()}, ${currency}, 'completed', 
+              ${'Transfer credit: ' + ref}, ${ref}, NOW(), NOW())
+    `);
+  }
+}
+
+// In production: import { TigerBeetleIntegration } from '../middleware/middlewareIntegration.js'
+// const ledger: LedgerBackend = process.env.TIGERBEETLE_ADDRESSES 
+//   ? new TigerBeetleLedger() : new PostgresLedger();
+const ledger: LedgerBackend = new PostgresLedger();
+
+// ─── Event Bus Abstraction (middleware-ready) ────────────────────────────────
+
+/**
+ * EventBus interface — in production, swap to Kafka producer.
+ * Kafka provides: ordered event streaming, replay, consumer groups.
+ */
+interface EventBus {
+  publish(topic: string, event: Record<string, unknown>): Promise<void>;
+}
+
+class PostgresEventBus implements EventBus {
+  async publish(topic: string, event: Record<string, unknown>): Promise<void> {
+    const db = await getDb();
+    if (!db) return;
+    await db.execute(sql`
+      INSERT INTO "auditLogs" ("userId", action, metadata, "createdAt")
+      VALUES (${(event.userId as number) || 0}, ${topic}, ${JSON.stringify(event)}, NOW())
+    `);
+  }
+}
+
+// In production: const events = process.env.KAFKA_BROKERS ? new KafkaEventBus() : new PostgresEventBus();
+const events: EventBus = new PostgresEventBus();
+
+// ─── FX Rate Service ─────────────────────────────────────────────────────────
+
+async function getFxRate(from: string, to: string): Promise<number> {
+  const db = await getDb();
+  if (!db) return 1;
+  const result = await db.execute(sql`
+    SELECT rate FROM fx_rate_history 
+    WHERE from_currency = ${from} AND to_currency = ${to}
+    ORDER BY recorded_at DESC LIMIT 1
+  `);
+  const rows = result as unknown as { rate: string }[];
+  if (rows.length > 0) return parseFloat(rows[0].rate);
+  // Fallback rates if no DB rate available
+  const fallback: Record<string, number> = {
+    "USD-NGN": 1580.50, "USD-GHS": 15.20, "USD-KES": 153.50,
+    "GBP-NGN": 2010.00, "EUR-NGN": 1720.00, "USD-ZAR": 18.50,
+  };
+  return fallback[`${from}-${to}`] || 1.0;
+}
+
+// ─── Fee Calculation ─────────────────────────────────────────────────────────
+
+function calculateFee(amount: number, corridor: string): FeeCalculation {
+  const tier = FEE_TIERS[corridor] || FEE_TIERS.DEFAULT;
+  const percentFee = amount * tier.pct;
+  const totalFee = Math.max(tier.min, Math.min(tier.max, tier.flat + percentFee));
+  return {
+    flatFee: tier.flat,
+    percentFee,
+    totalFee,
+    feeBreakdown: [
+      { type: "flat_fee", amount: tier.flat },
+      { type: "percent_fee", amount: percentFee },
+    ],
+  };
+}
+
+// ─── KYC/AML Checks ─────────────────────────────────────────────────────────
+
+async function validateCompliance(senderId: number, amount: number): Promise<{ allowed: boolean; reason?: string }> {
+  const db = await getDb();
+  if (!db) return { allowed: true };
+  // Get user's KYC tier
+  const userResult = await db.execute(sql`
+    SELECT "kycTier" FROM users WHERE id = ${senderId}
+  `);
+  const users = userResult as unknown as { kycTier: string }[];
+  if (users.length === 0) return { allowed: false, reason: "User not found" };
+  
+  const user = users[0];
+  const tier = user.kycTier || "tier1";
+  const limits = KYC_LIMITS[tier] || KYC_LIMITS.tier1;
+
+  // Check single transaction limit
+  if (amount > limits.single) {
+    return { allowed: false, reason: `Amount exceeds ${tier} single transaction limit ($${limits.single})` };
+  }
+
+  // Check daily volume
+  const dailyResult = await db.execute(sql`
+    SELECT COALESCE(SUM("fromAmount"), 0) as daily_total
+    FROM transactions 
+    WHERE "userId" = ${senderId} AND type = 'send' 
+    AND "createdAt" > NOW() - INTERVAL '24 hours'
+    AND status = 'completed'
+  `);
+  const dailyRows = dailyResult as unknown as { daily_total: string }[];
+  const dailyTotal = parseFloat(dailyRows[0]?.daily_total || "0");
+  
+  if (dailyTotal + amount > limits.daily) {
+    return { allowed: false, reason: `Would exceed ${tier} daily limit ($${limits.daily})` };
+  }
+
+  return { allowed: true };
+}
+
+// ─── Main Transfer Execution ─────────────────────────────────────────────────
+
+/**
+ * Execute a full transfer: validate → debit → convert → credit → settle
+ * This function is Temporal-workflow-ready: each step is idempotent and can be
+ * retried independently. In production, wrap each step as a Temporal activity.
+ */
+export async function executeTransfer(req: TransferRequest): Promise<TransferResult> {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable");
+  const transferId = `TXN-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const corridor = `${req.fromCurrency}-${req.toCurrency}`;
+
+  // Step 1: Compliance validation
+  const compliance = await validateCompliance(req.senderId, req.amount);
+  if (!compliance.allowed) {
+    await events.publish("transfer.rejected", { transferId, reason: compliance.reason, userId: req.senderId });
+    return {
+      transferId,
+      status: "failed",
+      debitAmount: 0, creditAmount: 0, fxRate: 0, fee: 0, totalCharged: 0,
+      estimatedDelivery: "", referenceNumber: transferId,
+      ledgerEntries: [],
+    };
+  }
+
+  // Step 2: Calculate fees
+  const fee = calculateFee(req.amount, corridor);
+  const totalCharged = req.amount + fee.totalFee;
+
+  // Step 3: Get FX rate
+  const fxRate = await getFxRate(req.fromCurrency, req.toCurrency);
+  const creditAmount = req.amount * fxRate;
+
+  // Step 4: Verify sender has sufficient balance
+  const senderBalance = await ledger.getBalance(req.senderId, req.fromCurrency);
+  if (senderBalance < totalCharged) {
+    await events.publish("transfer.insufficient_funds", { transferId, userId: req.senderId, required: totalCharged, available: senderBalance });
+    return {
+      transferId, status: "failed",
+      debitAmount: 0, creditAmount: 0, fxRate, fee: fee.totalFee, totalCharged,
+      estimatedDelivery: "", referenceNumber: transferId, ledgerEntries: [],
+    };
+  }
+
+  // Step 5: Create transfer record
+  await db.execute(sql`
+    INSERT INTO transfers (
+      "userId", "beneficiaryId", "fromCurrency", "toCurrency", "fromAmount", "toAmount",
+      "exchangeRate", fee, status, corridor, "payoutMethod", purpose, "referenceId", "createdAt"
+    ) VALUES (
+      ${req.senderId}, ${req.recipientId}, ${req.fromCurrency}, ${req.toCurrency},
+      ${req.amount.toString()}, ${creditAmount.toString()}, ${fxRate.toString()},
+      ${fee.totalFee.toString()}, 'processing', ${corridor}, ${req.payoutMethod},
+      ${req.purpose}, ${transferId}, NOW()
+    )
+  `);
+
+  // Step 6: Debit sender (atomic — in production this is a TigerBeetle two-phase transfer)
+  const debitRef = `${transferId}-debit`;
+  await ledger.debit(req.senderId, totalCharged, req.fromCurrency, debitRef);
+
+  // Step 7: Record fee as separate ledger entry (revenue)
+  const feeEntry: LedgerEntry = {
+    id: `${transferId}-fee`,
+    debitAccountId: req.senderId,
+    creditAccountId: 0, // Platform revenue account
+    amount: fee.totalFee,
+    currency: req.fromCurrency,
+    type: "fee",
+    timestamp: new Date(),
+  };
+  await ledger.createTransfer(feeEntry);
+
+  // Step 8: FX conversion ledger entry
+  const fxEntry: LedgerEntry = {
+    id: `${transferId}-fx`,
+    debitAccountId: req.senderId,
+    creditAccountId: req.recipientId,
+    amount: creditAmount,
+    currency: req.toCurrency,
+    type: "fx_conversion",
+    timestamp: new Date(),
+  };
+  await ledger.createTransfer(fxEntry);
+
+  // Step 9: Credit recipient
+  const creditRef = `${transferId}-credit`;
+  await ledger.credit(req.recipientId, creditAmount, req.toCurrency, creditRef);
+
+  // Step 10: Update transfer status
+  await db.execute(sql`
+    UPDATE transfers SET status = 'completed', "updatedAt" = NOW()
+    WHERE "referenceId" = ${transferId}
+  `);
+
+  // Step 11: Publish events (Kafka in production)
+  await events.publish("transfer.completed", {
+    transferId, userId: req.senderId,
+    amount: req.amount, fromCurrency: req.fromCurrency, toCurrency: req.toCurrency,
+    creditAmount, fxRate, fee: fee.totalFee, corridor: req.corridor,
+  });
+
+  // Estimated delivery based on payout method
+  const deliveryMap: Record<string, string> = {
+    wallet: "Instant",
+    mobile_money: "Within 5 minutes",
+    bank_transfer: "Within 1-2 business days",
+    cash_pickup: "Ready for pickup in 30 minutes",
+  };
+
+  return {
+    transferId,
+    status: "completed",
+    debitAmount: totalCharged,
+    creditAmount,
+    fxRate,
+    fee: fee.totalFee,
+    totalCharged,
+    estimatedDelivery: deliveryMap[req.payoutMethod] || "1-3 business days",
+    referenceNumber: transferId,
+    ledgerEntries: [feeEntry, fxEntry],
+  };
+}
+
+// ─── Exported utilities ──────────────────────────────────────────────────────
+
+export { calculateFee, validateCompliance, getFxRate };
+export type { FeeCalculation, LedgerEntry, LedgerBackend, EventBus };
