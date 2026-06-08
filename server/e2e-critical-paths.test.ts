@@ -27,7 +27,7 @@ function makeCtx(overrides: Record<string, any> = {}): TrpcContext {
     openId: "e2e-critical-user",
     email: "e2e@remitflow.test",
     name: "E2E Critical",
-    loginMethod: "manus",
+    loginMethod: "keycloak",
     role: "admin" as const,
     createdAt: new Date(),
     updatedAt: new Date(),

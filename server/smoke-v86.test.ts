@@ -12,7 +12,7 @@ function makeCtx(overrides: Record<string, any> = {}): TrpcContext {
     openId: "smoke-v86-user",
     email: "smoke-v86@remitflow.test",
     name: "Smoke V86",
-    loginMethod: "manus",
+    loginMethod: "keycloak",
     role: "admin" as const,
     createdAt: new Date(),
     updatedAt: new Date(),

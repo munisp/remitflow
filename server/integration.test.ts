@@ -21,7 +21,7 @@ function createCtx(userId = TEST_SENDER_ID, role: "user" | "admin" = "admin"): T
       openId: `test-user-${userId}`,
       email: `test${userId}@remitflow.com`,
       name: `Test User ${userId}`,
-      loginMethod: "manus",
+      loginMethod: "keycloak",
       role,
       createdAt: new Date(),
       updatedAt: new Date(),

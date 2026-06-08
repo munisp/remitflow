@@ -300,6 +300,7 @@ import { futureProofingRouter } from "./routers/futureProofing";
 import { propertyEscrowRouter } from "./routers/propertyEscrow";
 import { failureProtectionRouter } from "./routers/failureProtection";
 import { mlPipelineRouter } from "./routers/mlPipeline";
+import { transferCoreRouter } from "./routers/transferCore";
 import { secretsRotationRouter } from "./secrets-rotation";
 import { soc2EvidenceRouter } from "./compliance/soc2-evidence";
 import { businessKpiRouter } from "./lib/business-kpi";
@@ -6780,6 +6781,7 @@ Case: #${input.caseId}`,
   amlEngine: amlEngineRouter,
   fraudMl: fraudMlRouter,
   transferEngine: transferEngineRouter,
+  transferCore: transferCoreRouter,
   pdfReceipt: pdfReceiptRouter,
   searchIndexer: searchIndexerRouter,
   rateLimiter: rateLimiterRouter,

@@ -8,7 +8,7 @@ function createCtx(): TrpcContext {
     openId: "test-user",
     email: "test@remitflow.com",
     name: "Test User",
-    loginMethod: "manus",
+    loginMethod: "keycloak",
     role: "user" as const,
     createdAt: new Date(),
     updatedAt: new Date(),
