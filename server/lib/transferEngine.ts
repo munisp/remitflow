@@ -213,9 +213,9 @@ async function getFxRate(from: string, to: string): Promise<number> {
 function calculateFee(amount: number, corridor: string): FeeCalculation {
   const tier = FEE_TIERS[corridor] || FEE_TIERS.DEFAULT;
   // Use integer minor units (cents) to avoid float precision issues
+  // pct is already a decimal (e.g., 0.015 for 1.5%), so multiply amount*pct in cents
   const amountCents = Math.round(amount * 100);
-  const pctCents = Math.round(tier.pct * 10000); // pct as basis points
-  const percentFeeCents = Math.round((amountCents * pctCents) / 1000000);
+  const percentFeeCents = Math.round(amountCents * tier.pct);
   const flatCents = Math.round(tier.flat * 100);
   const minCents = Math.round(tier.min * 100);
   const maxCents = Math.round(tier.max * 100);
@@ -340,92 +340,88 @@ export async function executeTransfer(req: TransferRequest): Promise<TransferRes
     timestamp: new Date(),
   };
 
+  // Use Drizzle's transaction API (postgres.js requires sql.begin, not raw BEGIN)
+  // Middleware-ready: swap to TigerBeetle two-phase commit in production
+  let txFailed = false;
   try {
-    await db.execute(sql`BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
+    await db.transaction(async (tx: typeof db) => {
+      // Step 5: Create transfer record
+      await tx.execute(sql`
+        INSERT INTO transfers (
+          "userId", "beneficiaryId", "fromCurrency", "toCurrency", "fromAmount", "toAmount",
+          "exchangeRate", fee, status, corridor, "payoutMethod", purpose, "referenceId", "createdAt"
+        ) VALUES (
+          ${req.senderId}, ${req.recipientId}, ${req.fromCurrency}, ${req.toCurrency},
+          ${req.amount.toString()}, ${creditAmount.toString()}, ${fxRate.toString()},
+          ${fee.totalFee.toString()}, 'processing', ${corridor}, ${req.payoutMethod},
+          ${req.purpose}, ${transferId}, NOW()
+        )
+      `);
 
-    // Step 5: Create transfer record
-    await db.execute(sql`
-      INSERT INTO transfers (
-        "userId", "beneficiaryId", "fromCurrency", "toCurrency", "fromAmount", "toAmount",
-        "exchangeRate", fee, status, corridor, "payoutMethod", purpose, "referenceId", "createdAt"
-      ) VALUES (
-        ${req.senderId}, ${req.recipientId}, ${req.fromCurrency}, ${req.toCurrency},
-        ${req.amount.toString()}, ${creditAmount.toString()}, ${fxRate.toString()},
-        ${fee.totalFee.toString()}, 'processing', ${corridor}, ${req.payoutMethod},
-        ${req.purpose}, ${transferId}, NOW()
-      )
-    `);
+      // Step 6: Debit sender with balance re-check under lock
+      const debitResult = await tx.execute(sql`
+        UPDATE wallets 
+        SET balance = balance - ${totalCharged.toString()}::numeric,
+            "updatedAt" = NOW()
+        WHERE "userId" = ${req.senderId} AND currency = ${req.fromCurrency}
+          AND balance >= ${totalCharged.toString()}::numeric
+        RETURNING balance
+      `);
+      const debitRows = debitResult as unknown as { balance: string }[];
+      if (!debitRows || debitRows.length === 0) {
+        throw new Error("INSUFFICIENT_BALANCE");
+      }
 
-    // Step 6: Debit sender with balance re-check under lock
-    const debitResult = await db.execute(sql`
-      UPDATE wallets 
-      SET balance = balance - ${totalCharged.toString()}::numeric,
-          "updatedAt" = NOW()
-      WHERE "userId" = ${req.senderId} AND currency = ${req.fromCurrency}
-        AND balance >= ${totalCharged.toString()}::numeric
-      RETURNING balance
-    `);
-    const debitRows = debitResult as unknown as { balance: string }[];
-    if (!debitRows || debitRows.length === 0) {
-      await db.execute(sql`ROLLBACK`);
-      return {
-        transferId, status: "failed",
-        debitAmount: 0, creditAmount: 0, fxRate, fee: fee.totalFee, totalCharged,
-        estimatedDelivery: "", referenceNumber: transferId, ledgerEntries: [],
-      };
-    }
+      // Step 6b: Record debit transaction
+      const debitRef = `${transferId}-debit`;
+      await tx.execute(sql`
+        INSERT INTO transactions ("userId", type, "fromAmount", "fromCurrency", status, description, reference, "createdAt", "updatedAt")
+        VALUES (${req.senderId}, 'send', ${totalCharged.toString()}, ${req.fromCurrency}, 'completed', 
+                ${'Transfer debit: ' + debitRef}, ${debitRef}, NOW(), NOW())
+      `);
 
-    // Step 6b: Record debit transaction
-    const debitRef = `${transferId}-debit`;
-    await db.execute(sql`
-      INSERT INTO transactions ("userId", type, "fromAmount", "fromCurrency", status, description, reference, "createdAt", "updatedAt")
-      VALUES (${req.senderId}, 'send', ${totalCharged.toString()}, ${req.fromCurrency}, 'completed', 
-              ${'Transfer debit: ' + debitRef}, ${debitRef}, NOW(), NOW())
-    `);
+      // Step 7: Record fee ledger entry
+      await tx.execute(sql`
+        INSERT INTO ledger_entries (id, debit_account_id, credit_account_id, amount, currency, type, created_at)
+        VALUES (${feeEntry.id}, ${feeEntry.debitAccountId}, ${feeEntry.creditAccountId}, 
+                ${feeEntry.amount.toString()}, ${feeEntry.currency}, ${feeEntry.type}, NOW())
+      `);
 
-    // Step 7: Record fee ledger entry
-    await db.execute(sql`
-      INSERT INTO ledger_entries (id, debit_account_id, credit_account_id, amount, currency, type, created_at)
-      VALUES (${feeEntry.id}, ${feeEntry.debitAccountId}, ${feeEntry.creditAccountId}, 
-              ${feeEntry.amount.toString()}, ${feeEntry.currency}, ${feeEntry.type}, NOW())
-    `);
+      // Step 8: FX conversion ledger entry
+      await tx.execute(sql`
+        INSERT INTO ledger_entries (id, debit_account_id, credit_account_id, amount, currency, type, created_at)
+        VALUES (${fxEntry.id}, ${fxEntry.debitAccountId}, ${fxEntry.creditAccountId}, 
+                ${fxEntry.amount.toString()}, ${fxEntry.currency}, ${fxEntry.type}, NOW())
+      `);
 
-    // Step 8: FX conversion ledger entry
-    await db.execute(sql`
-      INSERT INTO ledger_entries (id, debit_account_id, credit_account_id, amount, currency, type, created_at)
-      VALUES (${fxEntry.id}, ${fxEntry.debitAccountId}, ${fxEntry.creditAccountId}, 
-              ${fxEntry.amount.toString()}, ${fxEntry.currency}, ${fxEntry.type}, NOW())
-    `);
+      // Step 9: Credit recipient (ensure wallet exists, then credit)
+      await tx.execute(sql`
+        INSERT INTO wallets ("userId", currency, balance, "createdAt", "updatedAt")
+        VALUES (${req.recipientId}, ${req.toCurrency}, 0, NOW(), NOW())
+        ON CONFLICT ("userId", currency) DO NOTHING
+      `);
+      await tx.execute(sql`
+        UPDATE wallets 
+        SET balance = balance + ${creditAmount.toString()}::numeric,
+            "updatedAt" = NOW()
+        WHERE "userId" = ${req.recipientId} AND currency = ${req.toCurrency}
+      `);
+      const creditRef = `${transferId}-credit`;
+      await tx.execute(sql`
+        INSERT INTO transactions ("userId", type, "fromAmount", "fromCurrency", status, description, reference, "createdAt", "updatedAt")
+        VALUES (${req.recipientId}, 'receive', ${creditAmount.toString()}, ${req.toCurrency}, 'completed', 
+                ${'Transfer credit: ' + creditRef}, ${creditRef}, NOW(), NOW())
+      `);
 
-    // Step 9: Credit recipient (ensure wallet exists, then credit)
-    await db.execute(sql`
-      INSERT INTO wallets ("userId", currency, balance, "createdAt", "updatedAt")
-      VALUES (${req.recipientId}, ${req.toCurrency}, 0, NOW(), NOW())
-      ON CONFLICT ("userId", currency) DO NOTHING
-    `);
-    await db.execute(sql`
-      UPDATE wallets 
-      SET balance = balance + ${creditAmount.toString()}::numeric,
-          "updatedAt" = NOW()
-      WHERE "userId" = ${req.recipientId} AND currency = ${req.toCurrency}
-    `);
-    const creditRef = `${transferId}-credit`;
-    await db.execute(sql`
-      INSERT INTO transactions ("userId", type, "fromAmount", "fromCurrency", status, description, reference, "createdAt", "updatedAt")
-      VALUES (${req.recipientId}, 'receive', ${creditAmount.toString()}, ${req.toCurrency}, 'completed', 
-              ${'Transfer credit: ' + creditRef}, ${creditRef}, NOW(), NOW())
-    `);
-
-    // Step 10: Update transfer status to completed
-    await db.execute(sql`
-      UPDATE transfers SET status = 'completed', "updatedAt" = NOW()
-      WHERE "referenceId" = ${transferId}
-    `);
-
-    await db.execute(sql`COMMIT`);
+      // Step 10: Update transfer status to completed
+      await tx.execute(sql`
+        UPDATE transfers SET status = 'completed', "updatedAt" = NOW()
+        WHERE "referenceId" = ${transferId}
+      `);
+    });
   } catch (err) {
-    // Rollback on any failure — no partial debits or orphaned entries
-    try { await db.execute(sql`ROLLBACK`); } catch { /* already rolled back */ }
+    // Transaction auto-rolled back by Drizzle on throw
+    txFailed = true;
     await events.publish("transfer.failed", { transferId, userId: req.senderId, error: String(err) });
     return {
       transferId, status: "failed",
