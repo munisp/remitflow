@@ -38,7 +38,7 @@ type DaprEvent struct {
 
 // publishEvent publishes an event to a Dapr topic
 func publishEvent(ctx context.Context, pubsubName, topic string, data any) error {
-	body, err := json.Marshal(data)
+	_, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
@@ -150,5 +150,5 @@ func main() {
 	mux.HandleFunc("/events/transfer-created", transferCreatedHandler)
 	mux.HandleFunc("/events/payout-completed", payoutCompletedHandler)
 	mux.HandleFunc("/events/kyc-approved", kycApprovedHandler)
-	log.Fatal(http.ListenAndServe(":"+port, authMiddleware(mux)))
+	log.Fatal(http.ListenAndServe(appPort, authMiddleware(mux)))
 }

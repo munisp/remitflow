@@ -8,16 +8,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	permify "github.com/Permify/permify-go/v1"
-	base "github.com/Permify/permify-go/v1/generated/base/v1"
 )
 
 // ─── Permission Schema ────────────────────────────────────────────────────────
@@ -55,71 +56,83 @@ type WriteRelationRequest struct {
 	EntityID     string `json:"entity_id" binding:"required"`
 }
 
-// ─── Permify Client ───────────────────────────────────────────────────────────
+// ─── Permify HTTP Client ──────────────────────────────────────────────────────
 type AuthzService struct {
-	client *permify.Client
-	tenant string
+	baseURL string
+	tenant  string
+	httpC   *http.Client
 }
 
 func NewAuthzService(endpoint, tenant string) (*AuthzService, error) {
-	pc, err := permify.NewClient(
-		permify.Config{Endpoint: endpoint},
-		permify.WithInsecure(),
-	)
+	return &AuthzService{
+		baseURL: endpoint,
+		tenant:  tenant,
+		httpC:   &http.Client{Timeout: 5 * time.Second},
+	}, nil
+}
+
+func (s *AuthzService) permifyPost(ctx context.Context, path string, body interface{}) ([]byte, error) {
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, "POST", s.baseURL+path, bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
-	return &AuthzService{client: pc, tenant: tenant}, nil
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpC.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
 }
 
 func (s *AuthzService) Check(ctx context.Context, req CheckRequest) (bool, error) {
-	cr, err := s.client.Permission.Check(ctx, &base.PermissionCheckRequest{
-		TenantId: s.tenant,
-		Metadata: &base.PermissionCheckRequestMetadata{
-			SchemaVersion: SchemaVersion,
-			SnapToken:     "",
-			Depth:         20,
-		},
-		Entity: &base.Entity{
-			Type: req.EntityType,
-			Id:   req.EntityID,
-		},
-		Permission: req.Permission,
-		Subject: &base.Subject{
-			Type: req.SubjectType,
-			Id:   req.SubjectID,
-		},
-	})
+	payload := map[string]interface{}{
+		"tenant_id": s.tenant,
+		"metadata":  map[string]interface{}{"schema_version": SchemaVersion, "depth": 20},
+		"entity":    map[string]string{"type": req.EntityType, "id": req.EntityID},
+		"permission": req.Permission,
+		"subject":   map[string]string{"type": req.SubjectType, "id": req.SubjectID},
+	}
+	body, err := s.permifyPost(ctx, "/v1/tenants/"+s.tenant+"/permissions/check", payload)
 	if err != nil {
+		return false, fmt.Errorf("permify check: %w", err)
+	}
+	var result struct {
+		Can string `json:"can"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
 		return false, err
 	}
-	return cr.Can == base.CheckResult_CHECK_RESULT_ALLOWED, nil
+	return result.Can == "CHECK_RESULT_ALLOWED", nil
 }
 
 func (s *AuthzService) WriteRelation(ctx context.Context, req WriteRelationRequest) error {
-	_, err := s.client.Data.Write(ctx, &base.DataWriteRequest{
-		TenantId: s.tenant,
-		Metadata: &base.DataWriteRequestMetadata{SchemaVersion: SchemaVersion},
-		Tuples: []*base.Tuple{
+	payload := map[string]interface{}{
+		"tenant_id": s.tenant,
+		"metadata":  map[string]interface{}{"schema_version": SchemaVersion},
+		"tuples": []map[string]interface{}{
 			{
-				Entity:   &base.Entity{Type: req.EntityType, Id: req.EntityID},
-				Relation: req.Relation,
-				Subject:  &base.Subject{Type: req.SubjectType, Id: req.SubjectID},
+				"entity":   map[string]string{"type": req.EntityType, "id": req.EntityID},
+				"relation": req.Relation,
+				"subject":  map[string]string{"type": req.SubjectType, "id": req.SubjectID},
 			},
 		},
-	})
+	}
+	_, err := s.permifyPost(ctx, "/v1/tenants/"+s.tenant+"/data/write", payload)
 	return err
 }
 
 func (s *AuthzService) DeleteRelation(ctx context.Context, req WriteRelationRequest) error {
-	_, err := s.client.Data.Delete(ctx, &base.DataDeleteRequest{
-		TenantId: s.tenant,
-		TupleFilter: &base.TupleFilter{
-			Entity:   &base.EntityFilter{Type: req.EntityType, Ids: []string{req.EntityID}},
-			Relation: req.Relation,
-			Subject:  &base.SubjectFilter{Type: req.SubjectType, Ids: []string{req.SubjectID}},
+	payload := map[string]interface{}{
+		"tenant_id": s.tenant,
+		"tuple_filter": map[string]interface{}{
+			"entity":   map[string]interface{}{"type": req.EntityType, "ids": []string{req.EntityID}},
+			"relation": req.Relation,
+			"subject":  map[string]interface{}{"type": req.SubjectType, "ids": []string{req.SubjectID}},
 		},
-	})
+	}
+	_, err := s.permifyPost(ctx, "/v1/tenants/"+s.tenant+"/data/delete", payload)
 	return err
 }
 

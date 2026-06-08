@@ -124,7 +124,7 @@ func (a *CBNActivities) GenerateMonthlyReport(ctx context.Context, input Monthly
 	body, _ := json.Marshal(payload)
 
 	req, _ := http.NewRequestWithContext(ctx, "POST", a.lakehouseURL+"/export",
-		jsonBody(body))
+		&jsonBodyReader{data: body})
 	req.Header.Set("X-Internal-Key", a.lakehouseKey)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -302,14 +302,6 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-type jsonReader struct {
-	*jsonBody
-}
-
-func jsonBody(b []byte) *jsonBodyReader {
-	return &jsonBodyReader{data: b, pos: 0}
 }
 
 type jsonBodyReader struct {

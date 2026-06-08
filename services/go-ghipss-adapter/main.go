@@ -28,6 +28,9 @@
 package main
 
 import (
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -43,6 +46,9 @@ import (
 )
 
 // ── Config ────────────────────────────────────────────────────────────────────
+
+
+var db *sql.DB
 
 type Config struct {
 	Port             string
@@ -384,6 +390,100 @@ func healthCheck(cfg Config) gin.HandlerFunc {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
+
+
+func initDB() error {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgresql://remitflow:remitflow123@localhost:5432/remitflow"
+	}
+	var err error
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err = db.Ping(); err != nil {
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+	// Create table if not exists
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS ghipss_adapter_state (
+			id TEXT PRIMARY KEY,
+			data JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_ghipss_adapter_updated ON ghipss_adapter_state(updated_at);
+		CREATE TABLE IF NOT EXISTS ghipss_adapter_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			payload JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_ghipss_adapter_events_type ON ghipss_adapter_events(event_type, created_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create tables: %w", err)
+	}
+	slog.Info("database initialized", "service", "go-ghipss-adapter", "table", "ghipss_adapter_state")
+	return nil
+}
+
+// dbUpsert stores or updates a record in the service state table
+func dbUpsert(id string, data interface{}) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`
+		INSERT INTO ghipss_adapter_state (id, data, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
+		id, jsonData)
+	return err
+}
+
+// dbGet retrieves a record from the service state table
+func dbGet(id string, dest interface{}) error {
+	var jsonData []byte
+	err := db.QueryRow("SELECT data FROM ghipss_adapter_state WHERE id = $1", id).Scan(&jsonData)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(jsonData, dest)
+}
+
+// dbList retrieves all records from the service state table
+func dbList(limit int) ([]json.RawMessage, error) {
+	rows, err := db.Query("SELECT data FROM ghipss_adapter_state ORDER BY updated_at DESC LIMIT $1", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []json.RawMessage
+	for rows.Next() {
+		var data json.RawMessage
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		results = append(results, data)
+	}
+	return results, rows.Err()
+}
+
+// dbLogEvent stores an event in the events table
+func dbLogEvent(eventType string, payload interface{}) error {
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec("INSERT INTO ghipss_adapter_events (event_type, payload) VALUES ($1, $2)",
+		eventType, jsonData)
+	return err
+}
 
 func main() {
 	cfg := loadConfig()

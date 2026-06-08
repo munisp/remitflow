@@ -2,9 +2,7 @@ module github.com/remitflow/kafka-service
 
 go 1.22
 
-require (
-	github.com/IBM/sarama v1.43.2
-)
+require github.com/IBM/sarama v1.43.2
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
