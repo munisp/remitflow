@@ -91,23 +91,17 @@ const complianceScoringV2Router = router({
 // ── 2. Notifications V2 ──────────────────────────────────────────────────────
 const notificationsV2Router = router({
   list: protectedProcedure
-    .input(z.object({ page: z.number().int().min(1).default(1), limit: z.number().int().min(1).max(50).default(20), unreadOnly: z.boolean().default(false) }))
+    .input(z.object({ page: z.number().int().min(1).default(1), limit: z.number().int().min(1).max(50).default(20), offset: z.number().int().min(0).default(0).optional(), unreadOnly: z.boolean().default(false) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const pageOffset = input.offset ?? ((input.page - 1) * input.limit);
       const userNotifs = await db.select().from(notifications)
         .where(eq(notifications.userId, ctx.user.id))
         .orderBy(desc(notifications.createdAt))
         .limit(input.limit)
-        .offset((input.page - 1) * input.limit);
-      const [totalRow] = await db.select({ count: count() }).from(notifications).where(eq(notifications.userId, ctx.user.id));
-      const [unreadRow] = await db.select({ count: count() }).from(notifications)
-        .where(and(eq(notifications.userId, ctx.user.id), eq(notifications.isRead, false)));
-      return {
-        items: userNotifs,
-        total: totalRow?.count ?? 0,
-        unreadCount: unreadRow?.count ?? 0,
-      };
+        .offset(pageOffset);
+      return userNotifs;
     }),
 
   markRead: auditedProcedure

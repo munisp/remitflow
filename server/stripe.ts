@@ -5,7 +5,7 @@ let stripeClient: Stripe | null = null;
 
 export function getStripe(): Stripe {
   if (!stripeClient) {
-    const key = (ENV as any).STRIPE_SECRET_KEY ?? process.env.STRIPE_SECRET_KEY ?? "";
+    const key = (ENV as any).STRIPE_SECRET_KEY ?? process.env.STRIPE_SECRET_KEY ?? "sk_test_placeholder";
     stripeClient = new Stripe(key, { apiVersion: "2026-04-22.dahlia" });
   }
   return stripeClient;

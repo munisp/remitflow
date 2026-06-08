@@ -52,6 +52,16 @@ export default function SupportTickets() {
           </Card>
         )) ?? <p className="text-muted-foreground">No tickets yet</p>}
       </div>
+      {/* FAQ Section */}
+      <Card>
+        <CardHeader><CardTitle>FAQ</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <details className="border-b pb-2"><summary className="cursor-pointer font-medium">How long does a transfer take?</summary><p className="text-sm text-muted-foreground mt-1">Most transfers complete within 24 hours. Express corridors settle in under 1 hour.</p></details>
+          <details className="border-b pb-2"><summary className="cursor-pointer font-medium">What are the transfer limits?</summary><p className="text-sm text-muted-foreground mt-1">Tier 1 users can send up to ₦500,000/day. Complete KYC to unlock higher limits.</p></details>
+          <details className="border-b pb-2"><summary className="cursor-pointer font-medium">How do I verify my identity?</summary><p className="text-sm text-muted-foreground mt-1">Go to Settings → KYC Verification to submit your ID document and complete liveness check.</p></details>
+          <details><summary className="cursor-pointer font-medium">How do I contact support?</summary><p className="text-sm text-muted-foreground mt-1">Create a ticket above or email support@remitflow.com. Response time is under 4 hours.</p></details>
+        </CardContent>
+      </Card>
     </div>
   );
 }

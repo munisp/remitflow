@@ -697,7 +697,7 @@ const realTimeFXStreamRouter = router({
       minRate: sql<number>`MIN(CAST(${fxRateHistory.rate} AS NUMERIC))`,
     }).from(fxRateHistory)
       .groupBy(fxRateHistory.fromCurrency, fxRateHistory.toCurrency).limit(20);
-    return rows.map((r: any) => {
+    const pairs = rows.map((r: any) => {
       const avg = Number(r.avgRate ?? 1);
       const std = Number(r.stdRate ?? 0);
       const volatility = avg > 0 ? Math.round((std / avg) * 10000) / 10000 : 0;
@@ -710,6 +710,8 @@ const realTimeFXStreamRouter = router({
         change24h: change,
       };
     });
+    const globalIndex = pairs.length > 0 ? Math.round(pairs.reduce((s: number, p: { volatility: number }) => s + p.volatility, 0) / pairs.length * 10000) / 10000 : 0;
+    return { pairs, globalIndex };
   }),
 });
 
@@ -902,4 +904,7 @@ export const v101Router = router({
   redisCache: redisCacheStatsRouter,
   kafkaEventBus: kafkaEventBusRouter,
   carbonCredits: carbonCreditsMarketRouter,
+  fxMarket: realTimeFXStreamRouter,
+  treasuryStressTest: liquidityStressTestingRouter,
+  gamification: loyaltyGamificationRouter,
 });

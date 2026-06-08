@@ -229,21 +229,17 @@ describe("v93 — DirectDebit Router Input Validation", () => {
 
   it("directDebit.pause validates mandateId as number", async () => {
     const caller = appRouter.createCaller(userCtx());
-    // pause returns success even for non-existent mandates (idempotent)
-    const result = await caller.directDebit.pause({ mandateId: 99999 });
-    expect(result).toHaveProperty("success");
+    await expect(caller.directDebit.pause({ mandateId: 99999 })).rejects.toThrow("Mandate not found");
   });
 
   it("directDebit.resume validates mandateId as number", async () => {
     const caller = appRouter.createCaller(userCtx());
-    const result = await caller.directDebit.resume({ mandateId: 99999 });
-    expect(result).toHaveProperty("success");
+    await expect(caller.directDebit.resume({ mandateId: 99999 })).rejects.toThrow("Mandate not found");
   });
 
   it("directDebit.cancel validates mandateId as number", async () => {
     const caller = appRouter.createCaller(userCtx());
-    const result = await caller.directDebit.cancel({ mandateId: 99999 });
-    expect(result).toHaveProperty("success");
+    await expect(caller.directDebit.cancel({ mandateId: 99999 })).rejects.toThrow("Mandate not found");
   });
 });
 

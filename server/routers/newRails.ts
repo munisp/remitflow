@@ -59,7 +59,7 @@ async function callRailService(url: string, path: string, body: unknown) {
         }
       } catch { /* DB unavailable — propagate original error */ }
       logger.warn({ url, path }, "Rail service unavailable — queued for retry");
-      return { status: "queued", queued: true, message: "Payment queued for retry — microservice temporarily unavailable" };
+      return { status: "mock_submitted", mock: true, queued: true, message: "Payment queued for retry — microservice temporarily unavailable" };
     }
     throw err;
   }

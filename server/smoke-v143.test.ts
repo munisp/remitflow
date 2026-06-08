@@ -96,13 +96,13 @@ describe("isGhostBeneficiary (v143)", () => {
 
 // ─── 3. Round-Tripping Detection ─────────────────────────────────────────────
 describe("detectRoundTripping (v143)", () => {
-  it("does not flag a user with no transfer history", () => {
-    const result = detectRoundTripping(77001);
+  it("does not flag a user with no transfer history", async () => {
+    const result = await detectRoundTripping(77001);
     expect(result.flagged).toBe(false);
   });
 
-  it("returns an object with flagged and optional reason", () => {
-    const result = detectRoundTripping(77002);
+  it("returns an object with flagged and optional reason", async () => {
+    const result = await detectRoundTripping(77002);
     expect(result).toHaveProperty("flagged");
     expect(typeof result.flagged).toBe("boolean");
   });

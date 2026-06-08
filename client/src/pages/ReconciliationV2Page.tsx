@@ -22,8 +22,8 @@ export default function ReconciliationV2Page() {
 
   const { data: history, refetch: refetchHistory } = trpc.v99.reconciliationV2.history.useQuery({ limit: 10 });
 
-  const runMutation = trpc.v99.reconciliationV2.runCheck.useMutation({
-    onSuccess: (data) => {
+  const runMutation = trpc.v99.reconciliationV2.run.useMutation({
+    onSuccess: (data: { status: string; discrepancies: { type: string; severity: string; message: string }[] }) => {
       if (data.status === "clean") {
         toast.success("Reconciliation complete — no discrepancies found!");
       } else {
@@ -31,7 +31,7 @@ export default function ReconciliationV2Page() {
       }
       refetchHistory();
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e: { message: string }) => toast.error(e.message),
   });
 
   const handleRun = () => {
@@ -124,7 +124,7 @@ export default function ReconciliationV2Page() {
             {result.discrepancies.length > 0 && (
               <div className="space-y-2">
                 <p className="font-semibold text-sm">Discrepancies:</p>
-                {result.discrepancies.map((d, i) => (
+                {result.discrepancies.map((d: { type: string; severity: string; message: string; count?: number }, i: number) => (
                   <div key={i} className="flex items-start gap-2 bg-white/60 rounded-lg p-3 text-sm">
                     <AlertTriangle className={`h-4 w-4 mt-0.5 flex-shrink-0 ${d.severity === "high" ? "text-red-600" : "text-amber-600"}`} />
                     <div>

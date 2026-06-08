@@ -14,6 +14,7 @@
  *     body: JSON.stringify(payload),
  *   });
  */
+import { createHmac } from "crypto";
 import { logger } from "../_core/logger";
 import { executeWithCircuitBreaker } from "../middleware/circuitBreaker";
 
@@ -61,7 +62,6 @@ function generateServiceToken(): string {
     scope: "inter-service",
   })).toString("base64url");
 
-  const { createHmac } = require("crypto");
   const signature = createHmac("sha256", SERVICE_JWT_SECRET)
     .update(`${header}.${payload}`)
     .digest("base64url");

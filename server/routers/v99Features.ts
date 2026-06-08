@@ -219,8 +219,7 @@ export const complianceScoringRouter = router({
 });
 
 // ─── 4. Transfer Limits V2 ────────────────────────────────────────────────────
-export const transferLimitsV2Router = router({
-  getMyLimits: protectedProcedure.query(async ({ ctx }) => {
+const limitsQueryFn = async (ctx: { user: { id: number; kycTier: string | null } }) => {
     const db = await getDb();
     const user = ctx.user;
     const kycStatus = user.kycTier === "tier0" ? "none" : user.kycTier === "tier1" ? "pending" : "approved";
@@ -232,7 +231,6 @@ export const transferLimitsV2Router = router({
     };
     const limits = limitsMap[kycStatus as keyof typeof limitsMap];
 
-    // Calculate usage
     let dailyUsage = 0;
     let monthlyUsage = 0;
     if (db) {
@@ -251,6 +249,8 @@ export const transferLimitsV2Router = router({
     return {
       kycStatus,
       limits,
+      daily: limits.daily,
+      monthly: limits.monthly,
       usage: { daily: dailyUsage, monthly: monthlyUsage },
       remaining: { daily: Math.max(0, limits.daily - dailyUsage), monthly: Math.max(0, limits.monthly - monthlyUsage) },
       utilizationPct: {
@@ -259,7 +259,11 @@ export const transferLimitsV2Router = router({
       },
       upgradeRequired: kycStatus !== "approved",
     };
-  }),
+};
+
+export const transferLimitsV2Router = router({
+  getMyLimits: protectedProcedure.query(async ({ ctx }) => limitsQueryFn(ctx)),
+  getLimits: protectedProcedure.query(async ({ ctx }) => limitsQueryFn(ctx)),
   requestIncrease: protectedProcedure
     .input(z.object({
       reason: z.string().min(10, "Please provide at least 10 characters explaining your reason"),
@@ -339,6 +343,16 @@ export const systemHealthRouter = router({
       },
       alerts,
     };
+  }),
+
+  getStatus: publicProcedure.query(async () => {
+    const db = await getDb();
+    let dbOk = false;
+    if (db) {
+      try { await db.execute(sql`SELECT 1`); dbOk = true; } catch { /* */ }
+    }
+    const status = !dbOk ? "unhealthy" : "healthy";
+    return { status, timestamp: new Date().toISOString() };
   }),
 
   getMetrics: publicProcedure
@@ -443,7 +457,7 @@ export const auditTrailV2Router = router({
 
 // ─── 7. Reconciliation V2 ────────────────────────────────────────────────────
 export const reconciliationV2Router = router({
-  runCheck: adminProcedure
+  run: adminProcedure
     .input(z.object({ fromDate: z.string(), toDate: z.string() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -473,7 +487,7 @@ export const reconciliationV2Router = router({
       }
 
       return {
-        status: discrepancies.length === 0 ? "clean" : "issues",
+        status: discrepancies.length === 0 ? "clean" : "discrepancies_found",
         period: { from: from.toISOString(), to: to.toISOString() },
         summary: {
           totalTransactions: Number(totals?.total ?? 0),
@@ -549,10 +563,10 @@ export const feeRulesEngineRouter = router({
         // Fallback to wildcard
         const wildcards = await db.select().from(feeRules)
           .where(and(eq(feeRules.isActive, true), eq(feeRules.corridor, "*→*"))).limit(1);
-        if (!wildcards[0]) return { appliedRule: "None", fee: 0, feeRate: 0, netAmount: input.amount };
+        if (!wildcards[0]) return { appliedRule: "None", fee: 0, totalFee: 0, feeRate: 0, netAmount: input.amount, appliedRules: [] as string[] };
         const wc = wildcards[0];
         const fee = Math.min(Number(wc.maxFee ?? 99), Math.max(Number(wc.minFee ?? 0), input.amount * (Number(wc.feePercentage ?? 0) / 100)));
-        return { appliedRule: wc.corridor, fee, feeRate: parseFloat(((fee / input.amount) * 100).toFixed(3)), netAmount: input.amount - fee };
+        return { appliedRule: wc.corridor, fee, totalFee: fee, feeRate: parseFloat(((fee / input.amount) * 100).toFixed(3)), netAmount: input.amount - fee, appliedRules: [wc.corridor] };
       }
 
       let fee = 0;
@@ -562,7 +576,7 @@ export const feeRulesEngineRouter = router({
         fee = Number(rule.feeFixed ?? 0);
       }
       const feeRate = input.amount > 0 ? parseFloat(((fee / input.amount) * 100).toFixed(3)) : 0;
-      return { appliedRule: rule.corridor, fee, feeRate, netAmount: input.amount - fee };
+      return { appliedRule: rule.corridor, fee, totalFee: fee, feeRate, netAmount: input.amount - fee, appliedRules: [rule.corridor] };
     }),
 
   create: adminProcedure

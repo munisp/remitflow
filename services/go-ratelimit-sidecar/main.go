@@ -112,6 +112,7 @@ type RateLimitRequest struct {
 	Key        string `json:"key"`        // e.g. "user:123:transfer.create"
 	Limit      int    `json:"limit"`      // max requests
 	WindowSecs int    `json:"windowSecs"` // sliding window in seconds
+	Window     int    `json:"window"`     // alias for windowSecs
 }
 
 type RateLimitResponse struct {
@@ -131,6 +132,9 @@ func handleRateLimitCheck(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
+	}
+	if req.WindowSecs == 0 && req.Window > 0 {
+		req.WindowSecs = req.Window
 	}
 	if req.Key == "" || req.Limit <= 0 || req.WindowSecs <= 0 {
 		http.Error(w, "key, limit, windowSecs are required", http.StatusBadRequest)
@@ -613,6 +617,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ratelimit/check", handleRateLimitCheck)
+	mux.HandleFunc("/check", handleRateLimitCheck)
 	mux.HandleFunc("/validate", handleValidate)
 	mux.HandleFunc("/idempotency/check", handleIdempotencyCheck)
 	mux.HandleFunc("/idempotency/store", handleIdempotencyStore)

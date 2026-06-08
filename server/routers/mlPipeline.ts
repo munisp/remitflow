@@ -16,8 +16,9 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure, adminProcedure } from "../_core/trpc.js";
+import { router, protectedProcedure, adminProcedure, auditedProcedure } from "../_core/trpc.js";
 import { logger } from "../_core/logger.js";
+import { createAuditLog } from "../db.js";
 
 // ─── Service URLs ───────────────────────────────────────────────────────────
 

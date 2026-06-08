@@ -72,6 +72,7 @@ import 'screens/bulk_user_actions_screen.dart';
 import 'screens/business_credit_scoring_screen.dart';
 import 'screens/business_savings_screen.dart';
 import 'screens/c_b_d_c_admin_screen.dart';
+import 'screens/cbdc_admin_screen.dart' as cbdc_compat;
 import 'screens/c_b_d_c_screen.dart';
 import 'screens/c_t_r_compliance_screen.dart';
 import 'screens/carbon_offset_page_screen.dart';
@@ -157,6 +158,7 @@ import 'screens/fee_rules_c_r_u_d_page_screen.dart';
 import 'screens/fee_rules_c_r_u_d_v2_page_screen.dart';
 import 'screens/fee_rules_crud_screen.dart';
 import 'screens/fee_rules_crud_v2_screen.dart';
+import 'screens/fee_rules_crudv2_page_screen.dart' as frcv2_compat;
 import 'screens/fee_rules_engine_screen.dart';
 import 'screens/float_income_dashboard_screen.dart';
 import 'screens/form_m_history_screen.dart';
@@ -181,6 +183,7 @@ import 'screens/immigrant_worker_send_screen.dart';
 import 'screens/investment_portfolio_screen.dart';
 import 'screens/invoice_financing_screen.dart';
 import 'screens/k_g_q_a_page_screen.dart';
+import 'screens/kgqa_page_screen.dart' as kgqa_compat;
 import 'screens/k_y_c_admin_queue_screen.dart';
 import 'screens/k_y_c_lifecycle_page_screen.dart';
 import 'screens/k_y_c_lifecycle_tracker_screen.dart';
@@ -245,6 +248,7 @@ import 'screens/open_banking_page_screen.dart';
 import 'screens/open_banking_screen.dart';
 import 'screens/outbound_revenue_model_screen.dart';
 import 'screens/p_b_a_c_policies_screen.dart';
+import 'screens/pbac_policies_screen.dart' as pbac_compat;
 import 'screens/p_o_s_management_screen.dart';
 import 'screens/p_w_a_dashboard_screen.dart';
 import 'screens/p_w_a_features_screen.dart';
@@ -295,6 +299,7 @@ import 'screens/request_money_screen.dart';
 import 'screens/revenue_analytics_page_screen.dart';
 import 'screens/revenue_analytics_screen.dart';
 import 'screens/revenue_share_p_w_a_screen.dart';
+import 'screens/revenue_share_pwa_screen.dart' as pwa_compat;
 import 'screens/revenue_share_screen.dart';
 import 'screens/s_l_a_monitor_screen.dart';
 import 'screens/s_m_e_trade_payment_screen.dart';
@@ -321,13 +326,14 @@ import 'screens/send_to_ghana_screen.dart';
 import 'screens/send_to_kenya_screen.dart';
 import 'screens/send_to_mali_screen.dart';
 import 'screens/send_to_niger_screen.dart';
+import 'screens/send_abroad_screen.dart';
 import 'screens/send_to_nigeria_screen.dart';
 import 'screens/send_to_senegal_screen.dart';
 import 'screens/send_to_south_africa_screen.dart';
 import 'screens/send_to_tanzania_screen.dart';
 import 'screens/send_to_togo_screen.dart';
 import 'screens/send_to_uganda_screen.dart';
-import 'screens/services_health_dashboard_screen.dart';
+import 'screens/services_health_dashboard_screen.dart' as shd_compat;
 import 'screens/settings_screen.dart';
 import 'screens/settlement_netting_page_screen.dart';
 import 'screens/settlement_netting_screen.dart';
@@ -475,6 +481,7 @@ final _router = GoRouter(
     GoRoute(path: '/business-credit-scoring', builder: (context, state) => const CreditScore()),
     GoRoute(path: '/business-savings', builder: (context, state) => const BusinessSavingsAccount()),
     GoRoute(path: '/c-b-d-c-admin', builder: (context, state) => const CBDCAdminScreen()),
+    GoRoute(path: '/cbdc-admin', builder: (context, state) => const CBDCAdminScreen()),
     GoRoute(path: '/c-b-d-c', builder: (context, state) => const CBDCScreen()),
     GoRoute(path: '/c-t-r-compliance', builder: (context, state) => const CTRComplianceScreen()),
     GoRoute(path: '/carbon-offset-page', builder: (context, state) => const CarbonOffsetPageScreen()),
@@ -559,6 +566,7 @@ final _router = GoRouter(
     GoRoute(path: '/fee-rules-c-r-u-d-v2-page', builder: (context, state) => const FeeRulesCRUDV2PageScreen()),
     GoRoute(path: '/fee-rules-crud', builder: (context, state) => const FeeRulesCRUDScreen()),
     GoRoute(path: '/fee-rules-crud-v2', builder: (context, state) => const FeeRulesCRUDV2Screen()),
+    GoRoute(path: '/fee-rules-v2', builder: (context, state) => const FeeRulesCRUDV2Screen()),
     GoRoute(path: '/fee-rules-engine', builder: (context, state) => const FeeRulesEngineScreen()),
     GoRoute(path: '/float-income-dashboard', builder: (context, state) => const FloatIncomeDashboardScreen()),
     GoRoute(path: '/form-m-history', builder: (context, state) => const FormMHistoryScreen()),
@@ -583,6 +591,7 @@ final _router = GoRouter(
     GoRoute(path: '/investment-portfolio', builder: (context, state) => const InvestmentPortfolioScreen()),
     GoRoute(path: '/invoice-financing', builder: (context, state) => const InvoiceFinancing()),
     GoRoute(path: '/k-g-q-a-page', builder: (context, state) => const KGQAPageScreen()),
+    GoRoute(path: '/kgqa', builder: (context, state) => const KGQAPageScreen()),
     GoRoute(path: '/k-y-c-admin-queue', builder: (context, state) => const KYCAdminQueueScreen()),
     GoRoute(path: '/k-y-c-lifecycle-page', builder: (context, state) => const KYCLifecyclePageScreen()),
     GoRoute(path: '/k-y-c-lifecycle-tracker', builder: (context, state) => const KYCLifecycleTrackerScreen()),
@@ -613,6 +622,7 @@ final _router = GoRouter(
     GoRoute(path: '/loyalty-rewards-v2', builder: (context, state) => const LoyaltyRewardsV2Screen()),
     GoRoute(path: '/m-f-a-settings', builder: (context, state) => const MFASettingsScreen()),
     GoRoute(path: '/m-pesa', builder: (context, state) => const MPesaScreen()),
+    GoRoute(path: '/mpesa', builder: (context, state) => const MPesaScreen()),
     GoRoute(path: '/medical-tourism', builder: (context, state) => const MedicalTourismScreen()),
     GoRoute(path: '/merchant-k-y-b-page', builder: (context, state) => const MerchantKYBPageScreen()),
     GoRoute(path: '/merchant-k-y-b-review', builder: (context, state) => const MerchantKYBReviewScreen()),
@@ -645,6 +655,7 @@ final _router = GoRouter(
     GoRoute(path: '/open-banking', builder: (context, state) => const OpenBankingScreen()),
     GoRoute(path: '/outbound-revenue-model', builder: (context, state) => const OutboundRevenueModelScreen()),
     GoRoute(path: '/p-b-a-c-policies', builder: (context, state) => const PBACPoliciesScreen()),
+    GoRoute(path: '/pbac-policies', builder: (context, state) => const PBACPoliciesScreen()),
     GoRoute(path: '/p-o-s-management', builder: (context, state) => const POSManagementScreen()),
     GoRoute(path: '/p-w-a-dashboard', builder: (context, state) => const PWADashboardScreen()),
     GoRoute(path: '/p-w-a-features', builder: (context, state) => const PWAFeaturesScreen()),
@@ -694,6 +705,7 @@ final _router = GoRouter(
     GoRoute(path: '/revenue-analytics-page', builder: (context, state) => const RevenueAnalyticsPageScreen()),
     GoRoute(path: '/revenue-analytics', builder: (context, state) => const RevenueAnalyticsScreen()),
     GoRoute(path: '/revenue-share-p-w-a', builder: (context, state) => const RevenueSharePWAScreen()),
+    GoRoute(path: '/revenue-share-pwa', builder: (context, state) => const RevenueSharePWAScreen()),
     GoRoute(path: '/revenue-share', builder: (context, state) => const RevenueShareScreen()),
     GoRoute(path: '/s-l-a-monitor', builder: (context, state) => const SLAMonitorScreen()),
     GoRoute(path: '/s-m-e-trade-payment', builder: (context, state) => const SMETradePaymentScreen()),
@@ -720,6 +732,7 @@ final _router = GoRouter(
     GoRoute(path: '/send-to-kenya', builder: (context, state) => const SendToKenyaScreen()),
     GoRoute(path: '/send-to-mali', builder: (context, state) => const SendToMaliScreen()),
     GoRoute(path: '/send-to-niger', builder: (context, state) => const SendToNigerScreen()),
+    GoRoute(path: '/send-abroad', builder: (context, state) => const SendAbroadScreen()),
     GoRoute(path: '/send-to-nigeria', builder: (context, state) => const SendToNigeriaScreen()),
     GoRoute(path: '/send-to-senegal', builder: (context, state) => const SendToSenegalScreen()),
     GoRoute(path: '/send-to-south-africa', builder: (context, state) => const SendToSouthAfricaScreen()),
@@ -727,6 +740,7 @@ final _router = GoRouter(
     GoRoute(path: '/send-to-togo', builder: (context, state) => const SendToTogoScreen()),
     GoRoute(path: '/send-to-uganda', builder: (context, state) => const SendToUgandaScreen()),
     GoRoute(path: '/services-health-dashboard', builder: (context, state) => const ServicesHealthDashboardScreen()),
+    GoRoute(path: '/services-health', builder: (context, state) => const ServicesHealthDashboardScreen()),
     GoRoute(path: '/settings', builder: (context, state) => const SettingsScreen()),
     GoRoute(path: '/settlement-netting-page', builder: (context, state) => const SettlementNettingPageScreen()),
     GoRoute(path: '/settlement-netting', builder: (context, state) => const SettlementNettingScreen()),
@@ -748,6 +762,7 @@ final _router = GoRouter(
     GoRoute(path: '/support-tickets', builder: (context, state) => const SupportTicketsScreen()),
     GoRoute(path: '/swift-tracker', builder: (context, state) => const SWIFTTrackerScreen()),
     GoRoute(path: '/system-config-admin', builder: (context, state) => const SystemConfigAdminScreen()),
+    GoRoute(path: '/system-config', builder: (context, state) => const SystemConfigScreen()),
     GoRoute(path: '/system-config-page', builder: (context, state) => const SystemConfigScreen()),
     GoRoute(path: '/system-health-dashboard-v2', builder: (context, state) => const SystemHealthDashboardV2()),
     GoRoute(path: '/talent-bridge', builder: (context, state) => const TalentBridgeScreen()),
