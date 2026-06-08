@@ -97,9 +97,43 @@ func NewAgentIntelligenceService() *AgentIntelligenceService {
 }
 
 func (s *AgentIntelligenceService) ComputeHeatmap() []DemandHeatmap {
+	var heatmap []DemandHeatmap
+	if db != nil {
+		rows, err := db.Query("SELECT data FROM agent_intelligence_state WHERE id LIKE 'metrics:%' ORDER BY updated_at DESC LIMIT 100")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var raw []byte
+				if err := rows.Scan(&raw); err != nil {
+					continue
+				}
+				var m AgentMetrics
+				if err := json.Unmarshal(raw, &m); err != nil {
+					continue
+				}
+				intensity := "low"
+				if m.TxCount > 100 {
+					intensity = "critical"
+				} else if m.TxCount > 50 {
+					intensity = "high"
+				} else if m.TxCount > 20 {
+					intensity = "medium"
+				}
+				heatmap = append(heatmap, DemandHeatmap{
+					AgentID:   m.AgentID,
+					Intensity: intensity,
+					Volume24h: m.TotalVolume,
+					TxCount:   m.TxCount,
+				})
+			}
+			if len(heatmap) > 0 {
+				return heatmap
+			}
+		}
+	}
+	// Fallback to in-memory
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var heatmap []DemandHeatmap
 	for id, m := range s.metrics {
 		intensity := "low"
 		if m.TxCount > 100 {
@@ -120,6 +154,27 @@ func (s *AgentIntelligenceService) ComputeHeatmap() []DemandHeatmap {
 }
 
 func (s *AgentIntelligenceService) ComputeFloatRecommendation(agentID string) FloatRecommendation {
+	// DB-primary read (middleware-ready: swap to TigerBeetle in production)
+	if db != nil {
+		var m AgentMetrics
+		if err := dbGet("metrics:"+agentID, &m); err == nil {
+			avgDaily := m.TotalVolume / 7
+			buffer := 1.3
+			recommended := math.Ceil(avgDaily * buffer)
+			action := "maintain"
+			if recommended > m.TotalVolume*0.15 {
+				action = "increase"
+			} else if recommended < m.TotalVolume*0.08 {
+				action = "decrease"
+			}
+			return FloatRecommendation{
+				AgentID: agentID, RecommendedFloat: recommended,
+				AvgDailyVolume: avgDaily, PeakDayMultiplier: 1.5,
+				BufferPercent: 30, Action: action,
+			}
+		}
+	}
+	// Fallback to in-memory
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	m, ok := s.metrics[agentID]
@@ -136,19 +191,58 @@ func (s *AgentIntelligenceService) ComputeFloatRecommendation(agentID string) Fl
 		action = "decrease"
 	}
 	return FloatRecommendation{
-		AgentID:           agentID,
-		RecommendedFloat:  recommended,
-		AvgDailyVolume:    avgDaily,
-		PeakDayMultiplier: 1.5,
-		BufferPercent:     30,
-		Action:            action,
+		AgentID: agentID, RecommendedFloat: recommended,
+		AvgDailyVolume: avgDaily, PeakDayMultiplier: 1.5,
+		BufferPercent: 30, Action: action,
 	}
 }
 
 func (s *AgentIntelligenceService) ComputePerformanceScores() []PerformanceScore {
+	var scores []PerformanceScore
+	if db != nil {
+		rows, err := db.Query("SELECT data FROM agent_intelligence_state WHERE id LIKE 'metrics:%' ORDER BY updated_at DESC LIMIT 200")
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var raw []byte
+				if err := rows.Scan(&raw); err != nil {
+					continue
+				}
+				var m AgentMetrics
+				if err := json.Unmarshal(raw, &m); err != nil {
+					continue
+				}
+				volumeScore := math.Min(10, m.TotalVolume/1000000*2)
+				activityScore := math.Min(10, float64(m.TxCount)/150*10)
+				errorScore := 10 - math.Min(10, m.ErrorRate*100)
+				customerScore := 8.0
+				overall := (volumeScore + activityScore + errorScore + customerScore) / 4
+				tier := "bronze"
+				if overall > 8 {
+					tier = "platinum"
+				} else if overall > 6 {
+					tier = "gold"
+				} else if overall > 4 {
+					tier = "silver"
+				}
+				scores = append(scores, PerformanceScore{
+					AgentID: m.AgentID, VolumeScore: volumeScore, ActivityScore: activityScore,
+					ErrorScore: errorScore, CustomerScore: customerScore,
+					OverallScore: overall, Tier: tier,
+				})
+			}
+			if len(scores) > 0 {
+				sort.Slice(scores, func(i, j int) bool { return scores[i].OverallScore > scores[j].OverallScore })
+				for i := range scores {
+					scores[i].Rank = i + 1
+				}
+				return scores
+			}
+		}
+	}
+	// Fallback to in-memory
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	var scores []PerformanceScore
 	for id, m := range s.metrics {
 		volumeScore := math.Min(10, m.TotalVolume/1000000*2)
 		activityScore := math.Min(10, float64(m.TxCount)/150*10)
@@ -178,7 +272,6 @@ func (s *AgentIntelligenceService) ComputePerformanceScores() []PerformanceScore
 
 func (s *AgentIntelligenceService) RecordTransaction(agentID string, amount float64) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	m, ok := s.metrics[agentID]
 	if !ok {
 		m = &AgentMetrics{AgentID: agentID}
@@ -188,6 +281,18 @@ func (s *AgentIntelligenceService) RecordTransaction(agentID string, amount floa
 	m.TotalVolume += amount
 	if m.TxCount > 0 {
 		m.AvgTxSize = m.TotalVolume / float64(m.TxCount)
+	}
+	metricsCopy := *m
+	s.mu.Unlock()
+
+	// Write-through to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() {
+			_ = dbUpsert("metrics:"+agentID, metricsCopy)
+			_ = dbLogEvent("transaction.recorded", map[string]interface{}{
+				"agentId": agentID, "amount": amount, "txCount": metricsCopy.TxCount,
+			})
+		}()
 	}
 }
 
@@ -287,29 +392,49 @@ func dbLogEvent(eventType string, payload interface{}) error {
 
 
 // loadFromDB populates in-memory state from database on startup (write-through cache warm)
-func loadFromDB() {
+func loadFromDB(svc *AgentIntelligenceService) {
 	if db == nil {
 		return
 	}
-	rows, err := dbList(1000)
+	rows, err := db.Query("SELECT id, data FROM agent_intelligence_state WHERE id LIKE 'metrics:%'")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
 	}
-	slog.Info("loaded persisted state from database", "records", len(rows))
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var id string
+		var data []byte
+		if err := rows.Scan(&id, &data); err != nil {
+			continue
+		}
+		var m AgentMetrics
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		// Strip "metrics:" prefix to get agentID
+		agentID := id[8:]
+		m.AgentID = agentID
+		svc.mu.Lock()
+		svc.metrics[agentID] = &m
+		svc.mu.Unlock()
+		count++
+	}
+	slog.Info("loaded persisted state from database", "records", count)
 }
 
 func main() {
 	port := envOrDefault("PORT", "8130")
 
+	svc := NewAgentIntelligenceService()
+
 	if err := initDB(); err != nil {
 		slog.Warn("database init failed, using in-memory fallback", "err", err)
 	} else {
 		slog.Info("database connected", "service", "go-agent-intelligence")
-		loadFromDB()
+		loadFromDB(svc)
 	}
-
-	svc := NewAgentIntelligenceService()
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -358,6 +483,11 @@ func main() {
 			FromAgent:  req.FromAgentID,
 			ToAgent:    req.ToAgentID,
 		}
+		// Persist transfer to DB (middleware-ready: in production this goes to TigerBeetle ledger)
+		if db != nil {
+			_ = dbUpsert("float-transfer:"+resp.TransferID, resp)
+			_ = dbLogEvent("float_transfer.created", resp)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(resp)
@@ -390,7 +520,8 @@ func main() {
 	}()
 
 	
-	// Periodic state persistence to PostgreSQL (write-through cache)
+	// Periodic full state persistence to PostgreSQL (belt-and-suspenders with write-through)
+	// In production, this would also publish to Kafka for downstream analytics
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -398,8 +529,12 @@ func main() {
 			if db == nil {
 				continue
 			}
-			// Persist current state snapshot
-			dbLogEvent("state_snapshot", map[string]string{"status": "persisted"})
+			svc.mu.RLock()
+			for id, m := range svc.metrics {
+				_ = dbUpsert("metrics:"+id, m)
+			}
+			svc.mu.RUnlock()
+			_ = dbLogEvent("state_snapshot", map[string]interface{}{"metricsCount": len(svc.metrics)})
 		}
 	}()
 

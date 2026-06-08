@@ -106,6 +106,10 @@ func handleCreateCorrespondent(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	correspondents[c.ID] = c
 	mu.Unlock()
+	// Persist to DB (middleware-ready)
+	if db != nil {
+		go func() { _ = dbUpsert("correspondents:"+fmt.Sprint(c.ID), c) }()
+	}
 	if c.RiskScore > 75 {
 		alert := DerisikingAlert{
 			ID:              fmt.Sprintf("ALERT-%d", time.Now().UnixNano()),
@@ -130,6 +134,15 @@ func handleCreateCorrespondent(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleListCorrespondents(w http.ResponseWriter, r *http.Request) {
+	// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		dbData, dbErr := dbList(500)
+		if dbErr == nil && len(dbData) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"items": dbData, "count": len(dbData), "source": "postgresql"})
+			return
+		}
+	}
 	mu.RLock()
 	list := make([]Correspondent, 0, len(correspondents))
 	for _, c := range correspondents {
@@ -151,6 +164,10 @@ func handleCreateClearingLine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cl.ID = fmt.Sprintf("CL-%d", time.Now().UnixNano())
+	// Persist to DB (middleware-ready)
+	if db != nil {
+		go func() { _ = dbUpsert("clearingLines:"+fmt.Sprint(cl.CorrespondentID), cl) }()
+	}
 	cl.AvailableUSD = cl.LimitUSD - cl.UsedUSD
 	cl.IsActive = true
 	if cl.ExpiresAt.IsZero() {
@@ -189,6 +206,13 @@ func handleDerisikingAlert(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	alerts[alert.CorrespondentID] = append(alerts[alert.CorrespondentID], alert)
 	mu.Unlock()
+	// Persist to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() {
+			_ = dbUpsert("alerts:"+alert.ID, alert)
+			_ = dbLogEvent("derisking_alert_created", map[string]interface{}{"alert_id": alert.ID, "severity": alert.Severity})
+		}()
+	}
 	publishEvent("correspondent-events", map[string]interface{}{"event": "derisking_alert_created", "alert_id": alert.ID, "severity": alert.Severity})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)

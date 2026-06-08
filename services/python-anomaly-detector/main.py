@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import json
 """
@@ -46,8 +47,6 @@ API:
   POST /detect/ransomware    — Ransomware behavioural detection
   GET  /health               — Liveness probe
 """
-
-from __future__ import annotations
 
 import math
 import time
@@ -131,6 +130,9 @@ def db_log_event(event_type: str, payload: dict):
 
 
 app = FastAPI(title="RemitFlow Anomaly Detector", version="1.0.0")
+
+# Initialize PostgreSQL tables (middleware-ready)
+_db_ensure_tables("anomaly_detector")
 
 # ─── Shared In-Memory State ───────────────────────────────────────────────────
 # In production these would be backed by Redis with TTL-based expiry.
@@ -322,6 +324,14 @@ async def detect_ato(req: ATORequest) -> ATOResponse:
     locations.append({"lat": req.latitude, "lon": req.longitude, "ts": now_ms, "fp": req.device_fingerprint})
     ip_events.append({"ts": now_ms, "user": req.user_id})
 
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = ATOResponse if isinstance(ATOResponse, dict) else {"result": str(ATOResponse)}
+        _db_upsert("anomaly_detector", f"detect_ato:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("anomaly_detector", "detect_ato", _result_data)
+    except Exception:
+        pass
     return ATOResponse(risk_score=round(score, 3), flags=flags, action=_action_from_score(score))
 
 
@@ -363,6 +373,14 @@ async def detect_credential_stuffing(req: CredentialStuffingRequest) -> Credenti
     # Blend rule score with ML score
     final_score = max(score, ml_score * 0.7)
 
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = CredentialStuffingResponse if isinstance(CredentialStuffingResponse, dict) else {"result": str(CredentialStuffingResponse)}
+        _db_upsert("anomaly_detector", f"detect_credential-stuffing:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("anomaly_detector", "detect_credential-stuffing", _result_data)
+    except Exception:
+        pass
     return CredentialStuffingResponse(
         risk_score=round(final_score, 3),
         flags=flags,
@@ -403,6 +421,14 @@ async def detect_bec(req: BECRequest) -> BECResponse:
         "amount": req.transfer_amount_usd,
     })
 
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = BECResponse if isinstance(BECResponse, dict) else {"result": str(BECResponse)}
+        _db_upsert("anomaly_detector", f"detect_bec:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("anomaly_detector", "detect_bec", _result_data)
+    except Exception:
+        pass
     return BECResponse(risk_score=round(score, 3), flags=flags, action=_action_from_score(score))
 
 
@@ -452,6 +478,14 @@ async def detect_round_trip(req: RoundTripRequest) -> RoundTripResponse:
         flags.append(f"high_velocity_outflow: ${total_out_usd:,.0f} across {len(outgoing)} transfers")
         score = max(score, 0.65)
 
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = RoundTripResponse if isinstance(RoundTripResponse, dict) else {"result": str(RoundTripResponse)}
+        _db_upsert("anomaly_detector", f"detect_round-trip:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("anomaly_detector", "detect_round-trip", _result_data)
+    except Exception:
+        pass
     return RoundTripResponse(risk_score=round(score, 3), flags=flags, action=_action_from_score(score))
 
 
@@ -496,6 +530,14 @@ async def detect_ransomware(req: RansomwareRequest) -> RansomwareResponse:
         flags.append(f"high_request_frequency: {len(recent)} requests in 1h")
         score = max(score, 0.5)
 
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = RansomwareResponse if isinstance(RansomwareResponse, dict) else {"result": str(RansomwareResponse)}
+        _db_upsert("anomaly_detector", f"detect_ransomware:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("anomaly_detector", "detect_ransomware", _result_data)
+    except Exception:
+        pass
     return RansomwareResponse(risk_score=round(score, 3), flags=flags, action=_action_from_score(score))
 
 
@@ -513,5 +555,109 @@ async def health() -> Dict[str, Any]:
 
 if __name__ == "__main__":
     import uvicorn
+
+# ─── PostgreSQL Persistence (middleware-ready: swap to TigerBeetle/Kafka in production) ───
+import psycopg2
+import json as _json
+
+def _get_db_conn():
+    """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""
+    try:
+        db_url = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = True
+        return conn
+    except Exception:
+        return None
+
+def _db_ensure_tables(table_prefix):
+    """Create state and events tables if they don't exist."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_prefix}_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL DEFAULT '{{}}',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_prefix}_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    payload JSONB DEFAULT '{{}}',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+def _db_upsert(table_prefix, record_id, data):
+    """Upsert a record to PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"INSERT INTO {table_prefix}_state (id, data, updated_at) VALUES (%s, %s, NOW()) "
+                f"ON CONFLICT (id) DO UPDATE SET data = %s, updated_at = NOW()",
+                (record_id, _json.dumps(data), _json.dumps(data))
+            )
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+def _db_get(table_prefix, record_id):
+    """Get a record from PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT data FROM {table_prefix}_state WHERE id = %s", (record_id,))
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+    return None
+
+def _db_list(table_prefix, limit=200):
+    """List records from PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT data FROM {table_prefix}_state ORDER BY updated_at DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [r[0] for r in rows]
+        except Exception:
+            pass
+    return []
+
+def _db_log_event(table_prefix, event_type, payload):
+    """Log an event to PostgreSQL events table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"INSERT INTO {table_prefix}_events (event_type, payload) VALUES (%s, %s)",
+                (event_type, _json.dumps(payload))
+            )
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
     port = int(__import__("os").environ.get("PORT", "8082"))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)

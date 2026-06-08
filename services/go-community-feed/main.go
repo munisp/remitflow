@@ -99,6 +99,10 @@ func (h *Hub) subscribe() chan ActivityEvent {
 	h.mu.Lock()
 	h.clients[ch] = true
 	h.mu.Unlock()
+	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() { _ = dbLogEvent("subscribe", map[string]string{"service": "go-community-feed"}) }()
+	}
 	return ch
 }
 

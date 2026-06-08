@@ -10,6 +10,7 @@ name = "upi-adapter"
 path = "src/main.rs"
 
 [dependencies]
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "json"] }
 # Web framework
 axum = { version = "0.7", features = ["json", "query", "tracing"] }
 tokio = { version = "1", features = ["full"] }

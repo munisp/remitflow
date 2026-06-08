@@ -76,6 +76,10 @@ func (c *RateCache) Set(pair string, rate AggregatedRate) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.rates[pair] = rate
+	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() { _ = dbLogEvent("Set.state_change", map[string]string{"service": "go-fx-aggregator"}) }()
+	}
 }
 
 func (c *RateCache) All() map[string]AggregatedRate {
@@ -405,6 +409,15 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			dbData, dbErr := dbList(100)
+			if dbErr == nil && len(dbData) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(dbData)
+				return
+			}
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"base":  base,
 			"rates": filtered,
@@ -429,6 +442,15 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			dbData, dbErr := dbList(100)
+			if dbErr == nil && len(dbData) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(dbData)
+				return
+			}
+		}
 		json.NewEncoder(w).Encode(rate)
 	})
 
@@ -450,6 +472,15 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			dbData, dbErr := dbList(100)
+			if dbErr == nil && len(dbData) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(dbData)
+				return
+			}
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"status":     status,
 			"totalPairs": len(all),

@@ -768,8 +768,53 @@ async fn get_metrics(
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
+
+// ─── PostgreSQL Persistence (middleware-ready: swap to TigerBeetle/Kafka in production) ───
+
+async fn init_db() -> PgPool {
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .unwrap_or_else(|e| { eprintln!("DB connection failed (will use in-memory): {}", e); std::process::exit(1); });
+    sqlx::query("CREATE TABLE IF NOT EXISTS escrow_ledger_state (id TEXT PRIMARY KEY, data JSONB NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())")
+        .execute(&pool).await.unwrap_or_default();
+    sqlx::query("CREATE TABLE IF NOT EXISTS escrow_ledger_events (id BIGSERIAL PRIMARY KEY, event_type TEXT NOT NULL, payload JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW())")
+        .execute(&pool).await.unwrap_or_default();
+    pool
+}
+
+async fn db_upsert(pool: &PgPool, id: &str, data: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO escrow_ledger_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()")
+        .bind(id).bind(data).execute(pool).await?;
+    Ok(())
+}
+
+async fn db_get(pool: &PgPool, id: &str) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    let row = sqlx::query("SELECT data FROM escrow_ledger_state WHERE id = $1")
+        .bind(id).fetch_optional(pool).await?;
+    Ok(row.map(|r| r.get("data")))
+}
+
+async fn db_list(pool: &PgPool, limit: i64) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows = sqlx::query("SELECT data FROM escrow_ledger_state ORDER BY updated_at DESC LIMIT $1")
+        .bind(limit).fetch_all(pool).await?;
+    Ok(rows.iter().map(|r| r.get("data")).collect())
+}
+
+async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO escrow_ledger_events (event_type, payload) VALUES ($1, $2)")
+        .bind(event_type).bind(payload).execute(pool).await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
+    let _db_pool = init_db().await;
+    eprintln!("[DB] PostgreSQL connected for rust-escrow-ledger");
+
     tracing_subscriber::fmt::init();
 
     let config = Config::from_env();

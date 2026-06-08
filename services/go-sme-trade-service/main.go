@@ -152,6 +152,14 @@ func handleCreateBatch(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	batches[batch.ID] = batch
 	mu.Unlock()
+	// Persist to DB (middleware-ready)
+	if db != nil {
+		go func() { _ = dbUpsert("batches:"+fmt.Sprint(batch.ID), batch) }()
+	}
+	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() { _ = dbLogEvent("handleCreateBatch.state_change", map[string]string{"service": "go-sme-trade-service"}) }()
+	}
 	// Record in TigerBeetle
 	tbPayload := map[string]interface{}{
 		"entry_type": "sme_batch_created", "batch_id": batch.ID,
@@ -203,6 +211,10 @@ func handleCreateFormM(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	formMs[fm.ID] = fm
 	mu.Unlock()
+	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() { _ = dbLogEvent("handleCreateFormM.state_change", map[string]string{"service": "go-sme-trade-service"}) }()
+	}
 	publishEvent("sme-trade-events", map[string]interface{}{
 		"event": "form_m_created", "form_m_id": fm.ID, "value_usd": fm.ValueUSD,
 	})

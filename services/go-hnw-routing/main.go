@@ -246,6 +246,14 @@ func handleRateLock(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	rateLocks[lock.ID] = lock
 	mu.Unlock()
+	// Persist to DB (middleware-ready)
+	if db != nil {
+		go func() { _ = dbUpsert("rateLocks:"+fmt.Sprint(lock.ID), lock) }()
+	}
+	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() { _ = dbLogEvent("handleRateLock.state_change", map[string]string{"service": "go-hnw-routing"}) }()
+	}
 	publishEvent("hnw-events", map[string]interface{}{
 		"event": "rate_lock_created", "lock_id": lock.ID, "user_id": req.UserID,
 		"fx_rate": fxRate, "expires_at": lock.ExpiresAt.Format(time.RFC3339),

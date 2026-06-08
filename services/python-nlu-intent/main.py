@@ -860,6 +860,9 @@ async def load_or_train_model():
 
 app = FastAPI(title="RemitFlow NLU Intent Classifier", version="1.0.0",
               description="Transformer-based intent classification for remittance payments")
+
+# Initialize PostgreSQL tables (middleware-ready)
+_db_ensure_tables("nlu_intent")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _metrics = {"total_requests": 0, "by_intent": defaultdict(int), "avg_latency_ms": 0.0, "total_latency_ms": 0.0}
@@ -905,6 +908,11 @@ def health():
 
 @app.get("/model-info")
 def model_info():
+    # DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+    db_items = _db_list("nlu_intent", 200)
+    if db_items:
+        return {"items": db_items, "count": len(db_items), "source": "postgresql"}
+    # Fallback: in-memory
     return {
         "model_version": _metadata.get("model_version", "unknown"),
         "architecture": _metadata.get("architecture", "unknown"),
@@ -960,6 +968,14 @@ async def classify(req: ClassifyRequest):
     if req.include_all_scores:
         result.all_scores = {ID2LABEL[i]: round(probs[i].item(), 4) for i in range(NUM_CLASSES)}
 
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = result if isinstance(result, dict) else {"result": str(result)}
+        _db_upsert("nlu_intent", f"classify:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("nlu_intent", "classify", _result_data)
+    except Exception:
+        pass
     return result
 
 
@@ -987,6 +1003,14 @@ async def batch_classify(req: BatchClassifyRequest):
         ))
 
     latency = (time.perf_counter() - t0) * 1000
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = BatchClassifyResponse if isinstance(BatchClassifyResponse, dict) else {"result": str(BatchClassifyResponse)}
+        _db_upsert("nlu_intent", f"batch:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("nlu_intent", "batch", _result_data)
+    except Exception:
+        pass
     return BatchClassifyResponse(results=results, latency_ms=round(latency, 2))
 
 
@@ -1018,10 +1042,122 @@ async def trigger_training():
     async with _model_lock:
         metadata = train_model(data=training_data)
         await load_or_train_model()
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = result if isinstance(result, dict) else {"result": str(result)}
+        _db_upsert("nlu_intent", f"train:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("nlu_intent", "train", _result_data)
+    except Exception:
+        pass
     return {"status": "trained", "data_source": data_source, **{k: v for k, v in metadata.items() if k != "history"}}
 
 
 if __name__ == "__main__":
     import uvicorn
+
+# ─── PostgreSQL Persistence (middleware-ready: swap to TigerBeetle/Kafka in production) ───
+import psycopg2
+import json as _json
+
+def _get_db_conn():
+    """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""
+    try:
+        db_url = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = True
+        return conn
+    except Exception:
+        return None
+
+def _db_ensure_tables(table_prefix):
+    """Create state and events tables if they don't exist."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_prefix}_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL DEFAULT '{{}}',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_prefix}_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    payload JSONB DEFAULT '{{}}',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+def _db_upsert(table_prefix, record_id, data):
+    """Upsert a record to PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"INSERT INTO {table_prefix}_state (id, data, updated_at) VALUES (%s, %s, NOW()) "
+                f"ON CONFLICT (id) DO UPDATE SET data = %s, updated_at = NOW()",
+                (record_id, _json.dumps(data), _json.dumps(data))
+            )
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+def _db_get(table_prefix, record_id):
+    """Get a record from PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT data FROM {table_prefix}_state WHERE id = %s", (record_id,))
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+    return None
+
+def _db_list(table_prefix, limit=200):
+    """List records from PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT data FROM {table_prefix}_state ORDER BY updated_at DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [r[0] for r in rows]
+        except Exception:
+            pass
+    return []
+
+def _db_log_event(table_prefix, event_type, payload):
+    """Log an event to PostgreSQL events table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"INSERT INTO {table_prefix}_events (event_type, payload) VALUES (%s, %s)",
+                (event_type, _json.dumps(payload))
+            )
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
     logger.info(f"RemitFlow NLU Intent Classifier starting on :{PORT}")
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")

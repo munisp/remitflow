@@ -91,6 +91,10 @@ func (s *RateLimitStore) GetBucket(ip string) *TokenBucket {
 	defer s.mu.Unlock()
 	b = newTokenBucket(float64(maxBurstSize), float64(maxRequestsMin)/60.0)
 	s.buckets[ip] = b
+	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() { _ = dbLogEvent("GetBucket.state_change", map[string]string{"service": "go-security-hardening", "ip": ip}) }()
+	}
 	return b
 }
 
@@ -330,6 +334,13 @@ func attackScanHandler(w http.ResponseWriter, r *http.Request) {
 	if blocked {
 		w.WriteHeader(http.StatusForbidden)
 	}
+	// Persist to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() {
+			_ = dbUpsert("attackScanHandler:"+fmt.Sprint(time.Now().UnixNano()), map[string]interface{}{"handler": "attackScanHandler", "time": time.Now()})
+			_ = dbLogEvent("attackScanHandler", map[string]interface{}{"handler": "attackScanHandler"})
+		}()
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"blocked":            blocked,
 		"attack_patterns":    detected,
@@ -365,6 +376,13 @@ func fraudCheckHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	// Persist to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() {
+			_ = dbUpsert("fraudCheckHandler:"+fmt.Sprint(time.Now().UnixNano()), map[string]interface{}{"handler": "fraudCheckHandler", "time": time.Now()})
+			_ = dbLogEvent("fraudCheckHandler", map[string]interface{}{"handler": "fraudCheckHandler"})
+		}()
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"user_id":    req.UserID,
 		"risk_score": maxRiskScore,

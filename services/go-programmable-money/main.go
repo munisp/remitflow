@@ -259,8 +259,16 @@ func main() {
 		engine.mu.Lock()
 		engine.rules[rule.ID] = &rule
 		engine.mu.Unlock()
+		// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+		if db != nil {
+			go func() { _ = dbLogEvent("main.state_change", map[string]string{"service": "go-programmable-money"}) }()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
+		// Persist to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			go func() { _ = dbUpsert("rulescreate:"+fmt.Sprint(time.Now().UnixNano()), rule) }()
+		}
 		json.NewEncoder(w).Encode(rule)
 	})
 
@@ -286,6 +294,12 @@ func main() {
 		}
 		triggered := engine.EvaluateConditions(rule, req.Context)
 		w.Header().Set("Content-Type", "application/json")
+		// Persist to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			go func() {
+				_ = dbUpsert("rules:evaluate:"+req.RuleID, map[string]interface{}{"ruleId": req.RuleID, "triggered": triggered})
+			}()
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{"ruleId": req.RuleID, "triggered": triggered})
 	})
 
@@ -314,8 +328,15 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
+		splitID := fmt.Sprintf("SPLIT-%d", time.Now().UnixMilli())
+		// Persist to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			go func() {
+				_ = dbUpsert("split:"+splitID, map[string]interface{}{"splitId": splitID, "amount": req.TotalAmount})
+			}()
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"splitId": fmt.Sprintf("SPLIT-%d", time.Now().UnixMilli()),
+			"splitId": splitID,
 			"status":  "processing",
 			"splits":  req.Splits,
 		})
@@ -336,6 +357,12 @@ func main() {
 		}
 		roundUp := engine.ComputeRoundUp(req.Amount, req.RoundTo)
 		w.Header().Set("Content-Type", "application/json")
+		// Persist to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			go func() {
+				_ = dbUpsert("roundup:"+fmt.Sprint(time.Now().UnixNano()), map[string]interface{}{"amount": req.Amount, "saved": roundUp})
+			}()
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"originalAmount": req.Amount,
 			"roundedAmount":  req.Amount + roundUp,

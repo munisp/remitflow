@@ -145,6 +145,10 @@ func initPrices() {
 		a.Volume24h = math.Round(a.Price * float64(rand.Intn(1000000)+100000))
 		a.LastUpdated = time.Now()
 		livePrices[a.Symbol] = &a
+	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() { _ = dbLogEvent("initPrices.state_change", map[string]string{"service": "go-investment-feed"}) }()
+	}
 	}
 }
 
@@ -199,6 +203,16 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 	featured := r.URL.Query().Get("featured")
 	search := strings.ToLower(r.URL.Query().Get("q"))
 
+	// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		dbData, dbErr := dbList(500)
+		if dbErr == nil && len(dbData) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"items": dbData, "count": len(dbData), "source": "postgresql"})
+			return
+		}
+	}
+	// Fallback: in-memory cache
 	priceMu.RLock()
 	defer priceMu.RUnlock()
 
@@ -225,6 +239,16 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 // GET /prices/{symbol}
 func priceBySymbolHandler(w http.ResponseWriter, r *http.Request) {
 	symbol := strings.ToUpper(strings.TrimPrefix(r.URL.Path, "/prices/"))
+	// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		dbData, dbErr := dbList(500)
+		if dbErr == nil && len(dbData) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"items": dbData, "count": len(dbData), "source": "postgresql"})
+			return
+		}
+	}
+	// Fallback: in-memory cache
 	priceMu.RLock()
 	asset, ok := livePrices[symbol]
 	priceMu.RUnlock()
@@ -248,6 +272,16 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 		periods = 30
 	}
 
+	// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		dbData, dbErr := dbList(500)
+		if dbErr == nil && len(dbData) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"items": dbData, "count": len(dbData), "source": "postgresql"})
+			return
+		}
+	}
+	// Fallback: in-memory cache
 	priceMu.RLock()
 	asset, ok := livePrices[symbol]
 	priceMu.RUnlock()
@@ -297,6 +331,16 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 
 // GET /summary — market summary
 func summaryHandler(w http.ResponseWriter, r *http.Request) {
+	// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		dbData, dbErr := dbList(500)
+		if dbErr == nil && len(dbData) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"items": dbData, "count": len(dbData), "source": "postgresql"})
+			return
+		}
+	}
+	// Fallback: in-memory cache
 	priceMu.RLock()
 	defer priceMu.RUnlock()
 

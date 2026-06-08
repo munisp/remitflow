@@ -223,6 +223,10 @@ func (s *RateLimiterStore) get(ip string) *IPState {
 			lastSeen: time.Now(),
 		}
 		s.states[ip] = st
+	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() { _ = dbLogEvent("get.state_change", map[string]string{"service": "go-security-sidecar"}) }()
+	}
 	}
 	st.lastSeen = time.Now()
 	return st

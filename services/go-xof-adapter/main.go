@@ -108,6 +108,10 @@ func getLiveFXRate(corridorCode string) (float64, error) {
 		rateCache[corridorCode] = rate
 		rateExpiry[corridorCode] = time.Now().Add(60 * time.Second)
 		rateCacheMu.Unlock()
+		// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+		if db != nil {
+			go func() { _ = dbLogEvent("getLiveFXRate", map[string]string{"service": "go-xof-adapter"}) }()
+		}
 		return rate, nil
 	}
 	return 0, fmt.Errorf("corridor %s not found", corridorCode)
@@ -201,6 +205,10 @@ func handleQuote(w http.ResponseWriter, r *http.Request) {
 		RateValidUntil:     time.Now().Add(60 * time.Second).Format(time.RFC3339),
 		PayoutMethods:      payoutMethods,
 	}
+	// Persist quote to PostgreSQL (middleware-ready: swap to TigerBeetle in production)
+	if db != nil {
+		go func() { _ = dbUpsert("quote:"+resp.CorridorCode+":"+fmt.Sprint(time.Now().UnixNano()), resp) }()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
@@ -258,12 +266,41 @@ func handleTransfer(w http.ResponseWriter, r *http.Request) {
 		"corridor": req.CorridorCode, "amount_ngn": req.AmountNGN,
 		"status": "processing", "timestamp": time.Now().Format(time.RFC3339),
 	})
+	// Persist transfer to PostgreSQL (middleware-ready: swap to TigerBeetle ledger in production)
+	if db != nil {
+		go func() {
+			_ = dbUpsert("transfer:"+transferID, resp)
+			_ = dbLogEvent("xof_transfer_initiated", map[string]interface{}{
+				"transfer_id": transferID, "user_id": req.UserID,
+				"amount_ngn": req.AmountNGN, "corridor": req.CorridorCode,
+			})
+		}()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(resp)
 }
 
 func handleCorridors(w http.ResponseWriter, r *http.Request) {
+	// DB-primary read for corridor config (middleware-ready: swap to config service in production)
+	if db != nil {
+		dbData, dbErr := dbList(50)
+		if dbErr == nil && len(dbData) > 0 {
+			// Check if we have corridor configs in DB
+			for _, raw := range dbData {
+				var item map[string]interface{}
+				if json.Unmarshal(raw, &item) == nil {
+					if _, hasCode := item["code"]; hasCode {
+						w.Header().Set("Content-Type", "application/json")
+						json.NewEncoder(w).Encode(map[string]interface{}{"corridors": dbData, "source": "postgresql"})
+						return
+					}
+				}
+				break
+			}
+		}
+	}
+	// Fallback: in-memory corridor registry
 	corridors := make([]Corridor, 0, len(corridorRegistry))
 	for _, c := range corridorRegistry {
 		if c.IsActive {

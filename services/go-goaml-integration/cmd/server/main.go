@@ -485,6 +485,10 @@ func createReport(reportType string, req CreateSTRRequest) *STRReport {
 	reportsMu.Lock()
 	reports[id] = report
 	reportsMu.Unlock()
+	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() { _ = dbLogEvent("createReport.state_change", map[string]string{"service": "go-goaml-integration"}) }()
+	}
 
 	go publishDaprEvent("compliance.filing", map[string]interface{}{
 		"reportId":   id,

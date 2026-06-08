@@ -169,6 +169,15 @@ func (g *FedNowGateway) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	g.transfers[txID] = transfer
 	g.mu.Unlock()
+	// Persist transfer to PostgreSQL (middleware-ready: swap to TigerBeetle ledger in production)
+	if db != nil {
+		go func() {
+			_ = dbUpsert("transfer:"+txID, transfer)
+			_ = dbLogEvent("fednow_transfer_submitted", map[string]interface{}{
+				"transactionId": txID, "amount": amount, "status": "ACSP",
+			})
+		}()
+	}
 
 	// Simulate instant settlement (FedNow settles in <30 seconds)
 	go func() {
@@ -235,6 +244,15 @@ func (g *FedNowGateway) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// DB-primary read (middleware-ready: swap to TigerBeetle in production)
+	if db != nil {
+		var dbTransfer FedNowTransfer
+		if err := dbGet("transfer:"+txID, &dbTransfer); err == nil {
+			json.NewEncoder(w).Encode(dbTransfer)
+			return
+		}
+	}
+	// Fallback: in-memory cache
 	g.mu.RLock()
 	transfer, ok := g.transfers[txID]
 	g.mu.RUnlock()
@@ -276,6 +294,19 @@ func (g *FedNowGateway) handleReturn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	returnID := generateID("RTN")
+	// Persist return to PostgreSQL (middleware-ready)
+	if db != nil {
+		go func() {
+			_ = dbUpsert("transfer:"+req.TransactionID, transfer)
+			_ = dbUpsert("return:"+returnID, map[string]interface{}{
+				"returnId": returnID, "transactionId": req.TransactionID,
+				"status": "RJCT", "reason": req.Reason,
+			})
+			_ = dbLogEvent("fednow_transfer_returned", map[string]interface{}{
+				"transactionId": req.TransactionID, "returnId": returnID,
+			})
+		}()
+	}
 	g.publishEvent("remitflow.transfers.fednow.returned", map[string]interface{}{
 		"transactionId": req.TransactionID,
 		"returnId":      returnID,
@@ -514,6 +545,15 @@ func main() {
 	mux.HandleFunc("/healthz", gateway.handleHealth)
 	mux.HandleFunc("/metrics", gateway.handleMetrics)
 	mux.HandleFunc("/corridors", func(w http.ResponseWriter, r *http.Request) {
+		// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			dbData, dbErr := dbList(100)
+			if dbErr == nil && len(dbData) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(dbData)
+				return
+			}
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"rail": "FedNow", "currency": "USD", "countries": []string{"US"},
 			"maxAmount": gateway.maxAmount, "settlementTime": "< 30 seconds",

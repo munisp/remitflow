@@ -399,6 +399,13 @@ func handleIdempotencyCheck(w http.ResponseWriter, r *http.Request) {
 				resp.Result = result
 			}
 		}
+	} else if db != nil {
+		// DB fallback for idempotency when Redis unavailable (middleware-ready)
+		var stored interface{}
+		if err := dbGet("idempotency:"+req.Key, &stored); err == nil {
+			resp.Exists = true
+			resp.Result = stored
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -428,6 +435,10 @@ func handleIdempotencyStore(w http.ResponseWriter, r *http.Request) {
 		ctx := context.Background()
 		data, _ := json.Marshal(req.Result)
 		rdb.SetEx(ctx, fmt.Sprintf("idempotency:%s", req.Key), string(data), time.Duration(ttl)*time.Second)
+	}
+	// Also persist to PostgreSQL for durability (middleware-ready: swap to TigerBeetle in production)
+	if db != nil {
+		go func() { _ = dbUpsert("idempotency:"+req.Key, req.Result) }()
 	}
 
 	w.Header().Set("Content-Type", "application/json")

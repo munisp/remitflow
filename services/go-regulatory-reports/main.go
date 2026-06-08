@@ -324,6 +324,10 @@ func main() {
 		_ = xmlData // store or upload to S3
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
+		// Persist to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			go func() { _ = dbUpsert("generate:"+fmt.Sprint(time.Now().UnixNano()), resp) }()
+		}
 		json.NewEncoder(w).Encode(resp)
 	})
 

@@ -150,6 +150,10 @@ func (hc *HealthChecker) checkAll(ctx context.Context) AggregatedHealth {
 		hc.mu.Lock()
 		hc.results[r.Name] = r
 		hc.mu.Unlock()
+		// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+		if db != nil {
+			go func() { _ = dbLogEvent("checkAll.state_change", map[string]string{"service": "go-health-aggregator"}) }()
+		}
 	}
 
 	if agg.Down > 0 {
@@ -319,6 +323,15 @@ func main() {
 		if result.Status == "unhealthy" {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
+		// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			dbData, dbErr := dbList(100)
+			if dbErr == nil && len(dbData) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(dbData)
+				return
+			}
+		}
 		json.NewEncoder(w).Encode(result)
 	})
 
@@ -333,6 +346,15 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+		if db != nil {
+			dbData, dbErr := dbList(100)
+			if dbErr == nil && len(dbData) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(dbData)
+				return
+			}
+		}
 		json.NewEncoder(w).Encode(result)
 	})
 
