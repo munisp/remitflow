@@ -458,8 +458,8 @@ async fn kyc_receipt(req: web::Json<KycReceiptRequest>) -> impl Responder {
 <table class="limits-table">
   <thead><tr><th>Limit Type</th><th>Amount</th><th>Currency</th></tr></thead>
   <tbody>
-    <tr><td>Daily Transfer Limit</td><td><strong>{daily:,.2}</strong></td><td>{currency}</td></tr>
-    <tr><td>Monthly Transfer Limit</td><td><strong>{monthly:,.2}</strong></td><td>{currency}</td></tr>
+    <tr><td>Daily Transfer Limit</td><td><strong>{daily:.2}</strong></td><td>{currency}</td></tr>
+    <tr><td>Monthly Transfer Limit</td><td><strong>{monthly:.2}</strong></td><td>{currency}</td></tr>
   </tbody>
 </table>
 <p>Your account is now fully verified and you can enjoy the full benefits of RemitFlow's cross-border payment services.</p>

@@ -2,6 +2,7 @@
 /// Processes up to 500 payments per batch with parallel execution, deduplication,
 /// and TigerBeetle double-entry bookkeeping. Integrates with Kafka, Dapr, Redis.
 use std::collections::{HashMap, HashSet};
+use warp::Filter;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -192,8 +193,101 @@ async fn handle_health() -> Result<impl warp::Reply, warp::Rejection> {
     })))
 }
 
+
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+
+async fn init_db() -> PgPool {
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to PostgreSQL");
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sme_bulk_processor_state (
+            id TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to create state table");
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_sme_bulk_processor_updated ON sme_bulk_processor_state(updated_at)"
+    )
+    .execute(&pool)
+    .await
+    .ok(); // Index may already exist
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sme_bulk_processor_events (
+            id BIGSERIAL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            payload JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to create events table");
+
+    tracing::info!("PostgreSQL connected for rust-sme-bulk-processor");
+    pool
+}
+
+async fn db_upsert(pool: &PgPool, id: &str, data: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO sme_bulk_processor_state (id, data, updated_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()"
+    )
+    .bind(id)
+    .bind(data)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn db_get(pool: &PgPool, id: &str) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    let row: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT data FROM sme_bulk_processor_state WHERE id = $1"
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.0))
+}
+
+async fn db_list(pool: &PgPool, limit: i64) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT data FROM sme_bulk_processor_state ORDER BY updated_at DESC LIMIT $1"
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO sme_bulk_processor_events (event_type, payload) VALUES ($1, $2)"
+    )
+    .bind(event_type)
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
+    let _pool = init_db().await;
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8101".to_string())
         .parse()
@@ -242,4 +336,5 @@ async fn main() {
 
     println!("[rust-sme-bulk-processor] Starting on :{}", port);
     warp::serve(routes).run(([0, 0, 0, 0], port)).await;
+    Ok(())
 }

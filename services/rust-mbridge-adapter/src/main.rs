@@ -230,7 +230,11 @@ async fn route_via_mojaloop(cfg: &Config, req: &MBridgeTransferRequest) -> bool 
             info!("[Mojaloop] mBridge transfer {} routed via Mojaloop for {}", req.transfer_id, req.receiver_country);
             true
         }
-        Err(e) | Ok(Err(e)) => {
+        Err(e) => {
+            warn!("[Mojaloop] Bridge routing timed out: {}", e);
+            false
+        }
+        Ok(Err(e)) => {
             warn!("[Mojaloop] Bridge routing failed: {}", e);
             false
         }
@@ -378,7 +382,7 @@ async fn health_check(State(cfg): State<Arc<Config>>) -> Json<HealthResponse> {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt().json().init();
     let cfg = Arc::new(Config::from_env());
     let port = cfg.port;
@@ -392,8 +396,7 @@ async fn main() {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("[mBridge] Adapter ready on :{}", port);
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
 }

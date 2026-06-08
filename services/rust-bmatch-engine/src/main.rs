@@ -312,8 +312,101 @@ async fn tigerbeetle_status() -> Json<Value> {
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
+
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+
+async fn init_db() -> PgPool {
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to PostgreSQL");
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bmatch_engine_state (
+            id TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to create state table");
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_bmatch_engine_updated ON bmatch_engine_state(updated_at)"
+    )
+    .execute(&pool)
+    .await
+    .ok(); // Index may already exist
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bmatch_engine_events (
+            id BIGSERIAL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            payload JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to create events table");
+
+    tracing::info!("PostgreSQL connected for rust-bmatch-engine");
+    pool
+}
+
+async fn db_upsert(pool: &PgPool, id: &str, data: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO bmatch_engine_state (id, data, updated_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()"
+    )
+    .bind(id)
+    .bind(data)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn db_get(pool: &PgPool, id: &str) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    let row: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT data FROM bmatch_engine_state WHERE id = $1"
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.0))
+}
+
+async fn db_list(pool: &PgPool, limit: i64) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT data FROM bmatch_engine_state ORDER BY updated_at DESC LIMIT $1"
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO bmatch_engine_events (event_type, payload) VALUES ($1, $2)"
+    )
+    .bind(event_type)
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
+    let _pool = init_db().await;
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
@@ -362,8 +455,7 @@ async fn main() {
     let addr = format!("0.0.0.0:{}", config.port);
     info!("[BMATCH] Listening on {}", addr);
     
-    let listener = tokio::net::TcpListener::bind(&addr).await
-        .expect("Failed to bind BMATCH engine port");
-    axum::serve(listener, app).await
-        .expect("BMATCH engine server error");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    axum::serve(listener, app).await?;
+    Ok(())
 }
