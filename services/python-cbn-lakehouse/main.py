@@ -55,6 +55,96 @@ INTERNAL_KEY = os.getenv("CBN_LAKEHOUSE_KEY", "cbn-lakehouse-key-001")
 PORT = int(os.getenv("PORT", "8099"))
 
 # ─── Models ───────────────────────────────────────────────────────────────────
+
+# ── PostgreSQL persistence layer ──────────────────────────────────────────────
+import psycopg2
+import psycopg2.extras
+
+_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+_pg_conn = None
+
+def _get_pg():
+    global _pg_conn
+    if _pg_conn is None or _pg_conn.closed:
+        try:
+            _pg_conn = psycopg2.connect(_DB_URL)
+            _pg_conn.autocommit = True
+            with _pg_conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS python_cbn_lakehouse_state (
+                        id TEXT PRIMARY KEY,
+                        data JSONB NOT NULL DEFAULT '{}',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_python_cbn_lakehouse_updated
+                        ON python_cbn_lakehouse_state(updated_at);
+                    CREATE TABLE IF NOT EXISTS python_cbn_lakehouse_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        payload JSONB NOT NULL DEFAULT '{}',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+            logging.info(f"[python-cbn-lakehouse] PostgreSQL connected, tables ready")
+        except Exception as e:
+            logging.warning(f"[python-cbn-lakehouse] PostgreSQL unavailable ({e}), using in-memory fallback")
+            _pg_conn = None
+    return _pg_conn
+
+def _db_upsert(record_id: str, data: dict):
+    conn = _get_pg()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO python_cbn_lakehouse_state (id, data, updated_at) 
+                       VALUES (%s, %s, NOW()) 
+                       ON CONFLICT (id) DO UPDATE SET data = %s, updated_at = NOW()""",
+                    (record_id, json.dumps(data), json.dumps(data))
+                )
+        except Exception as e:
+            logging.warning(f"[python-cbn-lakehouse] DB upsert failed: {e}")
+
+def _db_get(record_id: str) -> Optional[dict]:
+    conn = _get_pg()
+    if conn:
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT data FROM python_cbn_lakehouse_state WHERE id = %s", (record_id,))
+                row = cur.fetchone()
+                return row['data'] if row else None
+        except Exception:
+            return None
+    return None
+
+def _db_list(limit: int = 100) -> list:
+    conn = _get_pg()
+    if conn:
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("SELECT data FROM python_cbn_lakehouse_state ORDER BY updated_at DESC LIMIT %s", (limit,))
+                return [row['data'] for row in cur.fetchall()]
+        except Exception:
+            return []
+    return []
+
+def _db_log_event(event_type: str, payload: dict):
+    conn = _get_pg()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO python_cbn_lakehouse_events (event_type, payload) VALUES (%s, %s)",
+                    (event_type, json.dumps(payload))
+                )
+        except Exception:
+            pass
+
+# Initialize DB connection on startup
+_get_pg()
+
+
 class ExportRequest(BaseModel):
     export_type: str  # "transaction_report" | "settlement_account_list" | "fx_rate_audit" | "bdc_transfers"
     from_date: str    # ISO date string

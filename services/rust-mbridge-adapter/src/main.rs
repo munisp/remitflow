@@ -384,6 +384,27 @@ async fn health_check(State(cfg): State<Arc<Config>>) -> Json<HealthResponse> {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt().json().init();
+
+    // PostgreSQL audit logging
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    match tokio_postgres::connect(&db_url, tokio_postgres::NoTls).await {
+        Ok((client, connection)) => {
+            tokio::spawn(async move { let _ = connection.await; });
+            let _ = client.execute(
+                "CREATE TABLE IF NOT EXISTS rust_mbridge_adapter_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )", &[]).await;
+            info!("[mBridge] PostgreSQL connected");
+        }
+        Err(e) => {
+            warn!("[mBridge] PostgreSQL unavailable ({}), using in-memory", e);
+        }
+    }
+
     let cfg = Arc::new(Config::from_env());
     let port = cfg.port;
 

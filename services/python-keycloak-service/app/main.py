@@ -193,6 +193,55 @@ def verify_api_key(x_api_key: str = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid API key")
     return x_api_key
 
+# ─── PostgreSQL Persistence Layer ─────────────────────────────────────────────
+import json
+import psycopg2
+import psycopg2.extras
+
+_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+_pg_conn = None
+
+def _get_pg():
+    global _pg_conn
+    if _pg_conn is None or _pg_conn.closed:
+        try:
+            _pg_conn = psycopg2.connect(_DB_URL)
+            _pg_conn.autocommit = True
+            with _pg_conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS python_keycloak_service_state (
+                        id TEXT PRIMARY KEY,
+                        data JSONB NOT NULL DEFAULT '{}',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    CREATE TABLE IF NOT EXISTS python_keycloak_service_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        payload JSONB NOT NULL DEFAULT '{}',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+            logger.info("PostgreSQL connected for audit logging")
+        except Exception as e:
+            logger.warning(f"PostgreSQL unavailable ({e}), audit logging disabled")
+            _pg_conn = None
+    return _pg_conn
+
+def _db_log_event(event_type: str, payload: dict):
+    conn = _get_pg()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO python_keycloak_service_events (event_type, payload) VALUES (%s, %s)",
+                    (event_type, json.dumps(payload))
+                )
+        except Exception:
+            pass
+
+_get_pg()
+
 # ─── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="RemitFlow Keycloak IAM Bridge",

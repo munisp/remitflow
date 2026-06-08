@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
 )
 
 var (
@@ -142,7 +145,93 @@ func authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+
+// ── PostgreSQL Persistence Layer ─────────────────────────────────────────────
+var db *sql.DB
+
+func initDB() error {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgresql://remitflow:remitflow123@localhost:5432/remitflow"
+	}
+	var err error
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		return fmt.Errorf("db connect: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err = db.Ping(); err != nil {
+		return fmt.Errorf("db ping: %w", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS go_dapr_service_state (
+			id TEXT PRIMARY KEY,
+			data JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_go_dapr_service_updated ON go_dapr_service_state(updated_at);
+		CREATE TABLE IF NOT EXISTS go_dapr_service_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			payload JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_go_dapr_service_events_type ON go_dapr_service_events(event_type, created_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("create tables: %w", err)
+	}
+	slog.Info("PostgreSQL connected", "service", "go-dapr-service", "table", "go_dapr_service_state")
+	return nil
+}
+
+func dbUpsert(id string, data interface{}) error {
+	if db == nil { return nil }
+	jsonData, err := json.Marshal(data)
+	if err != nil { return err }
+	_, err = db.Exec(`INSERT INTO go_dapr_service_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`, id, jsonData)
+	return err
+}
+
+func dbGet(id string, dest interface{}) error {
+	if db == nil { return fmt.Errorf("no db") }
+	var jsonData []byte
+	err := db.QueryRow("SELECT data FROM go_dapr_service_state WHERE id = $1", id).Scan(&jsonData)
+	if err != nil { return err }
+	return json.Unmarshal(jsonData, dest)
+}
+
+func dbList(limit int) ([]json.RawMessage, error) {
+	if db == nil { return nil, nil }
+	rows, err := db.Query("SELECT data FROM go_dapr_service_state ORDER BY updated_at DESC LIMIT $1", limit)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var results []json.RawMessage
+	for rows.Next() {
+		var data json.RawMessage
+		if err := rows.Scan(&data); err != nil { return nil, err }
+		results = append(results, data)
+	}
+	return results, rows.Err()
+}
+
+func dbLogEvent(eventType string, payload interface{}) error {
+	if db == nil { return nil }
+	jsonData, err := json.Marshal(payload)
+	if err != nil { return err }
+	_, err = db.Exec("INSERT INTO go_dapr_service_events (event_type, payload) VALUES ($1, $2)", eventType, jsonData)
+	return err
+}
+// ── End PostgreSQL Layer ─────────────────────────────────────────────────────
+
 func main() {
+	if err := initDB(); err != nil {
+		slog.Warn("PostgreSQL init failed, using in-memory fallback", "err", err)
+	}
+
 	log.Printf("[Dapr Service] Starting %s on %s", appID, appPort)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)

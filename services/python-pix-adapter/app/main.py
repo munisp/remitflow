@@ -170,6 +170,55 @@ def generate_qr_payload(
     crc = sum(payload.encode()) & 0xFFFF
     return payload + f"{crc:04X}"
 
+# ─── PostgreSQL Persistence Layer ─────────────────────────────────────────────
+import json
+import psycopg2
+import psycopg2.extras
+
+_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+_pg_conn = None
+
+def _get_pg():
+    global _pg_conn
+    if _pg_conn is None or getattr(_pg_conn, 'closed', True):
+        try:
+            _pg_conn = psycopg2.connect(_DB_URL)
+            _pg_conn.autocommit = True
+            with _pg_conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS python_pix_adapter_state (
+                        id TEXT PRIMARY KEY,
+                        data JSONB NOT NULL DEFAULT '{}',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    CREATE TABLE IF NOT EXISTS python_pix_adapter_events (
+                        id BIGSERIAL PRIMARY KEY,
+                        event_type TEXT NOT NULL,
+                        payload JSONB NOT NULL DEFAULT '{}',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                """)
+            logging.info("[PIX] PostgreSQL connected")
+        except Exception as e:
+            logging.warning(f"[PIX] PostgreSQL unavailable ({e})")
+            _pg_conn = None
+    return _pg_conn
+
+def _db_log_event(event_type: str, payload: dict):
+    conn = _get_pg()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO python_pix_adapter_events (event_type, payload) VALUES (%s, %s)",
+                    (event_type, json.dumps(payload))
+                )
+        except Exception:
+            pass
+
+_get_pg()
+
 # ─── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="RemitFlow PIX Adapter",

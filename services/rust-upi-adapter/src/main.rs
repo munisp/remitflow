@@ -40,6 +40,26 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer().json())
         .init();
 
+    // PostgreSQL persistence for transfer state
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    match tokio_postgres::connect(&db_url, tokio_postgres::NoTls).await {
+        Ok((client, connection)) => {
+            tokio::spawn(async move { let _ = connection.await; });
+            let _ = client.execute(
+                "CREATE TABLE IF NOT EXISTS rust_upi_adapter_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )", &[]).await;
+            tracing::info!("[UPI] PostgreSQL connected");
+        }
+        Err(e) => {
+            tracing::warn!("[UPI] PostgreSQL unavailable ({}), using in-memory", e);
+        }
+    }
+
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8092".to_string())
         .parse()

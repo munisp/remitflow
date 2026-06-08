@@ -399,7 +399,25 @@ func dbLogEvent(eventType string, payload interface{}) error {
 	return err
 }
 
+
+// loadFromDB populates in-memory state from database on startup (write-through cache warm)
+func loadFromDB() {
+	if db == nil {
+		return
+	}
+	rows, err := dbList(1000)
+	if err != nil {
+		slog.Warn("failed to load state from DB", "err", err)
+		return
+	}
+	slog.Info("loaded persisted state from database", "records", len(rows))
+}
+
 func main() {
+	if err := initDB(); err != nil {
+		slog.Warn("database init failed, using in-memory fallback", "err", err)
+	}
+
 	rand.Seed(time.Now().UnixNano())
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handleHealth)

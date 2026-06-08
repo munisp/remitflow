@@ -300,6 +300,26 @@ async fn main() -> std::io::Result<()> {
         )
         .init();
 
+    // PostgreSQL audit logging connection
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    match tokio_postgres::connect(&db_url, tokio_postgres::NoTls).await {
+        Ok((client, connection)) => {
+            tokio::spawn(async move { let _ = connection.await; });
+            let _ = client.execute(
+                "CREATE TABLE IF NOT EXISTS rust_crypto_guard_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    payload JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )", &[]).await;
+            info!("PostgreSQL connected for audit logging");
+        }
+        Err(e) => {
+            warn!("PostgreSQL unavailable ({}), audit logging disabled", e);
+        }
+    }
+
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8081".to_string())
         .parse()

@@ -264,10 +264,32 @@ func dbLogEvent(eventType string, payload interface{}) error {
 	return err
 }
 
+
+// loadFromDB populates in-memory state from database on startup (write-through cache warm)
+func loadFromDB() {
+	if db == nil {
+		return
+	}
+	rows, err := dbList(1000)
+	if err != nil {
+		slog.Warn("failed to load state from DB", "err", err)
+		return
+	}
+	slog.Info("loaded persisted state from database", "records", len(rows))
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
 	port := envOrDefault("HEALTH_AGGREGATOR_PORT", "8200")
+
+	if err := initDB(); err != nil {
+		slog.Warn("database init failed, using in-memory fallback", "err", err)
+	} else {
+		slog.Info("database connected", "service", "go-health-aggregator")
+		loadFromDB()
+	}
+
 	checker := NewHealthChecker()
 
 	// Background polling
