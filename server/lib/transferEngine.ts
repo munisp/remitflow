@@ -212,8 +212,16 @@ async function getFxRate(from: string, to: string): Promise<number> {
 
 function calculateFee(amount: number, corridor: string): FeeCalculation {
   const tier = FEE_TIERS[corridor] || FEE_TIERS.DEFAULT;
-  const percentFee = amount * tier.pct;
-  const totalFee = Math.max(tier.min, Math.min(tier.max, tier.flat + percentFee));
+  // Use integer minor units (cents) to avoid float precision issues
+  const amountCents = Math.round(amount * 100);
+  const pctCents = Math.round(tier.pct * 10000); // pct as basis points
+  const percentFeeCents = Math.round((amountCents * pctCents) / 1000000);
+  const flatCents = Math.round(tier.flat * 100);
+  const minCents = Math.round(tier.min * 100);
+  const maxCents = Math.round(tier.max * 100);
+  const totalFeeCents = Math.max(minCents, Math.min(maxCents, flatCents + percentFeeCents));
+  const percentFee = percentFeeCents / 100;
+  const totalFee = totalFeeCents / 100;
   return {
     flatFee: tier.flat,
     percentFee,

@@ -66,9 +66,15 @@ export const posAgentCashFlowRouter = router({
       )
       ;
 
-    const todayVolume = todayTxs.reduce((s: any, t: any) => s + Number(t.amount ?? 0), 0);
+    const todayVolume = todayTxs.reduce((s: any, t: any) => {
+      const amt = typeof t.amount === 'string' ? t.amount : String(t.amount ?? '0');
+      return s + BigInt(Math.round(parseFloat(amt) * 100));
+    }, BigInt(0));
     const commissionRate = Number(agent?.commissionRate ?? 1.5);
-    const todayCommission = todayTxs.reduce((s: any, t: any) => s + Number(t.amount ?? 0) * commissionRate / 100, 0);
+    const todayCommissionMinor = todayTxs.reduce((s: any, t: any) => {
+      const amt = typeof t.amount === 'string' ? t.amount : String(t.amount ?? '0');
+      return s + BigInt(Math.round(parseFloat(amt) * 100 * commissionRate / 100));
+    }, BigInt(0));
 
     // All-time stats
     const [totalCustomers] = await db
@@ -83,7 +89,8 @@ export const posAgentCashFlowRouter = router({
       .where(eq(transactions.userId, ctx.user.id))
       ;
 
-    const totalCommission = Number(totalCommRow?.total ?? 0) * commissionRate / 100;
+    const totalMinor = BigInt(Math.round(Number(totalCommRow?.total ?? 0) * 100));
+    const totalCommission = Number(totalMinor * BigInt(Math.round(commissionRate * 100)) / BigInt(10000)) / 100;
 
     return {
       agent: agent ?? {
@@ -97,10 +104,10 @@ export const posAgentCashFlowRouter = router({
       },
       stats: {
         floatBalance: Number(wallet?.balance ?? 0),
-        todayVolume,
+        todayVolume: Number(todayVolume) / 100,
         todayCount: todayTxs.length,
         totalCommission,
-        todayCommission,
+        todayCommission: Number(todayCommissionMinor) / 100,
         totalCustomers: Number(totalCustomers?.c ?? 0),
       },
     };
