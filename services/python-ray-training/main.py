@@ -61,6 +61,76 @@ from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+# ── PostgreSQL persistence ──────────────────────────────────────────────
+import psycopg2
+import psycopg2.extras
+from contextlib import contextmanager
+
+_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+_db_pool = None
+
+def _get_db():
+    global _db_pool
+    if _db_pool is None:
+        _db_pool = psycopg2.connect(_DB_URL)
+        _db_pool.autocommit = True
+        with _db_pool.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ray_training_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_ray_training_updated
+                    ON ray_training_state(updated_at);
+                CREATE TABLE IF NOT EXISTS ray_training_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    payload JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_ray_training_events_type
+                    ON ray_training_events(event_type, created_at);
+            """)
+    return _db_pool
+
+def db_upsert(record_id: str, data: dict):
+    conn = _get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO ray_training_state (id, data, updated_at)
+               VALUES (%s, %s, NOW())
+               ON CONFLICT (id) DO UPDATE SET data = %s, updated_at = NOW()""",
+            (record_id, psycopg2.extras.Json(data), psycopg2.extras.Json(data))
+        )
+
+def db_get(record_id: str) -> dict | None:
+    conn = _get_db()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT data FROM ray_training_state WHERE id = %s", (record_id,))
+        row = cur.fetchone()
+        return row["data"] if row else None
+
+def db_list(limit: int = 100) -> list[dict]:
+    conn = _get_db()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT data FROM ray_training_state ORDER BY updated_at DESC LIMIT %s",
+            (limit,)
+        )
+        return [row["data"] for row in cur.fetchall()]
+
+def db_log_event(event_type: str, payload: dict):
+    conn = _get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO ray_training_events (event_type, payload) VALUES (%s, %s)",
+            (event_type, psycopg2.extras.Json(payload))
+        )
+# ── End PostgreSQL persistence ──────────────────────────────────────────
+
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("ray-training")
 
