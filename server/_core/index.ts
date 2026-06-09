@@ -158,6 +158,19 @@ async function startServer() {
       subsystems.webhook_queue = { status: "ok" };
     }
 
+    // Circuit breaker status
+    try {
+      const { getAllCircuitStatus } = await import("../lib/circuitBreaker.js");
+      const circuits = getAllCircuitStatus();
+      const openCircuits = circuits.filter(c => c.state === "open");
+      subsystems.circuit_breakers = {
+        status: openCircuits.length > 0 ? "degraded" : "ok",
+        error: openCircuits.length > 0 ? `${openCircuits.length} circuit(s) open: ${openCircuits.map(c => c.name).join(", ")}` : undefined,
+      };
+    } catch {
+      subsystems.circuit_breakers = { status: "ok" };
+    }
+
     const status = allReady ? "ready" : "not_ready";
     res.status(allReady ? 200 : 503).json({ status, timestamp: new Date().toISOString(), subsystems });
   });
