@@ -409,12 +409,21 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+		// DB-primary read: reconstruct from stored state if available
 		if db != nil {
-			dbData, dbErr := dbList(100)
-			if dbErr == nil && len(dbData) > 0 {
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(dbData)
+			var dbRates map[string]AggregatedRate
+			if dbErr := dbGet("rates_cache", &dbRates); dbErr == nil && len(dbRates) > 0 {
+				dbFiltered := make(map[string]AggregatedRate)
+				for pair, rate := range dbRates {
+					if len(pair) >= 3 && pair[:3] == base {
+						dbFiltered[pair] = rate
+					}
+				}
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"base":  base,
+					"rates": dbFiltered,
+					"count": len(dbFiltered),
+				})
 				return
 			}
 		}
@@ -435,6 +444,20 @@ func main() {
 		}
 
 		pair := from + "/" + to
+
+		// Try DB-primary read first
+		if db != nil {
+			var dbRates map[string]AggregatedRate
+			if dbErr := dbGet("rates_cache", &dbRates); dbErr == nil {
+				if dbRate, found := dbRates[pair]; found {
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(dbRate)
+					return
+				}
+			}
+		}
+
+		// Fall back to in-memory cache
 		rate, ok := cache.Get(pair)
 		if !ok {
 			http.Error(w, fmt.Sprintf(`{"error": "rate not found for %s"}`, pair), http.StatusNotFound)
@@ -442,15 +465,6 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
-		if db != nil {
-			dbData, dbErr := dbList(100)
-			if dbErr == nil && len(dbData) > 0 {
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(dbData)
-				return
-			}
-		}
 		json.NewEncoder(w).Encode(rate)
 	})
 

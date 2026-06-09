@@ -282,12 +282,20 @@ describe("Savings Goals", () => {
   });
 
   it("savings.createGoal creates a new goal", async () => {
+    // Clean up stale test goals to stay under the 10-goal limit
+    const { getDb } = await import("./db");
+    const { sql } = await import("drizzle-orm");
+    const db = await getDb();
+    if (db) {
+      const pattern = "Smoke Test Goal%";
+      await db.execute(sql`DELETE FROM "savingsGoals" WHERE name LIKE ${pattern} AND "userId" = 1`);
+    }
+
     const goal = await caller.savings.createGoal({
       name: "Smoke Test Goal",
       targetAmount: 50000,
       deadline: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
     });
-    // createGoal returns { success: true }
     expect(goal).toBeDefined();
     expect((goal as any).success).toBe(true);
   });
