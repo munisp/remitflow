@@ -15,6 +15,7 @@
  */
 
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { auditedProcedure, auditedAdminProcedure, rateLimitedProcedure } from "../_core/trpc";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc.js";
 import {
@@ -535,7 +536,8 @@ export const lakehouseRouter = router({
           beneficiaries: "beneficiaries", compliance_cases: "compliance_cases",
         };
         const safeTable = allowedTableMap[input.table];
-        const result = await db.execute(sql.raw(`SELECT * FROM \`${safeTable}\` ORDER BY id DESC LIMIT ${Number(input.limit)}`));
+        if (!safeTable) throw new TRPCError({ code: "BAD_REQUEST", message: `Table '${input.table}' not in allowlist` });
+        const result = await db.execute(sql.raw(`SELECT * FROM "${safeTable}" ORDER BY id DESC LIMIT ${Number(input.limit)}`));
         return await ingestToBronze(input.table, result.rows as Record<string, unknown>[]);
       }
     }),

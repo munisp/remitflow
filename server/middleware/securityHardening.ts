@@ -114,8 +114,8 @@ export interface APIKeyPolicy {
 }
 
 export const API_KEY_POLICY: APIKeyPolicy = {
-  maxAgeHours: 8760, // 365 days
-  rotationWarningHours: 720, // 30 days before expiry
+  maxAgeHours: 2160, // 90 days (OWASP: rotate API keys quarterly)
+  rotationWarningHours: 336, // 14 days before expiry
   maxKeysPerUser: 5,
   requiredPrefix: "rmf_",
   minLength: 40,

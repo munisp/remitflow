@@ -2,7 +2,7 @@ import { TRPCError } from "@trpc/server";
 import { and, asc, desc, eq, inArray, sql, gte, lte, count, lt, isNotNull, sum } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { z } from "zod";
-import { COOKIE_NAME } from "../shared/const";
+import { COOKIE_NAME, SESSION_EXPIRY_MS } from "../shared/const";
 import {
   analyticsThresholds, auditLogs, batchPayments, beneficiaries, cards, caseComments, chatMessages, chatSessions, complianceCases, disputes,
   fxAlerts, impersonationTokens, kycDocuments, notifications, paymentRequests, recurringPayments, scheduledTransferRuns,
@@ -461,11 +461,11 @@ export const appRouter = router({
         name: ctx.user.name ?? "",
       })
         .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-        .setExpirationTime(Math.floor((Date.now() + 365 * 24 * 60 * 60 * 1000) / 1000))
+        .setExpirationTime(Math.floor((Date.now() + SESSION_EXPIRY_MS) / 1000))
         .sign(secret);
       ctx.res.cookie(COOKIE_NAME, newToken, {
         httpOnly: true, secure: true, sameSite: "none",
-        maxAge: 365 * 24 * 60 * 60 * 1000, path: "/",
+        maxAge: SESSION_EXPIRY_MS, path: "/",
       });
       return { success: true, refreshedAt: new Date().toISOString() };
     }),
@@ -1620,7 +1620,7 @@ export const appRouter = router({
       return txs.filter((t: any) => t.type === 'savings_deposit' || t.type === 'savings_withdrawal').slice(0, input?.limit ?? 20);
     }),
     deposit: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), type: z.enum(['flex', 'locked']), lockDays: z.number().int().min(1).max(3650).optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR' });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
       if (input.type === 'locked' && !input.lockDays) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Lock period required for locked savings' });
       const apyTiers: Record<string, number> = { flex: 3.0, '30': 4.0, '60': 4.5, '90': 5.0, '180': 5.5, '365': 6.0 };
       const lockKey = input.type === 'flex' ? 'flex' : String(input.lockDays ?? 30);
@@ -1640,7 +1640,7 @@ export const appRouter = router({
       return { success: true, apy, maturityDate, projectedInterest: Math.round(projectedInterest * 100) / 100, goalId: (created as any).id };
     }),
     withdraw: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), goalId: z.number().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR' });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
       const withdrawableGoals = goals.filter((g: any) => {
         if (g.status !== 'active') return false;
@@ -1690,7 +1690,7 @@ export const appRouter = router({
       return { success: true, withdrawn: input.amount };
     }),
     createGoal: protectedProcedure.input(z.object({ name: z.string().min(1).max(100), targetAmount: z.number().positive(), deadline: z.string().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR' });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
       const existingGoals = await getSavingsGoalsByUserId(ctx.user.id);
       const activeGoals = existingGoals.filter((g: any) => g.status === 'active');
       if (activeGoals.length >= 10) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Maximum 10 active savings goals' });
@@ -2832,8 +2832,7 @@ export const appRouter = router({
       const rows = await db.execute(sql`SELECT * FROM consent_records WHERE user_id = ${ctx.user.id}`);
       return { consents: rows as any[], dataRequests: [], lastUpdated: new Date() };
     }),
-    pendingErasures: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    pendingErasures: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
@@ -2855,8 +2854,7 @@ export const appRouter = router({
         executed: requests.filter(r => r.status === 'executed').length,
       };
     }),
-    executeErasure: protectedProcedure.input(z.object({ requestId: z.number() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    executeErasure: adminProcedure.input(z.object({ requestId: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Get the request
@@ -3532,17 +3530,15 @@ export const appRouter = router({
       const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const midRate = toRate / fromRate;
       return { corridor: `${input.from}-${input.to}`, midRate, customerRate: midRate * 0.995, spread: 0.5, fees: [{ type: "transfer", amount: 0.5, unit: "%" }, { type: "fx_margin", amount: 0.5, unit: "%" }], totalCost: 1.0, competitorRates: [{ provider: "Wise", rate: midRate * 0.997, fee: 0.41 }, { provider: "Western Union", rate: midRate * 0.985, fee: 4.99 }, { provider: "MoneyGram", rate: midRate * 0.982, fee: 5.99 }] };
     }),
-    update: protectedProcedure
+    update: adminProcedure
       .input(z.object({ id: z.any().optional(), marginPct: z.number().min(0).max(20), flatFee: z.number().min(0).optional() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         await createAuditLog({ userId: ctx.user.id, action: "corridor.update", description: `Margin updated to ${input.marginPct}%` });
         return { success: true, marginPct: input.marginPct, flatFee: input.flatFee ?? 0 };
       }),
-    create: protectedProcedure
+    create: adminProcedure
       .input(z.object({ fromCurrency: z.string().length(3), toCurrency: z.string().length(3), marginPct: z.number().min(0).max(20), flatFee: z.number().min(0).optional() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         await createAuditLog({ userId: ctx.user.id, action: "corridor.create", description: `Created corridor ${input.fromCurrency}->${input.toCurrency}` });
         return { success: true, from: input.fromCurrency, to: input.toCurrency, marginPct: input.marginPct, flatFee: input.flatFee ?? 0 };
       }),
@@ -3958,8 +3954,7 @@ export const appRouter = router({
     }),
   }),
   admin: router({
-    revenueBreakdown: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    revenueBreakdown: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const txRows = await db.execute(sql`SELECT COALESCE(SUM(CAST(fee AS DECIMAL)), 0) as total_fees, COUNT(*) as tx_count FROM transactions WHERE created_at > NOW() - INTERVAL '30 days' AND status IN ('completed', 'settled')`);
@@ -3982,8 +3977,7 @@ export const appRouter = router({
         totalRevenue: total, transactionCount: txCount, period: "30d",
       };
     }),
-    summary: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    summary: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       const [totalUsersRow] = await db.select({ total: count() }).from(users);
@@ -3997,7 +3991,7 @@ export const appRouter = router({
         flaggedTransfers: flaggedRow?.total ?? 0,
       };
     }),
-    listUsers: protectedProcedure
+    listUsers: adminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         limit: z.number().min(1).max(100).default(20),
@@ -4006,7 +4000,6 @@ export const appRouter = router({
         kycTier: z.enum(["tier0", "tier1", "tier2", "tier3"]).optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const offset = (input.page - 1) * input.limit;
@@ -4022,10 +4015,9 @@ export const appRouter = router({
         const [{ total }] = whereExpr ? await countQ.where(whereExpr) : await countQ;
         return { users: rows, total, page: input.page, pages: Math.ceil(total / input.limit) };
       }),
-    getKycDocumentHistory: protectedProcedure
+    getKycDocumentHistory: adminProcedure
       .input(z.object({ userId: z.number(), docType: z.string().optional() }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const whereClauses: any[] = [eq(kycDocuments.userId, input.userId)];
@@ -4033,10 +4025,9 @@ export const appRouter = router({
         const docs = await db.select().from(kycDocuments).where(and(...whereClauses)).orderBy(desc(kycDocuments.createdAt));
         return { docs };
       }),
-    promoteUser: protectedProcedure
+    promoteUser: adminProcedure
       .input(z.object({ userId: z.number(), role: z.enum(["admin", "user"]) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         await db.update(users).set({ role: input.role }).where(eq(users.id, input.userId)).returning();
@@ -4052,20 +4043,18 @@ export const appRouter = router({
         }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, userId: input.userId, newRole: input.role };
       }),
-     deleteUser: protectedProcedure
+     deleteUser: adminProcedure
       .input(z.object({ userId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         if (input.userId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot delete your own account" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         await db.delete(users).where(eq(users.id, input.userId)).returning();
         return { success: true, deletedUserId: input.userId };
       }),
-    listPendingKyc: protectedProcedure
+    listPendingKyc: adminProcedure
       .input(z.object({ page: z.number().min(1).default(1), limit: z.number().min(1).max(50).default(20), status: z.enum(["pending", "under_review", "approved", "rejected", "all"]).default("pending") }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const offset = (input.page - 1) * input.limit;
@@ -4112,10 +4101,9 @@ export const appRouter = router({
         }
         return { success: true, docId: input.docId };
       }),
-    rejectKyc: protectedProcedure
+    rejectKyc: adminProcedure
       .input(z.object({ docId: z.number(), reason: z.string().min(5).max(500) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [doc] = await db.select().from(kycDocuments).where(eq(kycDocuments.id, input.docId)).limit(1);
@@ -4133,19 +4121,17 @@ export const appRouter = router({
         }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, docId: input.docId };
       }),
-    setKycUnderReview: protectedProcedure
+    setKycUnderReview: adminProcedure
       .input(z.object({ docId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         await db.update(kycDocuments).set({ status: "under_review" }).where(eq(kycDocuments.id, input.docId)).returning();
         return { success: true, docId: input.docId, status: "under_review" };
       }),
-    bulkApproveKyc: protectedProcedure
+    bulkApproveKyc: adminProcedure
       .input(z.object({ docIds: z.array(z.number()).min(1).max(50), advanceTier: z.boolean().default(true) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         let approved = 0;
@@ -4163,7 +4149,7 @@ export const appRouter = router({
         }
         return { success: true, approved };
       }),
-    listComplianceCases: protectedProcedure
+    listComplianceCases: adminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         limit: z.number().min(1).max(50).default(20),
@@ -4175,7 +4161,6 @@ export const appRouter = router({
         search: z.string().max(200).optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const offset = (input.page - 1) * input.limit;
@@ -4211,10 +4196,9 @@ export const appRouter = router({
           : await db.select({ total: count() }).from(complianceCases);
         return { cases: rows, total, page: input.page, pages: Math.ceil(total / input.limit) };
       }),
-    setCasePriority: protectedProcedure
+    setCasePriority: adminProcedure
       .input(z.object({ caseId: z.number(), priority: z.enum(["low", "medium", "high", "critical"]), autoSla: z.boolean().default(true) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const slaHours: Record<string, number> = { critical: 4, high: 24, medium: 48, low: 168 };
@@ -4223,7 +4207,7 @@ export const appRouter = router({
         await logAdminAction({ actorId: ctx.user.id, action: "setCasePriority", targetId: input.caseId, targetType: "complianceCase", description: `Set case #${input.caseId} priority to ${input.priority}${dueAt ? ` (SLA: ${dueAt.toISOString()})` : ""}`, severity: "info" });
         return { success: true, dueAt: dueAt?.toISOString() };
       }),
-    updateComplianceCase: protectedProcedure
+    updateComplianceCase: adminProcedure
       .input(z.object({
         caseId: z.number(),
         status: z.enum(["open", "under_review", "resolved", "escalated", "dismissed"]),
@@ -4231,7 +4215,6 @@ export const appRouter = router({
         assignedTo: z.string().max(255).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const updates: Record<string, any> = { status: input.status };
@@ -4265,10 +4248,9 @@ export const appRouter = router({
         }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, caseId: input.caseId };
       }),
-    assignCase: protectedProcedure
+    assignCase: adminProcedure
       .input(z.object({ caseId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const assignedTo = ctx.user.name ?? ctx.user.email ?? `User #${ctx.user.id}`;
@@ -4286,13 +4268,12 @@ export const appRouter = router({
         return { success: true, caseId: input.caseId, assignedTo };
       }),
     // ─── Case Comments ──────────────────────────────────────────────────────────
-    getCaseComments: protectedProcedure
+    getCaseComments: adminProcedure
       .input(z.object({ caseId: z.number() }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         return getCaseCommentsByCaseId(input.caseId);
       }),
-    addCaseComment: protectedProcedure
+    addCaseComment: adminProcedure
       .input(z.object({
         caseId: z.number(),
         content: z.string().min(1).max(2000),
@@ -4300,7 +4281,6 @@ export const appRouter = router({
         parentId: z.number().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const authorName = ctx.user.name ?? ctx.user.email ?? "Admin";
@@ -4351,23 +4331,21 @@ Case: #${input.caseId}`,
         }
         return comment;
       }),
-    deleteCaseComment: protectedProcedure
+    deleteCaseComment: adminProcedure
       .input(z.object({ commentId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         await db.delete(caseComments).where(and(eq(caseComments.id, input.commentId), eq(caseComments.authorId, ctx.user.id))).returning();
         return { success: true, deletedCommentId: input.commentId };
       }),
     // ─── Bulk Case Status Update ─────────────────────────────────────────────
-    bulkUpdateCaseStatus: protectedProcedure
+    bulkUpdateCaseStatus: adminProcedure
       .input(z.object({
         caseIds: z.array(z.number()).min(1).max(200),
         newStatus: z.enum(["open", "under_review", "resolved", "escalated", "dismissed"]),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         let updated = 0;
@@ -4389,13 +4367,12 @@ Case: #${input.caseId}`,
         return { updated };
       }),
     // ─── Analytics Alert Thresholds ──────────────────────────────────────────────
-    getAnalyticsThresholds: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    getAnalyticsThresholds: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(analyticsThresholds).orderBy(analyticsThresholds.metric);
     }),
-    upsertAnalyticsThreshold: protectedProcedure
+    upsertAnalyticsThreshold: adminProcedure
       .input(z.object({
         metric: z.string().max(64),
         label: z.string().max(128),
@@ -4404,7 +4381,6 @@ Case: #${input.caseId}`,
         notifyOwner: z.boolean().default(true),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [row] = await db.insert(analyticsThresholds)
@@ -4413,18 +4389,16 @@ Case: #${input.caseId}`,
           .returning();
         return row;
       }),
-    deleteAnalyticsThreshold: protectedProcedure
+    deleteAnalyticsThreshold: adminProcedure
       .input(z.object({ metric: z.string() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         await db.delete(analyticsThresholds).where(eq(analyticsThresholds.metric, input.metric)).returning();
         return { success: true, deletedMetric: input.metric };
       }),
     // ─── Admin Home Summary ────────────────────────────────────────────────────
-    homeSummary: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    homeSummary: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       const [totalUsersRow] = await db.select({ total: count() }).from(users);
@@ -4466,10 +4440,9 @@ Case: #${input.caseId}`,
       };
     }),
     // ─── KYC Expiry ────────────────────────────────────────────────────────────
-    listExpiringKyc: protectedProcedure
+    listExpiringKyc: adminProcedure
       .input(z.object({ daysAhead: z.number().min(1).max(90).default(30), page: z.number().min(1).default(1), limit: z.number().min(1).max(50).default(20) }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const cutoff = new Date(Date.now() + input.daysAhead * 24 * 60 * 60 * 1000);
@@ -4497,10 +4470,9 @@ Case: #${input.caseId}`,
           ));
         return { docs, total, page: input.page, pages: Math.ceil(total / input.limit) };
       }),
-    setKycExpiry: protectedProcedure
+    setKycExpiry: adminProcedure
       .input(z.object({ docId: z.number(), expiresAt: z.string() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         await db.update(kycDocuments).set({ expiresAt: new Date(input.expiresAt) }).where(eq(kycDocuments.id, input.docId)).returning();
@@ -4514,13 +4486,12 @@ Case: #${input.caseId}`,
         }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, docId: input.docId, expiresAt: input.expiresAt };
       }),
-    setCaseDueAt: protectedProcedure
+    setCaseDueAt: adminProcedure
       .input(z.object({
         caseId: z.number(),
         dueAt: z.string().datetime().nullable(),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const dueAtDate = input.dueAt ? new Date(input.dueAt) : null;
@@ -4532,10 +4503,9 @@ Case: #${input.caseId}`,
         return { success: true, caseId: input.caseId, dueAt: input.dueAt };
       }),
 
-    createImpersonationToken: protectedProcedure
+    createImpersonationToken: adminProcedure
       .input(z.object({ targetUserId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         // Verify target user exists
@@ -4556,7 +4526,7 @@ Case: #${input.caseId}`,
         return { token, expiresAt: expiresAt.toISOString(), targetUser: { id: target.id, name: target.name, email: target.email } };
       }),
 
-    listAdminAuditLogs: protectedProcedure
+    listAdminAuditLogs: adminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         limit: z.number().min(1).max(100).default(30),
@@ -4564,7 +4534,6 @@ Case: #${input.caseId}`,
         targetType: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const offset = (input.page - 1) * input.limit;
@@ -4592,9 +4561,8 @@ Case: #${input.caseId}`,
         return { logs: rows, total, page: input.page, pages: Math.ceil(total / input.limit) };
       }),
 
-    slaReport: protectedProcedure
+    slaReport: adminProcedure
       .query(async ({ ctx }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const now = new Date();
@@ -4627,13 +4595,12 @@ Case: #${input.caseId}`,
         return { onTime, atRisk, overdue, escalated, noDueDate, total: activeCases.length, dailyCounts };
       }),
 
-    bulkSetCaseDueAt: protectedProcedure
+    bulkSetCaseDueAt: adminProcedure
       .input(z.object({
         caseIds: z.array(z.number()).min(1).max(100),
         dueAt: z.string().nullable(),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const dueAtDate = input.dueAt ? new Date(input.dueAt) : null;
@@ -4648,10 +4615,9 @@ Case: #${input.caseId}`,
         });
         return { updated: input.caseIds.length };
       }),
-    adminAnalytics: protectedProcedure
+    adminAnalytics: adminProcedure
       .input(z.object({ days: z.number().int().min(1).max(365).default(30) }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
@@ -4745,7 +4711,7 @@ Case: #${input.caseId}`,
           breachedThresholds,
         };
       }),
-    exportComplianceCases: protectedProcedure
+    exportComplianceCases: adminProcedure
       .input(z.object({
         status: z.enum(["open", "under_review", "resolved", "escalated", "dismissed", "all"]).default("all"),
         severity: z.enum(["low", "medium", "high", "critical", "all"]).default("all"),
@@ -4754,7 +4720,6 @@ Case: #${input.caseId}`,
         search: z.string().max(200).optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const searchTerm = input.search?.trim();
@@ -4791,10 +4756,9 @@ Case: #${input.caseId}`,
         }
         return { csv: lines.join("\n"), count: rows.length };
       }),
-    getCaseTimeline: protectedProcedure
+    getCaseTimeline: adminProcedure
       .input(z.object({ caseId: z.number() }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         // Fetch the case itself for creation event
@@ -4870,8 +4834,7 @@ Case: #${input.caseId}`,
       }),
 
     // ─── Admin: List Admins ────────────────────────────────────────────────────
-    listAdmins: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    listAdmins: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       const admins = await db.select({ id: users.id, name: users.name, email: users.email })
@@ -4880,10 +4843,9 @@ Case: #${input.caseId}`,
     }),
 
     // ─── Admin: Assign Case to Admin ──────────────────────────────────────────
-    assignCaseToAdmin: protectedProcedure
+    assignCaseToAdmin: adminProcedure
       .input(z.object({ caseId: z.number(), adminId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [admin] = await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, input.adminId)).limit(1);
@@ -4897,7 +4859,7 @@ Case: #${input.caseId}`,
       }),
 
     // ─── Admin: Audit Log Viewer ──────────────────────────────────────────────
-    getAuditLog: protectedProcedure
+    getAuditLog: adminProcedure
       .input(z.object({
         limit: z.number().min(1).max(200).default(50),
         offset: z.number().default(0),
@@ -4908,7 +4870,6 @@ Case: #${input.caseId}`,
         dateTo: z.string().optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const conditions = [];
@@ -4933,7 +4894,7 @@ Case: #${input.caseId}`,
         return { logs: rows, total };
       }),
 
-    exportAuditLog: protectedProcedure
+    exportAuditLog: adminProcedure
       .input(z.object({
         actorId: z.number().optional(),
         action: z.string().optional(),
@@ -4942,7 +4903,6 @@ Case: #${input.caseId}`,
         dateTo: z.string().optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const conditions = [];
@@ -4970,10 +4930,9 @@ Case: #${input.caseId}`,
         return { csv: lines.join("\n"), count: rows.length };
       }),
 
-    seedDemoData: protectedProcedure
+    seedDemoData: adminProcedure
       .input(z.object({ reset: z.boolean().default(false) }).optional())
       .mutation(async ({ ctx }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const steps: string[] = [];
@@ -5037,8 +4996,7 @@ Case: #${input.caseId}`,
         return { success: true, steps, totalSteps: steps.length };
       }),
 
-    readinessCheck: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    readinessCheck: adminProcedure.query(async ({ ctx }) => {
       const checks: Array<{ id: string; label: string; status: "pass" | "warn" | "fail"; detail: string; fix?: string }> = [];
       // DB health
       const db = await getDb();
@@ -5083,7 +5041,7 @@ Case: #${input.caseId}`,
       return { checks, score, passed, total: checks.length };
     }),
     // ─── Liveness Audit Trail ─────────────────────────────────────────────────
-    listLivenessAudit: protectedProcedure
+    listLivenessAudit: adminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         limit: z.number().min(1).max(100).default(25),
@@ -5095,7 +5053,6 @@ Case: #${input.caseId}`,
         to: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
@@ -5139,10 +5096,9 @@ Case: #${input.caseId}`,
         const [{ total }] = whereExpr ? await countQ.where(whereExpr) : await countQ;
         return { rows, total, page: input.page, pages: Math.ceil(total / input.limit) };
       }),
-    getLivenessAuditDetail: protectedProcedure
+    getLivenessAuditDetail: adminProcedure
       .input(z.object({ id: z.number() }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
@@ -5154,8 +5110,7 @@ Case: #${input.caseId}`,
         const [user] = await db.select({ name: users.name, email: users.email, kycTier: users.kycTier }).from(users).where(eq(users.id, row.userId)).limit(1);
         return { ...row, kycDocument: doc ?? null, user: user ?? null };
       }),
-    livenessAuditStats: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    livenessAuditStats: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return { total: 0, passed: 0, failed: 0, deepfakeDetected: 0, spoofingDetected: 0, passRate: 0 };
       const { kycLivenessAudit } = await import("../drizzle/schema.js");
@@ -5175,13 +5130,12 @@ Case: #${input.caseId}`,
       };
     }),
 
-    livenessHourlyStats: protectedProcedure
+    livenessHourlyStats: adminProcedure
       .input(z.object({
         hours: z.number().min(1).max(720).default(24),
         corridor: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         // Try the Go aggregator first; fall back to a DB query if unavailable
         const GO_AGGREGATOR_URL = process.env.GO_LIVENESS_AGGREGATOR_URL ?? "http://go-liveness-aggregator:8098";
         try {
@@ -5245,10 +5199,9 @@ Case: #${input.caseId}`,
         }));
       }),
 
-    livenessCorridorStats: protectedProcedure
+    livenessCorridorStats: adminProcedure
       .input(z.object({ days: z.number().min(1).max(90).default(7) }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
@@ -5281,10 +5234,9 @@ Case: #${input.caseId}`,
         }));
       }),
 
-    markLivenessForReview: protectedProcedure
+    markLivenessForReview: adminProcedure
       .input(z.object({ auditId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
@@ -5297,10 +5249,9 @@ Case: #${input.caseId}`,
         return { success: true, auditId: updated.id };
       }),
 
-    resolveManualReview: protectedProcedure
+    resolveManualReview: adminProcedure
       .input(z.object({ auditId: z.number(), approve: z.boolean() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
@@ -5313,10 +5264,9 @@ Case: #${input.caseId}`,
         return { success: true, auditId: updated.id, approved: updated.overallLive };
       }),
 
-    listManualReviewQueue: protectedProcedure
+    listManualReviewQueue: adminProcedure
       .input(z.object({ limit: z.number().min(1).max(100).default(50), offset: z.number().min(0).default(0) }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
@@ -5334,13 +5284,12 @@ Case: #${input.caseId}`,
         return { rows, total };
       }),
 
-    livenessScoreHistogram: protectedProcedure
+    livenessScoreHistogram: adminProcedure
       .input(z.object({
         days: z.number().min(1).max(90).default(7),
         corridor: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { kycLivenessAudit } = await import("../drizzle/schema.js");
@@ -5373,7 +5322,7 @@ Case: #${input.caseId}`,
       }),
   }),
 
-    listAllTransactions: protectedProcedure
+    listAllTransactions: adminProcedure
       .input(z.object({
         limit: z.number().min(1).max(100).default(50),
         offset: z.number().min(0).default(0),
@@ -5382,7 +5331,6 @@ Case: #${input.caseId}`,
         minRisk: z.number().min(0).max(100).optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const whereClauses: any[] = [];
@@ -5399,8 +5347,7 @@ Case: #${input.caseId}`,
           : await db.select({ total: count() }).from(transactions);
         return { transactions: rows, total };
       }),
-    monitorStats: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+    monitorStats: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const oneDayAgo = new Date(Date.now() - 86400000);
@@ -5630,8 +5577,7 @@ Case: #${input.caseId}`,
       await db.update(marketOrders).set({ status: "disputed" as any, updatedAt: now }).where(eq(marketOrders.id, input.orderId)).returning();
       return { success: true, orderId: input.orderId, status: "disputed" };
     }),
-    adminListOrders: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new Error("Forbidden");
+    adminListOrders: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { marketOrders, marketListings } = await import("../drizzle/schema.js");
       return db.select({ id: marketOrders.id, status: marketOrders.status, amount: marketOrders.amount, currency: marketOrders.currency, escrowHeld: marketOrders.escrowHeld, createdAt: marketOrders.createdAt, listingTitle: marketListings.title }).from(marketOrders).leftJoin(marketListings, eq(marketOrders.listingId, marketListings.id)).orderBy(desc(marketOrders.createdAt)).limit(200);
@@ -5863,12 +5809,11 @@ Case: #${input.caseId}`,
       return { success: true, proposalId: input.proposalId };
     }),
 
-    approveDisbursement: protectedProcedure.input(z.object({
+    approveDisbursement: adminProcedure.input(z.object({
       proposalId: z.number(),
       action: z.enum(["approve", "reject"]),
       adminNotes: z.string().optional(),
     })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundProposals, communityFunds, notifications } = await import("../drizzle/schema.js");
       const [proposal] = await db.select().from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1);
@@ -5882,8 +5827,7 @@ Case: #${input.caseId}`,
       return { success: true, status: newStatus };
     }),
 
-    listDisbursementRequests: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+    listDisbursementRequests: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundProposals, communityFunds, users } = await import("../drizzle/schema.js");
       return db.select({ proposal: fundProposals, fund: communityFunds }).from(fundProposals)
