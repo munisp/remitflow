@@ -432,6 +432,47 @@ export class OpenSearchIntegration {
     if (since) filters.push(OpenSearchIntegration.buildRangeQuery("timestamp", { gte: since }));
     return filters.length > 0 ? OpenSearchIntegration.buildBoolQuery(undefined, undefined, undefined, filters) : { match_all: {} };
   }
+
+  /** Aggregation query for transaction corridor analytics */
+  async aggregateByField(indexName: string, field: string, size = 20): Promise<Array<{ key: string; count: number }>> {
+    if (!this.client) await this.connect();
+    if (!this.client) return [];
+    try {
+      const { body } = await this.client.search({
+        index: indexName,
+        body: {
+          size: 0,
+          aggs: { by_field: { terms: { field, size } } },
+        },
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (body.aggregations?.by_field?.buckets || []).map((b: any) => ({
+        key: b.key,
+        count: b.doc_count,
+      }));
+    } catch { return []; }
+  }
+
+  /** Delete documents by query (e.g., purge old data) */
+  async deleteByQuery(indexName: string, query: Record<string, unknown>): Promise<number> {
+    if (!this.client) await this.connect();
+    if (!this.client) return 0;
+    try {
+      const { body } = await this.client.deleteByQuery({ index: indexName, body: { query } });
+      return body.deleted || 0;
+    } catch { return 0; }
+  }
+
+  /** Get index health and doc count */
+  async getIndexStats(indexName: string): Promise<{ docCount: number; storeSizeBytes: number } | null> {
+    if (!this.client) await this.connect();
+    if (!this.client) return null;
+    try {
+      const { body } = await this.client.indices.stats({ index: indexName });
+      const stats = body._all?.primaries;
+      return { docCount: stats?.docs?.count || 0, storeSizeBytes: stats?.store?.size_in_bytes || 0 };
+    } catch { return null; }
+  }
 }
 
 /** Index field mappings for all RemitFlow indexes */
@@ -787,6 +828,67 @@ export class PermifyIntegration {
   async seedUserRelationships(userId: string, orgId = "default"): Promise<void> {
     await this.writeRelationship({ entity: "organization", entityId: orgId, relation: "member", subject: "user", subjectId: userId });
   }
+
+  /** Batch write relationships (e.g., onboarding a user with multiple roles) */
+  async batchWriteRelationships(relationships: Array<{ entity: string; entityId: string; relation: string; subject: string; subjectId: string }>): Promise<{ succeeded: number; failed: number }> {
+    let succeeded = 0;
+    let failed = 0;
+    for (const rel of relationships) {
+      const ok = await this.writeRelationship(rel);
+      if (ok) succeeded++;
+      else failed++;
+    }
+    return { succeeded, failed };
+  }
+
+  /** List relationships for an entity (useful for audit) */
+  async listRelationships(entity: string, entityId: string): Promise<Array<{ relation: string; subject: string; subjectId: string }>> {
+    if (!(await this.ensureAvailable())) return [];
+    try {
+      const res = await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/relationships/read`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          metadata: { snap_token: "" },
+          filter: { entity: { type: entity, ids: [entityId] } },
+        }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) return [];
+      const data = await res.json() as { tuples?: Array<{ relation: string; subject: { type: string; id: string } }> };
+      return (data.tuples || []).map(t => ({
+        relation: t.relation,
+        subject: t.subject.type,
+        subjectId: t.subject.id,
+      }));
+    } catch { return []; }
+  }
+
+  /** Get permission audit trail for a user across multiple entities */
+  async auditUserPermissions(userId: string, entities: Array<{ type: string; id: string }>, permissions: string[]): Promise<Array<{ entity: string; entityId: string; permission: string; allowed: boolean }>> {
+    const results: Array<{ entity: string; entityId: string; permission: string; allowed: boolean }> = [];
+    for (const ent of entities) {
+      for (const perm of permissions) {
+        const allowed = await this.checkCached({
+          entity: ent.type,
+          entityId: ent.id,
+          permission: perm,
+          subject: "user",
+          subjectId: userId,
+        });
+        results.push({ entity: ent.type, entityId: ent.id, permission: perm, allowed });
+      }
+    }
+    return results;
+  }
+
+  /** Clear entire permission cache (e.g., after schema change) */
+  clearCache(): void {
+    this.permCache.clear();
+  }
+
+  getSchemaVersion(): string { return this.schemaVersion; }
+  getCacheSize(): number { return this.permCache.size; }
 }
 
 // ─── Dapr Integration ─────────────────────────────────────────────────────────
@@ -1023,6 +1125,62 @@ export class FluvioIntegration {
   }
 
   isConnected(): boolean { return this.connected; }
+
+  /** Consumer group management — track offsets per consumer group */
+  async commitOffset(topic: string, consumerGroup: string, offset: number): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.serviceUrl}/consumer-groups/${consumerGroup}/offsets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, offset }),
+        signal: AbortSignal.timeout(3000),
+      });
+      return res.ok;
+    } catch { return false; }
+  }
+
+  /** Dead-letter queue — send failed messages to DLQ topic */
+  async sendToDLQ(originalTopic: string, record: { key: string; value: string; error: string }): Promise<boolean> {
+    const dlqTopic = `${originalTopic}.dlq`;
+    const dlqRecord = JSON.stringify({
+      originalTopic,
+      key: record.key,
+      value: record.value,
+      error: record.error,
+      failedAt: new Date().toISOString(),
+    });
+    return this.produce(dlqTopic, record.key, dlqRecord);
+  }
+
+  /** Backpressure: consume with max records and processing timeout */
+  async consumeWithBackpressure(
+    topic: string,
+    handler: (records: Array<{ key: string; value: string; offset: number }>) => Promise<void>,
+    opts: { maxRecords?: number; processingTimeoutMs?: number; consumerGroup?: string } = {}
+  ): Promise<{ processed: number; errors: number }> {
+    const { maxRecords = 10, processingTimeoutMs = 10000, consumerGroup = "default" } = opts;
+    const records = await this.consume(topic, undefined, maxRecords);
+    let processed = 0;
+    let errors = 0;
+
+    for (const record of records) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), processingTimeoutMs);
+        await handler([record]);
+        clearTimeout(timeout);
+        processed++;
+        if (consumerGroup !== "default") {
+          await this.commitOffset(topic, consumerGroup, record.offset);
+        }
+      } catch (err) {
+        errors++;
+        await this.sendToDLQ(topic, { key: record.key, value: record.value, error: String(err) });
+      }
+    }
+
+    return { processed, errors };
+  }
 }
 
 // ─── OpenAppSec Integration ──────────────────────────────────────────────────
@@ -1103,6 +1261,53 @@ export class OpenAppSecIntegration {
 
   getFailMode(): string { return this.failMode; }
   isAvailable(): boolean { return this.available; }
+
+  /** IP blocklist — automatically block after repeated violations */
+  private ipViolations = new Map<string, { count: number; lastSeen: number }>();
+  private blockedIps = new Set<string>();
+  private static MAX_VIOLATIONS = 3;
+  private static VIOLATION_WINDOW_MS = 300_000; // 5 minutes
+
+  recordViolation(ip: string): { blocked: boolean; totalViolations: number } {
+    const now = Date.now();
+    const existing = this.ipViolations.get(ip);
+    if (existing && now - existing.lastSeen < OpenAppSecIntegration.VIOLATION_WINDOW_MS) {
+      existing.count++;
+      existing.lastSeen = now;
+    } else {
+      this.ipViolations.set(ip, { count: 1, lastSeen: now });
+    }
+    const violations = this.ipViolations.get(ip)!;
+    if (violations.count >= OpenAppSecIntegration.MAX_VIOLATIONS) {
+      this.blockedIps.add(ip);
+      logger.warn(`[OpenAppSec] IP ${ip} auto-blocked after ${violations.count} violations`);
+      return { blocked: true, totalViolations: violations.count };
+    }
+    return { blocked: false, totalViolations: violations.count };
+  }
+
+  isIpBlocked(ip: string): boolean {
+    return this.blockedIps.has(ip);
+  }
+
+  unblockIp(ip: string): void {
+    this.blockedIps.delete(ip);
+    this.ipViolations.delete(ip);
+  }
+
+  getBlockedIps(): string[] {
+    return Array.from(this.blockedIps);
+  }
+
+  /** Request body inspection for common attack patterns */
+  inspectBody(body: string): { suspicious: boolean; patterns: string[] } {
+    const patterns: string[] = [];
+    if (/(<script|javascript:|on\w+=)/i.test(body)) patterns.push("xss");
+    if (/(union\s+select|;\s*drop\s+table|'\s*or\s+'1'\s*=\s*'1)/i.test(body)) patterns.push("sqli");
+    if (/(\.\.\/(\.\.\/){2,}|\/etc\/passwd|\/proc\/self)/i.test(body)) patterns.push("path_traversal");
+    if (/({{.*}}|{%.*%}|\$\{.*\})/i.test(body)) patterns.push("ssti");
+    return { suspicious: patterns.length > 0, patterns };
+  }
 }
 
 // ─── Lakehouse Integration ────────────────────────────────────────────────────
@@ -1233,6 +1438,54 @@ export class APISIXIntegration {
     if (synced > 0) this.routesSynced = true;
     logger.info(`[APISIX] Synced ${synced}/${routes.length} routes`);
     return { synced, errors };
+  }
+
+  /** Canary deployment — split traffic between stable and canary upstream */
+  async setCanaryWeight(routeId: string, canaryUpstream: string, weightPercent: number): Promise<boolean> {
+    if (weightPercent < 0 || weightPercent > 100) return false;
+    try {
+      await this.request(`/apisix/admin/routes/${routeId}`, "PATCH", {
+        plugins: {
+          "traffic-split": {
+            rules: [{
+              weighted_upstreams: [
+                { weight: 100 - weightPercent },
+                { upstream: { nodes: { [canaryUpstream]: 1 }, type: "roundrobin" }, weight: weightPercent },
+              ],
+            }],
+          },
+        },
+      });
+      logger.info(`[APISIX] Canary weight for ${routeId}: ${weightPercent}%`);
+      return true;
+    } catch (err) {
+      logger.warn({ err }, "[APISIX] Canary weight update failed");
+      return false;
+    }
+  }
+
+  /** SSL certificate management */
+  async uploadSSLCert(id: string, cert: string, key: string, snis: string[]): Promise<boolean> {
+    try {
+      await this.request(`/apisix/admin/ssls/${id}`, "PUT", { cert, key, snis });
+      return true;
+    } catch (err) {
+      logger.warn({ err }, "[APISIX] SSL cert upload failed");
+      return false;
+    }
+  }
+
+  /** Global plugin configuration */
+  async configureGlobalPlugin(pluginName: string, config: Record<string, unknown>): Promise<boolean> {
+    try {
+      await this.request(`/apisix/admin/global_rules/1`, "PATCH", {
+        plugins: { [pluginName]: config },
+      });
+      return true;
+    } catch (err) {
+      logger.warn({ err }, "[APISIX] Global plugin config failed");
+      return false;
+    }
   }
 }
 
