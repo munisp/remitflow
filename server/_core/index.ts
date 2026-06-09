@@ -115,12 +115,12 @@ async function startServer() {
     // Redis check (degraded without — rate limiting falls back to in-memory)
     try {
       const t0 = Date.now();
-      const { createClient } = await import("redis");
+      const Redis = (await import("ioredis")).default;
       const url = process.env.REDIS_URL ?? "redis://localhost:6379";
-      const client = createClient({ url, socket: { connectTimeout: 2000 } });
+      const client = new Redis(url, { lazyConnect: true, connectTimeout: 2000 });
       await client.connect();
-      await client.ping();
-      subsystems.redis = { status: "ok", latencyMs: Date.now() - t0 };
+      const pong = await client.ping();
+      subsystems.redis = { status: pong === "PONG" ? "ok" : "degraded", latencyMs: Date.now() - t0 };
       await client.quit();
     } catch {
       subsystems.redis = { status: "degraded", error: "Redis unavailable — using in-memory fallback" };
