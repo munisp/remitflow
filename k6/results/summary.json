@@ -1,0 +1,477 @@
+{
+  "options": {
+    "summaryTrendStats": [
+      "avg",
+      "min",
+      "med",
+      "max",
+      "p(90)",
+      "p(95)"
+    ],
+    "summaryTimeUnit": "",
+    "noColor": false
+  },
+  "state": {
+    "isStdOutTTY": true,
+    "isStdErrTTY": true,
+    "testRunDurationMs": 78625.352203
+  },
+  "metrics": {
+    "http_req_sending": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "min": 0.008416,
+        "med": 0.030748,
+        "max": 0.105236,
+        "p(90)": 0.05171000000000001,
+        "p(95)": 0.06665399999999999,
+        "avg": 0.03188788622754489
+      }
+    },
+    "http_req_waiting": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "p(95)": 9354.725465999994,
+        "avg": 1647.8303573832336,
+        "min": 0.610852,
+        "med": 3.568389,
+        "max": 13503.159032,
+        "p(90)": 7203.3606898000035
+      }
+    },
+    "vus": {
+      "type": "gauge",
+      "contains": "default",
+      "values": {
+        "min": 1,
+        "max": 5,
+        "value": 1
+      }
+    },
+    "errors": {
+      "type": "rate",
+      "contains": "default",
+      "values": {
+        "rate": 0.4270833333333333,
+        "passes": 41,
+        "fails": 55
+      },
+      "thresholds": {
+        "rate<0.01": {
+          "ok": false
+        }
+      }
+    },
+    "checks": {
+      "type": "rate",
+      "contains": "default",
+      "values": {
+        "rate": 0.437125748502994,
+        "passes": 73,
+        "fails": 94
+      }
+    },
+    "http_req_blocked": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "max": 0.837481,
+        "p(90)": 0.006436,
+        "p(95)": 0.01588729999999994,
+        "avg": 0.02473581437125747,
+        "min": 0.001623,
+        "med": 0.002975
+      }
+    },
+    "data_sent": {
+      "type": "counter",
+      "contains": "data",
+      "values": {
+        "rate": 587.3042054015509,
+        "count": 46177
+      }
+    },
+    "fx_rate_latency": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "p(90)": 6006.0479,
+        "p(95)": 8505.1566605,
+        "avg": 1476.9853918450704,
+        "min": 2.794989,
+        "med": 4.159585,
+        "max": 13503.262375
+      },
+      "thresholds": {
+        "p(95)<200": {
+          "ok": false
+        },
+        "p(99)<500": {
+          "ok": false
+        }
+      }
+    },
+    "http_req_failed": {
+      "values": {
+        "rate": 0.562874251497006,
+        "passes": 94,
+        "fails": 73
+      },
+      "type": "rate",
+      "contains": "default"
+    },
+    "p99_latency": {
+      "values": {
+        "min": 0.704286,
+        "med": 0.985635,
+        "max": 1.765662,
+        "p(90)": 1.53025,
+        "p(95)": 1.7233965,
+        "avg": 1.0852268125000002
+      },
+      "type": "trend",
+      "contains": "time"
+    },
+    "http_req_receiving": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "med": 0.090889,
+        "max": 0.245558,
+        "p(90)": 0.14742480000000002,
+        "p(95)": 0.16494059999999997,
+        "avg": 0.09918696407185634,
+        "min": 0.053029
+      }
+    },
+    "iteration_duration": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 6502.541545173076,
+        "min": 507.68969,
+        "med": 2008.3792635,
+        "max": 40026.530309,
+        "p(90)": 21883.088375399995,
+        "p(95)": 25886.294513449986
+      }
+    },
+    "group_duration": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "max": 40026.479334,
+        "p(90)": 21883.032346199994,
+        "p(95)": 25886.238193399986,
+        "avg": 6502.464150442307,
+        "min": 507.559347,
+        "med": 2008.298198
+      }
+    },
+    "http_req_duration{expected_response:true}": {
+      "contains": "time",
+      "values": {
+        "med": 4.159585,
+        "max": 13503.262375,
+        "p(90)": 6005.614836199999,
+        "p(95)": 8505.0841834,
+        "avg": 1484.5453291506847,
+        "min": 2.763655
+      },
+      "type": "trend"
+    },
+    "transfer_latency": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "med": 0.985635,
+        "max": 1.765662,
+        "p(90)": 1.53025,
+        "p(95)": 1.7233965,
+        "avg": 1.0852268125000002,
+        "min": 0.704286
+      },
+      "thresholds": {
+        "p(95)<800": {
+          "ok": true
+        },
+        "p(99)<2000": {
+          "ok": true
+        }
+      }
+    },
+    "wallet_latency": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 3380.5963011111107,
+        "min": 2.12788,
+        "med": 16.2660955,
+        "max": 13001.823661,
+        "p(90)": 11003.242833,
+        "p(95)": 12128.55007825
+      },
+      "thresholds": {
+        "p(95)<200": {
+          "ok": false
+        },
+        "p(99)<500": {
+          "ok": false
+        }
+      }
+    },
+    "data_received": {
+      "contains": "data",
+      "values": {
+        "count": 1489920,
+        "rate": 18949.613047878353
+      },
+      "type": "counter"
+    },
+    "iterations": {
+      "type": "counter",
+      "contains": "default",
+      "values": {
+        "count": 52,
+        "rate": 0.6613642870017682
+      }
+    },
+    "auth_latency": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 790.2199422142858,
+        "min": 2.081922,
+        "med": 2.5145655,
+        "max": 6503.946086,
+        "p(90)": 2953.2876080000033,
+        "p(95)": 4878.72935
+      },
+      "thresholds": {
+        "p(95)<300": {
+          "ok": false
+        },
+        "p(99)<800": {
+          "ok": false
+        }
+      }
+    },
+    "http_req_duration": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 1647.9614322335324,
+        "min": 0.704286,
+        "med": 3.680267,
+        "max": 13503.262375,
+        "p(90)": 7203.462988200003,
+        "p(95)": 9354.832271099995
+      },
+      "thresholds": {
+        "p(95)<500": {
+          "ok": false
+        },
+        "p(99)<1500": {
+          "ok": false
+        }
+      }
+    },
+    "vus_max": {
+      "type": "gauge",
+      "contains": "default",
+      "values": {
+        "value": 5,
+        "min": 5,
+        "max": 5
+      }
+    },
+    "http_reqs": {
+      "values": {
+        "count": 167,
+        "rate": 2.12399684479414
+      },
+      "type": "counter",
+      "contains": "default"
+    },
+    "http_req_tls_handshaking": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "max": 0,
+        "p(90)": 0,
+        "p(95)": 0,
+        "avg": 0,
+        "min": 0,
+        "med": 0
+      }
+    },
+    "http_req_connecting": {
+      "contains": "time",
+      "values": {
+        "avg": 0.014153964071856288,
+        "min": 0,
+        "med": 0,
+        "max": 0.558643,
+        "p(90)": 0,
+        "p(95)": 0
+      },
+      "type": "trend"
+    }
+  },
+  "root_group": {
+    "id": "d41d8cd98f00b204e9800998ecf8427e",
+    "groups": [
+      {
+        "name": "Wallet Flow",
+        "path": "::Wallet Flow",
+        "id": "87f82d0dcb80b8b50962d68aed5c778b",
+        "groups": [],
+        "checks": [
+            {
+              "name": "Wallet list success",
+              "path": "::Wallet Flow::Wallet list success",
+              "id": "f148ad50215b9d8d502320479f5381b4",
+              "passes": 0,
+              "fails": 12
+            },
+            {
+              "name": "Wallet balance success",
+              "path": "::Wallet Flow::Wallet balance success",
+              "id": "f3d71eddfca08ab3be9b3e89ac946c55",
+              "passes": 0,
+              "fails": 12
+            },
+            {
+              "id": "ea55984ab35b4cd8e4170254ebf84286",
+              "passes": 0,
+              "fails": 12,
+              "name": "Wallet transactions success",
+              "path": "::Wallet Flow::Wallet transactions success"
+            }
+          ]
+      },
+      {
+        "checks": [
+          {
+            "path": "::Auth Flow::Auth login responded",
+            "id": "9ace44c6de9968416a2677678ed78d7b",
+            "passes": 0,
+            "fails": 7,
+            "name": "Auth login responded"
+          },
+          {
+            "passes": 0,
+            "fails": 7,
+            "name": "Auth me success",
+            "path": "::Auth Flow::Auth me success",
+            "id": "27ac93c59010689810706d46924ca065"
+          }
+        ],
+        "name": "Auth Flow",
+        "path": "::Auth Flow",
+        "id": "5c11e31c00a627a5c2755b3235403ac9",
+        "groups": []
+      },
+      {
+        "groups": [],
+        "checks": [
+            {
+              "id": "1c202da13f9b1ccce31ff5e3087a8672",
+              "passes": 16,
+              "fails": 0,
+              "name": "FX rate success",
+              "path": "::Transfer Flow::FX rate success"
+            },
+            {
+              "passes": 0,
+              "fails": 16,
+              "name": "Transfer initiated",
+              "path": "::Transfer Flow::Transfer initiated",
+              "id": "78ee9d7d623a2cad311074b50fef8425"
+            },
+            {
+              "name": "Transfer list success",
+              "path": "::Transfer Flow::Transfer list success",
+              "id": "114843d1aa9597ca00d088f5a7ff487e",
+              "passes": 0,
+              "fails": 16
+            }
+          ],
+        "name": "Transfer Flow",
+        "path": "::Transfer Flow",
+        "id": "47c736947bf50ff59438975431ab6adf"
+      },
+      {
+        "path": "::FX Rate Flow",
+        "id": "1b6e183824ea13a19dbb808fe05c2bea",
+        "groups": [],
+        "checks": [
+            {
+              "id": "13e1a00bfe7496e59bdff8abcada0ad7",
+              "passes": 55,
+              "fails": 0,
+              "name": "FX rate fetched",
+              "path": "::FX Rate Flow::FX rate fetched"
+            }
+          ],
+        "name": "FX Rate Flow"
+      },
+      {
+        "name": "Compliance Flow",
+        "path": "::Compliance Flow",
+        "id": "9884a56629d3895f2690c5f523baf0b7",
+        "groups": [],
+        "checks": [
+            {
+              "passes": 0,
+              "fails": 4,
+              "name": "KYC status success",
+              "path": "::Compliance Flow::KYC status success",
+              "id": "c956f47112e452971e0eae7b416aea25"
+            },
+            {
+              "name": "Beneficiary list success",
+              "path": "::Compliance Flow::Beneficiary list success",
+              "id": "f1e6b8b79f6457cd09d8690892056145",
+              "passes": 0,
+              "fails": 4
+            }
+          ]
+      },
+      {
+        "path": "::Admin Flow",
+        "id": "bb69cd9117ef4a3d0be0f2190194261e",
+        "groups": [],
+        "checks": [
+            {
+              "name": "System health success",
+              "path": "::Admin Flow::System health success",
+              "id": "26fb5a7bdf02255cd30f007f102fc8a0",
+              "passes": 2,
+              "fails": 0
+            },
+            {
+              "id": "6a505ef12ecdef95c5f8f9676682e3f7",
+              "passes": 0,
+              "fails": 2,
+              "name": "Fee rules success",
+              "path": "::Admin Flow::Fee rules success"
+            },
+            {
+              "name": "Secrets status success",
+              "path": "::Admin Flow::Secrets status success",
+              "id": "94d03678088248a16a4691b598899770",
+              "passes": 0,
+              "fails": 2
+            }
+          ],
+        "name": "Admin Flow"
+      }
+    ],
+    "checks": [],
+    "name": "",
+    "path": ""
+  }
+}

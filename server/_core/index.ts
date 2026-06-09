@@ -71,6 +71,15 @@ async function startServer() {
   app.use(openAppSecHeadersMiddleware);
   app.use(openAppSecWafMiddleware);
 
+  // API versioning headers — all responses include version metadata
+  app.use((_req, res, next) => {
+    res.setHeader("X-API-Version", "v1");
+    res.setHeader("X-Supported-Versions", "v1");
+    res.setHeader("X-Min-Client-Version", "1.0.0");
+    res.setHeader("X-Server-Version", "69.0.0");
+    next();
+  });
+
   // Body parser — reduced to 10mb (KYC uploads go through S3 presigned URLs)
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ limit: "10mb", extended: true }));
@@ -177,6 +186,41 @@ async function startServer() {
       timestamp: new Date().toISOString(),
       checks,
     });
+  });
+
+  // DB connection pool metrics — for Prometheus/Grafana dashboards
+  app.get("/api/metrics/db", async (_req, res) => {
+    try {
+      const { getDb } = await import("../db.js");
+      const db = await getDb();
+      if (!db) return res.status(503).json({ error: "DB unavailable" });
+
+      const poolStats = await db.execute("SELECT count(*) as total_connections, sum(CASE WHEN state = 'active' THEN 1 ELSE 0 END) as active, sum(CASE WHEN state = 'idle' THEN 1 ELSE 0 END) as idle, sum(CASE WHEN wait_event IS NOT NULL THEN 1 ELSE 0 END) as waiting FROM pg_stat_activity WHERE datname = current_database()" as any);
+      const rows = poolStats as unknown as Array<{ total_connections: string; active: string; idle: string; waiting: string }>;
+      const stats = rows[0] ?? { total_connections: "0", active: "0", idle: "0", waiting: "0" };
+
+      const slowQueries = await db.execute("SELECT count(*) as slow_count FROM pg_stat_activity WHERE datname = current_database() AND state = 'active' AND now() - query_start > interval '5 seconds'" as any);
+      const slowRows = slowQueries as unknown as Array<{ slow_count: string }>;
+
+      const dbSize = await db.execute("SELECT pg_database_size(current_database()) as size_bytes" as any);
+      const sizeRows = dbSize as unknown as Array<{ size_bytes: string }>;
+
+      res.json({
+        pool: {
+          totalConnections: parseInt(stats.total_connections, 10),
+          active: parseInt(stats.active, 10),
+          idle: parseInt(stats.idle, 10),
+          waiting: parseInt(stats.waiting, 10),
+          maxPool: parseInt(process.env.DB_POOL_MAX ?? "50", 10),
+        },
+        slowQueries: parseInt(slowRows[0]?.slow_count ?? "0", 10),
+        databaseSizeBytes: parseInt(sizeRows[0]?.size_bytes ?? "0", 10),
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      res.status(500).json({ error: message });
+    }
   });
 
   // Security score endpoint — OWASP Top 10 coverage assessment + OpenAppSec vulnerability score
@@ -1174,7 +1218,7 @@ async function startServer() {
   // Attach WebSocket server for Services Health real-time feed
   attachServicesHealthWS(server);
 
-  server.listen(port, () => {
+  server.listen(port, async () => {
     logger.info(`Server running on http://localhost:${port}/`);
     // Start background cron scheduler (recurring payments, FX alerts, fraud escalation)
     startScheduler();
@@ -1182,6 +1226,16 @@ async function startServer() {
     startMicroservices();
     // Initialize Kafka topics (non-blocking, graceful fallback if Kafka unavailable)
     ensureTopicsExist().catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic init failed (non-blocking):"));
+    // Start webhook retry scheduler (exponential backoff for failed payment callbacks)
+    try {
+      const { ensureWebhookQueueTable, startWebhookRetryScheduler } = await import("../lib/webhookRetryQueue.js");
+      await ensureWebhookQueueTable();
+      startWebhookRetryScheduler(30_000);
+      logger.info("[Webhooks] Retry scheduler started (30s interval)");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "unknown";
+      logger.warn({ errMsg: message }, "[Webhooks] Retry scheduler failed to start (non-blocking):");
+    }
   });
 }
 
@@ -1205,6 +1259,13 @@ async function gracefulShutdown(signal: string) {
     logger.error("[Shutdown] Forced exit after 30s timeout");
     process.exit(1);
   }, 30_000);
+
+  // Stop webhook retry scheduler
+  try {
+    const { stopWebhookRetryScheduler } = await import("../lib/webhookRetryQueue.js");
+    stopWebhookRetryScheduler();
+    logger.info("[Shutdown] Webhook retry scheduler stopped");
+  } catch { /* non-critical */ }
 
   // Stop WebSocket broadcaster
   stopServicesHealthWS();

@@ -15,8 +15,6 @@
 # - No HSM — uses env-var DEKs (production uses CloudHSM)
 #
 
-version: "3.9"
-
 x-common-env: &common-env
   NODE_ENV: staging
   DATABASE_URL: postgresql://remitflow:remitflow_staging@postgres:5432/remitflow_staging
