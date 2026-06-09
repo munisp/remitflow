@@ -63,16 +63,51 @@ async function checkMinioHealth(): Promise<boolean> {
   return _minioAvailable;
 }
 
+/**
+ * AWS Signature Version 4 signing for S3-compatible storage (MinIO/S3).
+ * Uses standard SigV4 instead of Basic auth for production compatibility.
+ */
+function signS3Request(method: string, url: string, headers: Record<string, string>, body: Buffer): Record<string, string> {
+  const crypto = require("crypto") as typeof import("crypto");
+  const now = new Date();
+  const dateStamp = now.toISOString().replace(/[-:]/g, "").slice(0, 8);
+  const amzDate = now.toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "");
+  const region = process.env.AWS_REGION || "us-east-1";
+  const service = "s3";
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+
+  const accessKey = MINIO_ACCESS_KEY;
+  const secretKey = MINIO_SECRET_KEY;
+
+  headers["x-amz-date"] = amzDate;
+  headers["x-amz-content-sha256"] = crypto.createHash("sha256").update(body).digest("hex");
+
+  const sortedHeaders = Object.keys(headers).sort();
+  const signedHeaders = sortedHeaders.join(";");
+  const canonicalHeaders = sortedHeaders.map(k => `${k}:${headers[k]}`).join("\n") + "\n";
+
+  const parsedUrl = new URL(url);
+  const canonicalRequest = [method, parsedUrl.pathname, parsedUrl.search.slice(1), canonicalHeaders, signedHeaders, headers["x-amz-content-sha256"]].join("\n");
+
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, credentialScope, crypto.createHash("sha256").update(canonicalRequest).digest("hex")].join("\n");
+
+  const hmac = (key: Buffer | string, data: string) => crypto.createHmac("sha256", key).update(data).digest();
+  const signingKey = hmac(hmac(hmac(hmac(`AWS4${secretKey}`, dateStamp), region), service), "aws4_request");
+  const signature = crypto.createHmac("sha256", signingKey).update(stringToSign).digest("hex");
+
+  headers["Authorization"] = `AWS4-HMAC-SHA256 Credential=${accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  return headers;
+}
+
 async function putToMinio(key: string, data: Buffer, contentType: string): Promise<StorageResult | null> {
   if (!await checkMinioHealth()) return null;
   try {
     const url = `${MINIO_URL}/${MINIO_BUCKET}/${key}`;
+    const headers: Record<string, string> = { "content-type": contentType, "host": new URL(MINIO_URL).host };
+    const signedHeaders = signS3Request("PUT", url, headers, data);
     const res = await fetch(url, {
       method: "PUT",
-      headers: {
-        "Content-Type": contentType,
-        "Authorization": `Basic ${Buffer.from(`${MINIO_ACCESS_KEY}:${MINIO_SECRET_KEY}`).toString("base64")}`,
-      },
+      headers: signedHeaders,
       body: data as unknown as BodyInit,
     });
     if (res.ok || res.status === 200 || res.status === 204) {

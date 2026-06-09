@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -39,22 +40,33 @@ type DaprEvent struct {
 	Type            string          `json:"type"`
 }
 
-// publishEvent publishes an event to a Dapr topic
+// publishEvent publishes an event to a Dapr topic with retry
 func publishEvent(ctx context.Context, pubsubName, topic string, data any) error {
-	_, err := json.Marshal(data)
+	jsonBytes, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
 	url := fmt.Sprintf("http://localhost:%s/v1.0/publish/%s/%s", daprHTTPPort, pubsubName, topic)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, nil)
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBytes))
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		lastErr = fmt.Errorf("dapr publish returned %d", resp.StatusCode)
+		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
 	}
-	defer resp.Body.Close()
-	return nil
+	log.Printf("[Dapr] Publish to %s/%s failed after 3 retries: %v", pubsubName, topic, lastErr)
+	return lastErr
 }
 
 // Subscription handlers

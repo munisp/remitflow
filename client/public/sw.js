@@ -6,17 +6,35 @@
 // v204 additions: Form M history, HNW banking, CBN compliance, BDC portal, SME trade routes cached
 // v23 additions: Tier 1 (Expense, Contractor, KYB, Payroll Tax), Tier 2 (Savings, Bonds, LC, Invoice Financing, Payroll Run), Tier 3 (Embedded Payroll, Mortgage, Credit Scoring, ESG)
 
-const CACHE_VERSION = 'v23';
+const CACHE_VERSION = 'v24';
 const STATIC_CACHE = `remitflow-static-${CACHE_VERSION}`;
 const API_CACHE = `remitflow-api-${CACHE_VERSION}`;
 const FX_CACHE = `remitflow-fx-${CACHE_VERSION}`;
 const COMMUNITY_CACHE = `remitflow-community-${CACHE_VERSION}`;
 const REVENUE_SHARE_CACHE = `remitflow-revenue-share-${CACHE_VERSION}`;
 
-// Only pre-cache true static files, NOT SPA routes (which require auth checks)
-const STATIC_ASSETS = [
-  '/manifest.json', '/revenue-share-manifest.json', '/favicon.ico'
+// Cache size limits per cache bucket — prevents unbounded storage growth
+const CACHE_SIZE_LIMITS = {
+  [STATIC_CACHE]: 100,         // 100 items max
+  [API_CACHE]: 500,            // 500 API response entries
+  [FX_CACHE]: 200,             // 200 FX rate snapshots
+  [COMMUNITY_CACHE]: 200,
+  [REVENUE_SHARE_CACHE]: 100,
+};
+
+/**
+ * App shell pre-cache — the minimal set of assets needed for the SPA to render.
+ * These are cached on install so the app loads instantly even offline.
+ */
+const SHELL_ASSETS = [
+  '/',                         // SPA entry point (index.html)
+  '/manifest.json',
+  '/revenue-share-manifest.json',
+  '/favicon.ico',
 ];
+
+// Legacy alias
+const STATIC_ASSETS = SHELL_ASSETS;
 
 // v170: Universal FX + crypto rate patterns (15-min SWR)
 const UNIVERSAL_FX_PATTERNS = [
@@ -210,11 +228,28 @@ self.addEventListener('fetch', (event) => {
   }
 });
 
+/**
+ * Enforce cache size limit — evicts oldest entries when the cache exceeds maxItems.
+ */
+async function enforceCacheLimit(cacheName, maxItems) {
+  const limit = maxItems || CACHE_SIZE_LIMITS[cacheName] || 500;
+  const cache = await caches.open(cacheName);
+  const keys = await cache.keys();
+  if (keys.length > limit) {
+    const toDelete = keys.slice(0, keys.length - limit);
+    await Promise.all(toDelete.map((k) => cache.delete(k)));
+  }
+}
+
 async function cacheFirst(request, cacheName) {
   const cached = await caches.match(request);
   if (cached) return cached;
   const response = await fetch(request);
-  if (response.ok) { const c = await caches.open(cacheName); c.put(request, response.clone()); }
+  if (response.ok) {
+    const c = await caches.open(cacheName);
+    c.put(request, response.clone());
+    enforceCacheLimit(cacheName).catch(() => {});
+  }
   return response;
 }
 
@@ -241,13 +276,21 @@ async function staleWhileRevalidate(request, cacheName, maxAgeSeconds) {
   if (cached) {
     const age = (Date.now() - new Date(cached.headers.get('date') || 0).getTime()) / 1000;
     if (age < maxAgeSeconds) {
-      fetch(request).then((r) => { if (r.ok) cache.put(request, r); }).catch(() => {});
+      fetch(request).then((r) => {
+        if (r.ok) {
+          cache.put(request, r);
+          enforceCacheLimit(cacheName).catch(() => {});
+        }
+      }).catch(() => {});
       return cached;
     }
   }
   try {
     const response = await fetch(request);
-    if (response.ok) cache.put(request, response.clone());
+    if (response.ok) {
+      cache.put(request, response.clone());
+      enforceCacheLimit(cacheName).catch(() => {});
+    }
     return response;
   } catch {
     return cached || new Response(JSON.stringify({ error: 'offline' }), { status: 503, headers: { 'Content-Type': 'application/json' } });

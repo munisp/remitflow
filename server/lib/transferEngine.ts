@@ -159,10 +159,104 @@ class PostgresLedger implements LedgerBackend {
   }
 }
 
-// In production: import { TigerBeetleIntegration } from '../middleware/middlewareIntegration.js'
-// const ledger: LedgerBackend = process.env.TIGERBEETLE_ADDRESSES 
-//   ? new TigerBeetleLedger() : new PostgresLedger();
-const ledger: LedgerBackend = new PostgresLedger();
+/**
+ * TigerBeetle-backed ledger — activated when TIGERBEETLE_ADDRESSES is set.
+ * Uses the TigerBeetleIntegration class from middlewareIntegration for
+ * double-entry accounting with idempotent transfers, strict serialization,
+ * and O(1) balance lookups.
+ */
+class TigerBeetleLedger implements LedgerBackend {
+  private tb: import('../middleware/middlewareIntegration.js').TigerBeetleIntegration | null = null;
+  private initPromise: Promise<void> | null = null;
+
+  private async ensureConnected(): Promise<void> {
+    if (this.tb) return;
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = (async () => {
+      try {
+        const { TigerBeetleIntegration } = await import('../middleware/middlewareIntegration.js');
+        this.tb = new TigerBeetleIntegration();
+        await this.tb.connect();
+      } catch {
+        this.tb = null;
+      }
+    })();
+    return this.initPromise;
+  }
+
+  async createTransfer(entry: LedgerEntry): Promise<void> {
+    await this.ensureConnected();
+    if (!this.tb) {
+      // Fall through to PostgreSQL if TigerBeetle init failed
+      return pgFallback.createTransfer(entry);
+    }
+    const transferId = BigInt('0x' + entry.id.replace(/-/g, '').slice(0, 16));
+    await this.tb.createTransfer({
+      id: transferId,
+      debitAccountId: BigInt(entry.debitAccountId),
+      creditAccountId: BigInt(entry.creditAccountId),
+      amount: BigInt(Math.round(entry.amount * 100)),
+      ledger: 1,
+      code: entry.type === 'fee' ? 2 : entry.type === 'fx_conversion' ? 3 : 1,
+    });
+    // Also write to PostgreSQL for queryability
+    await pgFallback.createTransfer(entry);
+  }
+
+  async getBalance(accountId: number, currency: string): Promise<number> {
+    await this.ensureConnected();
+    if (!this.tb) return pgFallback.getBalance(accountId, currency);
+    try {
+      const accounts = await this.tb.lookupAccounts([BigInt(accountId)]);
+      if (accounts.length > 0) {
+        const acct = accounts[0];
+        const creditsPosted = Number(acct.credits_posted ?? 0);
+        const debitsPosted = Number(acct.debits_posted ?? 0);
+        const debitsPending = Number(acct.debits_pending ?? 0);
+        return (creditsPosted - debitsPosted - debitsPending) / 100;
+      }
+    } catch { /* fall through */ }
+    return pgFallback.getBalance(accountId, currency);
+  }
+
+  async debit(accountId: number, amount: number, currency: string, ref: string): Promise<void> {
+    await this.ensureConnected();
+    if (!this.tb) return pgFallback.debit(accountId, amount, currency, ref);
+    const transferId = BigInt('0x' + crypto.randomUUID().replace(/-/g, '').slice(0, 16));
+    await this.tb.createTransfer({
+      id: transferId,
+      debitAccountId: BigInt(accountId),
+      creditAccountId: BigInt(9999), // Suspense account
+      amount: BigInt(Math.round(amount * 100)),
+      ledger: 1,
+      code: 1,
+    });
+    // Also write to PostgreSQL for query/reporting
+    await pgFallback.debit(accountId, amount, currency, ref);
+  }
+
+  async credit(accountId: number, amount: number, currency: string, ref: string): Promise<void> {
+    await this.ensureConnected();
+    if (!this.tb) return pgFallback.credit(accountId, amount, currency, ref);
+    const transferId = BigInt('0x' + crypto.randomUUID().replace(/-/g, '').slice(0, 16));
+    await this.tb.createTransfer({
+      id: transferId,
+      debitAccountId: BigInt(9999), // Suspense account
+      creditAccountId: BigInt(accountId),
+      amount: BigInt(Math.round(amount * 100)),
+      ledger: 1,
+      code: 1,
+    });
+    await pgFallback.credit(accountId, amount, currency, ref);
+  }
+}
+
+const pgFallback = new PostgresLedger();
+
+// Activate TigerBeetle when configured; otherwise use PostgreSQL directly
+const ledger: LedgerBackend = process.env.TIGERBEETLE_ADDRESSES
+  ? new TigerBeetleLedger()
+  : pgFallback;
 
 // ─── Event Bus Abstraction (middleware-ready) ────────────────────────────────
 
@@ -185,8 +279,30 @@ class PostgresEventBus implements EventBus {
   }
 }
 
-// In production: const events = process.env.KAFKA_BROKERS ? new KafkaEventBus() : new PostgresEventBus();
-const events: EventBus = new PostgresEventBus();
+/**
+ * Kafka-backed event bus — activated when KAFKA_BROKERS is set.
+ * Falls back to PostgreSQL audit log when Kafka unavailable.
+ */
+class KafkaEventBus implements EventBus {
+  async publish(topic: string, event: Record<string, unknown>): Promise<void> {
+    try {
+      const { publishEvent } = await import('../middleware/kafka.js');
+      const published = await publishEvent(topic, String(event.userId || 'system'), event);
+      if (!published) {
+        // Kafka unavailable — fall back to PostgreSQL
+        await pgEventFallback.publish(topic, event);
+      }
+    } catch {
+      await pgEventFallback.publish(topic, event);
+    }
+  }
+}
+
+const pgEventFallback = new PostgresEventBus();
+
+const events: EventBus = process.env.KAFKA_BROKERS
+  ? new KafkaEventBus()
+  : pgEventFallback;
 
 // ─── FX Rate Service ─────────────────────────────────────────────────────────
 

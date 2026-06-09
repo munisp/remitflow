@@ -57,7 +57,15 @@ function getBaseUrl(cfg: KeycloakConfig): string {
  * Build the Keycloak authorization URL (replaces getLoginUrl on the server).
  * The frontend uses the VITE_KEYCLOAK_* env vars directly.
  */
-export function buildKeycloakAuthUrl(redirectUri: string, state: string): string {
+/**
+ * Build auth URL with PKCE challenge for public clients.
+ * PKCE prevents authorization code interception attacks.
+ */
+export function buildKeycloakAuthUrl(
+  redirectUri: string,
+  state: string,
+  pkce?: { challenge: string; method?: string }
+): string {
   const cfg = getKeycloakConfig();
   const base = getBaseUrl(cfg);
   const url = new URL(`${base}/auth`);
@@ -66,15 +74,24 @@ export function buildKeycloakAuthUrl(redirectUri: string, state: string): string
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", "openid email profile");
   url.searchParams.set("state", state);
+  // PKCE parameters
+  if (pkce) {
+    url.searchParams.set("code_challenge", pkce.challenge);
+    url.searchParams.set("code_challenge_method", pkce.method || "S256");
+  }
   return url.toString();
 }
 
 /**
  * Exchange an authorization code for tokens via Keycloak.
  */
+/**
+ * Exchange auth code for tokens. Supports PKCE code_verifier.
+ */
 export async function exchangeKeycloakCode(
   code: string,
-  redirectUri: string
+  redirectUri: string,
+  codeVerifier?: string
 ): Promise<KeycloakTokenResponse> {
   const cfg = getKeycloakConfig();
   const tokenUrl = `${getBaseUrl(cfg)}/token`;
@@ -88,6 +105,9 @@ export async function exchangeKeycloakCode(
   if (cfg.clientSecret) {
     params.set("client_secret", cfg.clientSecret);
   }
+  if (codeVerifier) {
+    params.set("code_verifier", codeVerifier);
+  }
 
   const { data } = await axios.post<KeycloakTokenResponse>(
     tokenUrl,
@@ -95,6 +115,58 @@ export async function exchangeKeycloakCode(
     { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 10_000 }
   );
   return data;
+}
+
+/**
+ * Refresh an access token using a refresh_token.
+ * Called when the access_token is expired but the session is still valid.
+ */
+export async function refreshKeycloakToken(
+  refreshToken: string
+): Promise<KeycloakTokenResponse> {
+  const cfg = getKeycloakConfig();
+  const tokenUrl = `${getBaseUrl(cfg)}/token`;
+
+  const params = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: cfg.clientId,
+    refresh_token: refreshToken,
+  });
+  if (cfg.clientSecret) {
+    params.set("client_secret", cfg.clientSecret);
+  }
+
+  const { data } = await axios.post<KeycloakTokenResponse>(
+    tokenUrl,
+    params.toString(),
+    { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 10_000 }
+  );
+  return data;
+}
+
+/**
+ * Revoke a token (access or refresh) on logout.
+ */
+export async function revokeKeycloakToken(
+  token: string,
+  tokenTypeHint: "access_token" | "refresh_token" = "refresh_token"
+): Promise<void> {
+  const cfg = getKeycloakConfig();
+  const revokeUrl = `${getBaseUrl(cfg)}/revoke`;
+
+  const params = new URLSearchParams({
+    client_id: cfg.clientId,
+    token,
+    token_type_hint: tokenTypeHint,
+  });
+  if (cfg.clientSecret) {
+    params.set("client_secret", cfg.clientSecret);
+  }
+
+  await axios.post(revokeUrl, params.toString(), {
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    timeout: 10_000,
+  });
 }
 
 /**

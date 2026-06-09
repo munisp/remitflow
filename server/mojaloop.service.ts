@@ -385,6 +385,131 @@ export async function getFSPParticipants(): Promise<Array<{
   } catch { /* fallback */ }
 
   logger.warn("[Mojaloop] Participants endpoint unavailable — returning empty list");
-  return [
-  ];
+  return [];
+}
+
+// ─── ILP Fulfillment / Condition Matching ─────────────────────────────────────
+
+/**
+ * Generate an ILP condition and fulfillment pair for a transfer.
+ * The condition is a SHA-256 hash of the fulfillment.
+ * The fulfillment is revealed only when the transfer is committed.
+ *
+ * Per FSPIOP spec:
+ *   condition  = BASE64URL(SHA256(fulfillment))
+ *   fulfillment = 32 random bytes, BASE64URL-encoded
+ */
+export function generateIlpConditionPair(): { condition: string; fulfillment: string } {
+  const fulfillmentBytes = crypto.randomBytes(32);
+  const fulfillment = fulfillmentBytes.toString("base64url");
+  const condition = crypto.createHash("sha256").update(fulfillmentBytes).digest("base64url");
+  return { condition, fulfillment };
+}
+
+/**
+ * Verify that a fulfillment matches a condition.
+ * Used in the callback handler when Mojaloop switch returns the fulfillment.
+ */
+export function verifyIlpFulfillment(condition: string, fulfillment: string): boolean {
+  try {
+    const fulfillmentBytes = Buffer.from(fulfillment, "base64url");
+    const computedCondition = crypto.createHash("sha256").update(fulfillmentBytes).digest("base64url");
+    return computedCondition === condition;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Generate a full ILP packet for a transfer request.
+ * Includes destination address, amount, and expiry.
+ */
+export function buildIlpPacket(params: {
+  amount: string;
+  currency: string;
+  destinationFspId: string;
+  destinationAccount: string;
+  expirySeconds?: number;
+}): { ilpPacket: string; condition: string; fulfillment: string } {
+  const { condition, fulfillment } = generateIlpConditionPair();
+  const expiry = new Date(Date.now() + (params.expirySeconds || 30) * 1000).toISOString();
+
+  const packet = {
+    amount: { amount: params.amount, currency: params.currency },
+    destination: `g.${params.destinationFspId}.${params.destinationAccount}`,
+    data: { transactionType: { scenario: "TRANSFER", initiator: "PAYER", initiatorType: "CONSUMER" } },
+    expiration: expiry,
+  };
+
+  const ilpPacket = Buffer.from(JSON.stringify(packet)).toString("base64url");
+  return { ilpPacket, condition, fulfillment };
+}
+
+// ─── Webhook Receiver (Mojaloop Callback Handlers) ───────────────────────────
+
+export interface MojaloopCallback {
+  transferId: string;
+  transferState: "COMMITTED" | "ABORTED" | "RESERVED";
+  fulfilment?: string;
+  completedTimestamp?: string;
+  errorInformation?: { errorCode: string; errorDescription: string };
+}
+
+/** Pending transfers awaiting callback — keyed by transferId */
+const pendingTransfers = new Map<string, {
+  condition: string;
+  resolve: (result: MojaloopCallback) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}>();
+
+/**
+ * Register a transfer as pending, waiting for Mojaloop callback.
+ * Returns a promise that resolves when the callback arrives (or times out).
+ */
+export function awaitTransferCallback(
+  transferId: string,
+  condition: string,
+  timeoutMs = 30_000
+): Promise<MojaloopCallback> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingTransfers.delete(transferId);
+      resolve({
+        transferId,
+        transferState: "ABORTED",
+        errorInformation: { errorCode: "5003", errorDescription: "Transfer callback timeout" },
+      });
+    }, timeoutMs);
+
+    pendingTransfers.set(transferId, { condition, resolve, timeout });
+  });
+}
+
+/**
+ * Handle an incoming Mojaloop callback (PUT /transfers/{id}).
+ * Verifies ILP fulfillment before accepting.
+ */
+export function handleMojaloopCallback(callback: MojaloopCallback): { accepted: boolean; reason?: string } {
+  const pending = pendingTransfers.get(callback.transferId);
+  if (!pending) {
+    logger.warn(`[Mojaloop] Received callback for unknown transfer: ${callback.transferId}`);
+    return { accepted: false, reason: "Unknown transfer" };
+  }
+
+  clearTimeout(pending.timeout);
+  pendingTransfers.delete(callback.transferId);
+
+  // Verify ILP fulfillment if present
+  if (callback.fulfilment && !verifyIlpFulfillment(pending.condition, callback.fulfilment)) {
+    logger.error(`[Mojaloop] ILP fulfillment mismatch for ${callback.transferId}`);
+    pending.resolve({
+      ...callback,
+      transferState: "ABORTED",
+      errorInformation: { errorCode: "5105", errorDescription: "ILP fulfillment mismatch" },
+    });
+    return { accepted: false, reason: "Fulfillment mismatch" };
+  }
+
+  pending.resolve(callback);
+  return { accepted: true };
 }

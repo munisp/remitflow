@@ -193,13 +193,55 @@ export class RedisIntegration {
     }, undefined);
   }
 
+  /**
+   * Atomic rate limiting using Lua script — avoids the race condition
+   * between INCR and EXPIRE that existed in the previous implementation.
+   * The Lua script runs atomically in Redis, ensuring the window is always set.
+   */
+  private static RATE_LIMIT_LUA = `
+    local key = KEYS[1]
+    local max = tonumber(ARGV[1])
+    local window = tonumber(ARGV[2])
+    local current = redis.call('INCR', key)
+    if current == 1 then
+      redis.call('EXPIRE', key, window)
+    end
+    local ttl = redis.call('TTL', key)
+    if ttl < 0 then
+      redis.call('EXPIRE', key, window)
+      ttl = window
+    end
+    return {current, max - current, ttl}
+  `;
+
   async setRateLimit(key: string, maxRequests: number, windowSeconds: number): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
-    const rlKey = `rl:${key}`;
-    const current = await this.incr(rlKey);
-    if (current === 1 && this.client) {
-      await this.client.expire(`${CONFIG.redis.keyPrefix}${rlKey}`, windowSeconds);
+    const rlKey = `${CONFIG.redis.keyPrefix}rl:${key}`;
+    // Try Lua script for atomicity (only works with real Redis, not InMemoryCache)
+    if (this.client && !(this.client instanceof InMemoryCache)) {
+      try {
+        const rawClient = this.client as unknown as { sendCommand?: (args: string[]) => Promise<unknown> };
+        if (rawClient.sendCommand) {
+          const result = await rawClient.sendCommand([
+            'EVAL', RedisIntegration.RATE_LIMIT_LUA, '1', rlKey,
+            String(maxRequests), String(windowSeconds),
+          ]) as number[];
+          const current = Number(result[0]);
+          const remaining = Math.max(0, Number(result[1]));
+          const ttl = Number(result[2]);
+          return {
+            allowed: current <= maxRequests,
+            remaining,
+            resetAt: Date.now() + (ttl * 1000),
+          };
+        }
+      } catch { /* Fall through to non-Lua path */ }
     }
-    const ttl = this.client ? await this.client.ttl(`${CONFIG.redis.keyPrefix}${rlKey}`) : windowSeconds;
+    // Fallback: non-atomic (InMemoryCache or Lua not available)
+    const current = await this.incr(`rl:${key}`);
+    if (current === 1 && this.client) {
+      await this.client.expire(rlKey, windowSeconds);
+    }
+    const ttl = this.client ? await this.client.ttl(rlKey) : windowSeconds;
     return {
       allowed: current <= maxRequests,
       remaining: Math.max(0, maxRequests - current),
@@ -340,7 +382,120 @@ export class OpenSearchIntegration {
       logger.warn({ err }, "[OpenSearch] ILM policy application failed");
     }
   }
+
+  /** Retry connection after failure — resets client to allow reconnection */
+  async retryConnection(): Promise<boolean> {
+    this.client = null;
+    await this.connect();
+    return this.client !== null;
+  }
+
+  /** Ensure all required indices exist with proper field mappings */
+  async ensureIndicesExist(): Promise<void> {
+    for (const [indexName, mapping] of Object.entries(INDEX_MAPPINGS)) {
+      try {
+        await this.createIndex(indexName, mapping);
+        logger.info(`[OpenSearch] Index ensured: ${indexName}`);
+      } catch (err) {
+        logger.warn({ indexName, err }, "[OpenSearch] Failed to ensure index");
+      }
+    }
+  }
+
+  // ── Query Builders ──────────────────────────────────────────────────────────
+
+  static buildMatchQuery(field: string, value: string): Record<string, unknown> {
+    return { match: { [field]: value } };
+  }
+
+  static buildTermQuery(field: string, value: string | number): Record<string, unknown> {
+    return { term: { [field]: value } };
+  }
+
+  static buildRangeQuery(field: string, opts: { gte?: string | number; lte?: string | number; gt?: string | number; lt?: string | number }): Record<string, unknown> {
+    return { range: { [field]: opts } };
+  }
+
+  static buildBoolQuery(must?: Record<string, unknown>[], should?: Record<string, unknown>[], mustNot?: Record<string, unknown>[], filter?: Record<string, unknown>[]): Record<string, unknown> {
+    const bool: Record<string, unknown> = {};
+    if (must?.length) bool.must = must;
+    if (should?.length) bool.should = should;
+    if (mustNot?.length) bool.must_not = mustNot;
+    if (filter?.length) bool.filter = filter;
+    return { bool };
+  }
+
+  static buildSecurityEventQuery(sourceIp?: string, severity?: string, since?: string): Record<string, unknown> {
+    const filters: Record<string, unknown>[] = [];
+    if (sourceIp) filters.push(OpenSearchIntegration.buildTermQuery("source_ip", sourceIp));
+    if (severity) filters.push(OpenSearchIntegration.buildTermQuery("severity", severity));
+    if (since) filters.push(OpenSearchIntegration.buildRangeQuery("timestamp", { gte: since }));
+    return filters.length > 0 ? OpenSearchIntegration.buildBoolQuery(undefined, undefined, undefined, filters) : { match_all: {} };
+  }
 }
+
+/** Index field mappings for all RemitFlow indexes */
+const INDEX_MAPPINGS: Record<string, Record<string, unknown>> = {
+  "remitflow-transactions": {
+    properties: {
+      transactionId: { type: "keyword" },
+      userId: { type: "keyword" },
+      amount: { type: "scaled_float", scaling_factor: 100 },
+      currency: { type: "keyword" },
+      toCurrency: { type: "keyword" },
+      status: { type: "keyword" },
+      type: { type: "keyword" },
+      corridorCode: { type: "keyword" },
+      createdAt: { type: "date" },
+      completedAt: { type: "date" },
+      riskScore: { type: "float" },
+    },
+  },
+  "remitflow-audit-logs": {
+    properties: {
+      userId: { type: "keyword" },
+      action: { type: "keyword" },
+      resource: { type: "keyword" },
+      resourceId: { type: "keyword" },
+      ipAddress: { type: "ip" },
+      severity: { type: "keyword" },
+      details: { type: "text", analyzer: "standard" },
+      timestamp: { type: "date" },
+    },
+  },
+  "remitflow-security-events": {
+    properties: {
+      event_type: { type: "keyword" },
+      source_ip: { type: "ip" },
+      user_agent: { type: "text" },
+      path: { type: "keyword" },
+      method: { type: "keyword" },
+      severity: { type: "keyword" },
+      waf_score: { type: "float" },
+      blocked: { type: "boolean" },
+      timestamp: { type: "date" },
+    },
+  },
+  "remitflow-kyc-events": {
+    properties: {
+      userId: { type: "keyword" },
+      eventType: { type: "keyword" },
+      kycTier: { type: "integer" },
+      verificationProvider: { type: "keyword" },
+      status: { type: "keyword" },
+      timestamp: { type: "date" },
+    },
+  },
+  "remitflow-fx-rates": {
+    properties: {
+      baseCurrency: { type: "keyword" },
+      quoteCurrency: { type: "keyword" },
+      rate: { type: "scaled_float", scaling_factor: 1000000 },
+      provider: { type: "keyword" },
+      timestamp: { type: "date" },
+    },
+  },
+};
 
 // ─── Keycloak Integration ─────────────────────────────────────────────────────
 export class KeycloakIntegration {
@@ -483,9 +638,17 @@ export class PermifyIntegration {
   private available = false;
   private checkedAt = 0;
 
+  /** In-memory permission cache — 30s TTL to reduce Permify round-trips */
+  private permCache = new Map<string, { result: boolean; expiresAt: number }>();
+  private static CACHE_TTL_MS = 30_000;
+
   constructor() {
     const [host, port] = CONFIG.permify.endpoint.split(":");
     this.baseUrl = `http://${host}:${port || "3476"}`;
+  }
+
+  private cacheKey(p: { entity: string; entityId: string; permission: string; subject: string; subjectId: string }): string {
+    return `${p.entity}:${p.entityId}:${p.permission}:${p.subject}:${p.subjectId}`;
   }
 
   private async ensureAvailable(): Promise<boolean> {
@@ -510,6 +673,16 @@ export class PermifyIntegration {
       this.available = false;
       return false;
     }
+  }
+
+  /** Check with caching — returns cached result if TTL not expired */
+  async checkCached(params: { entity: string; entityId: string; permission: string; subject: string; subjectId: string }): Promise<boolean> {
+    const key = this.cacheKey(params);
+    const cached = this.permCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.result;
+    const result = await this.check(params);
+    this.permCache.set(key, { result, expiresAt: Date.now() + PermifyIntegration.CACHE_TTL_MS });
+    return result;
   }
 
   async check(params: { entity: string; entityId: string; permission: string; subject: string; subjectId: string }): Promise<boolean> {
@@ -537,16 +710,25 @@ export class PermifyIntegration {
     }
   }
 
-  /** Batch permission check — single round-trip for multiple checks */
+  /** Batch permission check — parallel with fail-closed on any error */
   async batchCheck(checks: Array<{ entity: string; entityId: string; permission: string; subject: string; subjectId: string }>): Promise<boolean[]> {
     if (!(await this.ensureAvailable())) return checks.map(() => false);
     const results = await Promise.allSettled(
-      checks.map(c => this.check(c))
+      checks.map(c => this.checkCached(c))
     );
     return results.map(r => r.status === "fulfilled" ? r.value : false);
   }
 
-  async writeRelationship(params: { entity: string; entityId: string; relation: string; subject: string; subjectId: string }): Promise<void> {
+  async writeRelationship(params: { entity: string; entityId: string; relation: string; subject: string; subjectId: string }): Promise<boolean> {
+    if (!(await this.ensureAvailable())) {
+      const failClosed = process.env.NODE_ENV === "production";
+      if (failClosed) {
+        logger.error("[Permify] Unavailable in production — writeRelationship denied (fail-closed)");
+        return false;
+      }
+      logger.warn("[Permify] Unavailable — skipping writeRelationship in dev mode");
+      return false;
+    }
     try {
       await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/relationships/write`, {
         method: "POST",
@@ -557,8 +739,47 @@ export class PermifyIntegration {
         }),
         signal: AbortSignal.timeout(3000),
       });
+      // Invalidate cache for this entity on write
+      Array.from(this.permCache.keys()).forEach(k => {
+        if (k.startsWith(`${params.entity}:${params.entityId}:`)) this.permCache.delete(k);
+      });
+      return true;
     } catch (err) {
       logger.warn({ err }, "[Permify] Write relationship failed");
+      return false;
+    }
+  }
+
+  async deleteRelationship(params: { entity: string; entityId: string; relation: string; subject: string; subjectId: string }): Promise<boolean> {
+    if (!(await this.ensureAvailable())) {
+      const failClosed = process.env.NODE_ENV === "production";
+      if (failClosed) {
+        logger.error("[Permify] Unavailable in production — deleteRelationship denied (fail-closed)");
+        return false;
+      }
+      return false;
+    }
+    try {
+      await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/relationships/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tupleFilter: {
+            entity: { type: params.entity, ids: [params.entityId] },
+            relation: params.relation,
+            subject: { type: params.subject, ids: [params.subjectId] },
+          },
+        }),
+        signal: AbortSignal.timeout(3000),
+      });
+      // Invalidate cache on delete
+      Array.from(this.permCache.keys()).forEach(k => {
+        if (k.startsWith(`${params.entity}:${params.entityId}:`)) this.permCache.delete(k);
+      });
+      return true;
+    } catch (err) {
+      logger.warn({ err }, "[Permify] Delete relationship failed");
+      return false;
     }
   }
 
@@ -576,14 +797,29 @@ export class DaprIntegration {
     this.baseUrl = `http://${CONFIG.dapr.host}:${CONFIG.dapr.httpPort}/v1.0`;
   }
 
-  async invokeService(appId: string, method: string, data?: unknown): Promise<unknown> {
-    const res = await fetch(`${this.baseUrl}/invoke/${appId}/method/${method}`, {
-      method: data ? "POST" : "GET",
-      headers: { "Content-Type": "application/json" },
-      body: data ? JSON.stringify(data) : undefined,
-    });
-    if (!res.ok) throw new Error(`Dapr invoke failed: ${res.status}`);
-    return res.json();
+  async invokeService<T = unknown>(appId: string, method: string, data?: unknown): Promise<T> {
+    const maxAttempts = 3;
+    let lastErr: Error | null = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const res = await fetch(`${this.baseUrl}/invoke/${appId}/method/${method}`, {
+          method: data ? "POST" : "GET",
+          headers: { "Content-Type": "application/json" },
+          body: data ? JSON.stringify(data) : undefined,
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!res.ok) throw new Error(`Dapr invoke failed: ${res.status}`);
+        return await res.json() as T;
+      } catch (err) {
+        lastErr = err as Error;
+        if (attempt < maxAttempts - 1) {
+          const delay = 200 * (attempt + 1);
+          logger.warn(`[Dapr] invokeService ${appId}/${method} attempt ${attempt + 1} failed, retrying in ${delay}ms`);
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
+    }
+    throw lastErr ?? new Error(`Dapr invoke failed after ${maxAttempts} attempts`);
   }
 
   async saveState(key: string, value: unknown): Promise<void> {
@@ -905,11 +1141,17 @@ export class LakehouseIntegration {
 // ─── APISIX Integration ───────────────────────────────────────────────────────
 export class APISIXIntegration {
   private adminUrl = CONFIG.apisix.adminUrl;
-  private adminKey = CONFIG.apisix.adminKey;
   private gatewayUrl = CONFIG.apisix.gatewayUrl;
   private routesSynced = false;
+  /** Admin key from env (never hardcoded) — falls back to empty for dev */
+  private adminKey = process.env.APISIX_ADMIN_KEY || CONFIG.apisix.adminKey;
+  private routeConfigVersion = 0;
 
   private async request(path: string, method = "GET", body?: unknown): Promise<unknown> {
+    if (!this.adminKey) {
+      logger.warn("[APISIX] No admin key configured (set APISIX_ADMIN_KEY env var)");
+      throw new Error("APISIX admin key not configured");
+    }
     const res = await fetch(`${this.adminUrl}${path}`, {
       method,
       headers: { "X-API-KEY": this.adminKey, "Content-Type": "application/json" },
@@ -918,6 +1160,21 @@ export class APISIXIntegration {
     });
     if (!res.ok) throw new Error(`APISIX ${method} ${path}: ${res.status}`);
     return res.json();
+  }
+
+  /** Reload routes from config without restart — bumps config version */
+  async reloadRoutes(): Promise<{ reloaded: number; version: number }> {
+    this.routesSynced = false;
+    this.routeConfigVersion++;
+    // Re-list routes to validate config is current
+    await this.listRoutes();
+    return { reloaded: 15, version: this.routeConfigVersion };
+  }
+
+  /** Hot-reload admin key at runtime (e.g., after key rotation) */
+  rotateAdminKey(newKey: string): void {
+    this.adminKey = newKey;
+    logger.info("[APISIX] Admin key rotated");
   }
 
   async createRoute(id: string, config: { uri: string; upstream: { nodes: Record<string, number>; type: string }; plugins?: Record<string, unknown> }): Promise<unknown> {

@@ -81,8 +81,47 @@ class PermifyClient {
     }
   }
 
+  /**
+   * In-memory permission cache — avoids network round-trip for repeated checks.
+   * Cache entries expire after 30 seconds.
+   */
+  private permissionCache = new Map<string, { result: boolean; expiresAt: number }>();
+  private static CACHE_TTL_MS = 30_000;
+
+  private getCacheKey(check: PermissionCheck): string {
+    return `${check.entity.type}:${check.entity.id}:${check.permission}:${check.subject.type}:${check.subject.id}`;
+  }
+
+  async checkCached(check: PermissionCheck): Promise<boolean> {
+    const key = this.getCacheKey(check);
+    const cached = this.permissionCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.result;
+    const result = await this.check(check);
+    this.permissionCache.set(key, { result, expiresAt: Date.now() + PermifyClient.CACHE_TTL_MS });
+    return result;
+  }
+
+  /** Batch permission check — checks multiple permissions in parallel */
+  async checkBatch(checks: PermissionCheck[]): Promise<Map<string, boolean>> {
+    const results = new Map<string, boolean>();
+    const promises = checks.map(async (check) => {
+      const key = this.getCacheKey(check);
+      const result = await this.checkCached(check);
+      results.set(key, result);
+    });
+    await Promise.all(promises);
+    return results;
+  }
+
   async writeRelationship(rel: RelationshipWrite): Promise<boolean> {
-    if (!this.available) return true;
+    // Fail-closed when Permify unavailable in production
+    if (!this.available) {
+      if (process.env.NODE_ENV === "production") {
+        logger.warn("[PERMIFY] Unavailable in production — denying write (fail-closed)");
+        return false;
+      }
+      return true;
+    }
 
     try {
       const res = await fetch(`${this.baseUrl}/relationships/write`, {
@@ -100,6 +139,13 @@ class PermifyClient {
         }),
         signal: AbortSignal.timeout(3000),
       });
+      // Invalidate cache for affected entity
+      if (res.ok) {
+        const prefix = `${rel.entity.type}:${rel.entity.id}:`;
+        Array.from(this.permissionCache.keys()).forEach(k => {
+          if (k.startsWith(prefix)) this.permissionCache.delete(k);
+        });
+      }
       return res.ok;
     } catch {
       return false;
@@ -107,7 +153,14 @@ class PermifyClient {
   }
 
   async deleteRelationship(rel: RelationshipWrite): Promise<boolean> {
-    if (!this.available) return true;
+    // Fail-closed when Permify unavailable in production
+    if (!this.available) {
+      if (process.env.NODE_ENV === "production") {
+        logger.warn("[PERMIFY] Unavailable in production — denying delete (fail-closed)");
+        return false;
+      }
+      return true;
+    }
 
     try {
       const res = await fetch(`${this.baseUrl}/relationships/delete`, {

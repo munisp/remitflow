@@ -181,24 +181,38 @@ class DaprClient {
     appId: string,
     method: string,
     httpMethod: "GET" | "POST" | "PUT" | "DELETE" = "POST",
-    data?: unknown
+    data?: unknown,
+    retries = 3
   ): Promise<T | null> {
     if (!this.available) return null;
-    try {
-      const res = await fetch(
-        `${DAPR_BASE_URL}/v1.0/invoke/${appId}/method/${method}`,
-        {
-          method: httpMethod,
-          headers: data ? { "Content-Type": "application/json" } : undefined,
-          body: data ? JSON.stringify(data) : undefined,
-          signal: AbortSignal.timeout(5000),
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        const res = await fetch(
+          `${DAPR_BASE_URL}/v1.0/invoke/${appId}/method/${method}`,
+          {
+            method: httpMethod,
+            headers: data ? { "Content-Type": "application/json" } : undefined,
+            body: data ? JSON.stringify(data) : undefined,
+            signal: AbortSignal.timeout(5000),
+          }
+        );
+        if (!res.ok) {
+          lastError = new Error(`Dapr invoke ${appId}/${method} returned ${res.status}`);
+          if (res.status >= 500) {
+            await new Promise(r => setTimeout(r, (attempt + 1) * 200));
+            continue;
+          }
+          return null;
         }
-      );
-      if (!res.ok) return null;
-      return (await res.json()) as T;
-    } catch {
-      return null;
+        return (await res.json()) as T;
+      } catch (err) {
+        lastError = err as Error;
+        await new Promise(r => setTimeout(r, (attempt + 1) * 200));
+      }
     }
+    logger.warn(`[DAPR] invokeService ${appId}/${method} failed after ${retries} retries: ${lastError?.message}`);
+    return null;
   }
 
   // ── Distributed Lock ──────────────────────────────────────────────────────────
