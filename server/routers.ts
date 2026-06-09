@@ -507,29 +507,29 @@ export const appRouter = router({
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to list heartbeat jobs: ${err.message}` });
       }
     }),
-    heartbeatLogs: adminProcedure.input(z.object({ taskUid: z.string().min(1) })).query(async ({ input }) => {
-      const { execSync } = await import('child_process');
+    heartbeatLogs: adminProcedure.input(z.object({ taskUid: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/, "Invalid task UID format") })).query(async ({ input }) => {
+      const { execFileSync } = await import('child_process');
       try {
-        const raw = execSync(`manus-heartbeat logs --task-uid ${input.taskUid} 2>&1`, { timeout: 10000 }).toString();
+        const raw = execFileSync('manus-heartbeat', ['logs', '--task-uid', input.taskUid], { timeout: 10000 }).toString();
         const parsed = JSON.parse(raw);
         return { logs: (parsed.logs ?? []) as Array<{ execution_id: string; started_at: string; finished_at?: string; status: string; http_status?: number; duration_ms?: number }>, total: (parsed.total ?? 0) as number };
       } catch (err: any) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to fetch logs: ${err.message}` });
       }
     }),
-    heartbeatPause: adminProcedure.input(z.object({ taskUid: z.string().min(1) })).mutation(async ({ input }) => {
-      const { execSync } = await import('child_process');
+    heartbeatPause: adminProcedure.input(z.object({ taskUid: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/, "Invalid task UID format") })).mutation(async ({ input }) => {
+      const { execFileSync } = await import('child_process');
       try {
-        execSync(`manus-heartbeat pause --task-uid ${input.taskUid} 2>&1`, { timeout: 10000 });
+        execFileSync('manus-heartbeat', ['pause', '--task-uid', input.taskUid], { timeout: 10000 });
         return { success: true };
       } catch (err: any) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to pause job: ${err.message}` });
       }
     }),
-    heartbeatResume: adminProcedure.input(z.object({ taskUid: z.string().min(1) })).mutation(async ({ input }) => {
-      const { execSync } = await import('child_process');
+    heartbeatResume: adminProcedure.input(z.object({ taskUid: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/, "Invalid task UID format") })).mutation(async ({ input }) => {
+      const { execFileSync } = await import('child_process');
       try {
-        execSync(`manus-heartbeat resume --task-uid ${input.taskUid} 2>&1`, { timeout: 10000 });
+        execFileSync('manus-heartbeat', ['resume', '--task-uid', input.taskUid], { timeout: 10000 });
         return { success: true };
       } catch (err: any) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to resume job: ${err.message}` });

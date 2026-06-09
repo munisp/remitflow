@@ -1,4 +1,4 @@
-import { randomBytes } from "crypto";
+import { randomBytes, timingSafeEqual } from "crypto";
 import { createHmac } from "crypto";
 import { generateSecret, generateURI } from "otplib";
 import QRCode from "qrcode";
@@ -52,7 +52,12 @@ export async function verifyTOTP(token: string, secret: string): Promise<boolean
   try {
     const now = Math.floor(Date.now() / 30_000);
     for (let i = -1; i <= 1; i++) {
-      if (hotp(secret, now + i) === token) return true;
+      const expected = hotp(secret, now + i);
+      // Timing-safe comparison to prevent timing attacks
+      if (expected.length === token.length &&
+          timingSafeEqual(Buffer.from(expected), Buffer.from(token))) {
+        return true;
+      }
     }
     return false;
   } catch {

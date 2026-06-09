@@ -578,31 +578,44 @@ export const transactionSearchRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
 
-      const conditions: string[] = [String(`t."userId" = ${ctx.user.id}`)]; // userId from ctx
-      if (input.status !== "all") conditions.push(`t.status = '${input.status}'`);
-      if (input.fromDate) conditions.push(`t."createdAt" >= '${input.fromDate}'`);
-      if (input.toDate) conditions.push(`t."createdAt" <= '${input.toDate} 23:59:59'`);
-      if (input.minAmount) conditions.push(`t."fromAmount" >= ${input.minAmount}`);
-      if (input.maxAmount) conditions.push(`t."fromAmount" <= ${input.maxAmount}`);
-      if (input.fromCurrency) conditions.push(`t."fromCurrency" = '${input.fromCurrency}'`);
-      if (input.toCurrency) conditions.push(`t."toCurrency" = '${input.toCurrency}'`);
+      // Build parameterized conditions (no sql.raw — prevents SQL injection)
+      const conditions: ReturnType<typeof sql>[] = [sql`t."userId" = ${ctx.user.id}`];
+      if (input.status !== "all") conditions.push(sql`t.status = ${input.status}`);
+      if (input.fromDate) conditions.push(sql`t."createdAt" >= ${input.fromDate}`);
+      if (input.toDate) conditions.push(sql`t."createdAt" <= ${input.toDate + ' 23:59:59'}`);
+      if (input.minAmount) conditions.push(sql`t."fromAmount" >= ${input.minAmount}`);
+      if (input.maxAmount) conditions.push(sql`t."fromAmount" <= ${input.maxAmount}`);
+      if (input.fromCurrency) conditions.push(sql`t."fromCurrency" = ${input.fromCurrency}`);
+      if (input.toCurrency) conditions.push(sql`t."toCurrency" = ${input.toCurrency}`);
       if (input.query) {
-        conditions.push(`(t.reference ILIKE '%${input.query}%' OR t."recipientName" ILIKE '%${input.query}%' OR t.description ILIKE '%${input.query}%')`);
+        const pattern = `%${input.query}%`;
+        conditions.push(sql`(t.reference ILIKE ${pattern} OR t."recipientName" ILIKE ${pattern} OR t.description ILIKE ${pattern})`);
       }
 
-      const whereClause = conditions.join(" AND ");
-      const rows = await db.execute(sql.raw(`
+      // Combine conditions with AND
+      const whereClause = conditions.reduce((acc, cond, i) => i === 0 ? cond : sql`${acc} AND ${cond}`);
+
+      // Allowlist for ORDER BY column (prevents injection via sortBy/sortDir)
+      const sortColMap: Record<string, ReturnType<typeof sql>> = {
+        createdAt: sql`t."createdAt"`,
+        fromAmount: sql`t."fromAmount"`,
+        status: sql`t.status`,
+      };
+      const sortCol = sortColMap[input.sortBy] ?? sql`t."createdAt"`;
+      const orderBy = input.sortDir === "asc" ? sql`${sortCol} ASC` : sql`${sortCol} DESC`;
+
+      const rows = await db.execute(sql`
         SELECT t.*
         FROM transactions t
         WHERE ${whereClause}
-        ORDER BY t."${input.sortBy}" ${input.sortDir}
+        ORDER BY ${orderBy}
         LIMIT ${input.limit} OFFSET ${offset}
-      `));
-      const countRows = await db.execute(sql.raw(`
+      `);
+      const countRows = await db.execute(sql`
         SELECT COUNT(*) as total
         FROM transactions t
         WHERE ${whereClause}
-      `));
+      `);
       return {
         transfers: (rows as any[]).map(r => ({ ...r, amount: Number(r.fromAmount) })),
         total: Number((countRows as any[])[0]?.total ?? 0),
@@ -620,16 +633,18 @@ export const transactionSearchRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const conditions = [`t."userId" = ${ctx.user.id}`];
-      if (input.status !== "all") conditions.push(`t.status = '${input.status}'`);
-      if (input.fromDate) conditions.push(`t."createdAt" >= '${input.fromDate}'`);
-      if (input.toDate) conditions.push(`t."createdAt" <= '${input.toDate} 23:59:59'`);
-      const rows = await db.execute(sql.raw(`
+      // Parameterized conditions (no sql.raw — prevents SQL injection)
+      const conditions: ReturnType<typeof sql>[] = [sql`t."userId" = ${ctx.user.id}`];
+      if (input.status !== "all") conditions.push(sql`t.status = ${input.status}`);
+      if (input.fromDate) conditions.push(sql`t."createdAt" >= ${input.fromDate}`);
+      if (input.toDate) conditions.push(sql`t."createdAt" <= ${input.toDate + ' 23:59:59'}`);
+      const whereClause = conditions.reduce((acc, cond, i) => i === 0 ? cond : sql`${acc} AND ${cond}`);
+      const rows = await db.execute(sql`
         SELECT t.reference, t."fromAmount" as amount, t."fromCurrency" as from_currency, t."toCurrency" as to_currency, t."toAmount" as to_amount, t."fxRate" as exchange_rate, t.fee, t.status, t."createdAt" as "createdAt", t."recipientName" as beneficiary
         FROM transfers t LEFT JOIN beneficiaries b ON b.id = t.beneficiary_id
-        WHERE ${conditions.join(" AND ")}
+        WHERE ${whereClause}
         ORDER BY t."createdAt" DESC LIMIT 10000
-      `));
+      `);
       const headers = ["Reference", "Amount", "From Currency", "To Currency", "To Amount", "Rate", "Fee", "Status", "Date", "Beneficiary"];
       const csvRows = (rows as any[]).map(r =>
         [r.reference, r.amount, r.from_currency, r.to_currency, r.to_amount, r.exchange_rate, r.fee, r.status, r.created_at, r.beneficiary].join(",")

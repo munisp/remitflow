@@ -8,11 +8,13 @@ import { TRPCError } from "@trpc/server";
 
 // ─── Mock child_process ───────────────────────────────────────────────────────
 const mockExecSync = vi.fn();
+const mockExecFileSync = vi.fn();
 vi.mock("child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("child_process")>();
   return {
     ...actual,
     execSync: mockExecSync,
+    execFileSync: mockExecFileSync,
   };
 });
 
@@ -173,7 +175,7 @@ describe("Heartbeat Admin Procedures — Success Paths", () => {
   });
 
   it("heartbeatLogs returns logs array for a valid taskUid", async () => {
-    mockExecSync.mockReturnValueOnce(JSON.stringify({
+    mockExecFileSync.mockReturnValueOnce(JSON.stringify({
       logs: [
         { execution_id: "exec-1", started_at: "2026-05-14T00:00:00Z", finished_at: "2026-05-14T00:00:01Z", status: "success", http_status: 200, duration_ms: 1234 },
       ],
@@ -187,14 +189,14 @@ describe("Heartbeat Admin Procedures — Success Paths", () => {
   });
 
   it("heartbeatPause returns success: true on success", async () => {
-    mockExecSync.mockReturnValueOnce("");
+    mockExecFileSync.mockReturnValueOnce("");
     const caller = appRouter.createCaller(makeAdminCtx());
     const result = await caller.system.heartbeatPause({ taskUid: "abc123" });
     expect(result.success).toBe(true);
   });
 
   it("heartbeatResume returns success: true on success", async () => {
-    mockExecSync.mockReturnValueOnce("");
+    mockExecFileSync.mockReturnValueOnce("");
     const caller = appRouter.createCaller(makeAdminCtx());
     const result = await caller.system.heartbeatResume({ taskUid: "abc123" });
     expect(result.success).toBe(true);
@@ -215,19 +217,19 @@ describe("Heartbeat Admin Procedures — Error Handling", () => {
   });
 
   it("heartbeatLogs throws INTERNAL_SERVER_ERROR when CLI fails", async () => {
-    mockExecSync.mockImplementationOnce(() => { throw new Error("Task not found"); });
+    mockExecFileSync.mockImplementationOnce(() => { throw new Error("Task not found"); });
     const caller = appRouter.createCaller(makeAdminCtx());
     await expect(caller.system.heartbeatLogs({ taskUid: "nonexistent" })).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
   });
 
   it("heartbeatPause throws INTERNAL_SERVER_ERROR when CLI fails", async () => {
-    mockExecSync.mockImplementationOnce(() => { throw new Error("Cannot pause"); });
+    mockExecFileSync.mockImplementationOnce(() => { throw new Error("Cannot pause"); });
     const caller = appRouter.createCaller(makeAdminCtx());
     await expect(caller.system.heartbeatPause({ taskUid: "abc123" })).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
   });
 
   it("heartbeatResume throws INTERNAL_SERVER_ERROR when CLI fails", async () => {
-    mockExecSync.mockImplementationOnce(() => { throw new Error("Cannot resume"); });
+    mockExecFileSync.mockImplementationOnce(() => { throw new Error("Cannot resume"); });
     const caller = appRouter.createCaller(makeAdminCtx());
     await expect(caller.system.heartbeatResume({ taskUid: "abc123" })).rejects.toMatchObject({ code: "INTERNAL_SERVER_ERROR" });
   });

@@ -1099,7 +1099,10 @@ async function startServer() {
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
       res.setHeader("X-Accel-Buffering", "no");
-      res.setHeader("Access-Control-Allow-Origin", "*");
+      const allowedOrigin = process.env.CORS_ALLOWED_ORIGIN ?? req.headers.origin ?? "";
+      if (allowedOrigin && (allowedOrigin === process.env.CORS_ALLOWED_ORIGIN || process.env.NODE_ENV !== "production")) {
+        res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+      }
       res.flushHeaders();
       const STATIC_RATES: Record<string, number> = {
         USD: 1, EUR: 0.9215, GBP: 0.7925, JPY: 149.5, CAD: 1.36, AUD: 1.53,
