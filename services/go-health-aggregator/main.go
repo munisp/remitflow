@@ -314,7 +314,7 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 		defer cancel()
 		result := checker.checkAll(ctx)
@@ -335,8 +335,8 @@ func main() {
 		json.NewEncoder(w).Encode(result)
 	})
 
-	mux.HandleFunc("GET /health/service/{name}", func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
+	mux.HandleFunc("/health/service/", func(w http.ResponseWriter, r *http.Request) {
+		name := r.URL.Path[len("/health/service/"):]
 		checker.mu.RLock()
 		result, ok := checker.results[name]
 		checker.mu.RUnlock()

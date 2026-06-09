@@ -7,11 +7,13 @@ import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
 
 function createCtx(userId = 1): TrpcContext {
+  const openIds: Record<number, string> = { 1: "dev-user-001", 1282: "dev-user-1282" };
+  const emails: Record<number, string> = { 1: "demo@remitflow.app", 1282: "emeka@remitflow.test" };
   return {
     user: {
       id: userId,
-      openId: `test-user-${userId}`,
-      email: `test${userId}@remitflow.com`,
+      openId: openIds[userId] ?? `test-user-${userId}`,
+      email: emails[userId] ?? `test${userId}@remitflow.com`,
       name: `Test User ${userId}`,
       loginMethod: "keycloak",
       role: "admin" as const,

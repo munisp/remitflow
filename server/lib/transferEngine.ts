@@ -279,9 +279,34 @@ async function validateCompliance(senderId: number, amount: number): Promise<{ a
  * This function is Temporal-workflow-ready: each step is idempotent and can be
  * retried independently. In production, wrap each step as a Temporal activity.
  */
-export async function executeTransfer(req: TransferRequest): Promise<TransferResult> {
+export async function executeTransfer(req: TransferRequest & { idempotencyKey?: string }): Promise<TransferResult> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
+
+  // Idempotency guard: if a key is provided, check for duplicate before executing
+  if (req.idempotencyKey) {
+    const existing = await db.execute(sql`
+      SELECT "referenceId", status, "fromAmount", "toAmount", "exchangeRate", fee
+      FROM transfers WHERE idempotency_key = ${req.idempotencyKey} LIMIT 1
+    `);
+    const rows = existing as unknown as Array<{ referenceId: string; status: string; fromAmount: string; toAmount: string; exchangeRate: string; fee: string }>;
+    if (rows.length > 0) {
+      const row = rows[0];
+      return {
+        transferId: row.referenceId,
+        status: row.status as TransferResult["status"],
+        debitAmount: parseFloat(row.fromAmount),
+        creditAmount: parseFloat(row.toAmount),
+        fxRate: parseFloat(row.exchangeRate),
+        fee: parseFloat(row.fee),
+        totalCharged: parseFloat(row.fromAmount) + parseFloat(row.fee),
+        estimatedDelivery: "",
+        referenceNumber: row.referenceId,
+        ledgerEntries: [],
+      };
+    }
+  }
+
   const transferId = `TXN-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   const corridor = `${req.fromCurrency}-${req.toCurrency}`;
 
@@ -345,16 +370,16 @@ export async function executeTransfer(req: TransferRequest): Promise<TransferRes
   let txFailed = false;
   try {
     await db.transaction(async (tx: typeof db) => {
-      // Step 5: Create transfer record
+      // Step 5: Create transfer record (with idempotency key for dedup)
       await tx.execute(sql`
         INSERT INTO transfers (
           "userId", "beneficiaryId", "fromCurrency", "toCurrency", "fromAmount", "toAmount",
-          "exchangeRate", fee, status, corridor, "payoutMethod", purpose, "referenceId", "createdAt"
+          "exchangeRate", fee, status, corridor, "payoutMethod", purpose, "referenceId", idempotency_key, "createdAt"
         ) VALUES (
           ${req.senderId}, ${req.recipientId}, ${req.fromCurrency}, ${req.toCurrency},
           ${req.amount.toString()}, ${creditAmount.toString()}, ${fxRate.toString()},
           ${fee.totalFee.toString()}, 'processing', ${corridor}, ${req.payoutMethod},
-          ${req.purpose}, ${transferId}, NOW()
+          ${req.purpose}, ${transferId}, ${req.idempotencyKey ?? null}, NOW()
         )
       `);
 

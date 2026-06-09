@@ -16,6 +16,8 @@ export default defineConfig({
     environment: "node",
     include: ["server/**/*.test.ts", "server/**/*.spec.ts"],
     testTimeout: 15000,
+    pool: "forks",
+    poolOptions: { forks: { maxForks: 4 } },
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html", "lcov"],

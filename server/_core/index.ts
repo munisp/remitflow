@@ -87,18 +87,70 @@ async function startServer() {
     res.json({ status: "ok", timestamp: new Date().toISOString(), version: "69.0.0" });
   });
 
-  // Kubernetes readiness probe — checks DB connectivity
+  // Kubernetes readiness probe — checks DB + Redis + payment subsystems
   app.get("/api/ready", async (_req, res) => {
+    const subsystems: Record<string, { status: string; latencyMs?: number; error?: string }> = {};
+    let allReady = true;
+
+    // DB check (critical — must be available)
+    try {
+      const t0 = Date.now();
+      const { getDb } = await import("../db.js");
+      const db = await getDb();
+      if (!db) { subsystems.database = { status: "error", error: "DB unavailable" }; allReady = false; }
+      else { await db.execute("SELECT 1" as any); subsystems.database = { status: "ok", latencyMs: Date.now() - t0 }; }
+    } catch (err: any) {
+      subsystems.database = { status: "error", error: err.message }; allReady = false;
+    }
+
+    // Redis check (degraded without — rate limiting falls back to in-memory)
+    try {
+      const t0 = Date.now();
+      const { createClient } = await import("redis");
+      const url = process.env.REDIS_URL ?? "redis://localhost:6379";
+      const client = createClient({ url, socket: { connectTimeout: 2000 } });
+      await client.connect();
+      await client.ping();
+      subsystems.redis = { status: "ok", latencyMs: Date.now() - t0 };
+      await client.quit();
+    } catch {
+      subsystems.redis = { status: "degraded", error: "Redis unavailable — using in-memory fallback" };
+    }
+
+    // Payment provider check (which provider is active)
+    try {
+      const { selectProvider } = await import("../lib/paymentProviders.js");
+      const usdProvider = selectProvider("USD");
+      const ngnProvider = selectProvider("NGN");
+      subsystems.payments = {
+        status: usdProvider ? "ok" : "degraded",
+        error: !usdProvider ? "No USD payment provider configured" : undefined,
+      };
+      subsystems.payments_africa = {
+        status: ngnProvider ? "ok" : "degraded",
+        error: !ngnProvider ? "No NGN payment provider configured" : undefined,
+      };
+    } catch {
+      subsystems.payments = { status: "degraded", error: "Payment module unavailable" };
+    }
+
+    // Webhook retry queue health
     try {
       const { getDb } = await import("../db.js");
       const db = await getDb();
-      if (!db) return res.status(503).json({ status: "not_ready", reason: "db_unavailable" });
-      // Lightweight ping
-      await db.execute("SELECT 1" as any);
-      res.json({ status: "ready", timestamp: new Date().toISOString() });
-    } catch (err: any) {
-      res.status(503).json({ status: "not_ready", reason: err.message });
+      if (db) {
+        const result = await db.execute("SELECT COUNT(*) as cnt FROM webhook_retry_queue WHERE status = 'dead_letter'" as any);
+        const rows = result as unknown as Array<{ cnt: string }>;
+        const deadLetterCount = parseInt(rows?.[0]?.cnt ?? "0", 10);
+        subsystems.webhook_queue = { status: deadLetterCount > 10 ? "degraded" : "ok" };
+      }
+    } catch {
+      // Table may not exist yet — that's fine
+      subsystems.webhook_queue = { status: "ok" };
     }
+
+    const status = allReady ? "ready" : "not_ready";
+    res.status(allReady ? 200 : 503).json({ status, timestamp: new Date().toISOString(), subsystems });
   });
 
   // Detailed health check — DB + FX service + scheduler

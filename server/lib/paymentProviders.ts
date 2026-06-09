@@ -550,17 +550,80 @@ export const mtnMomoProvider: PaymentProvider = {
   },
 };
 
+// ── Dev/Sandbox Provider (works without any API keys) ────────────────────────
+
+export const devSandboxProvider: PaymentProvider = {
+  name: "dev_sandbox",
+  supportedCurrencies: ["USD", "EUR", "GBP", "NGN", "KES", "GHS", "TZS", "UGX", "ZAR", "RWF", "XOF", "XAF", "CAD", "AUD", "CHF", "ZMW", "CDF"],
+  supportedRails: ["card", "bank_transfer", "mobile_money", "mpesa", "wallet", "sepa", "ussd"],
+
+  async initiate(req: PaymentRequest): Promise<PaymentResult> {
+    const ref = `DEV-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+    // Simulate processing delay
+    const shouldSucceed = req.amount < 999999;
+    const db = await getDb();
+    await db.execute({
+      sql: `INSERT INTO payment_provider_logs (provider, action, reference, amount, currency, user_id, status, raw_response, created_at)
+            VALUES ('dev_sandbox', 'initiate', $1, $2, $3, $4, $5, $6, NOW())`,
+      args: [ref, req.amount, req.currency, req.userId, shouldSucceed ? "completed" : "failed", JSON.stringify({ sandbox: true, simulatedSuccess: shouldSucceed })],
+    });
+    return {
+      success: shouldSucceed,
+      providerRef: ref,
+      status: shouldSucceed ? "completed" : "failed",
+      providerName: "dev_sandbox",
+      rawResponse: { sandbox: true, message: shouldSucceed ? "Sandbox payment succeeded" : "Sandbox: amount exceeds test limit" },
+    };
+  },
+
+  async checkStatus(providerRef: string): Promise<PaymentResult> {
+    const db = await getDb();
+    const rows = await db.execute({ sql: `SELECT status FROM payment_provider_logs WHERE reference = $1 LIMIT 1`, args: [providerRef] });
+    const result = rows as unknown as Array<{ status: string }>;
+    const status = result[0]?.status ?? "pending";
+    return {
+      success: status === "completed",
+      providerRef,
+      status: status as PaymentResult["status"],
+      providerName: "dev_sandbox",
+    };
+  },
+
+  async refund(providerRef: string, amount?: number): Promise<PaymentResult> {
+    const refundRef = `DEV-REFUND-${Date.now()}`;
+    const db = await getDb();
+    await db.execute({
+      sql: `INSERT INTO payment_provider_logs (provider, action, reference, amount, currency, user_id, status, raw_response, created_at)
+            VALUES ('dev_sandbox', 'refund', $1, $2, 'USD', 0, 'completed', $3, NOW())`,
+      args: [refundRef, amount ?? 0, JSON.stringify({ originalRef: providerRef, sandbox: true })],
+    });
+    return { success: true, providerRef: refundRef, status: "completed", providerName: "dev_sandbox" };
+  },
+};
+
 // ── Payment Router (selects provider based on currency/rail) ─────────────────
 
-const providers: PaymentProvider[] = [stripeProvider, flutterwaveProvider, mpesaProvider, mtnMomoProvider];
+const isDevMode = process.env.NODE_ENV !== "production" || process.env.USE_SANDBOX_PAYMENTS === "true";
+
+function getConfiguredProviders(): PaymentProvider[] {
+  const configured: PaymentProvider[] = [];
+  if (process.env.STRIPE_SECRET_KEY) configured.push(stripeProvider);
+  if (process.env.FLUTTERWAVE_SECRET_KEY) configured.push(flutterwaveProvider);
+  if (process.env.MPESA_CONSUMER_KEY) configured.push(mpesaProvider);
+  if (process.env.MTN_MOMO_SUBSCRIPTION_KEY) configured.push(mtnMomoProvider);
+  // In dev mode, if no real providers are configured, use the sandbox
+  if (configured.length === 0 && isDevMode) configured.push(devSandboxProvider);
+  return configured;
+}
 
 export function selectProvider(currency: string, rail?: string): PaymentProvider | null {
   const cur = currency.toUpperCase();
+  const active = getConfiguredProviders();
   if (rail) {
-    const match = providers.find(p => p.supportedRails.includes(rail) && p.supportedCurrencies.includes(cur));
+    const match = active.find(p => p.supportedRails.includes(rail) && p.supportedCurrencies.includes(cur));
     if (match) return match;
   }
-  return providers.find(p => p.supportedCurrencies.includes(cur)) ?? null;
+  return active.find(p => p.supportedCurrencies.includes(cur)) ?? null;
 }
 
 export async function initiatePayment(req: PaymentRequest, rail?: string): Promise<PaymentResult> {

@@ -15,11 +15,14 @@ const TEST_SENDER_ID = 1; // Demo User, kycTier: tier3, has USD 15,000
 const TEST_RECIPIENT_ID = 1282; // Emeka Okafor, kycTier: tier2, has NGN 1,200,000
 
 function createCtx(userId = TEST_SENDER_ID, role: "user" | "admin" = "admin"): TrpcContext {
+  // Use real openId values matching the seed data to avoid "user not found" errors
+  const openIds: Record<number, string> = { 1: "dev-user-001", 1282: "dev-user-1282" };
+  const emails: Record<number, string> = { 1: "demo@remitflow.app", 1282: "emeka@remitflow.test" };
   return {
     user: {
       id: userId,
-      openId: `test-user-${userId}`,
-      email: `test${userId}@remitflow.com`,
+      openId: openIds[userId] ?? `test-user-${userId}`,
+      email: emails[userId] ?? `test${userId}@remitflow.com`,
       name: `Test User ${userId}`,
       loginMethod: "keycloak",
       role,
@@ -134,6 +137,12 @@ describe("Transfer Engine — Integration", () => {
     let transferResult: Awaited<ReturnType<typeof sender.transferCore.send>>;
 
     it("captures pre-transfer balances", async () => {
+      // Reset sender balance to a known state to avoid interference from other test runs
+      const db = await getDb();
+      if (db) {
+        await db.execute(sql`UPDATE wallets SET balance = 15000 WHERE "userId" = ${TEST_SENDER_ID} AND currency = 'USD'`);
+        await db.execute(sql`UPDATE wallets SET balance = 1200000 WHERE "userId" = ${TEST_RECIPIENT_ID} AND currency = 'NGN'`);
+      }
       senderBalanceBefore = await getWalletBalance(TEST_SENDER_ID, "USD");
       recipientBalanceBefore = await getWalletBalance(TEST_RECIPIENT_ID, "NGN");
       expect(senderBalanceBefore).toBeGreaterThan(0);
