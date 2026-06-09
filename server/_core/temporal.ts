@@ -6,6 +6,8 @@
  * without crashing.
  */
 
+import { logger } from "./logger";
+
 export interface TemporalClient {
   workflow: {
     start: (workflowType: string, options: {
@@ -57,7 +59,7 @@ export async function getTemporalClient(): Promise<TemporalClient | null> {
     };
     return _client;
   } catch (err) {
-    console.warn("[Temporal] Client unavailable:", (err as Error).message);
+    logger.warn({ err: (err as Error).message }, "[Temporal] Client unavailable");
     return null;
   }
 }

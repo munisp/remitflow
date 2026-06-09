@@ -147,7 +147,7 @@ export const bnplProtectionRouter = router({
         SELECT * FROM bnpl_merchant_disputes WHERE dispute_id = ${input.disputeId}
       `);
       const dispute = (disputeRows.rows as Array<{ plan_id: number; user_id: number }>)[0];
-      if (!dispute) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!dispute) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       if (input.resolution === "refund_buyer" || input.resolution === "partial_refund") {
         // Refund amount = total paid so far (or partial)
@@ -278,7 +278,7 @@ export const agentProtectionRouter = router({
       const db = await getDb();
       const rows = await db.execute(sql`SELECT * FROM agent_customer_disputes WHERE dispute_id = ${input.disputeId}`);
       const dispute = (rows.rows as Array<{ customer_id: number; expected_amount: number; transaction_ref: string }>)[0];
-      if (!dispute) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!dispute) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       if (input.resolution === "refund_customer") {
         const amount = input.refundAmount ?? dispute.expected_amount;
@@ -383,7 +383,7 @@ export const transferProtectionRouter = router({
         SELECT id, status, amount, from_currency, reference FROM transactions WHERE id = ${input.transactionId} AND "userId" = ${ctx.user.id}
       `);
       const tx = (txRows.rows as Array<{ id: number; status: string; reference: string }>)[0];
-      if (!tx) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (tx.status === "completed" && input.reason !== "wrong_recipient" && input.reason !== "wrong_amount") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Completed transfers can only be escalated for wrong recipient or wrong amount" });
       }
@@ -462,7 +462,7 @@ export const payrollProtectionRouter = router({
       const db = await getDb();
       const rows = await db.execute(sql`SELECT * FROM payroll_disputes WHERE dispute_id = ${input.disputeId}`);
       const dispute = (rows.rows as Array<{ employee_user_id: number; expected_amount: number; received_amount: number }>)[0];
-      if (!dispute) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!dispute) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       if (input.resolution === "pay_difference" || input.resolution === "full_repay") {
         const amount = input.adjustmentAmount ?? (dispute.expected_amount - dispute.received_amount);
@@ -540,7 +540,7 @@ export const investorProtectionRouter = router({
       const db = await getDb();
       const defRows = await db.execute(sql`SELECT * FROM developer_defaults WHERE default_id = ${input.defaultId}`);
       const defaultCase = (defRows.rows as Array<{ listing_id: number }>)[0];
-      if (!defaultCase) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!defaultCase) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const investorRows = await db.execute(sql`
         SELECT user_id, amount_invested_usd FROM real_estate_investments WHERE listing_id = ${defaultCase.listing_id} AND status = 'frozen'
@@ -749,7 +749,7 @@ export const mortgageProtectionRouter = router({
       const db = await getDb();
       const rows = await db.execute(sql`SELECT * FROM mortgage_hardship_requests WHERE request_id = ${input.requestId}`);
       const req = (rows.rows as Array<{ user_id: number; application_id: number; proposed_arrangement: string; duration_months: number }>)[0];
-      if (!req) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!req) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       if (input.approved) {
         // Apply arrangement (e.g., pause payments for X months)
@@ -859,7 +859,7 @@ export const cardProtectionRouter = router({
       const cardRows = await db.execute(sql`
         SELECT id, status FROM virtual_cards WHERE id = ${input.cardId} AND user_id = ${ctx.user.id}
       `);
-      if ((cardRows.rows as Array<unknown>).length === 0) throw new TRPCError({ code: "NOT_FOUND" });
+      if ((cardRows.rows as Array<unknown>).length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const chargebackId = genId("CB");
 
@@ -897,7 +897,7 @@ export const cardProtectionRouter = router({
       const db = await getDb();
       const rows = await db.execute(sql`SELECT * FROM card_chargebacks WHERE chargeback_id = ${input.chargebackId}`);
       const cb = (rows.rows as Array<{ user_id: number; amount: number; card_id: number }>)[0];
-      if (!cb) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!cb) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       if (input.resolution === "refund_customer" || input.resolution === "partial_refund") {
         const refund = input.refundAmount ?? cb.amount;

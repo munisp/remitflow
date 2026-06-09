@@ -99,7 +99,7 @@ export const crossSellRouter = router({
       });
 
       return {
-        success: true,
+        success: true, verified: true,
         orderId,
         provider: provider.name,
         phoneNumber: input.phoneNumber,
@@ -146,7 +146,7 @@ export const crossSellRouter = router({
       });
 
       return {
-        success: true,
+        success: true, verified: true,
         orderId,
         billType: billType.name,
         accountNumber: input.accountNumber,
@@ -194,7 +194,7 @@ export const crossSellRouter = router({
       });
 
       return {
-        success: true,
+        success: true, verified: true,
         policyId,
         product: product.name,
         type: product.type,

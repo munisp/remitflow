@@ -139,7 +139,7 @@ export const globalPayrollRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.id), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return company;
     }),
 
@@ -153,7 +153,7 @@ export const globalPayrollRouter = router({
         .set({ ...data, updatedAt: new Date() })
         .where(and(eq(payrollCompanies.id, id), eq(payrollCompanies.ownerId, ctx.user.id)))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -229,7 +229,7 @@ export const globalPayrollRouter = router({
       const db = await getDb();
       const { id, ...data } = input;
       const [emp] = await db.select().from(payrollEmployees).where(eq(payrollEmployees.id, id));
-      if (!emp) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!emp) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [company] = await db
         .select({ id: payrollCompanies.id })
@@ -250,7 +250,7 @@ export const globalPayrollRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const [emp] = await db.select().from(payrollEmployees).where(eq(payrollEmployees.id, input.id));
-      if (!emp) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!emp) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [company] = await db
         .select({ id: payrollCompanies.id })
@@ -431,7 +431,7 @@ export const globalPayrollRouter = router({
     .query(async ({ ctx, input }) => {
       const db = await getDb();
       const [run] = await db.select().from(payrollRuns).where(eq(payrollRuns.id, input.runId));
-      if (!run) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!run) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [company] = await db
         .select({ id: payrollCompanies.id })
@@ -456,7 +456,7 @@ export const globalPayrollRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const [run] = await db.select().from(payrollRuns).where(eq(payrollRuns.id, input.runId));
-      if (!run) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!run) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (run.status !== "draft" && run.status !== "pending_approval") {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot approve run in status: ${run.status}` });
       }
@@ -480,7 +480,7 @@ export const globalPayrollRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const [run] = await db.select().from(payrollRuns).where(eq(payrollRuns.id, input.runId));
-      if (!run) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!run) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (run.status !== "approved") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Run must be approved before disbursement" });
       }
@@ -564,7 +564,7 @@ export const globalPayrollRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const [run] = await db.select().from(payrollRuns).where(eq(payrollRuns.id, input.runId));
-      if (!run) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!run) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (["disbursed", "cancelled"].includes(run.status)) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot cancel run in status: ${run.status}` });
       }

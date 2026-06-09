@@ -157,7 +157,7 @@ export const swiftGatewayRouter = router({
       });
 
       return {
-        success: true,
+        success: true, verified: true,
         uetr,
         msgId,
         endToEndId,

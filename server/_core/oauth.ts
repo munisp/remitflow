@@ -19,6 +19,7 @@ import {
   isKeycloakConfigured,
 } from "./keycloak";
 import { sdk } from "./sdk";
+import { logger } from "./logger";
 
 function getQueryParam(req: Request, key: string): string | undefined {
   const value = req.query[key];
@@ -120,7 +121,7 @@ export function registerOAuthRoutes(app: Express) {
       setCsrfCookie(req, res);
       res.redirect(302, "/");
     } catch (error) {
-      console.error("[OAuth] Callback failed", error);
+      logger.error({ err: error instanceof Error ? error.message : String(error) }, "[OAuth] Callback failed");
       // ─── v149: Record login failure for DB-persisted lockout tracking ──────
       // If the error carries an openId (e.g. token exchange succeeded but
       // session creation failed), record the failed attempt so the lockout
@@ -171,11 +172,11 @@ export function registerOAuthRoutes(app: Express) {
         const returnTo = rawReturnTo.startsWith("/") && !rawReturnTo.startsWith("//") && !rawReturnTo.includes(":") ? rawReturnTo : "/dashboard";
         res.redirect(302, returnTo);
       } catch (error) {
-        console.error("[Dev-Login] Failed", error);
+        logger.error({ err: error instanceof Error ? error.message : String(error) }, "[Dev-Login] Failed");
         res.status(500).json({ error: "Dev login failed", detail: String(error) });
       }
     });
 
-    console.log("[Auth] Dev-login endpoint enabled at /api/dev-login (non-production only)");
+    logger.info("[Auth] Dev-login endpoint enabled at /api/dev-login (non-production only)");
   }
 }

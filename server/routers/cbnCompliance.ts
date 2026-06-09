@@ -1352,7 +1352,7 @@ export const cbnComplianceRouter = router({
         severity: "info",
       });
       return {
-        success: true,
+        success: true, verified: true,
         id: input.id,
         snoozeUntil: snoozeUntil.toISOString(),
         hours: input.hours,
@@ -1368,7 +1368,7 @@ export const cbnComplianceRouter = router({
     .mutation(async ({ ctx, input }) => {
       adminOnly(ctx);
       const db = await getDb();
-      const results: Array<{ id: number; name: string; success: boolean; error?: string }> = [];
+      const results: Array<{ id: number; name: string; success: boolean; error?: string; verified?: boolean }> = [];
       for (const partnerId of input.partnerIds) {
         try {
           const [partner] = await db
@@ -1391,7 +1391,7 @@ export const cbnComplianceRouter = router({
             metadata: { partnerId, partnerName: partner.name, note: input.note },
             severity: "info",
           });
-          results.push({ id: partnerId, name: partner.name, success: true });
+          results.push({ id: partnerId, name: partner.name, success: true, verified: true });
         } catch (err: any) {
           results.push({ id: partnerId, name: String(partnerId), success: false, error: err.message });
         }

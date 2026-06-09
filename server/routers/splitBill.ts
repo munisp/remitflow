@@ -132,14 +132,14 @@ export const splitBillRouter = router({
     .input(z.object({ groupId: z.string().uuid() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [group] = await db
         .select()
         .from(splitBillGroups)
         .where(and(eq(splitBillGroups.groupId, input.groupId), eq(splitBillGroups.creatorId, ctx.user.id)));
 
-      if (!group) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!group) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const participants = await db
         .select()
@@ -154,7 +154,7 @@ export const splitBillRouter = router({
     .input(z.object({ groupId: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Verify ownership
       const [group] = await db
@@ -162,7 +162,7 @@ export const splitBillRouter = router({
         .from(splitBillGroups)
         .where(and(eq(splitBillGroups.groupId, input.groupId), eq(splitBillGroups.creatorId, ctx.user.id)));
 
-      if (!group) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!group) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Update group status
       await db
@@ -195,14 +195,14 @@ export const splitBillRouter = router({
     .input(z.object({ participantId: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [participant] = await db
         .select()
         .from(splitBillParticipants)
         .where(eq(splitBillParticipants.id, input.participantId));
 
-      if (!participant) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!participant) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (!participant.email) throw new TRPCError({ code: "BAD_REQUEST", message: "No email for this participant" });
 
       // Verify creator owns the group

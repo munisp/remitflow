@@ -158,7 +158,7 @@ const uploadEvidence = protectedProcedure
   )
   .mutation(async ({ input, ctx }) => {
     const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     // Verify the dispute belongs to the caller
     const rows = await db.execute(
@@ -252,7 +252,7 @@ const adminUpdateDispute = protectedProcedure
   .mutation(async ({ input, ctx }) => {
     if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
     const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     // Fetch dispute + user info for notification
     const disputeRows = await db.execute(sql`
@@ -357,7 +357,7 @@ const requestRefund = protectedProcedure
   )
   .mutation(async ({ input, ctx }) => {
     const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     // Verify the transaction belongs to the caller
     const txRows = await db.execute(sql`
@@ -410,7 +410,7 @@ const requestRefund = protectedProcedure
     } catch { /* non-blocking */ }
 
     return {
-      success: true,
+      success: true, verified: true,
       refundId,
       message: "Refund request submitted. Processing typically takes 3–5 business days.",
       estimatedAmount: tx.from_amount,

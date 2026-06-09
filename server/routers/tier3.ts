@@ -120,7 +120,7 @@ export const embeddedPayrollApiRouter = router({
         .set({ status: "revoked" })
         .where(eq(embeddedPayrollApiKeys.id, input.keyId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -177,7 +177,7 @@ export const embeddedPayrollApiRouter = router({
         .select()
         .from(embeddedPayrollRequests)
         .where(eq(embeddedPayrollRequests.externalRunId, input.requestRef));
-      if (!request) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return request;
     }),
 
@@ -294,7 +294,7 @@ export const diasporaMortgageRouter = router({
         .select()
         .from(mortgageApplications)
         .where(and(eq(mortgageApplications.id, input.applicationId), eq(mortgageApplications.applicantId, ctx.user.id)));
-      if (!application) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!application) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const repayments = await db
         .select()
@@ -344,7 +344,7 @@ export const diasporaMortgageRouter = router({
         })
         .where(eq(mortgageApplications.id, input.applicationId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 });
@@ -363,7 +363,7 @@ export const businessCreditScoringRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Gather signals for scoring
       const [txVolume] = await db
@@ -435,7 +435,7 @@ export const businessCreditScoringRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [score] = await db
         .select()
@@ -528,7 +528,7 @@ export const esgReportingRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Get transaction data for the period
       const [txStats] = await db
@@ -605,7 +605,7 @@ export const esgReportingRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return db
         .select()
         .from(esgReports)
@@ -622,7 +622,7 @@ export const esgReportingRouter = router({
         .select()
         .from(esgReports)
         .where(eq(esgReports.id, input.reportId));
-      if (!report) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return report;
     }),
 });

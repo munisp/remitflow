@@ -239,7 +239,7 @@ export const digitalAgreementsRouter = router({
       const [agreement] = (await _db()).select()
         .from(partnerDigitalAgreements)
         .where(eq(partnerDigitalAgreements.id, input.id));
-      if (!agreement) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!agreement) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const signatures = (await _db()).select()
         .from(agreementSignatures)
@@ -310,7 +310,7 @@ export const digitalAgreementsRouter = router({
     .input(z.object({ id: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
       const [doc] = await (await _db()).select().from(partnerDigitalAgreements).where(eq(partnerDigitalAgreements.id, input.id));
-      if (!doc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (doc.status !== "draft") throw new TRPCError({ code: "BAD_REQUEST", message: "Only draft agreements can be sent" });
 
       const now = new Date();
@@ -330,7 +330,7 @@ export const digitalAgreementsRouter = router({
     .input(z.object({ id: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
       const [doc] = await (await _db()).select().from(partnerDigitalAgreements).where(eq(partnerDigitalAgreements.id, input.id));
-      if (!doc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (doc.status === "draft") throw new TRPCError({ code: "BAD_REQUEST", message: "Agreement has not been sent yet" });
 
       if (doc.status === "sent") {
@@ -359,7 +359,7 @@ export const digitalAgreementsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const [doc] = await (await _db()).select().from(partnerDigitalAgreements).where(eq(partnerDigitalAgreements.id, input.id));
-      if (!doc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (!["sent", "viewed"].includes(doc.status)) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Agreement cannot be signed in its current status" });
       }
@@ -430,7 +430,7 @@ export const digitalAgreementsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const [doc] = await (await _db()).select().from(partnerDigitalAgreements).where(eq(partnerDigitalAgreements.id, input.id));
-      if (!doc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const buffer = Buffer.from(input.fileBase64, "base64");
       if (buffer.length > 10 * 1024 * 1024) {
@@ -476,7 +476,7 @@ export const digitalAgreementsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const [doc] = await (await _db()).select().from(partnerDigitalAgreements).where(eq(partnerDigitalAgreements.id, input.id));
-      if (!doc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const now = new Date();
       const verificationHash = crypto
@@ -528,7 +528,7 @@ export const digitalAgreementsRouter = router({
       const [doc] = (await _db()).select({ auditTrail: partnerDigitalAgreements.auditTrail, status: partnerDigitalAgreements.status })
         .from(partnerDigitalAgreements)
         .where(eq(partnerDigitalAgreements.id, input.id));
-      if (!doc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return doc;
     }),
 

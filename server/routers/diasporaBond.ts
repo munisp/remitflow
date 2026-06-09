@@ -197,7 +197,7 @@ export const diasporaBondRouter = router({
     .query(async ({ input }) => {
       const db = await getDb();
       const [bond] = await db.select().from(diasporaBonds).where(eq(diasporaBonds.id, input.id));
-      if (!bond) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!bond) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const pricing = await getBondPrice(bond);
       const fillPct = (Number(bond.raisedAmountUsd) / Number(bond.targetAmountUsd)) * 100;
@@ -222,7 +222,7 @@ export const diasporaBondRouter = router({
     .query(async ({ input }) => {
       const db = await getDb();
       const [bond] = await db.select().from(diasporaBonds).where(eq(diasporaBonds.id, input.bondId));
-      if (!bond) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!bond) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       validateSubscriptionAmount(input.amountUsd, bond);
 
@@ -267,7 +267,7 @@ export const diasporaBondRouter = router({
 
       const db = await getDb();
       const [bond] = await db.select().from(diasporaBonds).where(eq(diasporaBonds.id, input.bondId));
-      if (!bond) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!bond) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       validateSubscriptionAmount(input.amountUsd, bond);
 
@@ -380,7 +380,7 @@ export const diasporaBondRouter = router({
         .select()
         .from(bondSubscriptions)
         .where(and(eq(bondSubscriptions.id, input.subscriptionId), eq(bondSubscriptions.userId, ctx.user.id)));
-      if (!sub) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!sub) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (sub.status !== "pending_payment") {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Subscription already in status: ${sub.status}` });
       }
@@ -461,7 +461,7 @@ export const diasporaBondRouter = router({
         .select()
         .from(bondSubscriptions)
         .where(and(eq(bondSubscriptions.id, input.subscriptionId), eq(bondSubscriptions.userId, ctx.user.id)));
-      if (!sub) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!sub) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const coupons = await db
         .select()
@@ -482,7 +482,7 @@ export const diasporaBondRouter = router({
       // Admin-level: process all due coupons for a bond
       const db = await getDb();
       const [bond] = await db.select().from(diasporaBonds).where(eq(diasporaBonds.id, input.bondId));
-      if (!bond) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!bond) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const activeSubs = await db
         .select()
@@ -590,7 +590,7 @@ export const diasporaBondRouter = router({
         .select()
         .from(bondSubscriptions)
         .where(and(eq(bondSubscriptions.id, input.subscriptionId), eq(bondSubscriptions.userId, ctx.user.id)));
-      if (!sub) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!sub) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (sub.status !== "active") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Only active subscriptions can be listed for sale" });
       }
@@ -599,7 +599,7 @@ export const diasporaBondRouter = router({
       }
 
       const [bond] = await db.select().from(diasporaBonds).where(eq(diasporaBonds.id, sub.bondId));
-      if (!bond) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!bond) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const pricing = await getBondPrice(bond);
       const fairValue = pricing.dirtyPrice;
@@ -650,7 +650,7 @@ export const diasporaBondRouter = router({
         .where(eq(bondSecondaryOrders.id, input.orderId))
         .then((rows: any) => rows);
 
-      if (!order) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!order) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (order.order.status !== "open") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Order is no longer open" });
       }
@@ -756,7 +756,7 @@ export const diasporaBondRouter = router({
         .select()
         .from(bondSubscriptions)
         .where(and(eq(bondSubscriptions.id, input.subscriptionId), eq(bondSubscriptions.userId, ctx.user.id)));
-      if (!sub) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!sub) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (sub.status !== "active") {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Only active subscriptions can be redeemed early" });
       }

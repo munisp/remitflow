@@ -304,7 +304,7 @@ const fxForecastingRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Get historical rates from DB
       // fxRateCache stores baseCurrency + rates JSON; fetch most recent entries
@@ -408,7 +408,7 @@ const openBankingFullRouter = router({
   /** 2.1 CBN Open Banking — real API integration */
   getAccounts: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     // Get user's connected bank accounts from DB
     const accounts = await db.execute(sql`
@@ -438,7 +438,7 @@ const openBankingFullRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const consentId = genId("OB-CONSENT");
       const state = randomBytes(32).toString("hex");
@@ -476,7 +476,7 @@ const openBankingFullRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const r2pId = genId("R2P");
       const token = randomBytes(32).toString("hex");
 
@@ -508,7 +508,7 @@ const openBankingFullRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const sessionId = genId("CHECKOUT");
       const sessionToken = randomBytes(48).toString("hex");
 
@@ -544,7 +544,7 @@ const openBankingFullRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const vrpConsentId = genId("VRP");
 
       await db.execute(sql`
@@ -633,7 +633,7 @@ const iso20022Router = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const txns = await db.select().from(transactions)
         .where(and(eq(transactions.userId, ctx.user.id), gte(transactions.createdAt, new Date(input.fromDate)), lte(transactions.createdAt, new Date(input.toDate))))
@@ -768,7 +768,7 @@ const cbdcFullRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Verify sender wallet
       const [senderWallet] = await db.select().from(cbdcWallets)
@@ -832,7 +832,7 @@ const cbdcFullRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const bridgeId = genId("BRIDGE");
 
@@ -884,7 +884,7 @@ const cbdcFullRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const contractId = genId("SC");
 
       await db.execute(sql`
@@ -924,7 +924,7 @@ const complianceFullRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const reportId = genId("GOAML");
       const txns = await db.select().from(transactions)
@@ -970,7 +970,7 @@ const complianceFullRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const dsarId = genId("DSAR");
 
       // Gather user data for access/portability requests
@@ -1196,7 +1196,7 @@ const paymentRailsFullRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const txId = genId("FEDNOW");
         const endToEndId = `E2E${randomBytes(8).toString("hex").toUpperCase()}`;
 
@@ -1258,9 +1258,9 @@ const paymentRailsFullRouter = router({
       .input(z.object({ transactionId: z.string() }))
       .query(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const [tx] = await db.execute(sql`SELECT * FROM fednow_transfers WHERE transaction_id = ${input.transactionId} AND user_id = ${ctx.user.id}`) as any[];
-        if (!tx) throw new TRPCError({ code: "NOT_FOUND" });
+        if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         return tx;
       }),
 
@@ -1288,7 +1288,7 @@ const paymentRailsFullRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const orchestrationId = genId("ORCH");
 
@@ -1495,7 +1495,7 @@ const securityFullRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const tokenId = genId("TOK");
       // Generate deterministic token for same value (allows dedup)
@@ -1524,7 +1524,7 @@ const securityFullRouter = router({
     .input(z.object({ token: z.string() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Check Permify authorization
       const allowed = await permify.check({
@@ -1534,7 +1534,7 @@ const securityFullRouter = router({
       if (!allowed) throw new TRPCError({ code: "FORBIDDEN", message: "Not authorized to detokenize" });
 
       const [row] = await db.execute(sql`SELECT * FROM pii_tokens WHERE token = ${input.token}`) as any[];
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const encKey = Buffer.from(process.env.PII_ENCRYPTION_KEY || randomBytes(32).toString("hex"), "hex").slice(0, 32);
       const decipher = createDecipheriv("aes-256-gcm", encKey, Buffer.from(row.iv, "hex"));
@@ -1558,7 +1558,7 @@ const securityFullRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const sampleId = genId("BIO");
 
         // Calculate behavioral fingerprint
@@ -1708,7 +1708,7 @@ const businessModelRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Get user's transaction history for volume-based pricing
       const [volumeData] = await db.execute(sql`
@@ -1778,7 +1778,7 @@ const businessModelRouter = router({
       .input(z.object({ planId: z.enum(["free", "starter", "business", "enterprise"]) }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const subId = genId("SUB");
 
         await db.execute(sql`

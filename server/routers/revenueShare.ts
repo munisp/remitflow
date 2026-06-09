@@ -50,12 +50,12 @@ export const revenueShareRouter = router({
     .input(z.object({ id: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [agreement] = await db
         .select()
         .from(revenueShareAgreements)
         .where(eq(revenueShareAgreements.id, input.id));
-      if (!agreement) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!agreement) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const tiers = await db
         .select()
         .from(revenueShareTiers)
@@ -96,7 +96,7 @@ export const revenueShareRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { tiers: tierInput, ...agreementData } = input;
       const [result] = await db.insert(revenueShareAgreements).values({
         ...agreementData,
@@ -142,7 +142,7 @@ export const revenueShareRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { id, baseRate, minPayoutThreshold, ...rest } = input;
       await db.update(revenueShareAgreements)
         .set({
@@ -159,7 +159,7 @@ export const revenueShareRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(revenueShareAgreements)
         .set({ status: "active", approvedBy: ctx.user.id, approvedAt: new Date(), updatedAt: new Date() })
         .where(eq(revenueShareAgreements.id, input.id)).returning();
@@ -171,7 +171,7 @@ export const revenueShareRouter = router({
     .input(z.object({ id: z.number(), reason: z.string().optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(revenueShareAgreements)
         .set({ status: "terminated", effectiveTo: new Date(), notes: input.reason, updatedAt: new Date() })
         .where(eq(revenueShareAgreements.id, input.id)).returning();
@@ -192,7 +192,7 @@ export const revenueShareRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [result] = await db.insert(revenueShareTiers).values({
         agreementId: input.agreementId,
         tierName: input.tierName,
@@ -209,7 +209,7 @@ export const revenueShareRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _deleted = await db.delete(revenueShareTiers).where(eq(revenueShareTiers.id, input.id)).returning();
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
@@ -253,7 +253,7 @@ export const revenueShareRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Aggregate ledger entries for the period
       const ledgerRows = await db
         .select()
@@ -333,7 +333,7 @@ export const revenueShareRouter = router({
     .input(z.object({ reportId: z.number(), payoutId: z.number().optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(revenueShareReports)
         .set({ status: "paid", paidAt: new Date(), ...(input.payoutId ? { payoutId: input.payoutId } : {}) })
         .where(eq(revenueShareReports.id, input.reportId)).returning();
@@ -451,7 +451,7 @@ export const revenueShareRouter = router({
     .mutation(async ({ ctx, input }) => {
       await createAuditLog({ userId: ctx.user.id, action: "partner.apply", metadata: { companyName: input.companyName, contactEmail: input.contactEmail } });
       return {
-        success: true,
+        success: true, verified: true,
         applicationId: `PA-${Date.now()}`,
         message: "Application received. Our team will review and contact you within 2 business days.",
       };

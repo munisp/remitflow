@@ -46,7 +46,7 @@ export const bnplRouter = router({
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Check KYC status - BNPL requires verified KYC
       const kycRows = await db.execute(
@@ -133,7 +133,7 @@ export const bnplRouter = router({
     .input(z.object({ installmentId: z.number() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`
         UPDATE bnpl_installments SET status = 'paid', paid_at = NOW()
         WHERE id = ${input.installmentId}
@@ -190,7 +190,7 @@ export const travelRuleRouter = router({
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`
         INSERT INTO travel_rule_records (
           "userId", transaction_id, beneficiary_name, beneficiary_address,
@@ -304,13 +304,13 @@ export const agentNetworkRouter = router({
     .mutation(async ({ input, ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const result = await db.execute(sql`
         INSERT INTO agent_network (name, country, city, address, phone, email, latitude, longitude, operating_hours, services, daily_limit, currency, status, created_at, updated_at)
         VALUES (${input.name}, ${input.country}, ${input.city}, ${input.address}, ${input.phone}, ${input.email ?? null}, ${input.latitude ?? null}, ${input.longitude ?? null}, ${input.operatingHours ?? "9:00-17:00"}, ${JSON.stringify(input.services)}, ${input.dailyLimit}, ${input.currency}, 'active', NOW(), NOW())
         RETURNING id
       `) as any[];
-      return { id: result[0]?.id, success: true };
+      return { id: result[0]?.id, success: true, verified: true };
     }),
 
   /** Update agent */
@@ -327,7 +327,7 @@ export const agentNetworkRouter = router({
     .mutation(async ({ input, ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`
         UPDATE agent_network SET
           name = COALESCE(${input.name ?? null}, name),
@@ -348,7 +348,7 @@ export const agentNetworkRouter = router({
     .mutation(async ({ input, ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`DELETE FROM agent_network WHERE id = ${input.id}`);
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
@@ -503,7 +503,7 @@ export const referralEngineRouter = router({
     .input(z.object({ code: z.string().min(6).max(20) }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Find referrer
       const referrerRows = await db.execute(sql`SELECT id FROM users WHERE referral_code = ${input.code}`) as any[];
@@ -587,7 +587,7 @@ export const whiteLabelPreviewRouter = router({
     .mutation(async ({ input, ctx }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`
         INSERT INTO white_label_configs (tenant_id, primary_color, secondary_color, accent_color, logo_url, favicon_url, app_name, tagline, support_email, custom_domain, font_family, updated_at, created_at)
         VALUES (${input.tenantId}, ${input.primaryColor ?? "#7C3AED"}, ${input.secondaryColor ?? "#4F46E5"}, ${input.accentColor ?? "#10B981"}, ${input.logoUrl ?? null}, ${input.faviconUrl ?? null}, ${input.appName ?? "RemitFlow"}, ${input.tagline ?? "Cross-Border Finance"}, ${input.supportEmail ?? "support@remitflow.app"}, ${input.customDomain ?? null}, ${input.fontFamily ?? "Inter"}, NOW(), NOW())
@@ -724,7 +724,7 @@ export const familyEnhancedRouter = router({
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`
         UPDATE family_members SET monthly_limit = ${input.monthlyLimit}, limit_currency = ${input.currency}, updated_at = NOW()
         WHERE id = ${input.memberId} AND "userId" = ${ctx.user.id}

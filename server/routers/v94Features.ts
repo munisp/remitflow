@@ -47,7 +47,7 @@ export const abTestingRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const totalWeight = input.variants.reduce((s, v) => s + v.weight, 0);
       if (Math.abs(totalWeight - 100) > 0.01) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Variant weights must sum to 100" });
@@ -73,7 +73,7 @@ export const abTestingRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(abExperiments)
         .set({ status: input.status as any, updatedAt: new Date() })
         .where(eq(abExperiments.id, input.experimentId)).returning();
@@ -141,7 +141,7 @@ export const abTestingRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [exp] = await db.select().from(abExperiments).where(eq(abExperiments.id, input.experimentId)).limit(1);
-      if (!exp) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!exp) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const events = await db.select().from(abEvents).where(eq(abEvents.experimentId, input.experimentId));
       const assignments = await db.select().from(abAssignments).where(eq(abAssignments.experimentId, input.experimentId));
       const variants = exp.variants as Array<{ id: string; name: string; weight: number }>;
@@ -202,7 +202,7 @@ export const referralBonusRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.update(referralBonuses)
         .set({
           status: input.status as any,
@@ -272,7 +272,7 @@ export const documentVaultRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const suffix = randomBytes(8).toString("hex");
       const fileKey = `vault/${ctx.user.id}/${suffix}-${input.fileName}`;
       const buffer = Buffer.from(input.fileBase64, "base64");
@@ -301,11 +301,11 @@ export const documentVaultRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [doc] = await db.select().from(documentVaultTable)
         .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id)))
         .limit(1);
-      if (!doc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const sharedWith = [...(doc.sharedWith ?? []), {
         email: input.shareWithEmail,
         userId: 0,
@@ -324,7 +324,7 @@ export const documentVaultRouter = router({
     .input(z.object({ documentId: z.number(), expiresAt: z.string() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(documentVaultTable)
         .set({ expiresAt: new Date(input.expiresAt), updatedAt: new Date() })
         .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id))).returning();
@@ -337,7 +337,7 @@ export const documentVaultRouter = router({
     .input(z.object({ documentId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _deleted = await db.delete(documentVaultTable)
         .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id))).returning();
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
@@ -349,7 +349,7 @@ export const documentVaultRouter = router({
     .input(z.object({ documentId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(documentVaultTable)
         .set({ status: "archived" as any, updatedAt: new Date() })
         .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id))).returning();
@@ -406,7 +406,7 @@ export const documentVaultRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [existing] = await db.select({ id: docReminderPrefs.id }).from(docReminderPrefs).where(eq(docReminderPrefs.userId, ctx.user.id)).limit(1);
       let _row: any;
       if (existing) {
@@ -494,7 +494,7 @@ export const rateAlertHistoryRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const snoozedUntil = new Date(Date.now() + input.snoozeHours * 3600 * 1000);
       await db.update(rateAlertHistory)
         .set({ status: "snoozed" as any, snoozedUntil })
@@ -507,7 +507,7 @@ export const rateAlertHistoryRouter = router({
     .input(z.object({ alertHistoryId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(rateAlertHistory)
         .set({ status: "dismissed" as any })
         .where(and(eq(rateAlertHistory.id, input.alertHistoryId), eq(rateAlertHistory.userId, ctx.user.id))).returning();

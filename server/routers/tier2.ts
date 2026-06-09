@@ -144,7 +144,7 @@ export const invoiceFinancingRouter = router({
         .select()
         .from(invoiceFinancingApplications)
         .where(eq(invoiceFinancingApplications.id, input.applicationId));
-      if (!app) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!app) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (app.status !== "pending_review") throw new TRPCError({ code: "BAD_REQUEST", message: `Application is ${app.status}` });
 
       const fundingRef = `IF-${Date.now()}`;
@@ -168,7 +168,7 @@ export const invoiceFinancingRouter = router({
         .select()
         .from(invoiceFinancingApplications)
         .where(and(eq(invoiceFinancingApplications.id, input.applicationId), eq(invoiceFinancingApplications.applicantId, ctx.user.id)));
-      if (!app) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!app) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (app.status !== "funded") throw new TRPCError({ code: "BAD_REQUEST", message: "Application is not in funded state" });
 
       const [repayment] = await db
@@ -283,7 +283,7 @@ export const letterOfCreditRouter = router({
         .select()
         .from(lettersOfCredit)
         .where(and(eq(lettersOfCredit.id, input.lcId), eq(lettersOfCredit.applicantId, ctx.user.id)));
-      if (!lc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!lc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [doc] = await db
         .insert(lcDocuments)
@@ -306,7 +306,7 @@ export const letterOfCreditRouter = router({
         .select()
         .from(lettersOfCredit)
         .where(and(eq(lettersOfCredit.id, input.lcId), eq(lettersOfCredit.applicantId, ctx.user.id)));
-      if (!lc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!lc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const documents = await db
         .select()
         .from(lcDocuments)
@@ -325,7 +325,7 @@ export const letterOfCreditRouter = router({
         .set({ status: "issued", issuedAt: new Date(), updatedAt: new Date() })
         .where(eq(lettersOfCredit.id, input.lcId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 });
@@ -379,7 +379,7 @@ export const multiEntityTreasuryRouter = router({
         .select()
         .from(entityGroups)
         .where(and(eq(entityGroups.id, input.groupId), eq(entityGroups.ownerId, ctx.user.id)));
-      if (!group) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!group) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [member] = await db
         .insert(entityGroupMembers)
@@ -407,7 +407,7 @@ export const multiEntityTreasuryRouter = router({
         .select()
         .from(entityGroups)
         .where(and(eq(entityGroups.id, input.groupId), eq(entityGroups.ownerId, ctx.user.id)));
-      if (!group) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!group) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Call Go treasury netting engine for FX rate
       const fxResult = await callTreasuryEngine("/fx-rate", {
@@ -446,7 +446,7 @@ export const multiEntityTreasuryRouter = router({
         .set({ status: "approved", approvedBy: ctx.user.id, approvedAt: new Date(), updatedAt: new Date() })
         .where(eq(intercompanyTransfers.id, input.transferId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -507,7 +507,7 @@ export const payrollTaxFilingRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Get payroll run data if provided
       let runData = null;
@@ -571,7 +571,7 @@ export const payrollTaxFilingRouter = router({
         })
         .where(eq(payrollTaxFilings.id, input.filingId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -584,7 +584,7 @@ export const payrollTaxFilingRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return db
         .select()
         .from(payrollTaxFilings)
@@ -694,7 +694,7 @@ export const businessSavingsRouter = router({
         .select()
         .from(businessSavingsAccounts)
         .where(and(eq(businessSavingsAccounts.id, input.accountId), eq(businessSavingsAccounts.ownerId, ctx.user.id)));
-      if (!account) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!account) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [product] = await db
         .select()
@@ -728,7 +728,7 @@ export const businessSavingsRouter = router({
         .select()
         .from(businessSavingsAccounts)
         .where(and(eq(businessSavingsAccounts.id, input.accountId), eq(businessSavingsAccounts.ownerId, ctx.user.id)));
-      if (!account) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!account) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (account.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: "Account is not active" });
 
       const currentBalance = safeParseAmount(account.currentBalanceUsd);

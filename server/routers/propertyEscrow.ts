@@ -462,7 +462,7 @@ const escrowPlanRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDbConn();
       const [plan] = await db.select().from(propertyEscrowPlans).where(and(eq(propertyEscrowPlans.planId, input.planId), eq(propertyEscrowPlans.buyerId, ctx.user.id))).limit(1);
-      if (!plan) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (plan.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: "Plan is not active" });
 
       // Find next unpaid installment
@@ -571,7 +571,7 @@ const milestoneRouter = router({
 
       // Verify caller is the builder for this plan
       const [plan] = await db.select().from(propertyEscrowPlans).where(eq(propertyEscrowPlans.id, milestone.escrowPlanId)).limit(1);
-      if (!plan) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const [builder] = await db.select().from(builderProfiles).where(eq(builderProfiles.id, plan.builderId)).limit(1);
       if (!builder || builder.userId !== ctx.user.id) {
         throw new TRPCError({ code: "FORBIDDEN", message: "Only the assigned builder can submit milestone evidence" });
@@ -611,7 +611,7 @@ const milestoneRouter = router({
     .query(async ({ input }) => {
       const db = await getDbConn();
       const [milestone] = await db.select().from(propertyMilestones).where(eq(propertyMilestones.milestoneId, input.milestoneId)).limit(1);
-      if (!milestone) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!milestone) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return db.select().from(milestoneEvidence).where(eq(milestoneEvidence.milestoneId, milestone.id)).orderBy(desc(milestoneEvidence.createdAt));
     }),
 
@@ -646,7 +646,7 @@ const milestoneRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDbConn();
       const [milestone] = await db.select().from(propertyMilestones).where(eq(propertyMilestones.milestoneId, input.milestoneId)).limit(1);
-      if (!milestone) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!milestone) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (milestone.fundsReleased) throw new TRPCError({ code: "BAD_REQUEST", message: "Funds already released for this milestone" });
 
       // Check all evidence for this milestone is verified
@@ -660,7 +660,7 @@ const milestoneRouter = router({
 
       // Get plan to release funds
       const [plan] = await db.select().from(propertyEscrowPlans).where(eq(propertyEscrowPlans.id, milestone.escrowPlanId)).limit(1);
-      if (!plan) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const releaseAmount = Number(milestone.releaseAmountUsd);
 
@@ -734,7 +734,7 @@ const milestoneRouter = router({
     .query(async ({ input }) => {
       const db = await getDbConn();
       const [plan] = await db.select().from(propertyEscrowPlans).where(eq(propertyEscrowPlans.planId, input.planId)).limit(1);
-      if (!plan) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const milestones = await db.select().from(propertyMilestones).where(eq(propertyMilestones.escrowPlanId, plan.id)).orderBy(propertyMilestones.sequenceNumber);
 
       const timeline = await Promise.all(milestones.map(async (m: typeof milestones[number]) => {
@@ -762,7 +762,7 @@ const propertyDisputeRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDbConn();
       const [plan] = await db.select().from(propertyEscrowPlans).where(eq(propertyEscrowPlans.planId, input.planId)).limit(1);
-      if (!plan) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (plan.buyerId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "Only the buyer can raise a dispute" });
 
       let milestoneDbId: number | null = null;
@@ -824,7 +824,7 @@ const propertyDisputeRouter = router({
     .query(async ({ input }) => {
       const db = await getDbConn();
       const [plan] = await db.select().from(propertyEscrowPlans).where(eq(propertyEscrowPlans.planId, input.planId)).limit(1);
-      if (!plan) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return db.select().from(propertyEscrowDisputes).where(eq(propertyEscrowDisputes.escrowPlanId, plan.id)).orderBy(desc(propertyEscrowDisputes.createdAt));
     }),
 
@@ -838,7 +838,7 @@ const propertyDisputeRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDbConn();
       const [dispute] = await db.select().from(propertyEscrowDisputes).where(eq(propertyEscrowDisputes.disputeId, input.disputeId)).limit(1);
-      if (!dispute) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!dispute) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const updates: Record<string, unknown> = {
         status: input.resolution,
@@ -897,7 +897,7 @@ const propertyDisputeRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDbConn();
       const [plan] = await db.select().from(propertyEscrowPlans).where(and(eq(propertyEscrowPlans.planId, input.planId), eq(propertyEscrowPlans.buyerId, ctx.user.id))).limit(1);
-      if (!plan) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (!["disputed", "defaulted"].includes(plan.status ?? "")) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Refund can only be requested for disputed or defaulted plans" });
       }

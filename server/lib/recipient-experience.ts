@@ -57,7 +57,7 @@ export const recipientExperienceRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const [tx] = await db.select().from(transactions).where(eq(transactions.id, input.transactionId));
-      if (!tx) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       await db.insert(notifications).values({
         userId: tx.userId,
         type: "system",

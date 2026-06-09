@@ -12,6 +12,7 @@
  * or Dapr Secrets API via environment configuration.
  */
 import crypto from "crypto";
+import { logger } from "../_core/logger";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -233,7 +234,7 @@ class SecretRotationScheduler {
 
   start(intervalHours = 24): void {
     this.interval = setInterval(
-      () => this.checkAndRotate().catch(console.error),
+      () => this.checkAndRotate().catch((err) => logger.error({ err: err instanceof Error ? err.message : String(err) }, "[SecretsRotation] Check failed")),
       intervalHours * 60 * 60 * 1000
     );
   }

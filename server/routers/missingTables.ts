@@ -60,13 +60,13 @@ export const supportTicketsRouter = router({
     .input(z.object({ id: z.number() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [ticket] = await db
         .select()
         .from(supportTickets)
         .where(and(eq(supportTickets.id, input.id), eq(supportTickets.userId, ctx.user.id)))
         .limit(1);
-      if (!ticket) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!ticket) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return ticket;
     }),
 
@@ -79,7 +79,7 @@ export const supportTicketsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await createAuditLog({ userId: ctx.user.id, action: "support_ticket.create", metadata: { subject: input.subject } });
       const [ticket] = await db
         .insert(supportTickets)
@@ -99,7 +99,7 @@ export const supportTicketsRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db
         .update(supportTickets)
         .set({ status: "closed" as any, resolvedAt: new Date() })
@@ -125,7 +125,7 @@ export const supportTicketsRouter = router({
     .input(z.object({ id: z.number(), resolution: z.string() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db
         .update(supportTickets)
         .set({ status: "resolved" as any, resolution: input.resolution, resolvedAt: new Date(), agentId: ctx.user.id })
@@ -154,7 +154,7 @@ export const directDebitRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const mandateRef = `DDM-${Date.now()}-${randomBytes(3).toString('hex').toUpperCase()}`;
       const nextDebit = input.nextDebitDate ? new Date(input.nextDebitDate) : new Date(Date.now() + 30 * 86400000);
       const [mandate] = await db
@@ -177,7 +177,7 @@ export const directDebitRouter = router({
     .input(z.object({ mandateId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(directDebitMandates).set({ status: "paused" as any }).where(and(eq(directDebitMandates.id, input.mandateId), eq(directDebitMandates.userId, ctx.user.id))).returning();
       await createAuditLog({ userId: ctx.user.id, action: "direct_debit.pause", metadata: { mandateId: input.mandateId } });
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
@@ -187,7 +187,7 @@ export const directDebitRouter = router({
     .input(z.object({ mandateId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(directDebitMandates).set({ status: "active" as any }).where(and(eq(directDebitMandates.id, input.mandateId), eq(directDebitMandates.userId, ctx.user.id))).returning();
       await createAuditLog({ userId: ctx.user.id, action: "direct_debit.resume", metadata: { mandateId: input.mandateId } });
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
@@ -197,7 +197,7 @@ export const directDebitRouter = router({
     .input(z.object({ mandateId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(directDebitMandates).set({ status: "cancelled" as any }).where(and(eq(directDebitMandates.id, input.mandateId), eq(directDebitMandates.userId, ctx.user.id))).returning();
       await createAuditLog({ userId: ctx.user.id, action: "direct_debit.cancel", metadata: { mandateId: input.mandateId } });
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
@@ -217,7 +217,7 @@ export const consentRouter = router({
     .input(z.object({ consentType: z.string(), granted: z.boolean() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const now = new Date();
       await db.execute(sql`INSERT INTO consent_records (user_id, consent_type, granted, granted_at, revoked_at, version)
             VALUES (${ctx.user.id}, ${input.consentType}, ${input.granted}, ${input.granted ? now : null}, ${!input.granted ? now : null}, '1.0')
@@ -231,7 +231,7 @@ export const consentRouter = router({
     .input(z.array(z.object({ consentType: z.string(), granted: z.boolean() })))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const now = new Date();
       for (const c of input) {
         await db.execute(
@@ -287,7 +287,7 @@ export const paymentMetricsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`INSERT INTO payment_metrics (user_id, corridor, success_count, failure_count, avg_processing_ms, total_volume, period)
             VALUES (${ctx.user.id}, ${input.corridor}, ${input.success ? 1 : 0}, ${input.success ? 0 : 1}, ${input.processingMs}, ${input.amount}, ${input.period})
             ON CONFLICT (user_id, corridor, period) DO UPDATE
@@ -318,7 +318,7 @@ export const bnplRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const interestRate = 2.5;
       const installmentAmount = (input.totalAmount * (1 + interestRate / 100)) / input.installments;
       const nextDueDate = new Date(Date.now() + 30 * 86400000);
@@ -345,9 +345,9 @@ export const bnplRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [plan] = await db.select().from(bnplPlans).where(and(eq(bnplPlans.id, input.id), eq(bnplPlans.userId, ctx.user.id))).limit(1);
-      if (!plan) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const installmentAmt = Number(plan.installmentAmount ?? 0);
       const newPaid = Number(plan.paidAmount ?? 0) + installmentAmt;
       const isComplete = newPaid >= Number(plan.totalAmount);
@@ -366,7 +366,7 @@ export const bnplRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(bnplPlans).set({ status: "cancelled", updatedAt: new Date() }).where(and(eq(bnplPlans.id, input.id), eq(bnplPlans.userId, ctx.user.id))).returning();
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
       return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
@@ -395,7 +395,7 @@ export const stablecoinRouter = router({
     .input(z.object({ symbol: z.string(), network: z.string().default("Ethereum") }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const walletAddress = `0x${randomBytes(20).toString('hex')}`;
       const [wallet] = await db
         .insert(stablecoinWallets)
@@ -415,9 +415,9 @@ export const stablecoinRouter = router({
     .input(z.object({ walletId: z.number(), toAddress: z.string(), amount: z.number().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(stablecoinWallets).where(and(eq(stablecoinWallets.id, input.walletId), eq(stablecoinWallets.userId, ctx.user.id))).limit(1);
-      if (!wallet) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!wallet) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
       const [_updated] = await db.update(stablecoinWallets).set({ balance: (Number(wallet.balance) - input.amount).toFixed(6) }).where(eq(stablecoinWallets.id, input.walletId)).returning();
       if (!_updated) throw new TRPCError({ code: "NOT_FOUND", message: "Wallet update failed" });
@@ -447,7 +447,7 @@ export const mojaloopRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const transferId = `TRF-${Date.now()}-${randomBytes(3).toString('hex').toUpperCase()}`;
       const ilpPacket = Buffer.from(JSON.stringify({ transferId, amount: input.amount, currency: input.currency })).toString("base64");
       const condition = `${randomBytes(22).toString('hex').substring(0, 43)}`;
@@ -473,9 +473,9 @@ export const mojaloopRouter = router({
     .input(z.object({ transferId: z.string() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [transfer] = await db.select().from(mojaloopTransfers).where(and(eq(mojaloopTransfers.transferId, input.transferId), eq(mojaloopTransfers.userId, ctx.user.id))).limit(1);
-      if (!transfer) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!transfer) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return transfer;
     }),
   participants: protectedProcedure.query(async () => {
@@ -524,7 +524,7 @@ export const kybRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [record] = await db
         .insert(kybRecords)
         .values({
@@ -559,7 +559,7 @@ export const kybRouter = router({
     .input(z.object({ id: z.number(), status: z.enum(["approved", "rejected", "pending_docs"]), rejectionReason: z.string().optional() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(kybRecords).set({
         status: input.status,
         reviewedBy: ctx.user.name ?? "Admin",
@@ -622,7 +622,7 @@ export const chargebackRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const dueDate = new Date(Date.now() + 14 * 86400000); // 14-day response window
       const [chargeback] = await db
         .insert(chargebackCases)
@@ -653,7 +653,7 @@ export const chargebackRouter = router({
     .input(z.object({ id: z.number(), status: z.enum(["won", "lost", "withdrawn"]), notes: z.string().optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(chargebackCases).set({ status: input.status, notes: input.notes, resolvedAt: new Date() }).where(eq(chargebackCases.id, input.id)).returning();
 
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
@@ -695,7 +695,7 @@ export const tenantConfigsRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { tenantId, tenantName, ...rest } = input;
       const updates: Record<string, any> = { updatedAt: new Date() };
       if (rest.primaryColor !== undefined) updates.primaryColor = rest.primaryColor;
@@ -733,9 +733,9 @@ export const bulkBatchRouter = router({
     .input(z.object({ batchId: z.string() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [batch] = await db.select().from(bulkPaymentBatches).where(and(eq(bulkPaymentBatches.batchId, input.batchId), eq(bulkPaymentBatches.userId, ctx.user.id))).limit(1);
-      if (!batch) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!batch) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return batch;
     }),
 
@@ -748,7 +748,7 @@ export const bulkBatchRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const batchId = `BATCH-${Date.now()}-${randomBytes(3).toString('hex').toUpperCase()}`;
       const totalAmount = input.payments.reduce((s, p) => s + p.amount, 0);
       const estimatedCompletion = new Date(Date.now() + input.payments.length * 2000);
@@ -777,7 +777,7 @@ export const bulkBatchRouter = router({
     .input(z.object({ batchId: z.string() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(bulkPaymentBatches).set({ status: "cancelled", updatedAt: new Date() }).where(and(eq(bulkPaymentBatches.batchId, input.batchId), eq(bulkPaymentBatches.userId, ctx.user.id))).returning();
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
       return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
@@ -803,7 +803,7 @@ export const regulatoryReportsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const reportId = `RPT-${input.reportType}-${Date.now()}`;
       const [report] = await db
         .insert(regulatoryReports)
@@ -848,7 +848,7 @@ export const regulatoryReportsRouter = router({
     .input(z.object({ reportId: z.string() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(regulatoryReports).set({ status: "filed" as any, filedAt: new Date() }).where(eq(regulatoryReports.reportId, input.reportId)).returning();
 
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
@@ -878,7 +878,7 @@ export const fraudModelRunsRouter = router({
     .input(z.object({ modelName: z.string().default("fraud_detection_v2"), modelVersion: z.string().default("2.1.0") }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const runId = `RUN-${Date.now()}-${randomBytes(3).toString('hex').toUpperCase()}`;
       const [run] = await db
         .insert(fraudModelRuns)
@@ -951,7 +951,7 @@ export const onboardingProgressRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const now = new Date();
       const updates: Record<string, any> = { updatedAt: now };
       if (input.profileCompleted !== undefined) { updates.profileCompleted = input.profileCompleted; if (input.profileCompleted) updates.profileCompletedAt = now; }
@@ -991,9 +991,9 @@ export const chatSessionMetaRouter = router({
     .input(z.object({ sessionId: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [meta] = await db.select().from(chatSessionMeta).where(eq(chatSessionMeta.sessionId, input.sessionId)).limit(1);
-      if (!meta) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!meta) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return meta;
     }),
 
@@ -1007,7 +1007,7 @@ export const chatSessionMetaRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { sessionId, ...updates } = input;
       const [_row] = await db.update(chatSessionMeta).set({ ...updates, updatedAt: new Date() }).where(eq(chatSessionMeta.sessionId, sessionId)).returning();
 
@@ -1036,7 +1036,7 @@ export const chatAgentStatusRouter = router({
     .input(z.object({ isOnline: z.boolean(), isAvailable: z.boolean().optional(), statusMessage: z.string().max(255).optional() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`INSERT INTO chat_agent_status (agent_id, is_online, is_available, last_seen_at, status_message, updated_at)
             VALUES (${ctx.user.id}, ${input.isOnline}, ${input.isAvailable ?? true}, NOW(), ${input.statusMessage ?? null}, NOW())
             ON CONFLICT (agent_id) DO UPDATE
@@ -1062,7 +1062,7 @@ export const chatCannedResponsesRouter = router({
     .input(z.object({ title: z.string().min(2).max(255), shortcut: z.string().min(1).max(50), content: z.string().min(5), category: z.string().default("general") }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [response] = await db.insert(chatCannedResponses).values({ ...input, createdBy: ctx.user.id }).returning();
       return response;
     }),
@@ -1071,7 +1071,7 @@ export const chatCannedResponsesRouter = router({
     .input(z.object({ id: z.number(), title: z.string().optional(), content: z.string().optional(), isActive: z.boolean().optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { id, ...updates } = input;
       const [_row] = await db.update(chatCannedResponses).set({ ...updates, updatedAt: new Date() }).where(eq(chatCannedResponses.id, id)).returning();
 
@@ -1084,7 +1084,7 @@ export const chatCannedResponsesRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(chatCannedResponses).set({ isActive: false }).where(eq(chatCannedResponses.id, input.id)).returning();
 
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
@@ -1123,7 +1123,7 @@ export const securityIncidentsRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(securityIncidents).set({ resolvedAt: new Date() }).where(eq(securityIncidents.id, input.id)).returning();
 
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });

@@ -84,7 +84,7 @@ export const paymentMethodsExtRouter = router({
       const db = await getDb();
       const [existing] = await db.select().from(achPaymentMethods)
         .where(and(eq(achPaymentMethods.id, input.id), eq(achPaymentMethods.userId, ctx.user.id)));
-      if (!existing) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       await db.update(achPaymentMethods).set({ isDefault: false }).where(eq(achPaymentMethods.userId, ctx.user.id)).returning();
       const [_row] = await db.update(achPaymentMethods).set({ isDefault: true }).where(eq(achPaymentMethods.id, input.id)).returning();
 
@@ -100,7 +100,7 @@ export const paymentMethodsExtRouter = router({
       const deleted = await db.delete(achPaymentMethods)
         .where(and(eq(achPaymentMethods.id, input.id), eq(achPaymentMethods.userId, ctx.user.id)))
         .returning();
-      if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -148,7 +148,7 @@ export const paymentMethodsExtRouter = router({
       const deleted = await db.delete(sepaPaymentMethods)
         .where(and(eq(sepaPaymentMethods.id, input.id), eq(sepaPaymentMethods.userId, ctx.user.id)))
         .returning();
-      if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -197,7 +197,7 @@ export const paymentMethodsExtRouter = router({
       const deleted = await db.delete(interacPaymentMethods)
         .where(and(eq(interacPaymentMethods.id, input.id), eq(interacPaymentMethods.userId, ctx.user.id)))
         .returning();
-      if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -247,7 +247,7 @@ export const paymentMethodsExtRouter = router({
       const deleted = await db.delete(xofPayoutAccounts)
         .where(and(eq(xofPayoutAccounts.id, input.id), eq(xofPayoutAccounts.userId, ctx.user.id)))
         .returning();
-      if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -350,13 +350,13 @@ export const hnwExtRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const [profile] = await db.select().from(hnwProfiles).where(eq(hnwProfiles.userId, ctx.user.id));
-      if (!profile) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!profile) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const [updated] = await db.update(hnwPortfolios).set({
         currentValueUsd: String(input.currentValueUsd),
         ...(input.allocationPercent !== undefined ? { allocationPercent: String(input.allocationPercent) } : {}),
         updatedAt: new Date(),
       }).where(and(eq(hnwPortfolios.id, input.id), eq(hnwPortfolios.hnwProfileId, profile.id))).returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -780,7 +780,7 @@ export const complianceExtRouter = router({
       const db = await getDb();
       const [session] = await db.select().from(tieredKycSessions)
         .where(and(eq(tieredKycSessions.sessionToken, input.sessionToken), eq(tieredKycSessions.userId, ctx.user.id)));
-      if (!session) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return session;
     }),
 
@@ -796,7 +796,7 @@ export const complianceExtRouter = router({
       const db = await getDb();
       const [session] = await db.select().from(tieredKycSessions)
         .where(and(eq(tieredKycSessions.sessionToken, input.sessionToken), eq(tieredKycSessions.userId, ctx.user.id)));
-      if (!session) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const [updated] = await db.update(tieredKycSessions).set({
         idDocFrontUrl: input.idDocFrontUrl ?? session.idDocFrontUrl,
         idDocBackUrl: input.idDocBackUrl ?? session.idDocBackUrl,
@@ -898,7 +898,7 @@ export const complianceExtRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const [alert] = await db.select().from(derisikingAlerts).where(eq(derisikingAlerts.id, input.alertId));
-      if (!alert) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!alert) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (alert.isAcknowledged) throw new TRPCError({ code: "BAD_REQUEST", message: "Alert already acknowledged" });
       const [updated] = await db.update(derisikingAlerts).set({
         isAcknowledged: true,
@@ -997,7 +997,7 @@ export const crossSellExtRouter = router({
       const db = await getDb();
       const [offer] = await db.select().from(crossSellOffers)
         .where(and(eq(crossSellOffers.id, input.offerId), eq(crossSellOffers.userId, ctx.user.id)));
-      if (!offer) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!offer) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const [_row] = await db.update(crossSellOffers).set({
         status: input.response,
         respondedAt: new Date(),
@@ -1256,7 +1256,7 @@ export const smeBulkRouter = router({
           eq(smeTradeBulkBatches.batchReference, input.batchReference),
           eq(smeTradeBulkBatches.userId, ctx.user.id),
         ));
-      if (!batch) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!batch) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return batch;
     }),
 
@@ -1288,7 +1288,7 @@ export const smeBulkRouter = router({
       const db = await getDb();
       const [batch] = await db.select().from(smeTradeBulkBatches)
         .where(and(eq(smeTradeBulkBatches.batchReference, input.batchReference), eq(smeTradeBulkBatches.userId, ctx.user.id)));
-      if (!batch) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!batch) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (!["pending_validation", "validated"].includes(batch.status)) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot cancel batch in status: ${batch.status}` });
       }
@@ -1342,7 +1342,7 @@ export const swiftTxRouter = router({
       const db = await getDb();
       const [tx] = await db.select().from(swiftTransactions)
         .where(and(eq(swiftTransactions.id, input.id), eq(swiftTransactions.userId, ctx.user.id)));
-      if (!tx) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return tx;
     }),
 
@@ -1352,7 +1352,7 @@ export const swiftTxRouter = router({
       const db = await getDb();
       const [tx] = await db.select().from(swiftTransactions)
         .where(and(eq(swiftTransactions.uetr, input.uetr), eq(swiftTransactions.userId, ctx.user.id)));
-      if (!tx) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return tx;
     }),
 

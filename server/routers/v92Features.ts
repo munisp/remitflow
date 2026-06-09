@@ -109,7 +109,7 @@ export const transferLimitsRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Get user KYC tier
       const userRows = await db.execute(sql`SELECT "kycTier" FROM users WHERE id = ${ctx.user.id} LIMIT 1`);
@@ -167,7 +167,7 @@ export const transferLimitsRouter = router({
 
   getMyLimits: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const userRows = await db.execute(sql`SELECT "kycTier" FROM users WHERE id = ${ctx.user.id} LIMIT 1`);
     const kycTier = (userRows as any[])[0]?.kycTier ?? "tier0";
     const limits = KYC_LIMITS[kycTier] ?? KYC_LIMITS["tier0"];
@@ -177,7 +177,7 @@ export const transferLimitsRouter = router({
   // v92: getMyUsage — daily/monthly usage + limits for current user
   getMyUsage: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const userRows = await db.execute(sql`SELECT "kycTier" FROM users WHERE id = ${ctx.user.id} LIMIT 1`);
     const kycTier = (userRows as any[])[0]?.kycTier ?? "tier1";
     const tierLimits = KYC_LIMITS[kycTier] ?? KYC_LIMITS["tier1"];
@@ -223,7 +223,7 @@ export const transferLimitsRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try {
         await db.execute(sql`
           INSERT INTO transfer_limit_overrides (tier, daily_limit, monthly_limit, single_limit, "updatedAt")
@@ -403,7 +403,7 @@ export const beneficiaryCrudRouter = router({
                 ${input.phone ?? null}, ${input.email ?? null})
         RETURNING id
       `);
-      return { id: (rows as any[])[0]?.id, success: true };
+      return { id: (rows as any[])[0]?.id, success: true, verified: true };
     }),
   list: protectedProcedure
     .input(z.object({
@@ -449,7 +449,7 @@ export const beneficiaryCrudRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Build update using individual fields to avoid sql.raw parameter issues
       const updates: string[] = [];
       if (input.name !== undefined) {
@@ -471,7 +471,7 @@ export const beneficiaryCrudRouter = router({
     .input(z.object({ id: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`DELETE FROM beneficiaries WHERE id = ${input.id} AND "userId" = ${ctx.user.id}`);
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
@@ -480,7 +480,7 @@ export const beneficiaryCrudRouter = router({
     .input(z.object({ id: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`
         UPDATE beneficiaries
         SET "isFavorite" = NOT "isFavorite"
@@ -506,7 +506,7 @@ export const walletCrudRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       if (input.isDefault) {
         await db.execute(sql`UPDATE wallets SET "isDefault" = false WHERE "userId" = ${ctx.user.id}`);
       }
@@ -522,7 +522,7 @@ export const walletCrudRouter = router({
     .input(z.object({ walletId: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`UPDATE wallets SET "isDefault" = false WHERE "userId" = ${ctx.user.id}`);
       const _res = await db.execute(sql`UPDATE wallets SET "isDefault" = true, "updatedAt" = NOW() WHERE id = ${input.walletId} AND "userId" = ${ctx.user.id} RETURNING 1`);
 
@@ -535,7 +535,7 @@ export const walletCrudRouter = router({
     .input(z.object({ walletId: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _res = await db.execute(sql`UPDATE wallets SET status = 'inactive', "updatedAt" = NOW() WHERE id = ${input.walletId} AND "userId" = ${ctx.user.id} RETURNING 1`);
 
       if (!_res.length) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
@@ -547,7 +547,7 @@ export const walletCrudRouter = router({
     .input(z.object({ walletId: z.number().int(), label: z.string().min(1).max(100) }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _res = await db.execute(sql`UPDATE wallets SET label = ${input.label}, "updatedAt" = NOW() WHERE id = ${input.walletId} AND "userId" = ${ctx.user.id} RETURNING 1`);
 
       if (!_res.length) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
@@ -619,7 +619,7 @@ export const transactionSearchRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions = [`t."userId" = ${ctx.user.id}`];
       if (input.status !== "all") conditions.push(`t.status = '${input.status}'`);
       if (input.fromDate) conditions.push(`t."createdAt" >= '${input.fromDate}'`);
@@ -684,11 +684,11 @@ export const kycAdminRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Get submission
       const subRows = await db.execute(sql`SELECT * FROM "kycDocuments" WHERE id = ${input.submissionId} LIMIT 1`);
       const sub = (subRows as any[])[0];
-      if (!sub) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!sub) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       // Update submission
       await db.execute(sql`
         UPDATE kyc_submissions
@@ -721,10 +721,10 @@ export const kycAdminRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const subRows = await db.execute(sql`SELECT * FROM "kycDocuments" WHERE id = ${input.submissionId} LIMIT 1`);
       const sub = (subRows as any[])[0];
-      if (!sub) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!sub) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       await db.execute(sql`
         UPDATE kyc_submissions
         SET status = 'rejected', reviewed_by = ${ctx.user.id}, reviewed_at = NOW(),

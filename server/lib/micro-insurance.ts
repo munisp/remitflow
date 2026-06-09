@@ -84,7 +84,7 @@ export const microInsuranceRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const product = INSURANCE_PRODUCTS.find((p) => p.id === input.productId);
-      if (!product) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!product) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const premium = Math.max(product.minPremium, Math.round(input.coverageAmount * product.premiumRate * (input.durationDays / 30)));
       return {
         policyId: `POL-${Date.now()}`,

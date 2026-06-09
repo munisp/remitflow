@@ -119,7 +119,7 @@ export const promoCodesAdminRouter = router({
     .mutation(async ({ ctx, input }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [existing] = await db.select({ id: promoCodes.id }).from(promoCodes).where(eq(promoCodes.code, input.code)).limit(1);
       if (existing) throw new TRPCError({ code: "CONFLICT", message: "Promo code already exists" });
       const [created] = await db.insert(promoCodes).values({
@@ -156,7 +156,7 @@ export const promoCodesAdminRouter = router({
     .mutation(async ({ ctx, input }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { id, ...updates } = input;
       const updateData: Record<string, unknown> = {};
       if (updates.description !== undefined) updateData.description = updates.description;
@@ -178,7 +178,7 @@ export const promoCodesAdminRouter = router({
     .mutation(async ({ ctx, input }) => {
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _deleted = await db.delete(promoCodes).where(eq(promoCodes.id, input.id)).returning();
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
@@ -236,7 +236,7 @@ export const promoValidateRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [promo] = await db.select().from(promoCodes)
         .where(and(
           eq(promoCodes.code, input.code.toUpperCase()),
@@ -447,7 +447,7 @@ export const notifPrefsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const updateData: Record<string, unknown> = { updatedAt: new Date() };
       Object.entries(input).forEach(([k, v]) => { if (v !== undefined) updateData[k] = v; });
       const [existing] = await db.select({ id: userNotifPrefs.id })
@@ -503,7 +503,7 @@ export const scheduledTransfersRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [created] = await db.insert(scheduledTransfers).values({
         userId: ctx.user.id,
         beneficiaryId: input.beneficiaryId,
@@ -523,7 +523,7 @@ export const scheduledTransfersRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(scheduledTransfers).set({ status: "paused" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id))).returning();
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
@@ -534,7 +534,7 @@ export const scheduledTransfersRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(scheduledTransfers).set({ status: "active" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id))).returning();
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
@@ -545,7 +545,7 @@ export const scheduledTransfersRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(scheduledTransfers).set({ status: "cancelled" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id))).returning();
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
@@ -572,7 +572,7 @@ export const rateAlertsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [created] = await db.insert(exchangeRateAlerts).values({
         userId: ctx.user.id,
         fromCurrency: input.fromCurrency,
@@ -587,7 +587,7 @@ export const rateAlertsRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _deleted = await db.delete(exchangeRateAlerts)
         .where(and(eq(exchangeRateAlerts.id, input.id), eq(exchangeRateAlerts.userId, ctx.user.id))).returning();
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });

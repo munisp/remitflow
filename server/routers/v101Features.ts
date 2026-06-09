@@ -569,7 +569,7 @@ const openBankingPSD2Router = router({
     .input(z.object({ consentId: z.string() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Get consent and validate it's active
       const [consent] = await db.select().from(openBankingConsents).where(eq(openBankingConsents.consentId, input.consentId));

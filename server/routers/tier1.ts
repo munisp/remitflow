@@ -130,7 +130,7 @@ export const contractorRouter = router({
         .set({ ...updates, updatedAt: new Date() })
         .where(and(eq(contractors.id, id), eq(contractors.ownerId, ctx.user.id)))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -229,7 +229,7 @@ export const contractorRouter = router({
         .select()
         .from(contractorInvoices)
         .where(and(eq(contractorInvoices.id, input.invoiceId), eq(contractorInvoices.ownerId, ctx.user.id)));
-      if (!invoice) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!invoice) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (invoice.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: `Invoice is ${invoice.status}, cannot approve` });
 
       const paymentRef = `PAY-${Date.now()}`;
@@ -251,7 +251,7 @@ export const contractorRouter = router({
         .set({ status: "rejected", rejectionReason: input.reason, updatedAt: new Date() })
         .where(and(eq(contractorInvoices.id, input.invoiceId), eq(contractorInvoices.ownerId, ctx.user.id)))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 });
@@ -269,7 +269,7 @@ export const expenseRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return db
         .select()
         .from(expensePolicies)
@@ -292,7 +292,7 @@ export const expenseRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [policy] = await db
         .insert(expensePolicies)
@@ -408,7 +408,7 @@ export const expenseRouter = router({
         .select()
         .from(expenseReports)
         .where(and(eq(expenseReports.id, input.reportId), eq(expenseReports.submittedBy, ctx.user.id)));
-      if (!report) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const items = await db
         .select()
         .from(expenseItems)
@@ -427,7 +427,7 @@ export const expenseRouter = router({
         .set({ status: "approved", approvedBy: ctx.user.id, updatedAt: new Date() })
         .where(eq(expenseReports.id, input.reportId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -440,7 +440,7 @@ export const expenseRouter = router({
         .select()
         .from(expenseReports)
         .where(eq(expenseReports.id, input.reportId));
-      if (!report) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (report.status !== "approved") throw new TRPCError({ code: "BAD_REQUEST", message: "Report must be approved before reimbursement" });
 
       const paymentRef = `REIMB-${Date.now()}`;
@@ -563,7 +563,7 @@ export const merchantKybRouter = router({
         })
         .where(eq(merchantKybReviews.id, input.reviewId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 });
@@ -599,7 +599,7 @@ export const bondSecondaryBuyerRouter = router({
         .select()
         .from(diasporaBonds)
         .where(eq(diasporaBonds.id, input.bondId));
-      if (!bond) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!bond) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const maturity = new Date(bond.maturityDate);
       const now = new Date();

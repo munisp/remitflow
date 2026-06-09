@@ -59,9 +59,9 @@ export const apiChangelogRouter = router({
     .input(z.object({ id: z.number() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!db) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const [entry] = await db.select().from(apiChangelogs).where(eq(apiChangelogs.id, input.id));
-      if (!entry) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!entry) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return entry;
     }),
 
@@ -80,7 +80,7 @@ export const apiChangelogRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [entry] = await db.insert(apiChangelogs).values({
         ...input,
         breakingChanges: input.breakingChanges ? JSON.stringify(input.breakingChanges) : null,
@@ -100,7 +100,7 @@ export const apiChangelogRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { id, ...updates } = input;
       const [entry] = await db.update(apiChangelogs).set(updates).where(eq(apiChangelogs.id, id)).returning();
       return entry;
@@ -110,7 +110,7 @@ export const apiChangelogRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _deleted = await db.delete(apiChangelogs).where(eq(apiChangelogs.id, input.id)).returning();
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };

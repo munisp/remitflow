@@ -31,7 +31,7 @@ export const scheduledTransfersV117Router = router({
     )
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const nextRunAt = new Date(input.startDate);
       const [row] = await db
@@ -100,12 +100,12 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ id: z.number().int().positive() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [row] = await db
         .select()
         .from(scheduledTransfers)
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)));
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return row;
     }),
 
@@ -123,7 +123,7 @@ export const scheduledTransfersV117Router = router({
     )
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const updates: Record<string, unknown> = {};
       if (input.amount !== undefined) updates.amount = input.amount.toString();
       if (input.frequency !== undefined) updates.frequency = input.frequency;
@@ -135,7 +135,7 @@ export const scheduledTransfersV117Router = router({
         .set(updates)
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)))
         .returning();
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return row;
     }),
 
@@ -144,13 +144,13 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [row] = await db
         .update(scheduledTransfers)
         .set({ status: "paused" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)))
         .returning();
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return row;
     }),
 
@@ -159,13 +159,13 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [row] = await db
         .update(scheduledTransfers)
         .set({ status: "active" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)))
         .returning();
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return row;
     }),
 
@@ -174,13 +174,13 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [row] = await db
         .update(scheduledTransfers)
         .set({ status: "cancelled" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)))
         .returning();
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return row;
     }),
 

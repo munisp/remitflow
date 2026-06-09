@@ -39,7 +39,7 @@ export const outboxEventsRouter = router({
     }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions: any[] = [];
       if (input?.status && input.status !== "all") conditions.push(eq(outboxEvents.status, input.status));
       if (input?.aggregateType) conditions.push(eq(outboxEvents.aggregateType, input.aggregateType));
@@ -54,9 +54,9 @@ export const outboxEventsRouter = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [event] = await db.select().from(outboxEvents).where(eq(outboxEvents.id, input.id));
-      if (!event) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!event) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       await db.update(outboxEvents)
         .set({ status: "pending", retryCount: (event.retryCount ?? 0) + 1, failedAt: null, errorMessage: null })
         .where(eq(outboxEvents.id, input.id)).returning();
@@ -82,7 +82,7 @@ export const outboxEventsRouter = router({
     .input(z.object({ olderThanDays: z.number().min(1).max(365).default(30) }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const cutoff = new Date(Date.now() - input.olderThanDays * 86400000);
       const result = await db.delete(outboxEvents)
         .where(and(eq(outboxEvents.status, "published"), sql`${outboxEvents.publishedAt} < ${cutoff}`)).returning();
@@ -100,7 +100,7 @@ export const slaIncidentsRouter = router({
     }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions: any[] = [];
       if (input?.status && input.status !== "all") conditions.push(eq(slaIncidents.status, input.status));
       const rows = await db.select().from(slaIncidents)
@@ -119,7 +119,7 @@ export const slaIncidentsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [incident] = await db.insert(slaIncidents).values({
         title: input.title,
         severity: input.severity,
@@ -137,12 +137,12 @@ export const slaIncidentsRouter = router({
     .input(z.object({ id: z.number().int().positive(), resolution: z.string().min(1).max(1000) }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [incident] = await db.update(slaIncidents)
         .set({ status: "resolved", resolvedAt: new Date(), resolution: input.resolution })
         .where(eq(slaIncidents.id, input.id))
         .returning();
-      if (!incident) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!incident) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       await createAuditLog({ userId: ctx.user.id, action: "SLA_INCIDENT_RESOLVED", description: `SLA incident ${input.id} resolved` });
       return incident;
     }),
@@ -170,7 +170,7 @@ export const nifiPipelineRunsRouter = router({
     }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions: any[] = [];
       if (input?.status && input.status !== "all") conditions.push(eq(nifiPipelineRuns.status, input.status));
       if (input?.pipelineName) conditions.push(eq(nifiPipelineRuns.pipelineName, input.pipelineName));
@@ -188,7 +188,7 @@ export const nifiPipelineRunsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [run] = await db.insert(nifiPipelineRuns).values({
         pipelineName: input.pipelineName,
         status: "pending",
@@ -224,7 +224,7 @@ export const dbtRunHistoryRouter = router({
     }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions: any[] = [];
       if (input?.status && input.status !== "all") conditions.push(eq(dbtRunHistory.status, input.status));
       if (input?.modelSelect) conditions.push(eq(dbtRunHistory.modelSelect, input.modelSelect));
@@ -242,7 +242,7 @@ export const dbtRunHistoryRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const runId = input.runId ?? `dbt_run_${Date.now()}`;
       const [run] = await db.insert(dbtRunHistory).values({
         runId,
@@ -280,7 +280,7 @@ export const airflowDagRunsRouter = router({
     }).optional())
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions: any[] = [];
       if (input?.status && input.status !== "all") conditions.push(eq(airflowDagRuns.status, input.status));
       if (input?.dagId) conditions.push(eq(airflowDagRuns.dagId, input.dagId));
@@ -298,7 +298,7 @@ export const airflowDagRunsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const runId = `manual_${Date.now()}`;
       const [run] = await db.insert(airflowDagRuns).values({
         dagId: input.dagId,
@@ -335,11 +335,11 @@ export const partnerApplicationCommentsRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Verify user has access to this application (either owner or admin)
       const [app] = await db.select().from(partnerApplications)
         .where(eq(partnerApplications.id, input.applicationId));
-      if (!app) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!app) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const isAdmin = ctx.user.role === "admin";
       if (!isAdmin && app.applicantId !== ctx.user.id) {
         throw new TRPCError({ code: "FORBIDDEN" });
@@ -372,7 +372,7 @@ export const partnerApplicationCommentsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Only admins can add internal comments
       if (input.isInternal && ctx.user.role !== "admin") {
         throw new TRPCError({ code: "FORBIDDEN", message: "Only admins can add internal comments" });
@@ -391,7 +391,7 @@ export const partnerApplicationCommentsRouter = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _deleted = await db.delete(partnerApplicationComments)
         .where(eq(partnerApplicationComments.id, input.id)).returning();
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
@@ -406,7 +406,7 @@ export const complianceEmailConfigRouter = router({
     .input(z.object({ tenantId: z.number().int().positive().optional() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions: any[] = [eq(complianceEmailConfig.isActive, true)];
       if (input?.tenantId) conditions.push(eq(complianceEmailConfig.tenantId, input.tenantId));
       const [config] = await db.select({
@@ -445,7 +445,7 @@ export const complianceEmailConfigRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const values: any = {
         officerName: input.officerName,
         officerEmail: input.officerEmail,
@@ -470,7 +470,7 @@ export const complianceEmailConfigRouter = router({
 
   list: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select({
       id: complianceEmailConfig.id,
       tenantId: complianceEmailConfig.tenantId,
@@ -488,7 +488,7 @@ export const complianceEmailConfigRouter = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [_row] = await db.update(complianceEmailConfig)
         .set({ isActive: false, updatedAt: new Date() })
         .where(eq(complianceEmailConfig.id, input.id)).returning();

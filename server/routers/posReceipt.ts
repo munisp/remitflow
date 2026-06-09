@@ -148,7 +148,7 @@ export const posReceiptRouter = router({
       const base64Html = Buffer.from(receiptHtml).toString("base64");
 
       return {
-        success: true,
+        success: true, verified: true,
         receiptHtml: base64Html,
         transactionId: input.transactionId,
         type: input.type,

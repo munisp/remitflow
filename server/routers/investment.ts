@@ -263,7 +263,7 @@ export const ngxStockRouter = router({
         .select()
         .from(ngxOrders)
         .where(and(eq(ngxOrders.id, input.orderId), eq(ngxOrders.userId, ctx.user.id)));
-      if (!order) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!order) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (order.status !== "pending")
         throw new TRPCError({ code: "BAD_REQUEST", message: "Only pending orders can be cancelled" });
 
@@ -449,7 +449,7 @@ export const realEstateRouter = router({
         .select()
         .from(realEstateListings)
         .where(eq(realEstateListings.id, input.listingId));
-      if (!listing) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!listing) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const invested = safeParseAmount(listing.pricePerShareUsd) * input.sharesCount;
       const annualReturn = safeParseAmount(listing.expectedAnnualReturnPct ?? "12") / 100;
       const rentalYield = safeParseAmount(listing.rentalYieldPct ?? "8") / 100;
@@ -628,7 +628,7 @@ export const startupRouter = router({
         .where(
           and(eq(startupInvestments.id, input.investmentId), eq(startupInvestments.userId, ctx.user.id))
         );
-      if (!inv) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!inv) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const [updated] = await (await getDbConn())
         .update(startupInvestments)
         .set({ agreementSigned: true })
@@ -817,7 +817,7 @@ export const paypalTopupRouter = router({
         .select()
         .from(paypalTransactions)
         .where(and(eq(paypalTransactions.paypalOrderId, input.orderId), eq(paypalTransactions.userId, ctx.user.id)));
-      if (!tx) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (tx.walletCredited) return { success: true, verified: true, amountUsd: capturedAmount };
       // Credit wallet
       const [wallet] = await (await getDbConn())

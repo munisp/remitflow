@@ -64,7 +64,7 @@ export const cronJobsRouter = router({
     .input(z.object({ id: z.string() }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [job] = await db.select().from(cronJobs).where(eq(cronJobs.id, input.id));
       if (!job) throw new TRPCError({ code: "NOT_FOUND", message: "Cron job not found" });
       return job;
@@ -80,7 +80,7 @@ export const cronJobsRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [job] = await db.insert(cronJobs).values({
         ...input,
         nextRunAt: getNextRun(input.schedule),
@@ -98,13 +98,13 @@ export const cronJobsRouter = router({
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { id, ...updates } = input;
       const [job] = await db.update(cronJobs)
         .set({ ...updates, updatedAt: new Date() })
         .where(eq(cronJobs.id, id))
         .returning();
-      if (!job) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!job) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return job;
     }),
 
@@ -112,7 +112,7 @@ export const cronJobsRouter = router({
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _deleted = await db.delete(cronJobs).where(eq(cronJobs.id, input.id)).returning();
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
@@ -122,9 +122,9 @@ export const cronJobsRouter = router({
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [current] = await db.select({ status: cronJobs.status }).from(cronJobs).where(eq(cronJobs.id, input.id));
-      if (!current) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!current) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const newStatus = current.status === "active" ? "paused" : "active";
       const [job] = await db.update(cronJobs)
         .set({ status: newStatus, updatedAt: new Date() })
@@ -137,11 +137,11 @@ export const cronJobsRouter = router({
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const startTime = Date.now();
 
       const [job] = await db.select().from(cronJobs).where(eq(cronJobs.id, input.id));
-      if (!job) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!job) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (job.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: `Job is ${job.status}, cannot trigger` });
 
       let runStatus: "success" | "error" = "success";

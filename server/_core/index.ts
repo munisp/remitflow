@@ -1253,7 +1253,7 @@ async function startServer() {
   });
 }
 
-startServer().catch(console.error);
+startServer().catch((err) => logger.error({ err: err instanceof Error ? err.message : String(err) }, "Server startup failed"));
 
 // ─── Graceful Shutdown ───────────────────────────────────────────────────────
 // Handles SIGTERM (Kubernetes pod termination) and SIGINT (Ctrl+C)

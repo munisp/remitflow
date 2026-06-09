@@ -3,6 +3,7 @@
  * Encrypts sensitive fields (BVN, NIN, passport numbers) at rest.
  */
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
+import { logger } from "../_core/logger";
 
 const ALGORITHM = "aes-256-gcm";
 const KEY_LENGTH = 32;
@@ -14,7 +15,7 @@ let encryptionKey: Buffer | null = null;
 export function initEncryption(keyOrEnvVar?: string): void {
   const rawKey = keyOrEnvVar ?? process.env.ENCRYPTION_KEY;
   if (!rawKey) {
-    console.warn("[Encryption] ENCRYPTION_KEY not set — PII encryption disabled");
+    logger.warn("[Encryption] ENCRYPTION_KEY not set — PII encryption disabled");
     return;
   }
 

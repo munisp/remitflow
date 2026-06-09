@@ -327,7 +327,7 @@ export const accountOpeningGateRouter = router({
     .input(z.object({ applicationId: z.string(), userId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [user] = await db
         .select({ kycTier: users.kycTier })
@@ -362,7 +362,7 @@ export const accountOpeningGateRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       await db
         .update(users)
@@ -453,7 +453,7 @@ export const enhancedKybRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Build ownership graph
       const shareholders = input.shareholders || [];
@@ -530,7 +530,7 @@ export const enhancedKybRouter = router({
         .from(kybRecords)
         .where(eq(kybRecords.id, input.kybRecordId))
         .limit(1);
-      if (!record) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!record) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Try calling deep KYB engine
       try {

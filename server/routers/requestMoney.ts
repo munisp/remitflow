@@ -18,7 +18,7 @@ export const requestMoneyRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const token = randomBytes(32).toString("hex");
       const expiresAt = new Date(Date.now() + input.expiresInHours * 3600 * 1000);
       const [req] = await db.insert(paymentRequests).values({
@@ -43,7 +43,7 @@ export const requestMoneyRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions = [eq(paymentRequests.requesterId, ctx.user.id)];
       if (input.status) conditions.push(eq(paymentRequests.status, input.status));
       const rows = await db.select().from(paymentRequests)
@@ -59,7 +59,7 @@ export const requestMoneyRouter = router({
     .input(z.object({ token: z.string().length(64) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [req] = await db.select().from(paymentRequests)
         .where(eq(paymentRequests.token, input.token));
       if (!req) throw new TRPCError({ code: "NOT_FOUND", message: "Payment request not found" });
@@ -77,10 +77,10 @@ export const requestMoneyRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [req] = await db.select().from(paymentRequests)
         .where(eq(paymentRequests.token, input.token));
-      if (!req) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!req) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (req.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: "Payment request is no longer active" });
       if (req.expiresAt && req.expiresAt < new Date()) throw new TRPCError({ code: "BAD_REQUEST", message: "Payment request has expired" });
       const payAmount = input.amount ?? (req.amount ? Number(req.amount) : null);
@@ -114,7 +114,7 @@ export const requestMoneyRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const token = randomBytes(32).toString("hex");
       const expiresAt = new Date(Date.now() + input.expiresInHours * 3600 * 1000);
       const [req] = await db.insert(paymentRequests).values({
@@ -143,10 +143,10 @@ export const requestMoneyRouter = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [req] = await db.select().from(paymentRequests)
         .where(and(eq(paymentRequests.id, input.id), eq(paymentRequests.requesterId, ctx.user.id)));
-      if (!req) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!req) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (req.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: "Only pending requests can be cancelled" });
       const [_row] = await db.update(paymentRequests)
         .set({ status: "cancelled", updatedAt: new Date() })
