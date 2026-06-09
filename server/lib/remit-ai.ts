@@ -8,6 +8,7 @@ import { transactions, users, wallets, beneficiaries } from "../../drizzle/schem
 import { sql, eq, gte, desc, count, sum, and } from "drizzle-orm";
 import { router, protectedProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
+import { safeParseAmount } from "./safeDecimal";
 
 const INTENT_PATTERNS: Array<{ pattern: RegExp; intent: string }> = [
   { pattern: /send\s+(\$|₦|£|€)?[\d,.]+\s+to\s+/i, intent: "transfer" },
@@ -32,7 +33,7 @@ function extractTransferDetails(message: string) {
   const amountMatch = message.match(/(\$|₦|£|€)?([\d,]+(?:\.\d{2})?)/);
   const recipientMatch = message.match(/to\s+([A-Za-z\s]+?)(?:\s+in|\s*$)/i);
   return {
-    amount: amountMatch ? parseFloat(amountMatch[2].replace(",", "")) : null,
+    amount: amountMatch ? safeParseAmount(amountMatch[2].replace(",", "")) : null,
     currency: amountMatch?.[1] === "$" ? "USD" : amountMatch?.[1] === "₦" ? "NGN" : amountMatch?.[1] === "£" ? "GBP" : amountMatch?.[1] === "€" ? "EUR" : null,
     recipientName: recipientMatch?.[1]?.trim() ?? null,
   };

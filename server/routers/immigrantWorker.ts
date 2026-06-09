@@ -5,6 +5,7 @@ import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
 import { immigrantWorkerKyc } from "../../drizzle/schema";
 import { eq } from "drizzle-orm";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 const KYC_SERVICE_URL = process.env.IMMIGRANT_WORKER_KYC_URL ?? "http://rust-immigrant-worker-kyc:8099";
 const XOF_ADAPTER_URL = process.env.XOF_ADAPTER_URL ?? "http://go-xof-adapter:8095";
@@ -117,10 +118,10 @@ export const immigrantWorkerRouter = router({
       .where(eq(immigrantWorkerKyc.userId, ctx.user.id));
     if (!record) throw new TRPCError({ code: "NOT_FOUND", message: "KYC record not found. Please complete KYC first." });
 
-    const monthlyLimit = parseFloat(record.monthlyLimitUsd ?? "500");
-    const monthlyUsed = parseFloat(record.monthlyUsedUsd ?? "0");
-    const annualLimit = parseFloat(record.annualLimitUsd ?? "5000");
-    const annualUsed = parseFloat(record.annualUsedUsd ?? "0");
+    const monthlyLimit = safeParseAmount(record.monthlyLimitUsd ?? "500");
+    const monthlyUsed = safeParseAmount(record.monthlyUsedUsd ?? "0");
+    const annualLimit = safeParseAmount(record.annualLimitUsd ?? "5000");
+    const annualUsed = safeParseAmount(record.annualUsedUsd ?? "0");
 
     return {
       kycTier: record.kycTier,
@@ -190,8 +191,8 @@ export const immigrantWorkerRouter = router({
         .where(eq(immigrantWorkerKyc.userId, ctx.user.id));
       if (record) {
         const amountUsd = input.amountNgn / 1620;
-        const newMonthlyUsed = parseFloat(record.monthlyUsedUsd ?? "0") + amountUsd;
-        const newAnnualUsed = parseFloat(record.annualUsedUsd ?? "0") + amountUsd;
+        const newMonthlyUsed = safeParseAmount(record.monthlyUsedUsd ?? "0") + amountUsd;
+        const newAnnualUsed = safeParseAmount(record.annualUsedUsd ?? "0") + amountUsd;
         await db.update(immigrantWorkerKyc)
           .set({
             monthlyUsedUsd: newMonthlyUsed.toFixed(2),

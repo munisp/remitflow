@@ -11,6 +11,7 @@ import { adminProcedure, protectedProcedure, publicProcedure, router ,
 import { wallets, transactions, apiKeys, notifications, treasuryPositions } from "../../drizzle/schema";
 import { randomBytes } from "crypto";
 import { getDb } from "../db";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 function genId(prefix: string) { return `${prefix}_${randomBytes(8).toString("hex")}`; }
 
@@ -320,9 +321,9 @@ export const smartRoutingRouter = router({
     amount: z.number().positive(), priority: z.enum(["speed", "cost", "reliability"]).default("cost"),
   })).query(async ({ input }) => {
     const routes = [
-      { routeId: "route_direct", name: "Direct Transfer", gateway: "RemitFlow Core", fee: parseFloat((input.amount * 0.008).toFixed(2)), estimatedTime: "2-4 hours", reliability: 99.8, score: input.priority === "cost" ? 95 : 78 },
-      { routeId: "route_swift", name: "SWIFT Network", gateway: "Correspondent Bank", fee: parseFloat((input.amount * 0.025 + 15).toFixed(2)), estimatedTime: "1-3 business days", reliability: 99.5, score: input.priority === "cost" ? 45 : 60 },
-      { routeId: "route_mojaloop", name: "Mojaloop FSPIOP", gateway: "Mojaloop Hub", fee: parseFloat((input.amount * 0.005).toFixed(2)), estimatedTime: "30-60 minutes", reliability: 98.9, score: input.priority === "speed" ? 98 : 88 },
+      { routeId: "route_direct", name: "Direct Transfer", gateway: "RemitFlow Core", fee: safeParseAmount((input.amount * 0.008).toFixed(2)), estimatedTime: "2-4 hours", reliability: 99.8, score: input.priority === "cost" ? 95 : 78 },
+      { routeId: "route_swift", name: "SWIFT Network", gateway: "Correspondent Bank", fee: safeParseAmount((input.amount * 0.025 + 15).toFixed(2)), estimatedTime: "1-3 business days", reliability: 99.5, score: input.priority === "cost" ? 45 : 60 },
+      { routeId: "route_mojaloop", name: "Mojaloop FSPIOP", gateway: "Mojaloop Hub", fee: safeParseAmount((input.amount * 0.005).toFixed(2)), estimatedTime: "30-60 minutes", reliability: 98.9, score: input.priority === "speed" ? 98 : 88 },
     ];
     routes.sort((a, b) => b.score - a.score);
     return { recommended: routes[0], alternatives: routes.slice(1) };
@@ -407,7 +408,7 @@ export const rateEngineRouter = router({
     const rates: Record<string, number> = { Starter: 0.012, Regular: 0.009, Premium: 0.006, Business: 0.004 };
     const rate = rates[input.userTier] ?? 0.012;
     const fee = Math.max(1.50, input.amount * rate);
-    return { amount: input.amount, fee: parseFloat(fee.toFixed(2)), feeRate: `${(rate * 100).toFixed(1)}%`, totalCost: parseFloat((input.amount + fee).toFixed(2)) };
+    return { amount: input.amount, fee: safeParseAmount(fee.toFixed(2)), feeRate: `${(rate * 100).toFixed(1)}%`, totalCost: safeParseAmount((input.amount + fee).toFixed(2)) };
   }),
 });
 

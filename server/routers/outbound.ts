@@ -20,6 +20,7 @@ import {
   respondToCrossSellOffer,
   markCrossSellOfferShown,
 } from "../db.js";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 const SWIFT_URL = process.env.OUTBOUND_SWIFT_URL ?? "http://localhost:8081";
 const FLOAT_URL = process.env.FLOAT_INCOME_URL ?? "http://localhost:8082";
@@ -115,7 +116,7 @@ const swiftRouter = router({
       // Fetch current annual usage from DB
       const year = new Date().getFullYear();
       const usageRow = await getAnnualUsage(ctx.user.id, input.purpose_code, year);
-      const usedUsd = usageRow ? parseFloat(usageRow.usedUsd as string) : 0;
+      const usedUsd = usageRow ? safeParseAmount(usageRow.usedUsd as string) : 0;
 
       // Call Go service with X-Used-Annual-USD header for limit enforcement
       const res = await fetch(`${SWIFT_URL}/submit`, {
@@ -170,7 +171,7 @@ const swiftRouter = router({
       const year = new Date().getFullYear();
       const code = input.purpose_code.toUpperCase();
       const usageRow = await getAnnualUsage(ctx.user.id, code, year);
-      const usedUsd = usageRow ? parseFloat(usageRow.usedUsd as string) : 0;
+      const usedUsd = usageRow ? safeParseAmount(usageRow.usedUsd as string) : 0;
       const capUsd = CBN_ANNUAL_LIMITS_USD[code] ?? 0;
       const remainingUsd = Math.max(0, capUsd - usedUsd);
       const utilizationPct = capUsd > 0 ? Math.round((usedUsd / capUsd) * 100) : 0;
@@ -192,7 +193,7 @@ const swiftRouter = router({
       const usageRows = await getAllAnnualUsageForUser(ctx.user.id, year);
       const usageMap: Record<string, number> = {};
       for (const row of usageRows) {
-        usageMap[row.purposeCode] = parseFloat(row.usedUsd as string);
+        usageMap[row.purposeCode] = safeParseAmount(row.usedUsd as string);
       }
       return Object.entries(CBN_ANNUAL_LIMITS_USD).map(([code, cap]) => {
         const used = usageMap[code] ?? 0;

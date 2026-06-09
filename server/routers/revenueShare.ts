@@ -7,6 +7,7 @@ import {
   revenueShareAgreements, revenueShareTiers, revenueShareLedger,
   revenueShareReports, partnerPayouts, tenants, transactions, users,
 } from "../../drizzle/schema.js";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 async function getDb() {
   const { getDb: _getDb } = await import("../db.js");
@@ -263,9 +264,9 @@ export const revenueShareRouter = router({
           eq(revenueShareLedger.periodMonth, input.periodMonth),
           eq(revenueShareLedger.periodYear, input.periodYear),
         ));
-      const totalFeeRevenue = ledgerRows.reduce((s: any, r: any) => s + parseFloat(r.grossFeeRevenue), 0);
-      const partnerEarnings = ledgerRows.reduce((s: any, r: any) => s + parseFloat(r.partnerShare), 0);
-      const platformEarnings = ledgerRows.reduce((s: any, r: any) => s + parseFloat(r.platformShare), 0);
+      const totalFeeRevenue = ledgerRows.reduce((s: any, r: any) => s + safeParseAmount(r.grossFeeRevenue), 0);
+      const partnerEarnings = ledgerRows.reduce((s: any, r: any) => s + safeParseAmount(r.partnerShare), 0);
+      const platformEarnings = ledgerRows.reduce((s: any, r: any) => s + safeParseAmount(r.platformShare), 0);
       const totalTransactions = ledgerRows.filter((r: any) => r.transactionId).length;
       // Get the agreement to find applied rate
       const [agreement] = await db.select().from(revenueShareAgreements).where(eq(revenueShareAgreements.id, input.agreementId));
@@ -375,8 +376,8 @@ export const revenueShareRouter = router({
         .where(eq(revenueShareReports.periodYear, input.periodYear))
         .groupBy(revenueShareReports.periodMonth)
         .orderBy(asc(revenueShareReports.periodMonth));
-      const totalPartnerPaid = byTenant.reduce((s: any, r: any) => s + parseFloat(r.totalPartnerEarnings || "0"), 0);
-      const totalPlatformKept = byTenant.reduce((s: any, r: any) => s + parseFloat(r.totalPlatformEarnings || "0"), 0);
+      const totalPartnerPaid = byTenant.reduce((s: any, r: any) => s + safeParseAmount(r.totalPartnerEarnings || "0"), 0);
+      const totalPlatformKept = byTenant.reduce((s: any, r: any) => s + safeParseAmount(r.totalPlatformEarnings || "0"), 0);
       return {
         summary: {
           totalPartnerPaid,
@@ -390,16 +391,16 @@ export const revenueShareRouter = router({
         byTenant: byTenant.map((r: any) => ({
           tenantId: r.tenantId,
           tenantName: r.tenantName || `Tenant ${r.tenantId}`,
-          partnerEarnings: parseFloat(r.totalPartnerEarnings || "0"),
-          platformEarnings: parseFloat(r.totalPlatformEarnings || "0"),
-          volume: parseFloat(r.totalVolume || "0"),
+          partnerEarnings: safeParseAmount(r.totalPartnerEarnings || "0"),
+          platformEarnings: safeParseAmount(r.totalPlatformEarnings || "0"),
+          volume: safeParseAmount(r.totalVolume || "0"),
           transactions: parseInt(r.totalTransactions || "0"),
         })),
         monthlyTrend: monthlyTrend.map((r: any) => ({
           month: r.month,
-          partnerEarnings: parseFloat(r.totalPartnerEarnings || "0"),
-          platformEarnings: parseFloat(r.totalPlatformEarnings || "0"),
-          volume: parseFloat(r.totalVolume || "0"),
+          partnerEarnings: safeParseAmount(r.totalPartnerEarnings || "0"),
+          platformEarnings: safeParseAmount(r.totalPlatformEarnings || "0"),
+          volume: safeParseAmount(r.totalVolume || "0"),
         })),
       };
     }),
@@ -477,9 +478,9 @@ export const revenueShareRouter = router({
           eq(revenueShareReports.periodYear, input.periodYear),
         ))
         .orderBy(desc(revenueShareReports.periodMonth));
-      const totalEarned = reports.reduce((s: any, r: any) => s + parseFloat(r.partnerEarnings), 0);
-      const totalPaid = reports.filter((r: any) => r.status === "paid").reduce((s: any, r: any) => s + parseFloat(r.partnerEarnings), 0);
-      const totalPending = reports.filter((r: any) => r.status === "pending").reduce((s: any, r: any) => s + parseFloat(r.partnerEarnings), 0);
+      const totalEarned = reports.reduce((s: any, r: any) => s + safeParseAmount(r.partnerEarnings), 0);
+      const totalPaid = reports.filter((r: any) => r.status === "paid").reduce((s: any, r: any) => s + safeParseAmount(r.partnerEarnings), 0);
+      const totalPending = reports.filter((r: any) => r.status === "pending").reduce((s: any, r: any) => s + safeParseAmount(r.partnerEarnings), 0);
       return {
         reports,
         summary: { totalEarned, totalPaid, totalPending, reportCount: reports.length },

@@ -19,6 +19,7 @@ import { broadcastUserEvent } from "./sse.service.js";
 import { mojaloopTransfer, pixTransfer, upiTransfer, initiateTransfer } from "./_core/serviceRegistry.js";
 import { logger } from './_core/logger';
 import { sendEmail, buildTransferCompletedEmail, buildTransferFailedEmail } from "./email.service.js";
+import { safeParseAmount } from "./lib/safeDecimal";
 
 export type TransferState =
   | "pending"      // initial DB state before pipeline starts
@@ -338,7 +339,7 @@ export async function runTransferPipeline(
       if (txRow) {
         const country = (txRow.recipientCountry ?? "").toLowerCase();
         const currency = (txRow.toCurrency ?? "").toUpperCase();
-        const amount = parseFloat(txRow.toAmount ?? "0");
+        const amount = safeParseAmount(txRow.toAmount ?? "0");
         try {
           if (currency === "BRL" || country.includes("brazil")) {
             // PIX (Brazil)

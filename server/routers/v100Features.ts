@@ -35,6 +35,7 @@ import {
   referralBonuses,
 } from "../../drizzle/schema.js";
 import { eq, desc, and, gte, lte, like, sql, count, sum, avg } from "drizzle-orm";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ── 1. Compliance Scoring V2 ─────────────────────────────────────────────────
 const complianceScoringV2Router = router({
@@ -898,12 +899,12 @@ const realTimeFXStreamRouter = router({
       const avgSpread = spreads.length > 0 ? spreads.reduce((a: number, b: number) => a + b, 0) / spreads.length : 0.32;
       return {
         pair: input.pair,
-        avgSpread: parseFloat(avgSpread.toFixed(4)),
-        minSpread: spreads.length > 0 ? parseFloat(Math.min(...spreads).toFixed(4)) : 0.18,
-        maxSpread: spreads.length > 0 ? parseFloat(Math.max(...spreads).toFixed(4)) : 0.65,
+        avgSpread: safeParseAmount(avgSpread.toFixed(4)),
+        minSpread: spreads.length > 0 ? safeParseAmount(Math.min(...spreads).toFixed(4)) : 0.18,
+        maxSpread: spreads.length > 0 ? safeParseAmount(Math.max(...spreads).toFixed(4)) : 0.65,
         spreadHistory: rates.map((r: any) => ({
           timestamp: r.recordedAt?.toISOString() ?? new Date().toISOString(),
-          spread: parseFloat((Number(r.rate) * 0.002).toFixed(4)),
+          spread: safeParseAmount((Number(r.rate) * 0.002).toFixed(4)),
           rate: Number(r.rate),
         })),
       };

@@ -34,6 +34,7 @@ import {
   payrollCompanies,
   payrollRuns,
 } from "../../drizzle/schema";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -476,7 +477,7 @@ export const multiEntityTreasuryRouter = router({
         transfers: transfers.map((t: any) => ({
           from_company_id: t.fromCompanyId,
           to_company_id:   t.toCompanyId,
-          amount_usd:      parseFloat(t.amountUsd),
+          amount_usd:      safeParseAmount(t.amountUsd),
           from_currency:   t.fromCurrency,
           to_currency:     t.toCurrency,
         })),
@@ -523,11 +524,11 @@ export const payrollTaxFilingRouter = router({
         jurisdiction:    input.jurisdiction,
         period_start:    input.periodStart,
         period_end:      input.periodEnd,
-        total_gross_usd: runData ? parseFloat(runData.totalGrossUsd ?? "0") : 0,
+        total_gross_usd: runData ? safeParseAmount(runData.totalGrossUsd ?? "0") : 0,
         employee_count:  runData ? (runData.totalEmployees ?? 0) : 0,
       });
 
-      const totalGross = runData ? parseFloat(runData.totalGrossUsd ?? "0") : 0;
+      const totalGross = runData ? safeParseAmount(runData.totalGrossUsd ?? "0") : 0;
       const totalTax = taxResult?.total_tax_usd ?? totalGross * 0.075;
       const totalPension = taxResult?.total_pension_usd ?? totalGross * 0.08;
 
@@ -630,10 +631,10 @@ export const businessSavingsRouter = router({
       if (!product) throw new TRPCError({ code: "NOT_FOUND", message: "Savings product not found" });
 
       // Business rules
-      if (input.principalUsd < parseFloat(product.minDepositUsd)) {
+      if (input.principalUsd < safeParseAmount(product.minDepositUsd)) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Minimum deposit is $${product.minDepositUsd}` });
       }
-      if (input.principalUsd > parseFloat(product.maxDepositUsd)) {
+      if (input.principalUsd > safeParseAmount(product.maxDepositUsd)) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Maximum deposit is $${product.maxDepositUsd}` });
       }
 
@@ -707,8 +708,8 @@ export const businessSavingsRouter = router({
         .orderBy(desc(businessSavingsTxns.createdAt));
 
       // Calculate projected interest
-      const principal = parseFloat(account.principalUsd);
-      const annualRate = parseFloat(product?.annualRatePct ?? "0") / 100;
+      const principal = safeParseAmount(account.principalUsd);
+      const annualRate = safeParseAmount(product?.annualRatePct ?? "0") / 100;
       const daysElapsed = Math.ceil((Date.now() - account.startDate.getTime()) / (1000 * 60 * 60 * 24));
       const projectedInterest = principal * annualRate * (daysElapsed / 365);
 
@@ -730,7 +731,7 @@ export const businessSavingsRouter = router({
       if (!account) throw new TRPCError({ code: "NOT_FOUND" });
       if (account.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: "Account is not active" });
 
-      const currentBalance = parseFloat(account.currentBalanceUsd);
+      const currentBalance = safeParseAmount(account.currentBalanceUsd);
       if (input.amountUsd > currentBalance) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Insufficient balance. Available: $${currentBalance.toFixed(2)}` });
       }

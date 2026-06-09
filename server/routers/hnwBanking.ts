@@ -7,6 +7,7 @@ import { hnwClientProfiles, hnwRateLocks, hnwTransfers, hnwRmRequests } from "..
 import { eq, desc, and, gt } from "drizzle-orm";
 import { notifyOwner } from "../_core/notification";
 import { getStripe } from "../stripe";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 const HNW_FX_URL = process.env.HNW_FX_ENGINE_URL ?? "http://rust-hnw-fx-engine:8100";
 const HNW_ROUTING_URL = process.env.HNW_ROUTING_URL ?? "http://go-hnw-routing:8098";
@@ -48,7 +49,7 @@ export const hnwBankingRouter = router({
     const [profile] = await db.select().from(hnwClientProfiles)
       .where(eq(hnwClientProfiles.userId, ctx.user.id));
     return {
-      spreadBps: parseFloat(profile?.negotiatedSpreadBps ?? "150"),
+      spreadBps: safeParseAmount(profile?.negotiatedSpreadBps ?? "150"),
       aumTier: profile?.aumTier ?? "standard",
       isNegotiated: !!profile,
     };
@@ -74,7 +75,7 @@ export const hnwBankingRouter = router({
         corridor_code: input.corridorCode,
         amount_ngn: input.amountNgn,
         duration_minutes: input.durationMinutes,
-        negotiated_spread_bps: parseFloat(profile.negotiatedSpreadBps ?? "80"),
+        negotiated_spread_bps: safeParseAmount(profile.negotiatedSpreadBps ?? "80"),
       });
 
       // Persist rate lock
@@ -134,8 +135,8 @@ export const hnwBankingRouter = router({
         recipient_name: input.recipientName,
         recipient_bank_name: input.recipientBankName,
         purpose_code: input.purposeCode,
-        amount_ngn: parseFloat(lock.amountNgn ?? "0"),
-        fx_rate: parseFloat(lock.fxRate ?? "0"),
+        amount_ngn: safeParseAmount(lock.amountNgn ?? "0"),
+        fx_rate: safeParseAmount(lock.fxRate ?? "0"),
         corridor_code: lock.corridorCode,
       });
 

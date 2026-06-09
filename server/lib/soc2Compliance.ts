@@ -12,6 +12,7 @@ import { getDb } from "../db";
 import { sql } from "drizzle-orm";
 import { logger } from "../_core/logger";
 import { execSync } from "child_process";
+import { safeParseAmount } from "./safeDecimal";
 
 // ─── SOC 2 Trust Services Criteria ──────────────────────────────────────────────
 export const TrustServicesCriteria = {
@@ -265,7 +266,7 @@ async function testProcessingIntegrity(db: any): Promise<ControlTestResult> {
       controlId: "PI1.1",
       criteria: "PI1",
       testName: "Processing Integrity",
-      status: parseFloat(errorRate) < 5 ? "pass" : "warning",
+      status: safeParseAmount(errorRate) < 5 ? "pass" : "warning",
       evidence: `Transaction error rate: ${errorRate}% (${failed}/${total}). Double-entry ledger reconciliation active. Idempotency keys enforced.`,
       testedAt: new Date(),
       details: { totalTx: total, failedTx: failed, errorRate: `${errorRate}%`, reconciliation: "active", idempotency: true },

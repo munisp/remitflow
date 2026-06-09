@@ -28,6 +28,7 @@ import {
   diasporaBonds,
   payrollCompanies,
 } from "../../drizzle/schema";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helper: call Go contractor engine ───────────────────────────────────────
 
@@ -610,8 +611,8 @@ export const bondSecondaryBuyerRouter = router({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            face_value_usd:    parseFloat(bond.faceValue),
-            coupon_rate_pct:   parseFloat(bond.couponRate) * 100,
+            face_value_usd:    safeParseAmount(bond.faceValue),
+            coupon_rate_pct:   safeParseAmount(bond.couponRate) * 100,
             market_price_usd:  input.marketPriceUsd,
             years_to_maturity: yearsToMaturity,
             payments_per_year: 2,
@@ -621,8 +622,8 @@ export const bondSecondaryBuyerRouter = router({
       } catch { /* fallback */ }
 
       // TypeScript fallback YTM calculation
-      const fv = parseFloat(bond.faceValue);
-      const c = fv * parseFloat(bond.couponRate) / 2;
+      const fv = safeParseAmount(bond.faceValue);
+      const c = fv * safeParseAmount(bond.couponRate) / 2;
       const n = Math.round(yearsToMaturity * 2);
       const p = input.marketPriceUsd;
       // Approximation: YTM ≈ (C + (FV-P)/n) / ((FV+P)/2)
@@ -662,7 +663,7 @@ export const bondSecondaryBuyerRouter = router({
       }
 
       // Find best matching order
-      const eligible = openOrders.filter((o: any) => parseFloat(o.askPrice) <= input.maxPriceUsd);
+      const eligible = openOrders.filter((o: any) => safeParseAmount(o.askPrice) <= input.maxPriceUsd);
       if (eligible.length === 0) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -672,7 +673,7 @@ export const bondSecondaryBuyerRouter = router({
 
       const bestOrder = eligible[0];
       const fillUnits = Math.min(input.units, bestOrder.units);
-      const matchedPrice = parseFloat(bestOrder.askPrice);
+      const matchedPrice = safeParseAmount(bestOrder.askPrice);
       const totalValue = fillUnits * matchedPrice;
 
       // Update the sell order
@@ -697,7 +698,7 @@ export const bondSecondaryBuyerRouter = router({
           bondId:          input.bondId,
           subscriptionRef,
           units:           fillUnits,
-          faceValue:       (fillUnits * parseFloat(bestOrder.askPrice)).toFixed(2),
+          faceValue:       (fillUnits * safeParseAmount(bestOrder.askPrice)).toFixed(2),
           purchasePrice:   matchedPrice.toFixed(2),
           totalPaid:       totalValue.toFixed(2),
           currency:        bestOrder.currency ?? "USD",

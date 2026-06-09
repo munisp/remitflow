@@ -23,6 +23,7 @@ import {
   recurringPayments, partnerWebhooks, fxRateCache, feeRules,
 } from "../../drizzle/schema.js";
 import { eq, and, desc, gte, lte, sql, count, sum, avg, or, like, isNull, isNotNull } from "drizzle-orm";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── 1. Fee Negotiation Engine ────────────────────────────────────────────────
 export const feeNegotiationRouter = router({
@@ -95,14 +96,14 @@ export const feeNegotiationRouter = router({
         .limit(100);
       const txList = rows.map((r: any) => ({
         date: r.date,
-        amount: parseFloat(r.amount ?? "0"),
+        amount: safeParseAmount(r.amount ?? "0"),
         currency: r.currency ?? "USD",
-        fee: parseFloat(r.fee ?? "0"),
-        feeRate: parseFloat(r.amount ?? "1") > 0 ? parseFloat(r.fee ?? "0") / parseFloat(r.amount ?? "1") : 0,
+        fee: safeParseAmount(r.fee ?? "0"),
+        feeRate: safeParseAmount(r.amount ?? "1") > 0 ? safeParseAmount(r.fee ?? "0") / safeParseAmount(r.amount ?? "1") : 0,
       }));
       const totalFees = txList.reduce((s: any, t: any) => s + t.fee, 0);
       const avgFeeRate = txList.length > 0 ? txList.reduce((s: any, t: any) => s + t.feeRate, 0) / txList.length : 0;
-      return { transactions: txList, summary: { count: txList.length, totalFees, avgFeeRate: parseFloat((avgFeeRate * 100).toFixed(3)) } };
+      return { transactions: txList, summary: { count: txList.length, totalFees, avgFeeRate: safeParseAmount((avgFeeRate * 100).toFixed(3)) } };
     }),
 });
 
@@ -179,7 +180,7 @@ export const complianceScoringRouter = router({
         .from(transactions)
         .where(and(eq(transactions.userId, ctx.user.id), eq(transactions.status, "completed")));
       txCount = Number(result[0]?.c ?? 0);
-      totalVolume = parseFloat(String(result[0]?.vol ?? "0"));
+      totalVolume = safeParseAmount(String(result[0]?.vol ?? "0"));
     }
 
     const user = ctx.user;
@@ -242,8 +243,8 @@ const limitsQueryFn = async (ctx: { user: { id: number; kycTier: string | null }
       const [monthlyResult] = await db.select({ total: sum(transactions.fromAmount) })
         .from(transactions)
         .where(and(eq(transactions.userId, ctx.user.id), eq(transactions.status, "completed"), gte(transactions.createdAt, monthAgo)));
-      dailyUsage = parseFloat(String(dailyResult?.total ?? "0"));
-      monthlyUsage = parseFloat(String(monthlyResult?.total ?? "0"));
+      dailyUsage = safeParseAmount(String(dailyResult?.total ?? "0"));
+      monthlyUsage = safeParseAmount(String(monthlyResult?.total ?? "0"));
     }
 
     return {
@@ -491,7 +492,7 @@ export const reconciliationV2Router = router({
         period: { from: from.toISOString(), to: to.toISOString() },
         summary: {
           totalTransactions: Number(totals?.total ?? 0),
-          totalVolume: parseFloat(String(totals?.volume ?? "0")),
+          totalVolume: safeParseAmount(String(totals?.volume ?? "0")),
           completedCount: Number(totals?.completed ?? 0),
           pendingCount,
           failedCount,
@@ -566,7 +567,7 @@ export const feeRulesEngineRouter = router({
         if (!wildcards[0]) return { appliedRule: "None", fee: 0, totalFee: 0, feeRate: 0, netAmount: input.amount, appliedRules: [] as string[] };
         const wc = wildcards[0];
         const fee = Math.min(Number(wc.maxFee ?? 99), Math.max(Number(wc.minFee ?? 0), input.amount * (Number(wc.feePercentage ?? 0) / 100)));
-        return { appliedRule: wc.corridor, fee, totalFee: fee, feeRate: parseFloat(((fee / input.amount) * 100).toFixed(3)), netAmount: input.amount - fee, appliedRules: [wc.corridor] };
+        return { appliedRule: wc.corridor, fee, totalFee: fee, feeRate: safeParseAmount(((fee / input.amount) * 100).toFixed(3)), netAmount: input.amount - fee, appliedRules: [wc.corridor] };
       }
 
       let fee = 0;
@@ -575,7 +576,7 @@ export const feeRulesEngineRouter = router({
       } else {
         fee = Number(rule.feeFixed ?? 0);
       }
-      const feeRate = input.amount > 0 ? parseFloat(((fee / input.amount) * 100).toFixed(3)) : 0;
+      const feeRate = input.amount > 0 ? safeParseAmount(((fee / input.amount) * 100).toFixed(3)) : 0;
       return { appliedRule: rule.corridor, fee, totalFee: fee, feeRate, netAmount: input.amount - fee, appliedRules: [rule.corridor] };
     }),
 

@@ -26,6 +26,7 @@ import {
 } from "../../drizzle/schema.js";
 import crypto from "crypto";
 
+
 async function getDbConn() {
   const db = await getDb();
   if (!db) throw new Error("DB unavailable");
@@ -178,8 +179,8 @@ export const ngxStockRouter = router({
       const [stock] = await db.select().from(ngxStocks).where(eq(ngxStocks.id, input.stockId));
       if (!stock) throw new TRPCError({ code: "NOT_FOUND", message: "Stock not found" });
 
-      const qty = parseFloat(input.quantityUnits);
-      const price = parseFloat(input.pricePerUnitNgn);
+      const qty = safeParseAmount(input.quantityUnits);
+      const price = safeParseAmount(input.pricePerUnitNgn);
       const totalNgn = qty * price;
       let ngnRate = 1600;
       try {
@@ -449,10 +450,10 @@ export const realEstateRouter = router({
         .from(realEstateListings)
         .where(eq(realEstateListings.id, input.listingId));
       if (!listing) throw new TRPCError({ code: "NOT_FOUND" });
-      const invested = parseFloat(listing.pricePerShareUsd) * input.sharesCount;
-      const annualReturn = parseFloat(listing.expectedAnnualReturnPct ?? "12") / 100;
-      const rentalYield = parseFloat(listing.rentalYieldPct ?? "8") / 100;
-      const appreciation = parseFloat(listing.appreciationPct ?? "4") / 100;
+      const invested = safeParseAmount(listing.pricePerShareUsd) * input.sharesCount;
+      const annualReturn = safeParseAmount(listing.expectedAnnualReturnPct ?? "12") / 100;
+      const rentalYield = safeParseAmount(listing.rentalYieldPct ?? "8") / 100;
+      const appreciation = safeParseAmount(listing.appreciationPct ?? "4") / 100;
       const totalReturn = invested * Math.pow(1 + annualReturn, input.holdYears) - invested;
       const rentalIncome = invested * rentalYield * input.holdYears;
       const capitalGain = invested * Math.pow(1 + appreciation, input.holdYears) - invested;
@@ -525,7 +526,7 @@ export const startupRouter = router({
       if (!deal) throw new TRPCError({ code: "NOT_FOUND", message: "Deal not found" });
       if (deal.status !== "open")
         throw new TRPCError({ code: "BAD_REQUEST", message: "This deal is not open for investment" });
-      const minTicket = parseFloat(deal.minimumTicketUsd);
+      const minTicket = safeParseAmount(deal.minimumTicketUsd);
       if (input.amountUsd < minTicket)
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -548,13 +549,13 @@ export const startupRouter = router({
       }
 
       // Calculate equity
-      const valuation = parseFloat(deal.valuationUsd ?? "0");
+      const valuation = safeParseAmount(deal.valuationUsd ?? "0");
       const equityPct = valuation > 0 ? (input.amountUsd / valuation) * 100 : null;
 
       // Update raised so far
-      const newRaised = parseFloat(deal.raisedSoFarUsd ?? "0") + input.amountUsd;
+      const newRaised = safeParseAmount(deal.raisedSoFarUsd ?? "0") + input.amountUsd;
       const newStatus =
-        newRaised >= parseFloat(deal.targetRaiseUsd) ? "funded" : deal.status;
+        newRaised >= safeParseAmount(deal.targetRaiseUsd) ? "funded" : deal.status;
       await (await getDbConn())
         .update(startupDeals)
         .set({ raisedSoFarUsd: newRaised.toFixed(2), status: newStatus })
@@ -676,9 +677,9 @@ export const portfolioRouter = router({
       .from(startupInvestments)
       .where(and(eq(startupInvestments.userId, userId), eq(startupInvestments.status, "confirmed")));
 
-    const stockTotal = parseFloat(stockOrders[0]?.totalUsd ?? "0");
-    const reTotal = parseFloat(reInvestments[0]?.totalUsd ?? "0");
-    const startupTotal = parseFloat(startupInvs[0]?.totalUsd ?? "0");
+    const stockTotal = safeParseAmount(stockOrders[0]?.totalUsd ?? "0");
+    const reTotal = safeParseAmount(reInvestments[0]?.totalUsd ?? "0");
+    const startupTotal = safeParseAmount(startupInvs[0]?.totalUsd ?? "0");
     const grandTotal = stockTotal + reTotal + startupTotal;
 
     return {
@@ -691,7 +692,7 @@ export const portfolioRouter = router({
       realEstate: {
         totalUsd: reTotal.toFixed(2),
         count: Number(reInvestments[0]?.count ?? 0),
-        returnsPaidUsd: parseFloat(reInvestments[0]?.returnsPaid ?? "0").toFixed(2),
+        returnsPaidUsd: safeParseAmount(reInvestments[0]?.returnsPaid ?? "0").toFixed(2),
         allocationPct: grandTotal > 0 ? ((reTotal / grandTotal) * 100).toFixed(1) : "0",
       },
       startups: {
@@ -810,7 +811,7 @@ export const paypalTopupRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Payment not completed" });
 
       const capture = captureData.purchase_units?.[0]?.payments?.captures?.[0];
-      const capturedAmount = parseFloat(capture?.amount?.value ?? "0");
+      const capturedAmount = safeParseAmount(capture?.amount?.value ?? "0");
 
       const [tx] = await (await getDbConn())
         .select()
@@ -926,7 +927,7 @@ export const flutterwaveTopupRouter = router({
         .from(flutterwaveTransactions)
         .where(and(eq(flutterwaveTransactions.txRef, input.txRef), eq(flutterwaveTransactions.userId, ctx.user.id)));
       if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Transaction not found" });
-      if (tx.walletCredited) return { success: true, verified: true, amountUsd: parseFloat(tx.amountUsd) };
+      if (tx.walletCredited) return { success: true, verified: true, amountUsd: safeParseAmount(tx.amountUsd) };
       // Verify payment with Flutterwave API
       const secretKey = process.env.FLW_SECRET_KEY ?? "";
       const verifyRes = await fetch(

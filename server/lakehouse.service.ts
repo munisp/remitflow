@@ -1,3 +1,4 @@
+import { safeParseAmount } from "./lib/safeDecimal";
 /**
  * RemitFlow — Lakehouse Integration Service (TypeScript layer)
  *
@@ -317,7 +318,7 @@ export async function transformToSilver(
       if (k.startsWith("_")) continue;
       cleaned[k] = v === null || v === undefined ? null : v;
       if (k === "amount" || k === "fee" || k === "risk_score") {
-        cleaned[k] = parseFloat(String(v || "0"));
+        cleaned[k] = safeParseAmount(String(v || "0"));
       }
       if (k.endsWith("_at") || k.endsWith("_date")) {
         cleaned[k] = v ? new Date(v as string | number | Date).toISOString() : null;
@@ -359,10 +360,10 @@ export async function buildGoldAggregates(
     if (!dailyVolumeMap[key]) {
       dailyVolumeMap[key] = { date: txDate, currency, totalAmount: 0, txCount: 0, avgAmount: 0, totalFees: 0, completedCount: 0, failedCount: 0 };
     }
-    const amount = parseFloat(String(tx.amount || "0"));
+    const amount = safeParseAmount(String(tx.amount || "0"));
     dailyVolumeMap[key].totalAmount += amount;
     dailyVolumeMap[key].txCount++;
-    dailyVolumeMap[key].totalFees += parseFloat(String(tx.fee || "0"));
+    dailyVolumeMap[key].totalFees += safeParseAmount(String(tx.fee || "0"));
     if (tx.status === "completed") dailyVolumeMap[key].completedCount++;
     if (tx.status === "failed") dailyVolumeMap[key].failedCount++;
   }
@@ -381,8 +382,8 @@ export async function buildGoldAggregates(
       corridorMap[corridor] = { corridor, fromCurrency: from, toCurrency: to, destinationCountry: dest, txCount: 0, totalVolume: 0, avgRisk: 0, avgAmount: 0 };
     }
     corridorMap[corridor].txCount++;
-    corridorMap[corridor].totalVolume += parseFloat(String(tx.amount || "0"));
-    corridorMap[corridor].avgRisk += parseFloat(String(tx.risk_score || "0"));
+    corridorMap[corridor].totalVolume += safeParseAmount(String(tx.amount || "0"));
+    corridorMap[corridor].avgRisk += safeParseAmount(String(tx.risk_score || "0"));
   }
   for (const c of Object.values(corridorMap)) {
     c.avgRisk = c.txCount > 0 ? c.avgRisk / c.txCount : 0;
@@ -391,12 +392,12 @@ export async function buildGoldAggregates(
 
   // ML feature store snapshot
   const mlFeatures = transactions.map((tx) => {
-    const amount = parseFloat(String(tx.amount || "0"));
+    const amount = safeParseAmount(String(tx.amount || "0"));
     const created = tx.created_at ? new Date(tx.created_at as string | number | Date) : new Date();
     return {
       tx_id: tx.id,
       amount_usd: amount,
-      risk_score: parseFloat(String(tx.risk_score || "0")),
+      risk_score: safeParseAmount(String(tx.risk_score || "0")),
       is_high_value: amount > 10000 ? 1 : 0,
       is_round_number: amount > 0 && amount % 100 === 0 ? 1 : 0,
       destination_country: tx.destination_country || "US",

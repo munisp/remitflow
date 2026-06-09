@@ -318,6 +318,7 @@ import { regulatoryReportsRouter as regReportsV2Router } from "./lib/regulatory-
 import { supportTicketingRouter } from "./lib/support-ticketing";
 import { abTestingRouter as abTestingV2Router } from "./lib/ab-testing";
 import { quickWinsRouter } from "./lib/quick-wins";
+import { safeParseAmount } from "./lib/safeDecimal";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -5348,7 +5349,7 @@ Case: #${input.caseId}`,
         const buckets = Array.from({ length: 10 }, (_, i) => {
           const lo = (i * 0.1).toFixed(1);
           const hi = ((i + 1) * 0.1).toFixed(1);
-          return { label: `${lo}-${hi}`, lo: parseFloat(lo), hi: parseFloat(hi) };
+          return { label: `${lo}-${hi}`, lo: safeParseAmount(lo), hi: safeParseAmount(hi) };
         });
         // Fetch all passive scores in range
         let q = db
@@ -5364,8 +5365,8 @@ Case: #${input.caseId}`,
             label: b.label,
             count: rows.filter((r: any) =>
               (input.corridor ? r.corridorCode === corridor : true) &&
-              parseFloat(r.passiveScore ?? "0") >= b.lo &&
-              parseFloat(r.passiveScore ?? "0") < b.hi
+              safeParseAmount(r.passiveScore ?? "0") >= b.lo &&
+              safeParseAmount(r.passiveScore ?? "0") < b.hi
             ).length,
           })),
         }));
@@ -5683,8 +5684,8 @@ Case: #${input.caseId}`,
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 500 });
       const now = new Date(); const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
       const monthlyTxns = txns.filter((t: any) => new Date(t.createdAt) >= startOfMonth && t.type === "send");
-      const totalSentThisMonth = monthlyTxns.reduce((s: any, t: any) => s + parseFloat(String(t.amount)), 0);
-      const totalSentAllTime = txns.filter((t: any) => t.type === "send").reduce((s: any, t: any) => s + parseFloat(String(t.amount)), 0);
+      const totalSentThisMonth = monthlyTxns.reduce((s: any, t: any) => s + safeParseAmount(String(t.amount)), 0);
+      const totalSentAllTime = txns.filter((t: any) => t.type === "send").reduce((s: any, t: any) => s + safeParseAmount(String(t.amount)), 0);
       return { members: members.map((m: any) => ({ ...m, budget: budgets.find((b: any) => b.familyMemberId === m.id) ?? null })), totalSentThisMonth, totalSentAllTime, recentTransfers: monthlyTxns.slice(0, 10) };
     }),
   }),
@@ -5838,7 +5839,7 @@ Case: #${input.caseId}`,
       const [fund] = await db.select().from(communityFunds).where(eq(communityFunds.id, input.fundId)).limit(1);
       if (!fund) return null;
       const proposals = await db.select().from(fundProposals).where(and(eq(fundProposals.fundId, input.fundId), eq(fundProposals.status, "funded")));
-      const totalFunded = proposals.reduce((s: any, p: any) => s + parseFloat(String(p.requestedAmount)), 0);
+      const totalFunded = proposals.reduce((s: any, p: any) => s + safeParseAmount(String(p.requestedAmount)), 0);
       return { fund, fundedProposals: proposals.length, totalFunded, beneficiaryCount: fund.beneficiaryCount, sdgGoals: fund.sdgGoals };
     }),
 
@@ -6075,7 +6076,7 @@ Case: #${input.caseId}`,
         const rate = (ratesResult as any)?.rates?.[input.to] ?? (ratesResult as any)?.[input.to] ?? 1;
         const fxFallbackFee = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
         const fee = Math.max(0.5, fxFallbackFee.totalFee);
-        return { from: input.from, to: input.to, sendAmount: input.amount, receiveAmount: parseFloat(((input.amount - fee) * rate).toFixed(2)), fxRate: rate, fee: Math.round(fee * 100) / 100, totalCost: Math.round(fee * 100) / 100, spread: fxFallbackFee.feeRate, fsp: "internal", expiresAt: Math.floor(Date.now() / 1000) + 60, _fallback: true };
+        return { from: input.from, to: input.to, sendAmount: input.amount, receiveAmount: safeParseAmount(((input.amount - fee) * rate).toFixed(2)), fxRate: rate, fee: Math.round(fee * 100) / 100, totalCost: Math.round(fee * 100) / 100, spread: fxFallbackFee.feeRate, fsp: "internal", expiresAt: Math.floor(Date.now() / 1000) + 60, _fallback: true };
       }
     }),
   }),

@@ -645,7 +645,7 @@ export async function incrementAnnualUsage(userId: number, purposeCode: string, 
   const code = purposeCode.toUpperCase();
   const existing = await getAnnualUsage(userId, code, year);
   if (existing) {
-    const newUsed = (parseFloat(existing.usedUsd as string) + amountUsd).toFixed(2);
+    const newUsed = (safeParseAmount(existing.usedUsd as string) + amountUsd).toFixed(2);
     await db.update(outboundAnnualUsage)
       .set({ usedUsd: newUsed, lastTransactionAt: new Date(), updatedAt: new Date() })
       .where(and(eq(outboundAnnualUsage.userId, userId), eq(outboundAnnualUsage.purposeCode, code), eq(outboundAnnualUsage.calendarYear, year)));
@@ -745,6 +745,7 @@ import { hnwFxRates, hnwRelationshipManagers, hnwPortfolios, correspondentBanks,
 import { diasporaUsaProfiles, achPaymentMethods, usComplianceDisclosures, diasporaEuProfiles, sepaPaymentMethods, diasporaCanadaProfiles, interacPaymentMethods, westAfricaTransfers, immigrantWorkerKyc, hnwClientProfiles } from '../drizzle/schema';
 import { hnwRateLocks, hnwTransfers, hnwRmRequests, correspondentBanksV200, correspondentSettlements, smeTradeBatches, diasporaProfiles, diasporaOfferClaims, transfers } from '../drizzle/schema';
 import { logger } from './_core/logger';
+import { safeParseAmount } from "./lib/safeDecimal";
 
 
 // ── scheduledTransferRuns ──

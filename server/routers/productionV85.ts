@@ -33,6 +33,7 @@ import { eq, desc, and, or, ilike, gte, lte, sql, isNull } from "drizzle-orm";
 import { notifyOwner } from "../_core/notification";
 import { randomBytes } from "crypto";
 import { broadcastAdminEvent } from "../sse.service";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Sandbox Scenarios Router ─────────────────────────────────────────────────
 export const sandboxScenariosRouter = router({
@@ -864,8 +865,8 @@ export const feeEngineRouter = router({
         const rules = await db.select().from(feeRules)
           .where(and(eq(feeRules.corridor, corridor), eq(feeRules.isActive, true)));
         rule = rules.find((r: any) => {
-          const min = parseFloat(r.minAmount ?? "0");
-          const max = r.maxAmount ? parseFloat(r.maxAmount) : Infinity;
+          const min = safeParseAmount(r.minAmount ?? "0");
+          const max = r.maxAmount ? safeParseAmount(r.maxAmount) : Infinity;
           return input.amount >= min && input.amount <= max;
         }) ?? rules[0];
       }
@@ -874,14 +875,14 @@ export const feeEngineRouter = router({
       let feeType = "percentage";
       if (rule) {
         if (rule.feeType === "percentage") {
-          fee = input.amount * parseFloat(rule.feePercentage ?? "0.02");
+          fee = input.amount * safeParseAmount(rule.feePercentage ?? "0.02");
         } else if (rule.feeType === "fixed") {
-          fee = parseFloat(rule.feeFixed ?? "2.50");
+          fee = safeParseAmount(rule.feeFixed ?? "2.50");
         } else {
-          fee = Math.max(parseFloat(rule.feeFixed ?? "0"), input.amount * parseFloat(rule.feePercentage ?? "0.015"));
+          fee = Math.max(safeParseAmount(rule.feeFixed ?? "0"), input.amount * safeParseAmount(rule.feePercentage ?? "0.015"));
         }
-        const minFee = parseFloat(rule.minFee ?? "0");
-        const maxFee = rule.maxFee ? parseFloat(rule.maxFee) : Infinity;
+        const minFee = safeParseAmount(rule.minFee ?? "0");
+        const maxFee = rule.maxFee ? safeParseAmount(rule.maxFee) : Infinity;
         fee = Math.max(minFee, Math.min(maxFee, fee));
         feeType = rule.feeType;
       } else {
@@ -891,11 +892,11 @@ export const feeEngineRouter = router({
       return {
         corridor,
         amount: input.amount,
-        fee: parseFloat(fee.toFixed(2)),
+        fee: safeParseAmount(fee.toFixed(2)),
         feeType,
-        totalAmount: parseFloat((input.amount + fee).toFixed(2)),
+        totalAmount: safeParseAmount((input.amount + fee).toFixed(2)),
         breakdown: {
-          baseFee: parseFloat(fee.toFixed(2)),
+          baseFee: safeParseAmount(fee.toFixed(2)),
           networkFee: 0.50,
           regulatoryFee: input.amount > 10000 ? 5.00 : 0,
         },

@@ -24,6 +24,7 @@ import { logger } from "./_core/logger.js";
 import { getDb } from "./db.js";
 import { eq, sql } from "drizzle-orm";
 import { wallets, transactions } from "../drizzle/schema.js";
+import { safeParseAmount } from "./lib/safeDecimal";
 
 // ─── TigerBeetle Client ──────────────────────────────────────────────────────
 
@@ -303,7 +304,7 @@ export async function reconcileBalances(options?: {
     const tbBalance = await tbGetBalance(w.tbAccountId as string);
     if (!tbBalance) continue;
 
-    const pgBal = parseFloat(String(w.balance) || "0");
+    const pgBal = safeParseAmount(String(w.balance) || "0");
     const tbBal = tbBalance.balance;
     const diff = Math.abs(pgBal - tbBal);
 

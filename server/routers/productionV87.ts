@@ -62,6 +62,7 @@ import {
 } from "../cocoindex.service.js";
 import { getDb } from "../db.js";
 import { sql } from "drizzle-orm";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ── AI Hub ────────────────────────────────────────────────────────────────────
 export const aiHubRouter = router({
@@ -791,10 +792,10 @@ export const mlInsightsRouter = router({
     const recent = (recentResult as any).rows?.[0];
     const baseline = (baselineResult as any).rows?.[0];
 
-    const recentAvg = parseFloat(recent?.avg_risk || "0");
-    const recentStd = parseFloat(recent?.std_risk || "0");
-    const baseAvg = parseFloat(baseline?.avg_risk || "0");
-    const baseStd = parseFloat(baseline?.std_risk || "0");
+    const recentAvg = safeParseAmount(recent?.avg_risk || "0");
+    const recentStd = safeParseAmount(recent?.std_risk || "0");
+    const baseAvg = safeParseAmount(baseline?.avg_risk || "0");
+    const baseStd = safeParseAmount(baseline?.std_risk || "0");
     const recentCount = parseInt(recent?.tx_count || "0", 10);
     const baseCount = parseInt(baseline?.tx_count || "0", 10);
 
@@ -834,8 +835,8 @@ export const mlInsightsRouter = router({
       const tx = result.rows[0] as any;
       if (!tx) return { error: "Transaction not found" };
 
-      const amount = parseFloat(tx.amount || "0");
-      const riskScore = parseFloat(tx.risk_score || "0");
+      const amount = safeParseAmount(tx.amount || "0");
+      const riskScore = safeParseAmount(tx.risk_score || "0");
 
       // SHAP-style explanation
       const shapValues = [

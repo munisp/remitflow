@@ -32,6 +32,7 @@ import {
 } from "../../drizzle/schema";
 import { eq, desc, and, gte, lte, sql } from "drizzle-orm";
 import { logger } from '../_core/logger';
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Billing Engine HTTP client ───────────────────────────────────────────────
 
@@ -227,14 +228,14 @@ export const billingEngineRouter = router({
           input.midMarketRate,
           {
             feeMode: cfg.feeMode as "PERCENTAGE" | "FLAT" | "HYBRID",
-            feePercentage: parseFloat(cfg.feePercentage ?? "1.5"),
+            feePercentage: safeParseAmount(cfg.feePercentage ?? "1.5"),
             flatFeeMinor: cfg.flatFeeMinor ?? 0,
             feeCapMinor: cfg.feeCapMinor ?? 2000,
             feeFloorMinor: cfg.feeFloorMinor ?? 100,
-            fxSpreadPercentage: parseFloat(cfg.fxSpreadPercentage ?? "0.80"),
-            hedgeCostPercentage: parseFloat(cfg.hedgeCostPercentage ?? "0.15"),
-            platformFeeSharePct: parseFloat(cfg.platformFeeSharePct ?? "40.0"),
-            platformFxSharePct: parseFloat(cfg.platformFxSharePct ?? "100.0"),
+            fxSpreadPercentage: safeParseAmount(cfg.fxSpreadPercentage ?? "0.80"),
+            hedgeCostPercentage: safeParseAmount(cfg.hedgeCostPercentage ?? "0.15"),
+            platformFeeSharePct: safeParseAmount(cfg.platformFeeSharePct ?? "40.0"),
+            platformFxSharePct: safeParseAmount(cfg.platformFxSharePct ?? "100.0"),
             overheadPerTxMinor: cfg.overheadPerTxMinor ?? 50,
           },
           input.payoutMethod

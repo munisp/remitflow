@@ -39,6 +39,7 @@ import {
   replayEvents, saveSnapshot, getProjection, updateProjection,
 } from "../middleware/eventSourcing.js";
 import { logger } from "../_core/logger.js";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const genId = (prefix: string) => `${prefix}-${Date.now()}-${randomBytes(4).toString("hex").toUpperCase()}`;
@@ -179,7 +180,7 @@ function parsePaymentIntent(message: string): { action: string; amount?: number;
     || lower.match(/([\d,]+(?:\.\d{1,2})?)\s*(?:₦|ngn|naira|dollars?|usd|\$|£|gbp|€|eur)/i)
     || lower.match(/(?:send|transfer|pay)\s+(?:₦|ngn|\$|£|€)?\s*([\d,]+(?:\.\d{1,2})?)/i)
     || lower.match(/([\d,]+(?:\.\d{1,2})?)\s*(?:to|for)/i);
-  const amount = amountMatch ? parseFloat((amountMatch[1] || amountMatch[2] || "0").replace(/,/g, "")) || undefined : undefined;
+  const amount = amountMatch ? safeParseAmount((amountMatch[1] || amountMatch[2] || "0").replace(/,/g, "")) || undefined : undefined;
 
   // Currency detection
   let currency = "NGN";
@@ -244,7 +245,7 @@ const predictiveTransfersRouter = router({
       const key = tx.description || tx.reference || "unknown";
       const existing = beneficiaryPatterns.get(key) || { count: 0, totalAmount: 0, lastSent: new Date(0), intervals: [] };
       existing.count++;
-      existing.totalAmount += parseFloat(tx.fromAmount || "0");
+      existing.totalAmount += safeParseAmount(tx.fromAmount || "0");
       const txDate = new Date(tx.createdAt);
       if (existing.lastSent.getTime() > 0) {
         existing.intervals.push(txDate.getTime() - existing.lastSent.getTime());
@@ -318,7 +319,7 @@ const fxForecastingRouter = router({
       // fxRateCache.rates is a JSON object keyed by currency code (e.g. {"NGN": 1371.48, "GBP": 0.79})
       const values = (rates as any[]).reverse().map((r: any) => {
         const ratesObj = typeof r.rates === "string" ? JSON.parse(r.rates) : r.rates;
-        return parseFloat(ratesObj?.[input.toCurrency] ?? "0");
+        return safeParseAmount(ratesObj?.[input.toCurrency] ?? "0");
       }).filter((v: number) => v > 0 && !isNaN(v));
       const ema5 = calcEMA(values, 5);
       const ema20 = calcEMA(values, 20);
@@ -337,9 +338,9 @@ const fxForecastingRouter = router({
         forecast.push({
           day,
           date: new Date(Date.now() + day * 86400000).toISOString().split("T")[0],
-          predicted: parseFloat(predicted.toFixed(6)),
-          lowerBound: parseFloat(lowerBound.toFixed(6)),
-          upperBound: parseFloat(upperBound.toFixed(6)),
+          predicted: safeParseAmount(predicted.toFixed(6)),
+          lowerBound: safeParseAmount(lowerBound.toFixed(6)),
+          upperBound: safeParseAmount(upperBound.toFixed(6)),
           confidence: Math.max(0.5, 0.95 - (day * 0.01)),
         });
       }
@@ -365,7 +366,7 @@ const fxForecastingRouter = router({
         forecast,
         trend,
         recommendation,
-        volatility: parseFloat((volatility * 100).toFixed(2)),
+        volatility: safeParseAmount((volatility * 100).toFixed(2)),
         dataPoints: values.length,
         modelVersion: "ema_lr_v1",
       };
@@ -640,7 +641,7 @@ const iso20022Router = router({
 
       const entries = (txns as any[]).map((tx: any, i: number) => ({
         ntryRef: tx.reference || `ENTRY-${i + 1}`,
-        amt: parseFloat(tx.fromAmount || "0"),
+        amt: safeParseAmount(tx.fromAmount || "0"),
         ccy: tx.fromCurrency || "NGN",
         cdtDbtInd: tx.type === "receive" ? "CRDT" : "DBIT",
         sts: tx.status === "completed" ? "BOOK" : "PDNG",
@@ -845,7 +846,7 @@ const cbdcFullRouter = router({
       // Get FX rate
       const [rate] = await db.select().from(fxRateCache)
         .where(eq(fxRateCache.baseCurrency, input.fromCurrency.replace("e", ""))).limit(1) as any[];
-      const fxRate = rate ? parseFloat(rate.rate) : 1;
+      const fxRate = rate ? safeParseAmount(rate.rate) : 1;
       const fiatAmount = input.amount * fxRate;
       const fee = input.amount * 0.005; // 0.5% bridge fee
 
@@ -936,7 +937,7 @@ const complianceFullRouter = router({
         transactions: (txns as any[]).map((tx: any) => ({
           localRef: tx.reference || tx.id?.toString(),
           date: tx.createdAt,
-          amount: parseFloat(tx.fromAmount || "0"),
+          amount: safeParseAmount(tx.fromAmount || "0"),
           currency: tx.fromCurrency || "NGN",
           type: tx.type,
           fromAccount: tx.userId?.toString(),
@@ -1157,9 +1158,9 @@ const architectureRouter = router({
 
         const txns = await db.select().from(transactions).where(and(eq(transactions.userId, ctx.user.id), gte(transactions.createdAt, periodStart)));
         const summary = {
-          totalSent: (txns as any[]).filter((t: any) => t.type === "send").reduce((s: number, t: any) => s + parseFloat(t.fromAmount || "0"), 0),
-          totalReceived: (txns as any[]).filter((t: any) => t.type === "receive").reduce((s: number, t: any) => s + parseFloat(t.fromAmount || "0"), 0),
-          totalFees: (txns as any[]).filter((t: any) => t.fee).reduce((s: number, t: any) => s + parseFloat(t.fee || "0"), 0),
+          totalSent: (txns as any[]).filter((t: any) => t.type === "send").reduce((s: number, t: any) => s + safeParseAmount(t.fromAmount || "0"), 0),
+          totalReceived: (txns as any[]).filter((t: any) => t.type === "receive").reduce((s: number, t: any) => s + safeParseAmount(t.fromAmount || "0"), 0),
+          totalFees: (txns as any[]).filter((t: any) => t.fee).reduce((s: number, t: any) => s + safeParseAmount(t.fee || "0"), 0),
           transactionCount: txns.length,
           period: input.period,
           generatedAt: new Date().toISOString(),
@@ -1396,7 +1397,7 @@ function scoreRails(rails: Array<{ rail: string; status: string; latencyMs: numb
       else if (priority === "speed") score = (1 / (speed + 1)) * 50 + reliability * 30 + (1 - fee / amount) * 20;
       else score = reliability * 50 + (1 - fee / amount) * 25 + (1 / (speed + 1)) * 25;
 
-      return { rail: r.rail, estimatedFee: parseFloat(fee.toFixed(2)), estimatedTime: `${speed} min`, score: parseFloat(score.toFixed(4)), reliability, status: r.status };
+      return { rail: r.rail, estimatedFee: safeParseAmount(fee.toFixed(2)), estimatedTime: `${speed} min`, score: safeParseAmount(score.toFixed(4)), reliability, status: r.status };
     })
     .sort((a, b) => b.score - a.score);
 }
@@ -1716,7 +1717,7 @@ const businessModelRouter = router({
       `) as any[];
 
       const txCount = parseInt(volumeData?.tx_count || "0");
-      const monthlyVolume = parseFloat(volumeData?.total_volume || "0");
+      const monthlyVolume = safeParseAmount(volumeData?.total_volume || "0");
 
       // ML-inspired dynamic pricing factors
       const corridor = `${input.fromCurrency}-${input.toCurrency}`;
@@ -1749,12 +1750,12 @@ const businessModelRouter = router({
       return {
         corridor,
         amount: input.amount,
-        fee: parseFloat(fee.toFixed(2)),
-        effectiveFeeRate: parseFloat((effectiveFeeRate * 100).toFixed(4)),
+        fee: safeParseAmount(fee.toFixed(2)),
+        effectiveFeeRate: safeParseAmount((effectiveFeeRate * 100).toFixed(4)),
         baseFeeRate: baseFeeRate * 100,
         discounts: {
-          volumeDiscount: parseFloat((volumeDiscount * 100).toFixed(2)),
-          offPeakDiscount: parseFloat((offPeakDiscount * 100).toFixed(2)),
+          volumeDiscount: safeParseAmount((volumeDiscount * 100).toFixed(2)),
+          offPeakDiscount: safeParseAmount((offPeakDiscount * 100).toFixed(2)),
         },
         demandMultiplier,
         userTier: txCount >= 50 ? "enterprise" : txCount >= 20 ? "premium" : txCount >= 5 ? "preferred" : "standard",
@@ -1800,7 +1801,7 @@ const businessModelRouter = router({
 
 async function getCorridorDemand(corridor: string): Promise<number> {
   const cached = await redis.get(`demand:${corridor}`);
-  if (cached) return parseFloat(cached);
+  if (cached) return safeParseAmount(cached);
 
   // Calculate from recent transaction volume
   const db = await getDb();

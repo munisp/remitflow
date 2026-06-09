@@ -24,6 +24,7 @@ import { requestIdMiddleware } from "../middleware/requestId";
 import { attachServicesHealthWS, stopServicesHealthWS } from "../ws-services-health.js";
 import { requireValidEnv } from "./startup-validation";
 import { logger } from "./logger";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -673,9 +674,9 @@ async function startServer() {
                   eq(revenueShareLedger.periodYear, periodYear),
                 ));
 
-              const totalRevenue = ledgerRows.reduce((s: number, r: any) => s + parseFloat(r.grossRevenue || "0"), 0);
-              const platformEarnings = ledgerRows.reduce((s: number, r: any) => s + parseFloat(r.platformEarnings || "0"), 0);
-              const partnerEarnings = ledgerRows.reduce((s: number, r: any) => s + parseFloat(r.partnerEarnings || "0"), 0);
+              const totalRevenue = ledgerRows.reduce((s: number, r: any) => s + safeParseAmount(r.grossRevenue || "0"), 0);
+              const platformEarnings = ledgerRows.reduce((s: number, r: any) => s + safeParseAmount(r.platformEarnings || "0"), 0);
+              const partnerEarnings = ledgerRows.reduce((s: number, r: any) => s + safeParseAmount(r.partnerEarnings || "0"), 0);
               const txCount = ledgerRows.reduce((s: number, r: any) => s + (r.transactionCount || 0), 0);
 
               await db.insert(revenueShareReports).values({
@@ -687,7 +688,7 @@ async function startServer() {
                 platformEarnings: platformEarnings.toString(),
                 partnerEarnings: partnerEarnings.toString(),
                 transactionCount: txCount,
-                status: partnerEarnings >= parseFloat(agreement.minPayoutThreshold || "50") ? "pending" : "below_threshold",
+                status: partnerEarnings >= safeParseAmount(agreement.minPayoutThreshold || "50") ? "pending" : "below_threshold",
                 generatedAt: new Date(),
               });
               reportsGenerated++;
@@ -748,7 +749,7 @@ async function startServer() {
       let totalInterestPaid = 0;
 
       for (const account of accounts) {
-        const balance = parseFloat(String(account.currentAmount));
+        const balance = safeParseAmount(String(account.currentAmount));
         const apr = 0.05; // 5% APR default for savings goals
         const dailyRate = apr / 365;
         const interest = Math.round(balance * dailyRate * 100) / 100;

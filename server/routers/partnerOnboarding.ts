@@ -17,6 +17,7 @@ import {
   agentAccounts,
   transactions,
 } from "../../drizzle/schema";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function generateCode(prefix = "RF"): string {
@@ -831,12 +832,12 @@ export const adminInviteCodesRouter = router({
         if (tenantId && tenantMap[tenantId]) { tenantMap[tenantId].totalFee += fee; tenantMap[tenantId].txCount += 1; }
       }
       const byPartner = Object.values(tenantMap)
-        .map(t => ({ ...t, totalFee: parseFloat(t.totalFee.toFixed(2)), revenueShare: globalFee > 0 ? parseFloat(((t.totalFee / globalFee) * 100).toFixed(1)) : 0 }))
+        .map(t => ({ ...t, totalFee: safeParseAmount(t.totalFee.toFixed(2)), revenueShare: globalFee > 0 ? safeParseAmount(((t.totalFee / globalFee) * 100).toFixed(1)) : 0 }))
         .sort((a, b) => b.totalFee - a.totalFee);
       const monthly = Object.values(monthlyMap)
-        .map(m => ({ ...m, totalFee: parseFloat(m.totalFee.toFixed(2)) }))
+        .map(m => ({ ...m, totalFee: safeParseAmount(m.totalFee.toFixed(2)) }))
         .sort((a, b) => a.month.localeCompare(b.month));
-      return { byPartner, monthly, topPartners: byPartner.slice(0, 10), totalRevenue: parseFloat(globalFee.toFixed(2)), totalTransactions: globalTx };
+      return { byPartner, monthly, topPartners: byPartner.slice(0, 10), totalRevenue: safeParseAmount(globalFee.toFixed(2)), totalTransactions: globalTx };
     }),
   // ── Get onboarding sessions (admin) ──────────────────────────────────────
   listOnboardingSessions: adminProcedure

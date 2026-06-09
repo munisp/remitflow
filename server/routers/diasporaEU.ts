@@ -5,6 +5,7 @@ import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
 import { diasporaProfiles, diasporaOfferClaims, transfers } from "../../drizzle/schema";
 import { eq, desc, and } from "drizzle-orm";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 const OUTBOUND_SWIFT_URL = process.env.OUTBOUND_SWIFT_URL ?? "http://go-outbound-swift:8090";
 
@@ -139,9 +140,9 @@ export const diasporaEURouter = router({
       .where(and(eq(transfers.userId, ctx.user.id), eq(transfers.corridorCode, "IT")));
     return {
       totalTransfers: italyTransfers.length,
-      totalAmountEur: italyTransfers.reduce((s: any, t: any) => s + parseFloat(t.amountForeign ?? "0"), 0),
+      totalAmountEur: italyTransfers.reduce((s: any, t: any) => s + safeParseAmount(t.amountForeign ?? "0"), 0),
       avgAmountEur: italyTransfers.length > 0
-        ? italyTransfers.reduce((s: any, t: any) => s + parseFloat(t.amountForeign ?? "0"), 0) / italyTransfers.length
+        ? italyTransfers.reduce((s: any, t: any) => s + safeParseAmount(t.amountForeign ?? "0"), 0) / italyTransfers.length
         : 0,
     };
   }),

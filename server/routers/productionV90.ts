@@ -29,6 +29,7 @@ import { eq, desc, count, sum, gte, and, sql } from "drizzle-orm";
 import { kycLifecycle, transactions, transactions as txSchema } from "../../drizzle/schema";
 import { invokeLLM } from "../_core/llm";
 import { notifyOwner } from "../_core/notification";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Default Constants ────────────────────────────────────────────────────────
 const DEFAULTS = {
@@ -85,9 +86,9 @@ export const fxStreamRouter = router({
         if (base <= 0) continue; // skip zero/negative rates
         const spread = base * 0.002;
         rates[currency] = {
-          rate: parseFloat(base.toFixed(6)),
-          bid: parseFloat((base - spread).toFixed(6)),
-          ask: parseFloat((base + spread).toFixed(6)),
+          rate: safeParseAmount(base.toFixed(6)),
+          bid: safeParseAmount((base - spread).toFixed(6)),
+          ask: safeParseAmount((base + spread).toFixed(6)),
           change24h: 0, // 24h change requires historical data
           timestamp: fetchedAt,
         };
@@ -110,7 +111,7 @@ export const fxStreamRouter = router({
         const noise = (((Date.now() % 2000) / 2000) - 0.5) * 0.02 * baseRate;
         points.push({
           date: date.toISOString().split("T")[0],
-          rate: parseFloat((baseRate + noise).toFixed(4)),
+          rate: safeParseAmount((baseRate + noise).toFixed(4)),
           volume: ((Date.now() % 900000) + 100000),
         });
       }
@@ -183,12 +184,12 @@ export const embeddingIndexRouter = router({
         `SELECT id, "fromCurrency", "toCurrency", "fromAmount", "createdAt" FROM transactions
          WHERE "userId" = $1 AND "fromCurrency" = $2 AND "toCurrency" = $3 AND id != $4
          ORDER BY ABS(CAST("fromAmount" AS NUMERIC) - $5) ASC LIMIT $6`,
-        [ctx.user.id, src.fromCurrency, src.toCurrency, isNaN(numericId) ? -1 : numericId, parseFloat(src.fromAmount), input.limit]
+        [ctx.user.id, src.fromCurrency, src.toCurrency, isNaN(numericId) ? -1 : numericId, safeParseAmount(src.fromAmount), input.limit]
       ) as any[];
       const results = similar.map((t: any, i: number) => ({
         transactionId: `TXN-${t.id}`,
-        score: parseFloat((0.95 - i * 0.05).toFixed(3)),
-        amount: parseFloat(t.fromAmount),
+        score: safeParseAmount((0.95 - i * 0.05).toFixed(3)),
+        amount: safeParseAmount(t.fromAmount),
         sourceCurrency: t.fromCurrency,
         destCurrency: t.toCurrency,
         createdAt: t.createdAt,
@@ -580,11 +581,11 @@ export const paymentRailsRouter = router({
         const base = baseRates[currency] || 1.0;
         const jitter = 1 + (((Date.now() % 1000) / 1000) - 0.5) * 0.002;
         acc[currency] = {
-          rate: parseFloat((base * jitter).toFixed(4)),
-          buyRate: parseFloat((base * jitter * (1 - spread)).toFixed(4)),
-          sellRate: parseFloat((base * jitter * (1 + spread)).toFixed(4)),
-          change24h: parseFloat((((Date.now() % 2000) / 1000) - 1).toFixed(4)),
-          changePct: parseFloat((((Date.now() % 1000) / 2000) - 0.25).toFixed(4)),
+          rate: safeParseAmount((base * jitter).toFixed(4)),
+          buyRate: safeParseAmount((base * jitter * (1 - spread)).toFixed(4)),
+          sellRate: safeParseAmount((base * jitter * (1 + spread)).toFixed(4)),
+          change24h: safeParseAmount((((Date.now() % 2000) / 1000) - 1).toFixed(4)),
+          changePct: safeParseAmount((((Date.now() % 1000) / 2000) - 0.25).toFixed(4)),
           lastUpdated: new Date().toISOString(),
           source: "RemitFlow FX Engine v2",
         };
@@ -629,7 +630,7 @@ export const paymentRailsRouter = router({
           rail,
           totalVolume,
           totalTransactions,
-          avgTransactionSize: parseFloat(avgTxSize.toFixed(2)),
+          avgTransactionSize: safeParseAmount(avgTxSize.toFixed(2)),
           successRate: railSuccessRates[rail] ?? 98.5,
           avgSettlementTime: railSettlementTimes[rail] ?? 3600,
           failedTransactions: Math.round(totalTransactions * (1 - (railSuccessRates[rail] ?? 98.5) / 100)),
@@ -674,7 +675,7 @@ export const paymentRailsRouter = router({
         summary: {
           totalVolume,
           totalTransactions,
-          avgSuccessRate: parseFloat(avgSuccessRate.toFixed(2)),
+          avgSuccessRate: safeParseAmount(avgSuccessRate.toFixed(2)),
           activeRails: rails.length,
           dataSource: "DuckDB + Apache Iceberg (Lakehouse v2)",
           lastRefreshed: new Date().toISOString(),
@@ -699,24 +700,24 @@ export const revenueAnalyticsRouter = router({
       return {
         period: input.period,
         currency: input.currency,
-        totalRevenue: parseFloat((m * 12450.75).toFixed(2)),
-        feeRevenue: parseFloat((m * 9840.50).toFixed(2)),
-        fxSpreadRevenue: parseFloat((m * 2610.25).toFixed(2)),
+        totalRevenue: safeParseAmount((m * 12450.75).toFixed(2)),
+        feeRevenue: safeParseAmount((m * 9840.50).toFixed(2)),
+        fxSpreadRevenue: safeParseAmount((m * 2610.25).toFixed(2)),
         transactionCount: m * 1847,
         avgRevenuePerTransaction: 6.74,
         revenueGrowth: 0.127, // 12.7% MoM
         topCorridors: [
-          { corridor: "US→NG", revenue: parseFloat((m * 3240.50).toFixed(2)), transactions: m * 412, share: 0.26 },
-          { corridor: "GB→NG", revenue: parseFloat((m * 2180.25).toFixed(2)), transactions: m * 287, share: 0.175 },
-          { corridor: "US→GH", revenue: parseFloat((m * 1840.75).toFixed(2)), transactions: m * 241, share: 0.148 },
-          { corridor: "US→KE", revenue: parseFloat((m * 1520.00).toFixed(2)), transactions: m * 198, share: 0.122 },
-          { corridor: "CA→NG", revenue: parseFloat((m * 1240.50).toFixed(2)), transactions: m * 164, share: 0.100 },
+          { corridor: "US→NG", revenue: safeParseAmount((m * 3240.50).toFixed(2)), transactions: m * 412, share: 0.26 },
+          { corridor: "GB→NG", revenue: safeParseAmount((m * 2180.25).toFixed(2)), transactions: m * 287, share: 0.175 },
+          { corridor: "US→GH", revenue: safeParseAmount((m * 1840.75).toFixed(2)), transactions: m * 241, share: 0.148 },
+          { corridor: "US→KE", revenue: safeParseAmount((m * 1520.00).toFixed(2)), transactions: m * 198, share: 0.122 },
+          { corridor: "CA→NG", revenue: safeParseAmount((m * 1240.50).toFixed(2)), transactions: m * 164, share: 0.100 },
         ],
         revenueByProduct: [
-          { product: "Remittance", revenue: parseFloat((m * 8420.50).toFixed(2)), share: 0.676 },
-          { product: "FX Hedging", revenue: parseFloat((m * 1840.25).toFixed(2)), share: 0.148 },
-          { product: "Bill Payments", revenue: parseFloat((m * 1240.00).toFixed(2)), share: 0.100 },
-          { product: "BNPL", revenue: parseFloat((m * 950.00).toFixed(2)), share: 0.076 },
+          { product: "Remittance", revenue: safeParseAmount((m * 8420.50).toFixed(2)), share: 0.676 },
+          { product: "FX Hedging", revenue: safeParseAmount((m * 1840.25).toFixed(2)), share: 0.148 },
+          { product: "Bill Payments", revenue: safeParseAmount((m * 1240.00).toFixed(2)), share: 0.100 },
+          { product: "BNPL", revenue: safeParseAmount((m * 950.00).toFixed(2)), share: 0.076 },
         ],
       };
     }),
@@ -739,10 +740,10 @@ export const revenueAnalyticsRouter = router({
         const revenue = Number(d.totalAmount ?? 0) * 0.015;
         return {
           date: d.day,
-          revenue: parseFloat(revenue.toFixed(2)),
+          revenue: safeParseAmount(revenue.toFixed(2)),
           transactions: d.txCount,
-          feeRevenue: parseFloat((revenue * 0.79).toFixed(2)),
-          fxRevenue: parseFloat((revenue * 0.21).toFixed(2)),
+          feeRevenue: safeParseAmount((revenue * 0.79).toFixed(2)),
+          fxRevenue: safeParseAmount((revenue * 0.21).toFixed(2)),
         };
       });
       return { days: input.days, points };
@@ -812,7 +813,7 @@ export const disputeManagementRouter = router({
         reason: d.type,
         status: d.status === "under_review" ? "in_review" : d.status,
         priority: d.type === "unauthorized" || d.type === "other" ? "high" : "medium",
-        amount: parseFloat(d.amount ?? "0"),
+        amount: safeParseAmount(d.amount ?? "0"),
         currency: d.currency ?? "USD",
         description: d.description,
         resolution: d.resolution,

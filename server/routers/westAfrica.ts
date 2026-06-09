@@ -5,6 +5,7 @@ import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
 import { westAfricaTransfers } from "../../drizzle/schema";
 import { eq, desc, and } from "drizzle-orm";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 const XOF_ADAPTER_URL = process.env.XOF_ADAPTER_URL ?? "http://go-xof-adapter:8095";
 
@@ -133,7 +134,7 @@ export const westAfricaRouter = router({
     for (const t of transfers) {
       if (!stats[t.corridorCode]) stats[t.corridorCode] = { count: 0, totalNgn: 0 };
       stats[t.corridorCode].count++;
-      stats[t.corridorCode].totalNgn += parseFloat(t.amountNgn ?? "0");
+      stats[t.corridorCode].totalNgn += safeParseAmount(t.amountNgn ?? "0");
     }
     return stats;
   }),

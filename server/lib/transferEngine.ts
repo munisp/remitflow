@@ -16,6 +16,7 @@
 import { sql } from "drizzle-orm";
 import crypto from "crypto";
 import { getDb } from "../db";
+import { safeParseAmount } from "./safeDecimal";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -116,7 +117,7 @@ class PostgresLedger implements LedgerBackend {
       FROM wallets WHERE "userId" = ${accountId} AND currency = ${currency}
     `);
     const rows = result as unknown as { balance: string }[];
-    return rows.length > 0 ? parseFloat(rows[0].balance) : 0;
+    return rows.length > 0 ? safeParseAmount(rows[0].balance) : 0;
   }
 
   async debit(accountId: number, amount: number, currency: string, ref: string): Promise<void> {
@@ -315,7 +316,7 @@ async function getFxRate(from: string, to: string): Promise<number> {
     ORDER BY recorded_at DESC LIMIT 1
   `);
   const rows = result as unknown as { rate: string }[];
-  if (rows.length > 0) return parseFloat(rows[0].rate);
+  if (rows.length > 0) return safeParseAmount(rows[0].rate);
   // Fallback rates if no DB rate available
   const fallback: Record<string, number> = {
     "USD-NGN": 1580.50, "USD-GHS": 15.20, "USD-KES": 153.50,
@@ -379,7 +380,7 @@ async function validateCompliance(senderId: number, amount: number): Promise<{ a
     AND status = 'completed'
   `);
   const dailyRows = dailyResult as unknown as { daily_total: string }[];
-  const dailyTotal = parseFloat(dailyRows[0]?.daily_total || "0");
+  const dailyTotal = safeParseAmount(dailyRows[0]?.daily_total || "0");
   
   if (dailyTotal + amount > limits.daily) {
     return { allowed: false, reason: `Would exceed ${tier} daily limit ($${limits.daily})` };
@@ -411,11 +412,11 @@ export async function executeTransfer(req: TransferRequest & { idempotencyKey?: 
       return {
         transferId: row.referenceId,
         status: row.status as TransferResult["status"],
-        debitAmount: parseFloat(row.fromAmount),
-        creditAmount: parseFloat(row.toAmount),
-        fxRate: parseFloat(row.exchangeRate),
-        fee: parseFloat(row.fee),
-        totalCharged: parseFloat(row.fromAmount) + parseFloat(row.fee),
+        debitAmount: safeParseAmount(row.fromAmount),
+        creditAmount: safeParseAmount(row.toAmount),
+        fxRate: safeParseAmount(row.exchangeRate),
+        fee: safeParseAmount(row.fee),
+        totalCharged: safeParseAmount(row.fromAmount) + safeParseAmount(row.fee),
         estimatedDelivery: "",
         referenceNumber: row.referenceId,
         ledgerEntries: [],

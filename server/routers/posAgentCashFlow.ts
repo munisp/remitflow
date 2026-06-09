@@ -18,6 +18,7 @@ import {
 } from "../../drizzle/schema.js";
 import { and, desc, eq, gte, sql, count, sum } from "drizzle-orm";
 import { randomBytes } from "crypto";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -68,12 +69,12 @@ export const posAgentCashFlowRouter = router({
 
     const todayVolume = todayTxs.reduce((s: any, t: any) => {
       const amt = typeof t.amount === 'string' ? t.amount : String(t.amount ?? '0');
-      return s + BigInt(Math.round(parseFloat(amt) * 100));
+      return s + BigInt(Math.round(safeParseAmount(amt) * 100));
     }, BigInt(0));
     const commissionRate = Number(agent?.commissionRate ?? 1.5);
     const todayCommissionMinor = todayTxs.reduce((s: any, t: any) => {
       const amt = typeof t.amount === 'string' ? t.amount : String(t.amount ?? '0');
-      return s + BigInt(Math.round(parseFloat(amt) * 100 * commissionRate / 100));
+      return s + BigInt(Math.round(safeParseAmount(amt) * 100 * commissionRate / 100));
     }, BigInt(0));
 
     // All-time stats

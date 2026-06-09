@@ -20,6 +20,7 @@ import { safeParseAmount } from "../lib/safeDecimal.js";
 import { treasuryPositions } from "../../drizzle/schema";
 import { createAuditLog } from "../audit.service";
 
+
 // ─── Default float rates (central bank rates as of 2026) ─────────────────────
 const DEFAULT_FLOAT_RATES: Record<string, { rate: number; description: string }> = {
   USD: { rate: 0.0525, description: "Fed Funds Rate 5.25%" },
@@ -70,7 +71,7 @@ export const floatIncomeRouter = router({
       );
       for (const row of (rateRows as any[])) {
         const currency = (row.key as string).replace("float_rate_", "").toUpperCase();
-        rateOverrides[currency] = parseFloat(row.value);
+        rateOverrides[currency] = safeParseAmount(row.value);
       }
     } catch { /* system_config may not have float_rate keys */ }
 
@@ -80,7 +81,7 @@ export const floatIncomeRouter = router({
       const ytdRows = await db.execute(
         sql`SELECT COALESCE(SUM(yield_amount), 0) AS ytd FROM float_income_records WHERE date >= DATE_TRUNC('year', NOW())`
       );
-      totalYtdYield = parseFloat((ytdRows as any[])[0]?.ytd || "0");
+      totalYtdYield = safeParseAmount((ytdRows as any[])[0]?.ytd || "0");
     } catch { /* table may not exist yet */ }
 
     const currencies = Object.keys(DEFAULT_FLOAT_RATES);
@@ -229,7 +230,7 @@ export const floatIncomeRouter = router({
         );
         for (const row of (rateRows as any[])) {
           const currency = (row.key as string).replace("float_rate_", "").toUpperCase();
-          rateOverrides[currency] = parseFloat(row.value);
+          rateOverrides[currency] = safeParseAmount(row.value);
         }
       } catch { /* ignore */ }
 

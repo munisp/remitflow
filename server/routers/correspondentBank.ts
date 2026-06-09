@@ -5,6 +5,7 @@ import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
 import { correspondentBanksV200 as correspondentBanks, correspondentSettlements } from "../../drizzle/schema";
 import { eq, desc } from "drizzle-orm";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 const CORRESPONDENT_URL = process.env.CORRESPONDENT_MANAGER_URL ?? "http://go-correspondent-manager:8096";
 
@@ -45,10 +46,10 @@ export const correspondentBankRouter = router({
         correspondent_id: b.correspondentId,
         bank_name: b.bankName,
         currency: b.currency,
-        nostro_balance_usd: parseFloat(b.nostroBalanceUsd ?? "0"),
-        vostro_balance_usd: parseFloat(b.vostroBalanceUsd ?? "0"),
-        clearing_line_usd: parseFloat(b.clearingLineUsd ?? "0"),
-        utilization_pct: parseFloat(b.utilizationPct ?? "0"),
+        nostro_balance_usd: safeParseAmount(b.nostroBalanceUsd ?? "0"),
+        vostro_balance_usd: safeParseAmount(b.vostroBalanceUsd ?? "0"),
+        clearing_line_usd: safeParseAmount(b.clearingLineUsd ?? "0"),
+        utilization_pct: safeParseAmount(b.utilizationPct ?? "0"),
         source: "database",
       }));
     }
@@ -136,10 +137,10 @@ export const correspondentBankRouter = router({
     requireAdmin(ctx.user.role);
     const db = await getDb();
     const banks = await db.select().from(correspondentBanks);
-    const totalClearingLine = banks.reduce((s: any, b: any) => s + parseFloat(b.clearingLineUsd ?? "0"), 0);
-    const totalNostro = banks.reduce((s: any, b: any) => s + parseFloat(b.nostroBalanceUsd ?? "0"), 0);
+    const totalClearingLine = banks.reduce((s: any, b: any) => s + safeParseAmount(b.clearingLineUsd ?? "0"), 0);
+    const totalNostro = banks.reduce((s: any, b: any) => s + safeParseAmount(b.nostroBalanceUsd ?? "0"), 0);
     const avgFeeBps = banks.length > 0
-      ? banks.reduce((s: any, b: any) => s + parseFloat(b.feeBps ?? "50"), 0) / banks.length
+      ? banks.reduce((s: any, b: any) => s + safeParseAmount(b.feeBps ?? "50"), 0) / banks.length
       : 0;
     return {
       totalCorrespondents: banks.length,

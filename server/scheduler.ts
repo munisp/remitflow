@@ -42,6 +42,7 @@ import { runArchivalPipeline } from "./services/archivalPipeline";
 import { transferBatchQueue } from "./services/transferBatchQueue";
 import { walletCache } from "./services/walletCache";
 import { logger } from './_core/logger';
+import { safeParseAmount } from "./lib/safeDecimal";
 
 // ============================================================================
 // FX Rate Cache (backed by fx-rates.service with real API sources)
@@ -154,8 +155,8 @@ async function executeSingleRecurringPayment(payment: any): Promise<void> {
   }
 
   const wallet = userWallets[0];
-  const paymentAmount = parseFloat(payment.amount);
-  const walletBalance = parseFloat(wallet.balance);
+  const paymentAmount = safeParseAmount(payment.amount);
+  const walletBalance = safeParseAmount(wallet.balance);
 
   if (walletBalance < paymentAmount) {
     await createNotification(
@@ -286,7 +287,7 @@ async function checkFXRateAlerts(): Promise<void> {
       const currentRate = getCachedRate(alert.fromCurrency, alert.toCurrency);
       if (currentRate === null) continue;
 
-      const targetRate = parseFloat(alert.targetRate);
+      const targetRate = safeParseAmount(alert.targetRate);
       const isTriggered =
         alert.direction === "above"
           ? currentRate >= targetRate
@@ -781,8 +782,8 @@ async function sendWeeklyFundDigests(): Promise<void> {
         const topProposal = activeProposalRows.sort((a: any, b: any) => Number(b.votesFor ?? 0) - Number(a.votesFor ?? 0))[0];
         digestFunds.push({
           name: fund.name,
-          totalRaised: parseFloat(String(fund.totalRaised ?? 0)),
-          goalAmount: parseFloat(String(fund.goalAmount ?? 0)),
+          totalRaised: safeParseAmount(String(fund.totalRaised ?? 0)),
+          goalAmount: safeParseAmount(String(fund.goalAmount ?? 0)),
           contributorCount: fund.contributorCount ?? 0,
           currency: fund.currency ?? "USD",
           activeProposals: activeProposalRows.length,

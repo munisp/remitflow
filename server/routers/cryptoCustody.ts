@@ -31,6 +31,7 @@ import { protectedProcedure, publicProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
 import { logger } from '../_core/logger';
+import { safeParseAmount } from "../lib/safeDecimal";
 // Audit logging for custody operations — uses createAuditLog pattern
 const logCustodyAction = (userId: number, action: string, details: object) => {
   // createAuditLog-compatible audit trail for all custody mutations
@@ -183,8 +184,8 @@ class FireblocksCustody implements CustodyProvider {
     const data = await this.request("GET", `/vault/accounts/${this.vaultAccountId}/${asset}`);
     return {
       asset,
-      available: parseFloat(data.available ?? "0"),
-      total: parseFloat(data.total ?? "0"),
+      available: safeParseAmount(data.available ?? "0"),
+      total: safeParseAmount(data.total ?? "0"),
       address: data.address ?? "",
     };
   }

@@ -29,6 +29,7 @@ import {
   users,
 } from "../../drizzle/schema";
 import crypto from "crypto";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -304,10 +305,10 @@ export const diasporaMortgageRouter = router({
       // Generate amortisation schedule if no repayments yet
       let schedule = repayments;
       if (repayments.length === 0 && application.status === "disbursed") {
-        const loanAmount = parseFloat(application.loanAmountUsd);
-        const monthlyRate = parseFloat(application.annualRatePct) / 100 / 12;
+        const loanAmount = safeParseAmount(application.loanAmountUsd);
+        const monthlyRate = safeParseAmount(application.annualRatePct) / 100 / 12;
         const totalPayments = application.termYears * 12;
-        const monthlyPayment = parseFloat(application.monthlyPaymentUsd);
+        const monthlyPayment = safeParseAmount(application.monthlyPaymentUsd);
         let balance = loanAmount;
         const projected = [];
         for (let i = 1; i <= Math.min(totalPayments, 12); i++) {
@@ -468,7 +469,7 @@ export const businessCreditScoringRouter = router({
       if (!score) throw new TRPCError({ code: "BAD_REQUEST", message: "No valid credit score found. Request a credit score first." });
       if (new Date() > score.expiresAt!) throw new TRPCError({ code: "BAD_REQUEST", message: "Credit score expired. Request a new score." });
 
-      const maxLimit = parseFloat(score.maxCreditLimitUsd);
+      const maxLimit = safeParseAmount(score.maxCreditLimitUsd);
       if (input.requestedUsd > maxLimit) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Requested amount exceeds credit limit of $${maxLimit.toLocaleString()}` });
       }

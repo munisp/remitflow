@@ -33,6 +33,7 @@ import { createAuditLog } from "../audit.service";
 import { sendEmail } from "../email.service";
 import crypto from "crypto";
 import { logger } from '../_core/logger';
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function adminOnly(ctx: { user: { role: string | null } }) {
@@ -146,7 +147,7 @@ export const cbnComplianceRouter = router({
       const toCurrency = input.pair.split("/")[1] ?? "NGN";
       const platformSpreadBps = 150;
       const platformRate = (
-        parseFloat(rate.midRate) * (1 + platformSpreadBps / 10000)
+        safeParseAmount(rate.midRate) * (1 + platformSpreadBps / 10000)
       ).toFixed(4);
 
       const [snapshot] = await db
@@ -897,7 +898,7 @@ export const cbnComplianceRouter = router({
         activeCbnCorridors.map(async ({ corridor }: { corridor: string }) => {
           try {
             const rate = await fetchBmatchRate(corridor);
-            liveRateMap.set(corridor, parseFloat(rate.midRate ?? "0"));
+            liveRateMap.set(corridor, safeParseAmount(rate.midRate ?? "0"));
           } catch {
             // If a corridor rate fetch fails, skip it gracefully
           }
@@ -917,7 +918,7 @@ export const cbnComplianceRouter = router({
         // Skip if we couldn't fetch a live rate for this pair
         if (liveRateNum === undefined) continue;
 
-        const threshold = parseFloat(String(alert.targetRate));
+        const threshold = safeParseAmount(String(alert.targetRate));
         const breached =
           (alert.direction === "above" && liveRateNum >= threshold) ||
           (alert.direction === "below" && liveRateNum <= threshold);

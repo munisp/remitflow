@@ -19,6 +19,7 @@
  */
 import { Ollama } from "ollama";
 import { logger } from './_core/logger';
+import { safeParseAmount } from "./lib/safeDecimal";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const OLLAMA_HOST = process.env.OLLAMA_HOST || "http://localhost:11434";
@@ -238,10 +239,10 @@ const REMITTANCE_TOOLS: ARTTool[] = [
       const totalFee = baseFee + fxSpread;
       return {
         amount, from, to,
-        baseFee: parseFloat(baseFee.toFixed(2)),
-        fxSpread: parseFloat(fxSpread.toFixed(2)),
-        totalFee: parseFloat(totalFee.toFixed(2)),
-        effectiveRate: parseFloat((totalFee / amount * 100).toFixed(2)) + "%",
+        baseFee: safeParseAmount(baseFee.toFixed(2)),
+        fxSpread: safeParseAmount(fxSpread.toFixed(2)),
+        totalFee: safeParseAmount(totalFee.toFixed(2)),
+        effectiveRate: safeParseAmount((totalFee / amount * 100).toFixed(2)) + "%",
       };
     },
   },
