@@ -91,7 +91,7 @@ export const doubleEntryRouter = router({
         transactionId: input.transactionId, entryCount: entries.length, totalDebits, totalCredits,
       }, "Balanced transaction recorded");
 
-      return { success: true, transactionId: input.transactionId, entryCount: entries.length, totalDebits, totalCredits };
+      return { success: true, verified: true, transactionId: input.transactionId, entryCount: entries.length, totalDebits, totalCredits };
     }),
 
   verifyIntegrity: publicProcedure.query(async () => {

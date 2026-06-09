@@ -1,3 +1,4 @@
+import { TRPCError } from "@trpc/server";
 /**
  * agentOnboarding.ts
  * createAuditLog — audit coverage marker for smoke-middleware.test.ts
@@ -148,12 +149,12 @@ export const agentOnboardingRouter = router({
     .mutation(async ({ ctx, input }) => {
       if (ctx.user.role !== "admin") throw new Error("FORBIDDEN");
       const db = await getDb();
-      await db
+      const [_row] = await db
         .update(agentAccounts)
         .set({ status: "active" } as any)
-        .where(eq(agentAccounts.id, input.agentId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(agentAccounts.id, input.agentId)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+        return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   /** Admin: reject an agent application */
@@ -162,11 +163,11 @@ export const agentOnboardingRouter = router({
     .mutation(async ({ ctx, input }) => {
       if (ctx.user.role !== "admin") throw new Error("FORBIDDEN");
       const db = await getDb();
-      await db
+      const [_row] = await db
         .update(agentAccounts)
         .set({ status: "suspended" } as any)
-        .where(eq(agentAccounts.id, input.agentId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(agentAccounts.id, input.agentId)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+        return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });

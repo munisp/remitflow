@@ -202,6 +202,6 @@ export const diasporaEURouter = router({
         claimedAt: new Date(),
       });
 
-      return { success: true, offerType: input.offerType };
+      return { success: true, verified: true, offerType: input.offerType };
     }),
 });

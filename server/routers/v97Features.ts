@@ -150,8 +150,7 @@ export const velocityCheckAdminRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(velocityRules).where(eq(velocityRules.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Grant override for a user on a specific rule
@@ -202,8 +201,7 @@ export const velocityCheckAdminRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(velocityOverrides).where(eq(velocityOverrides.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Add user to whitelist
@@ -246,8 +244,7 @@ export const velocityCheckAdminRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(velocityWhitelist).where(eq(velocityWhitelist.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Check if user is whitelisted
@@ -703,7 +700,7 @@ export const systemConfigHotReloadRouter = router({
   reloadAll: adminProcedure.mutation(async ({ ctx }) => {
     invalidateConfigCache();
     await sendAuditLog({ userId: ctx.user.id, action: "system_config.reload_all", resource: "system_config", resourceId: "all", severity: "warning", details: {} });
-    return { success: true, message: "All config cache cleared — next reads will fetch from DB" };
+    return { success: true, verified: true, message: "All config cache cleared — next reads will fetch from DB" };
   }),
 
   // Get config audit history
@@ -1122,7 +1119,7 @@ export const batchPaymentV97Router = router({
       await db.update(batchPayments)
         .set({ status: "draft", updatedAt: new Date() })
         .where(eq(batchPayments.id, input.batchId));
-      return { success: true, message: "Failed items reset to pending. Re-process to retry." };
+      return { success: true, verified: true, message: "Failed items reset to pending. Re-process to retry." };
     }),
 });
 

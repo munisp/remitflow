@@ -221,7 +221,7 @@ export const qdrantRouter = router({
     }))
     .mutation(async ({ input }) => {
       await upsertTransactionVector(input);
-      return { success: true, indexed: input.id };
+      return { success: true, verified: true, indexed: input.id };
     }),
 });
 

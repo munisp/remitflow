@@ -94,11 +94,11 @@ export const correspondentBankRouter = router({
     .mutation(async ({ input, ctx }) => {
       requireAdmin(ctx.user.role);
       const db = await getDb();
-      await db.update(correspondentBanks)
+      const [_row] = await db.update(correspondentBanks)
         .set({ status: input.status })
-        .where(eq(correspondentBanks.correspondentId, input.correspondentId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(correspondentBanks.correspondentId, input.correspondentId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   triggerRebalance: protectedProcedure

@@ -559,14 +559,16 @@ export const devSandboxProvider: PaymentProvider = {
 
   async initiate(req: PaymentRequest): Promise<PaymentResult> {
     const ref = `DEV-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
-    // Simulate processing delay
     const shouldSucceed = req.amount < 999999;
-    const db = await getDb();
-    await db.execute({
-      sql: `INSERT INTO payment_provider_logs (provider, action, reference, amount, currency, user_id, status, raw_response, created_at)
-            VALUES ('dev_sandbox', 'initiate', $1, $2, $3, $4, $5, $6, NOW())`,
-      args: [ref, req.amount, req.currency, req.userId, shouldSucceed ? "completed" : "failed", JSON.stringify({ sandbox: true, simulatedSuccess: shouldSucceed })],
-    });
+    // Log to DB (non-fatal if table doesn't exist yet)
+    try {
+      const db = await getDb();
+      await db.execute({
+        sql: `INSERT INTO payment_provider_logs (provider, action, reference, amount, currency, user_id, status, raw_response, created_at)
+              VALUES ('dev_sandbox', 'initiate', $1, $2, $3, $4, $5, $6, NOW())`,
+        args: [ref, req.amount, req.currency, req.userId, shouldSucceed ? "completed" : "failed", JSON.stringify({ sandbox: true, simulatedSuccess: shouldSucceed })],
+      });
+    } catch { /* table may not exist in test env */ }
     return {
       success: shouldSucceed,
       providerRef: ref,

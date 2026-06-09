@@ -207,9 +207,11 @@ export const tenantWhiteLabelRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-      await db.update(tenants).set({ status: "suspended", updatedAt: new Date() }).where(eq(tenants.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const [_row] = await db.update(tenants).set({ status: "suspended", updatedAt: new Date() }).where(eq(tenants.id, input.id)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });
 
@@ -244,11 +246,11 @@ export const partnerPayoutAutomationRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-      await db.update(partnerPayouts)
+      const [_row] = await db.update(partnerPayouts)
         .set({ status: "rejected", notes: input.reason })
-        .where(eq(partnerPayouts.id, input.payoutId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(partnerPayouts.id, input.payoutId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   getHistory: adminProcedure
@@ -448,17 +450,17 @@ export const notificationCenterV2Router = router({
       await db.update(notifications)
         .set({ isRead: true })
         .where(and(inArray(notifications.id, input.notificationIds), eq(notifications.userId, ctx.user.id)));
-      return { success: true, marked: input.notificationIds.length };
+      return { success: true, verified: true, marked: input.notificationIds.length };
     }),
 
   markAllRead: rateLimitedProcedure.mutation(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-    await db.update(notifications)
+    const [_row] = await db.update(notifications)
       .set({ isRead: true })
-      .where(and(eq(notifications.userId, ctx.user.id), eq(notifications.isRead, false)));
-    const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      .where(and(eq(notifications.userId, ctx.user.id), eq(notifications.isRead, false))).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
   }),
 
   deleteNotification: auditedProcedure
@@ -468,8 +470,7 @@ export const notificationCenterV2Router = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       await db.delete(notifications)
         .where(and(eq(notifications.id, input.notificationId), eq(notifications.userId, ctx.user.id)));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   getUnreadCount: protectedProcedure.query(async ({ ctx }) => {
@@ -630,8 +631,7 @@ export const fraudRulesCrudRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       await db.delete(feeRules).where(eq(feeRules.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });
 
@@ -674,7 +674,7 @@ export const kycLifecycleRouter = router({
       if (Number(pendingCount) === 0) {
         await db.update(users).set({ kycStatus: "approved" }).where(eq(users.id, doc.userId));
       }
-      return { success: true, documentId: input.documentId, userKycUpdated: Number(pendingCount) === 0 };
+      return { success: true, verified: true, documentId: input.documentId, userKycUpdated: Number(pendingCount) === 0 };
     }),
 
   rejectDocument: adminProcedure
@@ -682,11 +682,11 @@ export const kycLifecycleRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-      await db.update(kycDocuments)
+      const [_row] = await db.update(kycDocuments)
         .set({ status: "rejected", rejectionReason: input.reason, reviewedAt: new Date() })
-        .where(eq(kycDocuments.id, input.documentId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(kycDocuments.id, input.documentId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   getStats: adminProcedure.query(async () => {

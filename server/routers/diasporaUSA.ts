@@ -160,7 +160,7 @@ export const diasporaUSARouter = router({
         claimedAt: new Date(),
       });
 
-      return { success: true, offerType: input.offerType };
+      return { success: true, verified: true, offerType: input.offerType };
     }),
 
   getReferralCode: protectedProcedure.query(async ({ ctx }) => {

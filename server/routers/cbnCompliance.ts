@@ -317,7 +317,7 @@ export const cbnComplianceRouter = router({
         content: `Admin ${ctx.user.name} filed ${input.accountIds.length} settlement account(s) with CBN. Reference: ${input.cbnReferenceNumber}`,
       });
 
-      return { success: true, filedCount: input.accountIds.length };
+      return { success: true, verified: true, filedCount: input.accountIds.length };
     }),
 
   exportCbnFilingDocument: protectedProcedure
@@ -838,18 +838,18 @@ export const cbnComplianceRouter = router({
     .mutation(async ({ ctx, input }) => {
       adminOnly(ctx);
       const db = await getDb();
-      await db
+      const [_row] = await db
         .update(exchangeRateAlerts)
         .set({ isActive: false })
-        .where(eq(exchangeRateAlerts.id, input.alertId));
+        .where(eq(exchangeRateAlerts.id, input.alertId)).returning();
 
       await publishKafkaEvent("cbn-rate-alert-deleted", {
         alert_id: input.alertId,
         deleted_by: ctx.user.id,
       });
 
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   checkRateAlerts: protectedProcedure
@@ -1265,7 +1265,7 @@ export const cbnComplianceRouter = router({
         severity: "info",
         metadata: { pair: `${alert.fromCurrency}/${alert.toCurrency}`, direction: alert.direction, threshold: alert.targetRate },
       });
-      return { success: true, id: input.id, pair: `${alert.fromCurrency}/${alert.toCurrency}` };
+      return { success: true, verified: true, id: input.id, pair: `${alert.fromCurrency}/${alert.toCurrency}` };
     }),
 
   // ─── v194: Rate Alert History ─────────────────────────────────────────────

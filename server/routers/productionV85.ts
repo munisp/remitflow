@@ -113,10 +113,10 @@ export const sandboxScenariosRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(sandboxScenarios)
-        .where(and(eq(sandboxScenarios.id, input.id), eq(sandboxScenarios.userId, ctx.user.id)));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const [_row] = await db.delete(sandboxScenarios)
+        .where(and(eq(sandboxScenarios.id, input.id), eq(sandboxScenarios.userId, ctx.user.id))).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   run: auditedProcedure
@@ -143,7 +143,7 @@ export const sandboxScenariosRouter = router({
         payment: { status: "succeeded", chargeId: `ch_test_${Date.now()}`, amount: payload.amount ?? 1000 },
         compliance: { riskScore: 12, flags: [], sanctionsHit: false, pepMatch: false, decision: "pass" },
       };
-      return { success: true, result: results[scenario.scenarioType] ?? results.transfer, scenarioName: scenario.name };
+      return { success: true, verified: true, result: results[scenario.scenarioType] ?? results.transfer, scenarioName: scenario.name };
     }),
 });
 
@@ -640,7 +640,7 @@ export const complianceAlertsRouter = router({
         content: `Alert snoozed for ${input.hours}h until ${snoozeUntil.toISOString()} by ${ctx.user.name ?? ctx.user.email}`,
         isInternal: true,
       });
-      return { success: true, snoozeUntil };
+      return { success: true, verified: true, snoozeUntil };
     }),
 
   unsnooze: protectedProcedure
@@ -648,17 +648,17 @@ export const complianceAlertsRouter = router({
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB unavailable' });
-      await db.update(complianceAlerts)
+      const [_row] = await db.update(complianceAlerts)
         .set({ snoozeUntil: null, status: 'open' })
-        .where(eq(complianceAlerts.id, input.alertId));
+        .where(eq(complianceAlerts.id, input.alertId)).returning();
       await db.insert(complianceAlertNotes).values({
         alertId: input.alertId,
         authorId: ctx.user.id,
         content: `Alert unsnoozed and re-opened by ${ctx.user.name ?? ctx.user.email}`,
         isInternal: true,
       });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   updateMlroNotes: protectedProcedure
@@ -666,11 +666,11 @@ export const complianceAlertsRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'DB unavailable' });
-      await db.update(complianceAlerts)
+      const [_row] = await db.update(complianceAlerts)
         .set({ mlroNotes: input.notes })
-        .where(eq(complianceAlerts.id, input.alertId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(complianceAlerts.id, input.alertId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   stats: protectedProcedure.query(async ({ ctx }) => {
@@ -735,8 +735,7 @@ export const securityEventsRouter = router({
       if (input.severity === "critical") {
         broadcastAdminEvent({ type: "fraud_alert", payload: { userId: ctx.user.id, eventType: input.eventType } });
       }
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   stats: protectedProcedure.query(async ({ ctx }) => {
@@ -818,7 +817,7 @@ export const mfaRouter = router({
         severity: "info",
         details: JSON.stringify({ method: "totp" }),
       });
-      return { success: true, message: "MFA enabled successfully" };
+      return { success: true, verified: true, message: "MFA enabled successfully" };
     }),
 
   disable: auditedProcedure
@@ -826,15 +825,15 @@ export const mfaRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(mfaSettings).set({ totpEnabled: false }).where(eq(mfaSettings.userId, ctx.user.id));
+      const [_row] = await db.update(mfaSettings).set({ totpEnabled: false }).where(eq(mfaSettings.userId, ctx.user.id)).returning();
       await db.insert(securityEvents).values({
         userId: ctx.user.id,
         eventType: "mfa_disabled",
         severity: "warning",
         details: JSON.stringify({ method: "totp" }),
       });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   generateBackupCodes: auditedProcedure.mutation(async ({ ctx }) => {
@@ -1117,7 +1116,7 @@ export const adminBulkRouter = router({
           details: JSON.stringify({ suspendedBy: ctx.user.id }),
         });
       }
-      return { success: true, affected: input.userIds.length };
+      return { success: true, verified: true, affected: input.userIds.length };
     }),
 
   exportUsers: protectedProcedure

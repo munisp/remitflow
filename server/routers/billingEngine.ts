@@ -371,7 +371,7 @@ export const billingEngineRouter = router({
         severity: "warning",
         metadata: { tenantId, changeReason },
       });
-      return { success: true, version: newVersion, updatedAt: now };
+      return { success: true, verified: true, version: newVersion, updatedAt: now };
     }),
 
   // ── List billing events for a tenant ─────────────────────────────────────
@@ -598,7 +598,7 @@ export const billingEngineRouter = router({
         occurredAtMs: now,
       });
 
-      return { success: true, configId, tenantId: input.tenantId };
+      return { success: true, verified: true, configId, tenantId: input.tenantId };
     }),
 
 

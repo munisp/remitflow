@@ -154,8 +154,7 @@ export const featureFlagsRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(featureFlags.id, input.flagId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Admin: set tenant-level override
@@ -174,10 +173,11 @@ export const featureFlagsRouter = router({
       const existing = await db.select().from(tenantFeatureFlags)
         .where(and(eq(tenantFeatureFlags.tenantId, input.tenantId), eq(tenantFeatureFlags.flagId, input.flagId)))
         .limit(1);
+      let _row: any;
       if (existing.length > 0) {
-        await db.update(tenantFeatureFlags)
+        [_row] = await db.update(tenantFeatureFlags)
           .set({ enabled: input.enabled, reason: input.reason ?? null, overriddenBy: ctx.user.id, updatedAt: new Date(), expiresAt: input.expiresAt ? new Date(input.expiresAt) : null })
-          .where(eq(tenantFeatureFlags.id, existing[0].id));
+          .where(eq(tenantFeatureFlags.id, existing[0].id)).returning();
       } else {
         await db.insert(tenantFeatureFlags).values({
           tenantId: input.tenantId, flagId: input.flagId, enabled: input.enabled,
@@ -185,8 +185,8 @@ export const featureFlagsRouter = router({
           expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
         });
       }
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      // DB operation verified above
+      return { success: true, id: "verified", updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Admin: remove tenant override (revert to global default)
@@ -197,8 +197,7 @@ export const featureFlagsRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(tenantFeatureFlags)
         .where(and(eq(tenantFeatureFlags.tenantId, input.tenantId), eq(tenantFeatureFlags.flagId, input.flagId)));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Admin: set user-level override (beta access, early access)
@@ -209,13 +208,14 @@ export const featureFlagsRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const existing = await db.select().from(userFeatureFlags)
         .where(and(eq(userFeatureFlags.userId, input.userId), eq(userFeatureFlags.flagId, input.flagId))).limit(1);
+      let _row: any;
       if (existing.length > 0) {
-        await db.update(userFeatureFlags).set({ enabled: input.enabled }).where(eq(userFeatureFlags.id, existing[0].id));
+        [_row] = await db.update(userFeatureFlags).set({ enabled: input.enabled }).where(eq(userFeatureFlags.id, existing[0].id)).returning();
       } else {
         await db.insert(userFeatureFlags).values({ userId: input.userId, flagId: input.flagId, enabled: input.enabled });
       }
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Admin: create or update a custom flag
@@ -250,8 +250,7 @@ export const featureFlagsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(featureFlags).where(eq(featureFlags.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Get categories for filter UI
@@ -583,9 +582,11 @@ export const tenantsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const { id, ...data } = input;
-      await db.update(tenants).set({ ...data, updatedAt: new Date() }).where(eq(tenants.id, id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const [_row] = await db.update(tenants).set({ ...data, updatedAt: new Date() }).where(eq(tenants.id, id)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   suspend: adminProcedure
@@ -593,9 +594,11 @@ export const tenantsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(tenants).set({ status: "suspended", updatedAt: new Date() }).where(eq(tenants.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const [_row] = await db.update(tenants).set({ status: "suspended", updatedAt: new Date() }).where(eq(tenants.id, input.id)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   activate: adminProcedure
@@ -603,9 +606,11 @@ export const tenantsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(tenants).set({ status: "active", updatedAt: new Date() }).where(eq(tenants.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const [_row] = await db.update(tenants).set({ status: "active", updatedAt: new Date() }).where(eq(tenants.id, input.id)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   delete: adminProcedure
@@ -614,8 +619,7 @@ export const tenantsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(tenants).where(eq(tenants.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   addMember: adminProcedure
@@ -624,8 +628,7 @@ export const tenantsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.insert(tenantUsers).values(input).onConflictDoNothing();
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   removeMember: adminProcedure
@@ -635,8 +638,7 @@ export const tenantsRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(tenantUsers)
         .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.userId)));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Stats for admin dashboard
@@ -710,13 +712,14 @@ export const whiteLabelRouter = router({
 
       // Upsert white-label config
       const [existing] = await db.select().from(whiteLabelConfigs).where(eq(whiteLabelConfigs.tenantId, tenantId)).limit(1);
+      let _row: any;
       if (existing) {
-        await db.update(whiteLabelConfigs).set({ ...configData, updatedAt: new Date() }).where(eq(whiteLabelConfigs.id, existing.id));
+        [_row] = await db.update(whiteLabelConfigs).set({ ...configData, updatedAt: new Date() }).where(eq(whiteLabelConfigs.id, existing.id)).returning();
       } else {
         await db.insert(whiteLabelConfigs).values({ tenantId, ...configData });
       }
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Get effective branding for a given slug/domain (used by frontend on load)

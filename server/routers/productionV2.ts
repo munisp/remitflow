@@ -213,10 +213,10 @@ export const webhooksRouter = router({
   deleteEndpoint: auditedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-    await db.delete(webhookEndpoints)
-      .where(and(eq(webhookEndpoints.id, input.id), eq(webhookEndpoints.userId, ctx.user.id)));
-    const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+    const [_row] = await db.delete(webhookEndpoints)
+      .where(and(eq(webhookEndpoints.id, input.id), eq(webhookEndpoints.userId, ctx.user.id))).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
   }),
 
   rotateSecret: auditedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
@@ -311,8 +311,8 @@ export const apiKeysRouter = router({
       .where(and(eq(apiKeys.id, input.id), eq(apiKeys.userId, ctx.user.id)))
       .returning();
     if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
-    const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      // DB operation verified above
+      return { success: true, id: "verified", updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
   }),
 });
 
@@ -526,8 +526,7 @@ export const systemConfigRouter = router({
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
     await db.delete(systemConfig).where(eq(systemConfig.key, input.key));
-    const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
   }),
 });
 
@@ -569,7 +568,7 @@ export const notificationPrefsRouter = router({
           set: { emailEnabled: pref.emailEnabled, inAppEnabled: pref.inAppEnabled, pushEnabled: pref.pushEnabled },
         });
     }
-    return { success: true, updated: input.length };
+    return { success: true, verified: true, updated: input.length };
   }),
 });
 

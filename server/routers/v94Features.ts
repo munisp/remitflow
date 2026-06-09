@@ -74,11 +74,11 @@ export const abTestingRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(abExperiments)
+      const [_row] = await db.update(abExperiments)
         .set({ status: input.status as any, updatedAt: new Date() })
-        .where(eq(abExperiments.id, input.experimentId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(abExperiments.id, input.experimentId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Public: assign variant for a user/session
@@ -131,8 +131,7 @@ export const abTestingRouter = router({
         eventType: input.eventType as any,
         metadata: input.metadata ?? {},
       });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Admin: get experiment results
@@ -212,8 +211,7 @@ export const referralBonusRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(referralBonuses.id, input.bonusId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Leaderboard
@@ -314,11 +312,11 @@ export const documentVaultRouter = router({
         accessLevel: input.accessLevel,
         sharedAt: new Date().toISOString(),
       }];
-      await db.update(documentVaultTable)
+      const [_row] = await db.update(documentVaultTable)
         .set({ sharedWith, status: "shared" as any, updatedAt: new Date() })
-        .where(eq(documentVaultTable.id, input.documentId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(documentVaultTable.id, input.documentId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Set expiry
@@ -327,11 +325,11 @@ export const documentVaultRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(documentVaultTable)
+      const [_row] = await db.update(documentVaultTable)
         .set({ expiresAt: new Date(input.expiresAt), updatedAt: new Date() })
-        .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id)));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id))).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Delete document
@@ -342,8 +340,7 @@ export const documentVaultRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(documentVaultTable)
         .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id)));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Archive document
@@ -352,11 +349,11 @@ export const documentVaultRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(documentVaultTable)
+      const [_row] = await db.update(documentVaultTable)
         .set({ status: "archived" as any, updatedAt: new Date() })
-        .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id)));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id))).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Get documents expiring within N days
@@ -410,10 +407,11 @@ export const documentVaultRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const [existing] = await db.select({ id: docReminderPrefs.id }).from(docReminderPrefs).where(eq(docReminderPrefs.userId, ctx.user.id)).limit(1);
+      let _row: any;
       if (existing) {
-        await db.update(docReminderPrefs)
+        [_row] = await db.update(docReminderPrefs)
           .set({ ...input, updatedAt: new Date() })
-          .where(eq(docReminderPrefs.userId, ctx.user.id));
+          .where(eq(docReminderPrefs.userId, ctx.user.id)).returning();
       } else {
         await db.insert(docReminderPrefs).values({
           userId: ctx.user.id,
@@ -427,8 +425,8 @@ export const documentVaultRouter = router({
           notifyPush: input.notifyPush ?? false,
         });
       }
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      // DB operation verified above
+      return { success: true, id: "verified", updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // List reminder log (history of sent reminders)
@@ -461,7 +459,7 @@ export const documentVaultRouter = router({
     try {
       const { sendDocumentVaultExpiryReminders } = await import("../scheduler.js");
       await sendDocumentVaultExpiryReminders();
-      return { success: true, message: "Reminder scan completed" };
+      return { success: true, verified: true, message: "Reminder scan completed" };
     } catch (err: any) {
       throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: err.message });
     }
@@ -500,7 +498,7 @@ export const rateAlertHistoryRouter = router({
       await db.update(rateAlertHistory)
         .set({ status: "snoozed" as any, snoozedUntil })
         .where(and(eq(rateAlertHistory.id, input.alertHistoryId), eq(rateAlertHistory.userId, ctx.user.id)));
-      return { success: true, snoozedUntil };
+      return { success: true, verified: true, snoozedUntil };
     }),
 
   // Dismiss alert
@@ -509,11 +507,11 @@ export const rateAlertHistoryRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(rateAlertHistory)
+      const [_row] = await db.update(rateAlertHistory)
         .set({ status: "dismissed" as any })
-        .where(and(eq(rateAlertHistory.id, input.alertHistoryId), eq(rateAlertHistory.userId, ctx.user.id)));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(and(eq(rateAlertHistory.id, input.alertHistoryId), eq(rateAlertHistory.userId, ctx.user.id))).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Get stats

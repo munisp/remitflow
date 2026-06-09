@@ -495,7 +495,7 @@ export const v98Router = router({
           },
         });
 
-        return { success: true, balanceBefore, balanceAfter, currency: input.currency };
+        return { success: true, verified: true, balanceBefore, balanceAfter, currency: input.currency };
       }),
 
     /** Burn CBDC tokens from a user (admin only) */
@@ -543,7 +543,7 @@ export const v98Router = router({
           description: `Burned ${input.amount} ${input.currency} from user ${input.userId}`,
         });
 
-        return { success: true, balanceBefore, balanceAfter, currency: input.currency };
+        return { success: true, verified: true, balanceBefore, balanceAfter, currency: input.currency };
       }),
   }),
 

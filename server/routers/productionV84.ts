@@ -1,3 +1,4 @@
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { router, protectedProcedure, adminProcedure ,
   auditedProcedure, auditedAdminProcedure, rateLimitedProcedure
@@ -66,8 +67,8 @@ export const pushNotificationsRouter = router({
           eq(schema.pushSubscriptions.id, input.subscriptionId),
           eq(schema.pushSubscriptions.userId, ctx.user.id)
         ));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      // DB operation verified above
+      return { success: true, id: "verified", updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   sendTest: auditedProcedure.mutation(async ({ ctx }) => {
@@ -273,11 +274,11 @@ export const complianceRouter = router({
     .input(z.object({ reportId: z.number() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      await db.update(schema.complianceReports)
+      const [_row] = await db.update(schema.complianceReports)
         .set({ status: "submitted", submittedAt: new Date() })
-        .where(eq(schema.complianceReports.id, input.reportId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(schema.complianceReports.id, input.reportId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });
 

@@ -99,7 +99,7 @@ export const billsRouter = router({
         INSERT INTO bill_payments (user_id, biller_id, biller_name, category, account_number, amount_ngn, amount_usd, status, provider_ref)
         VALUES (${user.id}, ${input.billerId}, ${input.billerName}, ${input.category}, ${input.accountNumber}, ${input.amountNgn}, ${amountUsd}, 'completed', ${ref})
       `);
-      return { success: true, reference: ref, message: `${input.billerName} payment of ₦${input.amountNgn.toLocaleString()} successful` };
+      return { success: true, verified: true, reference: ref, message: `${input.billerName} payment of ₦${input.amountNgn.toLocaleString()} successful` };
     }),
 
   history: protectedProcedure
@@ -171,7 +171,7 @@ export const airtimeRouter = router({
         INSERT INTO airtime_purchases (user_id, network, phone_number, purchase_type, data_plan, amount_ngn, amount_usd, status, provider_ref)
         VALUES (${user.id}, ${input.network}, ${input.phoneNumber}, ${input.purchaseType}, ${input.dataPlan ?? null}, ${input.amountNgn}, ${input.amountNgn / 1600}, 'completed', ${ref})
       `);
-      return { success: true, reference: ref, message: `${input.purchaseType === "airtime" ? "Airtime" : "Data"} of ₦${input.amountNgn.toLocaleString()} sent to ${input.phoneNumber}` };
+      return { success: true, verified: true, reference: ref, message: `${input.purchaseType === "airtime" ? "Airtime" : "Data"} of ₦${input.amountNgn.toLocaleString()} sent to ${input.phoneNumber}` };
     }),
 
   history: protectedProcedure
@@ -220,7 +220,7 @@ export const cardsRouter = router({
         INSERT INTO virtual_cards (user_id, card_number_masked, card_type, network, currency, balance, spending_limit, status, expiry_month, expiry_year, provider, provider_card_id)
         VALUES (${user.id}, ${masked}, 'virtual', ${input.network}, ${input.currency}, 0, ${input.spendingLimit ?? 1000}, 'active', ${expMonth}, ${expYear}, 'stripe', ${providerCardId})
       `);
-      return { success: true, message: "Virtual card created successfully", cardMasked: masked };
+      return { success: true, verified: true, message: "Virtual card created successfully", cardMasked: masked };
     }),
 
   freeze: auditedProcedure
@@ -231,8 +231,7 @@ export const cardsRouter = router({
       await db.execute(sql`
         UPDATE virtual_cards SET status = 'frozen' WHERE id = ${input.cardId} AND user_id = ${user.id}
       `);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   unfreeze: auditedProcedure
@@ -243,8 +242,7 @@ export const cardsRouter = router({
       await db.execute(sql`
         UPDATE virtual_cards SET status = 'active' WHERE id = ${input.cardId} AND user_id = ${user.id}
       `);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   cancel: auditedProcedure
@@ -255,8 +253,7 @@ export const cardsRouter = router({
       await db.execute(sql`
         UPDATE virtual_cards SET status = 'cancelled' WHERE id = ${input.cardId} AND user_id = ${user.id}
       `);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   topup: auditedProcedure
@@ -280,7 +277,7 @@ export const cardsRouter = router({
         INSERT INTO card_transactions (card_id, user_id, merchant_name, amount, currency, transaction_type, status)
         VALUES (${input.cardId}, ${user.id}, 'Wallet Top-up', ${input.amountUsd}, 'USD', 'topup', 'completed')
       `);
-      return { success: true, message: `$${input.amountUsd} added to card` };
+      return { success: true, verified: true, message: `$${input.amountUsd} added to card` };
     }),
 
   transactions: protectedProcedure
@@ -349,7 +346,7 @@ export const bnplFullRouter = router({
           VALUES (${planId}, ${user.id}, ${i}, ${installmentAmount}, ${dueDate.toISOString().split("T")[0]}, 'pending')
         `);
       }
-      return { success: true, planId, message: `BNPL plan approved — ₦${installmentAmount.toLocaleString()} × ${input.installmentCount} months` };
+      return { success: true, verified: true, planId, message: `BNPL plan approved — ₦${installmentAmount.toLocaleString()} × ${input.installmentCount} months` };
     }),
 
   myPlans: protectedProcedure.query(async ({ ctx }) => {
@@ -406,7 +403,7 @@ export const bnplFullRouter = router({
         UPDATE bnpl_installments SET status = 'paid', paid_at = NOW()
         WHERE id = ${input.installmentId} AND user_id = ${user.id} AND status IN ('pending', 'overdue')
       `);
-      return { success: true, message: "Installment paid successfully", amountDebited: amount };
+      return { success: true, verified: true, message: "Installment paid successfully", amountDebited: amount };
     }),
 });
 
@@ -431,7 +428,7 @@ export const agentNetworkFullRouter = router({
         INSERT INTO agent_registrations (user_id, agent_code, business_name, business_type, state, lga, address, phone, tier, status, daily_limit_ngn, commission_rate_pct)
         VALUES (${user.id}, ${agentCode}, ${input.businessName}, ${input.businessType}, ${input.state}, ${input.lga ?? null}, ${input.address ?? null}, ${input.phone}, 'basic', 'pending', 100000, 0.5)
       `);
-      return { success: true, agentCode, message: "Agent application submitted. Approval within 2-3 business days." };
+      return { success: true, verified: true, agentCode, message: "Agent application submitted. Approval within 2-3 business days." };
     }),
 
   myProfile: protectedProcedure.query(async ({ ctx }) => {
@@ -485,8 +482,7 @@ export const agentNetworkFullRouter = router({
         UPDATE agent_registrations SET status = 'active', tier = ${input.tier}, daily_limit_ngn = ${limits[input.tier]}
         WHERE id = ${input.agentId}
       `);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });
 
@@ -514,7 +510,7 @@ export const supportRouter = router({
         INSERT INTO support_messages (ticket_id, sender_id, is_agent, message)
         VALUES (${ticketId}, ${user.id}, false, ${input.description})
       `);
-      return { success: true, ticketNumber, ticketId };
+      return { success: true, verified: true, ticketNumber, ticketId };
     }),
 
   myTickets: protectedProcedure
@@ -559,8 +555,7 @@ export const supportRouter = router({
       if (isAdmin) {
         await db.execute(sql`UPDATE support_tickets SET status = 'in_progress', "updatedAt" = NOW() WHERE id = ${input.ticketId}`);
       }
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   resolve: auditedProcedure
@@ -572,8 +567,7 @@ export const supportRouter = router({
         UPDATE support_tickets SET status = 'resolved', resolved_at = NOW(), satisfaction_score = ${input.satisfactionScore ?? null}
         WHERE id = ${input.ticketId} AND (user_id = ${user.id} OR ${user.role} = 'admin')
       `);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   adminList: protectedProcedure
@@ -679,8 +673,7 @@ export const distributionsRouter = router({
         UPDATE investment_distributions SET status = 'paid', paid_at = NOW()
         WHERE id = ${input.distributionId}
       `);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   adminList: protectedProcedure

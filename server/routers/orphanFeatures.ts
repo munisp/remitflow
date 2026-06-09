@@ -86,9 +86,11 @@ export const paymentMethodsExtRouter = router({
         .where(and(eq(achPaymentMethods.id, input.id), eq(achPaymentMethods.userId, ctx.user.id)));
       if (!existing) throw new TRPCError({ code: "NOT_FOUND" });
       await db.update(achPaymentMethods).set({ isDefault: false }).where(eq(achPaymentMethods.userId, ctx.user.id));
-      await db.update(achPaymentMethods).set({ isDefault: true }).where(eq(achPaymentMethods.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const [_row] = await db.update(achPaymentMethods).set({ isDefault: true }).where(eq(achPaymentMethods.id, input.id)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   removeAch: protectedProcedure
@@ -99,8 +101,7 @@ export const paymentMethodsExtRouter = router({
         .where(and(eq(achPaymentMethods.id, input.id), eq(achPaymentMethods.userId, ctx.user.id)))
         .returning();
       if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   listSepa: protectedProcedure.query(async ({ ctx }) => {
@@ -148,8 +149,7 @@ export const paymentMethodsExtRouter = router({
         .where(and(eq(sepaPaymentMethods.id, input.id), eq(sepaPaymentMethods.userId, ctx.user.id)))
         .returning();
       if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   listInterac: protectedProcedure.query(async ({ ctx }) => {
@@ -198,8 +198,7 @@ export const paymentMethodsExtRouter = router({
         .where(and(eq(interacPaymentMethods.id, input.id), eq(interacPaymentMethods.userId, ctx.user.id)))
         .returning();
       if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   listXofAccounts: protectedProcedure.query(async ({ ctx }) => {
@@ -249,8 +248,7 @@ export const paymentMethodsExtRouter = router({
         .where(and(eq(xofPayoutAccounts.id, input.id), eq(xofPayoutAccounts.userId, ctx.user.id)))
         .returning();
       if (!deleted.length) throw new TRPCError({ code: "NOT_FOUND" });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   listAll: protectedProcedure.query(async ({ ctx }) => {
@@ -396,7 +394,7 @@ export const hnwExtRouter = router({
       const [rm] = await db.select().from(hnwRelationshipManagers).where(eq(hnwRelationshipManagers.id, input.rmId));
       if (!rm) throw new TRPCError({ code: "NOT_FOUND", message: "Relationship manager not found" });
       await db.update(hnwProfiles).set({ assignedRmId: input.rmId, updatedAt: new Date() }).where(eq(hnwProfiles.id, profile.id));
-      return { success: true, rmName: rm.displayName };
+      return { success: true, verified: true, rmName: rm.displayName };
     }),
 });
 
@@ -703,16 +701,17 @@ export const securityExtRouter = router({
       const db = await getDb();
       const [lockout] = await db.select().from(userLockouts).where(eq(userLockouts.userId, input.userId));
       if (!lockout) throw new TRPCError({ code: "NOT_FOUND", message: "No lockout record found" });
-      await db.update(userLockouts).set({
+      const [_row] = await db.update(userLockouts).set({
         failedAttempts: 0,
         lockedAt: null,
         lockExpiresAt: null,
         unlockedAt: new Date(),
         unlockedByAdminId: ctx.user.id,
-      }).where(eq(userLockouts.userId, input.userId));
-      await createAuditLog({ userId: ctx.user.id, action: "admin.unlock_user", targetType: "user", targetId: input.userId, severity: "warning", metadata: { reason: input.reason } });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      }).where(eq(userLockouts.userId, input.userId)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   requestSelfUnlock: protectedProcedure.mutation(async ({ ctx }) => {
@@ -726,7 +725,7 @@ export const securityExtRouter = router({
       unlockTokenExpiresAt: expiresAt,
       unlockRequestedAt: new Date(),
     }).where(eq(userLockouts.userId, ctx.user.id));
-    return { success: true, message: "Unlock link sent to your email. Valid for 30 minutes." };
+    return { success: true, verified: true, message: "Unlock link sent to your email. Valid for 30 minutes." };
   }),
 
   checkIdempotencyKey: protectedProcedure
@@ -983,10 +982,10 @@ export const crossSellExtRouter = router({
     .input(z.object({ offerId: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      await db.update(crossSellOffers).set({ shownAt: new Date(), status: "shown" })
-        .where(and(eq(crossSellOffers.id, input.offerId), eq(crossSellOffers.userId, ctx.user.id)));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const [_row] = await db.update(crossSellOffers).set({ shownAt: new Date(), status: "shown" })
+        .where(and(eq(crossSellOffers.id, input.offerId), eq(crossSellOffers.userId, ctx.user.id))).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   respondToOffer: protectedProcedure
@@ -999,13 +998,14 @@ export const crossSellExtRouter = router({
       const [offer] = await db.select().from(crossSellOffers)
         .where(and(eq(crossSellOffers.id, input.offerId), eq(crossSellOffers.userId, ctx.user.id)));
       if (!offer) throw new TRPCError({ code: "NOT_FOUND" });
-      await db.update(crossSellOffers).set({
+      const [_row] = await db.update(crossSellOffers).set({
         status: input.response,
         respondedAt: new Date(),
-      }).where(eq(crossSellOffers.id, input.offerId));
-      await createAuditLog({ userId: ctx.user.id, action: `cross_sell.offer_${input.response}`, targetType: "cross_sell_offer", targetId: input.offerId, severity: "info", metadata: { offerType: offer.offerType, response: input.response } });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      }).where(eq(crossSellOffers.id, input.offerId)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   listMyOffers: protectedProcedure.query(async ({ ctx }) => {
@@ -1212,7 +1212,7 @@ export const pushPrefsRouter = router({
           isEnabled: input.isEnabled,
         });
       }
-      return { success: true, preferenceKey: input.preferenceKey, isEnabled: input.isEnabled };
+      return { success: true, verified: true, preferenceKey: input.preferenceKey, isEnabled: input.isEnabled };
     }),
 
   updateBulkPreferences: protectedProcedure
@@ -1292,9 +1292,11 @@ export const smeBulkRouter = router({
       if (!["pending_validation", "validated"].includes(batch.status)) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot cancel batch in status: ${batch.status}` });
       }
-      await db.update(smeTradeBulkBatches).set({ status: "cancelled", completedAt: new Date() }).where(eq(smeTradeBulkBatches.id, batch.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const [_row] = await db.update(smeTradeBulkBatches).set({ status: "cancelled", completedAt: new Date() }).where(eq(smeTradeBulkBatches.id, batch.id)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   adminListBatches: adminProcedure

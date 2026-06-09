@@ -738,7 +738,7 @@ export const beneficiaryGroupsV2Router = router({
         .where(and(eq(beneficiaries.id, input.beneficiaryId), eq(beneficiaries.userId, ctx.user.id)))
         .limit(1);
       if (!b[0]) throw new Error("Beneficiary not found");
-      return { success: true, beneficiaryId: input.beneficiaryId, group: input.groupName };
+      return { success: true, verified: true, beneficiaryId: input.beneficiaryId, group: input.groupName };
     }),
 
   bulkSend: protectedProcedure

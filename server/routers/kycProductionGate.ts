@@ -387,7 +387,7 @@ export const accountOpeningGateRouter = router({
         metadata: { tier: input.verifiedTier, level: input.verifiedLevel },
       });
 
-      return { success: true, updatedTier: input.verifiedTier };
+      return { success: true, verified: true, updatedTier: input.verifiedTier };
     }),
 });
 

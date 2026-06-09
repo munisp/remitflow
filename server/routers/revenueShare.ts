@@ -151,8 +151,7 @@ export const revenueShareRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(revenueShareAgreements.id, id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   approveAgreement: adminProcedure
@@ -160,11 +159,11 @@ export const revenueShareRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(revenueShareAgreements)
+      const [_row] = await db.update(revenueShareAgreements)
         .set({ status: "active", approvedBy: ctx.user.id, approvedAt: new Date(), updatedAt: new Date() })
-        .where(eq(revenueShareAgreements.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(revenueShareAgreements.id, input.id)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   terminateAgreement: adminProcedure
@@ -172,11 +171,11 @@ export const revenueShareRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(revenueShareAgreements)
+      const [_row] = await db.update(revenueShareAgreements)
         .set({ status: "terminated", effectiveTo: new Date(), notes: input.reason, updatedAt: new Date() })
-        .where(eq(revenueShareAgreements.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(revenueShareAgreements.id, input.id)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // ── Tiers ────────────────────────────────────────────────────────────────────
@@ -211,8 +210,7 @@ export const revenueShareRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.delete(revenueShareTiers).where(eq(revenueShareTiers.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // ── Ledger ────────────────────────────────────────────────────────────────────
@@ -334,11 +332,11 @@ export const revenueShareRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(revenueShareReports)
+      const [_row] = await db.update(revenueShareReports)
         .set({ status: "paid", paidAt: new Date(), ...(input.payoutId ? { payoutId: input.payoutId } : {}) })
-        .where(eq(revenueShareReports.id, input.reportId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(revenueShareReports.id, input.reportId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // ── Analytics ─────────────────────────────────────────────────────────────────

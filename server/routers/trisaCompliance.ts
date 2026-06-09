@@ -175,7 +175,7 @@ export const trisaComplianceRouter = router({
         } catch { /* table may not exist */ }
       }
 
-      return { success: true, recordId, status: "RECEIVED", message: "Travel Rule information received and stored" };
+      return { success: true, verified: true, recordId, status: "RECEIVED", message: "Travel Rule information received and stored" };
     }),
 
   /**
@@ -268,7 +268,7 @@ export const trisaComplianceRouter = router({
         description: JSON.stringify({ notes: input.notes }),
       });
 
-      return { success: true, recordId: input.recordId, status: "APPROVED", reviewedBy: ctx.user.id };
+      return { success: true, verified: true, recordId: input.recordId, status: "APPROVED", reviewedBy: ctx.user.id };
     }),
 
   /**

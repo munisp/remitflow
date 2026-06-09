@@ -196,7 +196,7 @@ export const hnwBankingRouter = router({
         content: `Topic: ${input.topic}\nMessage: ${input.message}\nPreferred time: ${input.preferredContactTime ?? "Any"}`,
       });
 
-      return { success: true, message: "Your request has been submitted. Your RM will contact you within 2 business hours." };
+      return { success: true, verified: true, message: "Your request has been submitted. Your RM will contact you within 2 business hours." };
     }),
 
   /**

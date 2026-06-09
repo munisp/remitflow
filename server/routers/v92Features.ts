@@ -237,7 +237,7 @@ export const transferLimitsRouter = router({
       } catch {
         // Table may not exist — return success with in-memory update
       }
-      return { success: true, tier: input.tier };
+      return { success: true, verified: true, tier: input.tier };
     }),
 });
 
@@ -464,8 +464,7 @@ export const beneficiaryCrudRouter = router({
       if (input.isFavorite !== undefined) {
         await db.execute(sql`UPDATE beneficiaries SET "isFavorite" = ${input.isFavorite} WHERE id = ${input.id} AND "userId" = ${ctx.user.id}`);
       }
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   delete: auditedProcedure
@@ -474,8 +473,7 @@ export const beneficiaryCrudRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.execute(sql`DELETE FROM beneficiaries WHERE id = ${input.id} AND "userId" = ${ctx.user.id}`);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   toggleFavorite: auditedProcedure
@@ -488,8 +486,7 @@ export const beneficiaryCrudRouter = router({
         SET "isFavorite" = NOT "isFavorite"
         WHERE id = ${input.id} AND "userId" = ${ctx.user.id}
       `);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });
 
@@ -518,8 +515,7 @@ export const walletCrudRouter = router({
         VALUES (${ctx.user.id}, ${input.currency}, 0, ${input.isDefault}, 'active', NOW(), NOW())
         ON CONFLICT ("userId", currency) DO UPDATE SET "updatedAt" = NOW()
       `);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   setDefault: auditedProcedure
@@ -528,9 +524,11 @@ export const walletCrudRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       await db.execute(sql`UPDATE wallets SET "isDefault" = false WHERE "userId" = ${ctx.user.id}`);
-      await db.execute(sql`UPDATE wallets SET "isDefault" = true, "updatedAt" = NOW() WHERE id = ${input.walletId} AND "userId" = ${ctx.user.id}`);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const _res = await db.execute(sql`UPDATE wallets SET "isDefault" = true, "updatedAt" = NOW() WHERE id = ${input.walletId} AND "userId" = ${ctx.user.id} RETURNING 1`);
+
+      if (!_res.length) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   deactivate: auditedProcedure
@@ -538,9 +536,11 @@ export const walletCrudRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.execute(sql`UPDATE wallets SET status = 'inactive', "updatedAt" = NOW() WHERE id = ${input.walletId} AND "userId" = ${ctx.user.id}`);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const _res = await db.execute(sql`UPDATE wallets SET status = 'inactive', "updatedAt" = NOW() WHERE id = ${input.walletId} AND "userId" = ${ctx.user.id} RETURNING 1`);
+
+      if (!_res.length) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   updateLabel: auditedProcedure
@@ -548,9 +548,11 @@ export const walletCrudRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.execute(sql`UPDATE wallets SET label = ${input.label}, "updatedAt" = NOW() WHERE id = ${input.walletId} AND "userId" = ${ctx.user.id}`);
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      const _res = await db.execute(sql`UPDATE wallets SET label = ${input.label}, "updatedAt" = NOW() WHERE id = ${input.walletId} AND "userId" = ${ctx.user.id} RETURNING 1`);
+
+      if (!_res.length) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });
 
@@ -708,8 +710,7 @@ export const kycAdminRouter = router({
           nextSteps: "You can now send larger amounts. Log in to start transacting.",
         }); // non-blocking
       }
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   reject: adminProcedure
@@ -742,8 +743,7 @@ export const kycAdminRouter = router({
           nextSteps: "Please resubmit with the correct documents. Contact support if you need help.",
         });
       }
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   getStats: adminProcedure.query(async () => {

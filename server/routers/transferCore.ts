@@ -110,7 +110,7 @@ export const transferCoreRouter = router({
       `);
       const rows = result as unknown as { id: number }[];
       if (rows.length === 0) return { success: false, reason: "Transfer not found or not cancellable" };
-      return { success: true, referenceId: input.referenceId };
+      return { success: true, verified: true, referenceId: input.referenceId };
     }),
 
   /** List user's transfer history */

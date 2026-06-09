@@ -99,7 +99,7 @@ export const requestMoneyRouter = router({
       await db.update(paymentRequests)
         .set({ status: "paid", payerUserId: ctx.user.id, paidAt: new Date(), updatedAt: new Date() })
         .where(eq(paymentRequests.id, req.id));
-      return { success: true, transactionRef: txRef };
+      return { success: true, verified: true, transactionRef: txRef };
     }),
 
   // Send a payment request via email to a specific recipient
@@ -148,10 +148,10 @@ export const requestMoneyRouter = router({
         .where(and(eq(paymentRequests.id, input.id), eq(paymentRequests.requesterId, ctx.user.id)));
       if (!req) throw new TRPCError({ code: "NOT_FOUND" });
       if (req.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: "Only pending requests can be cancelled" });
-      await db.update(paymentRequests)
+      const [_row] = await db.update(paymentRequests)
         .set({ status: "cancelled", updatedAt: new Date() })
-        .where(eq(paymentRequests.id, input.id));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+        .where(eq(paymentRequests.id, input.id)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });

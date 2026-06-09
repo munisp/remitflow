@@ -317,7 +317,7 @@ export const securityAuditRouter = router({
         action: "USER_UNLOCKED",
         description: `Admin (id=${adminId}) manually unlocked account for user ${input.userId}`,
       });
-      return { success: true, userId: input.userId };
+      return { success: true, verified: true, userId: input.userId };
     }),
 
   // ─── v148: Reset login attempts counter ───────────────────────────────────
@@ -338,7 +338,7 @@ export const securityAuditRouter = router({
         action: "LOGIN_ATTEMPTS_RESET",
         description: `Admin (id=${adminId}) reset failed login attempts for user ${input.userId}`,
       });
-      return { success: true, userId: input.userId };
+      return { success: true, verified: true, userId: input.userId };
     }),
 
   // ─── v149: Lockout audit history for a specific user ─────────────────

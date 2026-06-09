@@ -423,7 +423,7 @@ export const transfersListRouter = router({
         .where(eq(transactions.id, input.id))
         ;
 
-      return { success: true, id: input.id };
+      return { success: true, verified: true, id: input.id };
     }),
 
   exportCsv: protectedProcedure

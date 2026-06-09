@@ -122,7 +122,7 @@ const raiseDispute = protectedProcedure
       // Notification failure is non-blocking
     }
 
-    return { success: true, disputeId, message: "Dispute submitted successfully. Our team will review within 2 business days." };
+    return { success: true, verified: true, disputeId, message: "Dispute submitted successfully. Our team will review within 2 business days." };
   });
 
 // ─── User: upload evidence file (base64 → S3) ───────────────────────────────
@@ -184,7 +184,7 @@ const uploadEvidence = protectedProcedure
       metadata: { disputeId: input.disputeId, evidenceUrl: input.evidenceUrl },
     });
 
-    return { success: true, disputeId: input.disputeId };
+    return { success: true, verified: true, disputeId: input.disputeId };
   });
 
 // ─── User: list own disputes ──────────────────────────────────────────────────
@@ -304,10 +304,10 @@ const adminUpdateDispute = protectedProcedure
           });
         } catch { /* non-blocking */ }
       }
-      return { success: true, disputeId: input.disputeId, newStatus: input.status, smsSent };
+      return { success: true, verified: true, disputeId: input.disputeId, newStatus: input.status, smsSent };
     }
 
-    return { success: true, disputeId: input.disputeId, newStatus: input.status, smsSent: false };
+    return { success: true, verified: true, disputeId: input.disputeId, newStatus: input.status, smsSent: false };
   });
 
 // ─── Admin: get dispute stats ─────────────────────────────────────────────────

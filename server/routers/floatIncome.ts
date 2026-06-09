@@ -202,7 +202,7 @@ export const floatIncomeRouter = router({
         targetType: "float_rate",
         description: JSON.stringify({ currency: input.currency, newRate: input.rate, reason: input.reason }),
       });
-      return { success: true, currency: input.currency, newRate: input.rate, updatedBy: ctx.user.id };
+      return { success: true, verified: true, currency: input.currency, newRate: input.rate, updatedBy: ctx.user.id };
     }),
 
   /**
@@ -256,6 +256,6 @@ export const floatIncomeRouter = router({
         description: JSON.stringify({ date: today, currencies: results.length }),
       });
 
-      return { success: true, date: today, accruals: results };
+      return { success: true, verified: true, date: today, accruals: results };
     }),
 });

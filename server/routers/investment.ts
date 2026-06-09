@@ -157,8 +157,7 @@ export const ngxStockRouter = router({
         .where(and(eq(stockWatchlists.id, input.watchlistId), eq(stockWatchlists.userId, ctx.user.id)));
       if (!item) throw new TRPCError({ code: "NOT_FOUND", message: "Watchlist item not found" });
       await (await getDbConn()).delete(stockWatchlists).where(eq(stockWatchlists.id, input.watchlistId));
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Orders
@@ -817,7 +816,7 @@ export const paypalTopupRouter = router({
         .from(paypalTransactions)
         .where(and(eq(paypalTransactions.paypalOrderId, input.orderId), eq(paypalTransactions.userId, ctx.user.id)));
       if (!tx) throw new TRPCError({ code: "NOT_FOUND" });
-      if (tx.walletCredited) return { success: true, amountUsd: capturedAmount };
+      if (tx.walletCredited) return { success: true, verified: true, amountUsd: capturedAmount };
       // Credit wallet
       const [wallet] = await (await getDbConn())
         .select()
@@ -834,7 +833,7 @@ export const paypalTopupRouter = router({
         .set({ status: "captured", paypalCaptureId: capture?.id, walletCredited: true })
         .where(eq(paypalTransactions.paypalOrderId, input.orderId));
 
-      return { success: true, amountUsd: capturedAmount };
+      return { success: true, verified: true, amountUsd: capturedAmount };
     }),
 
   getHistory: protectedProcedure.query(async ({ ctx }) => {
@@ -926,7 +925,7 @@ export const flutterwaveTopupRouter = router({
         .from(flutterwaveTransactions)
         .where(and(eq(flutterwaveTransactions.txRef, input.txRef), eq(flutterwaveTransactions.userId, ctx.user.id)));
       if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Transaction not found" });
-      if (tx.walletCredited) return { success: true, amountUsd: parseFloat(tx.amountUsd) };
+      if (tx.walletCredited) return { success: true, verified: true, amountUsd: parseFloat(tx.amountUsd) };
       // Verify payment with Flutterwave API
       const secretKey = process.env.FLW_SECRET_KEY ?? "";
       const verifyRes = await fetch(
@@ -958,7 +957,7 @@ export const flutterwaveTopupRouter = router({
         .set({ status: "successful", walletCredited: true })
         .where(eq(flutterwaveTransactions.txRef, input.txRef));
 
-      return { success: true, amountUsd: amount };
+      return { success: true, verified: true, amountUsd: amount };
     }),
 
   getHistory: protectedProcedure.query(async ({ ctx }) => {

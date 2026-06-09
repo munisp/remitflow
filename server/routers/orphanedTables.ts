@@ -60,7 +60,7 @@ export const outboxEventsRouter = router({
       await db.update(outboxEvents)
         .set({ status: "pending", retryCount: (event.retryCount ?? 0) + 1, failedAt: null, errorMessage: null })
         .where(eq(outboxEvents.id, input.id));
-      return { success: true, message: "Event queued for retry" };
+      return { success: true, verified: true, message: "Event queued for retry" };
     }),
 
   stats: adminProcedure.query(async () => {
@@ -87,7 +87,7 @@ export const outboxEventsRouter = router({
       const result = await db.delete(outboxEvents)
         .where(and(eq(outboxEvents.status, "published"), sql`${outboxEvents.publishedAt} < ${cutoff}`));
       await createAuditLog({ userId: ctx.user.id, action: "OUTBOX_PURGE", description: `Purged published outbox events older than ${input.olderThanDays} days` });
-      return { success: true, message: `Purged events older than ${input.olderThanDays} days` };
+      return { success: true, verified: true, message: `Purged events older than ${input.olderThanDays} days` };
     }),
 });
 
@@ -395,8 +395,7 @@ export const partnerApplicationCommentsRouter = router({
       await db.delete(partnerApplicationComments)
         .where(eq(partnerApplicationComments.id, input.id));
       await createAuditLog({ userId: ctx.user.id, action: "PARTNER_COMMENT_DELETED", description: `Partner application comment ${input.id} deleted` });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });
 
@@ -465,7 +464,7 @@ export const complianceEmailConfigRouter = router({
         .onConflictDoUpdate({ target: [complianceEmailConfig.tenantId], set: values })
         .returning();
       await createAuditLog({ userId: ctx.user.id, action: "COMPLIANCE_EMAIL_CONFIG_UPDATED", description: `Compliance email config updated for officer: ${input.officerEmail}` });
-      return { success: true, id: config.id };
+      return { success: true, verified: true, id: config.id };
     }),
 
   list: adminProcedure.query(async () => {
@@ -489,11 +488,11 @@ export const complianceEmailConfigRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(complianceEmailConfig)
+      const [_row] = await db.update(complianceEmailConfig)
         .set({ isActive: false, updatedAt: new Date() })
-        .where(eq(complianceEmailConfig.id, input.id));
+        .where(eq(complianceEmailConfig.id, input.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "COMPLIANCE_EMAIL_CONFIG_DEACTIVATED", description: `Compliance email config ${input.id} deactivated` });
-      const ts = new Date();
-      return { success: true, updatedAt: ts.toISOString(), serverTime: ts.getTime() };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });
