@@ -419,7 +419,8 @@ export const stablecoinRouter = router({
       const [wallet] = await db.select().from(stablecoinWallets).where(and(eq(stablecoinWallets.id, input.walletId), eq(stablecoinWallets.userId, ctx.user.id))).limit(1);
       if (!wallet) throw new TRPCError({ code: "NOT_FOUND" });
       if (Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
-      await db.update(stablecoinWallets).set({ balance: (Number(wallet.balance) - input.amount).toFixed(6) }).where(eq(stablecoinWallets.id, input.walletId));
+      const [_updated] = await db.update(stablecoinWallets).set({ balance: (Number(wallet.balance) - input.amount).toFixed(6) }).where(eq(stablecoinWallets.id, input.walletId)).returning();
+      if (!_updated) throw new TRPCError({ code: "NOT_FOUND", message: "Wallet update failed" });
       const txHash = `0x${randomBytes(32).toString('hex')}`;
       return { success: true, verified: true, txHash, amount: input.amount, toAddress: input.toAddress };
     }),

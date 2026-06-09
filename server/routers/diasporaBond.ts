@@ -658,7 +658,7 @@ export const diasporaBondRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot buy your own sell order" });
       }
       if (order.order.expiresAt && order.order.expiresAt < new Date()) {
-        await db.update(bondSecondaryOrders).set({ status: "expired" }).where(eq(bondSecondaryOrders.id, input.orderId));
+        const [_expired] = await db.update(bondSecondaryOrders).set({ status: "expired" }).where(eq(bondSecondaryOrders.id, input.orderId)).returning();
         throw new TRPCError({ code: "BAD_REQUEST", message: "Order has expired" });
       }
 

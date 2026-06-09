@@ -409,7 +409,7 @@ const escrowPlanRouter = router({
       await db.update(wallets).set({
         balance: String(Number(wallet.balance) - depositUsd),
         updatedAt: new Date(),
-      }).where(eq(wallets.id, wallet.id));
+      }).where(eq(wallets.id, wallet.id)).returning();
 
       // Lock deposit in TigerBeetle
       try {
@@ -449,7 +449,7 @@ const escrowPlanRouter = router({
         startedAt: new Date(),
         nextPaymentDate,
         updatedAt: new Date(),
-      }).where(eq(propertyEscrowPlans.id, plan.id));
+      }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
 
       await createAuditLog({ userId: ctx.user.id, action: "ESCROW_DEPOSIT_PAID", metadata: { planId: plan.planId, amount: depositUsd } });
       await notifyOwner({ title: "Escrow Deposit Paid", content: `Buyer ${ctx.user.id} paid $${depositUsd.toFixed(2)} deposit for escrow plan ${plan.planId}` });
@@ -482,7 +482,7 @@ const escrowPlanRouter = router({
       await db.update(wallets).set({
         balance: String(Number(wallet.balance) - amount),
         updatedAt: new Date(),
-      }).where(eq(wallets.id, wallet.id));
+      }).where(eq(wallets.id, wallet.id)).returning();
 
       // Lock in TigerBeetle
       try {
@@ -517,7 +517,7 @@ const escrowPlanRouter = router({
         status: "paid",
         paidAt: new Date(),
         transactionId: tx?.id,
-      }).where(eq(escrowPaymentSchedule.id, nextInstallment.id));
+      }).where(eq(escrowPaymentSchedule.id, nextInstallment.id)).returning();
 
       // Update plan totals
       const newTotalPaid = Number(plan.totalPaidUsd) + amount;
@@ -598,7 +598,7 @@ const milestoneRouter = router({
       await db.update(propertyMilestones).set({
         status: "evidence_submitted",
         updatedAt: new Date(),
-      }).where(eq(propertyMilestones.id, milestone.id));
+      }).where(eq(propertyMilestones.id, milestone.id)).returning();
 
       await createAuditLog({ userId: ctx.user.id, action: "MILESTONE_EVIDENCE_SUBMITTED", metadata: { milestoneId: input.milestoneId, evidenceId, evidenceType: input.evidenceType } });
       await notifyOwner({ title: "Milestone Evidence Submitted", content: `Builder submitted ${input.evidenceType} evidence for milestone "${milestone.name}" (Plan: ${plan.planId})` });
@@ -634,7 +634,7 @@ const milestoneRouter = router({
       }).where(eq(milestoneEvidence.id, evidence.id));
 
       if (!input.approved) {
-        await db.update(propertyMilestones).set({ status: "rejected", rejectedReason: input.rejectionReason ?? "Evidence rejected by inspector", updatedAt: new Date() }).where(eq(propertyMilestones.id, evidence.milestoneId));
+        await db.update(propertyMilestones).set({ status: "rejected", rejectedReason: input.rejectionReason ?? "Evidence rejected by inspector", updatedAt: new Date() }).where(eq(propertyMilestones.id, evidence.milestoneId)).returning();
       }
 
       await createAuditLog({ userId: ctx.user.id, action: input.approved ? "MILESTONE_EVIDENCE_APPROVED" : "MILESTONE_EVIDENCE_REJECTED", metadata: { evidenceId: input.evidenceId } });
@@ -690,7 +690,7 @@ const milestoneRouter = router({
           await db.update(wallets).set({
             balance: String(Number(builderWallet.balance) + releaseAmount),
             updatedAt: new Date(),
-          }).where(eq(wallets.id, builderWallet.id));
+          }).where(eq(wallets.id, builderWallet.id)).returning();
         }
       }
 
@@ -703,14 +703,14 @@ const milestoneRouter = router({
         fundsReleasedAt: new Date(),
         tigerBeetleTransferId: tbTransferId,
         updatedAt: new Date(),
-      }).where(eq(propertyMilestones.id, milestone.id));
+      }).where(eq(propertyMilestones.id, milestone.id)).returning();
 
       // Update plan released total
       const newReleased = Number(plan.totalReleasedUsd) + releaseAmount;
       await db.update(propertyEscrowPlans).set({
         totalReleasedUsd: String(newReleased),
         updatedAt: new Date(),
-      }).where(eq(propertyEscrowPlans.id, plan.id));
+      }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
 
       await createAuditLog({ userId: ctx.user.id, action: "MILESTONE_APPROVED_FUNDS_RELEASED", metadata: { milestoneId: input.milestoneId, releaseAmount, planId: plan.planId } });
 
@@ -792,7 +792,7 @@ const propertyDisputeRouter = router({
       }).returning();
 
       // Freeze the escrow plan
-      await db.update(propertyEscrowPlans).set({ status: "disputed", updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id));
+      await db.update(propertyEscrowPlans).set({ status: "disputed", updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
 
       // Send cure notice to builder
       const [builder] = await db.select().from(builderProfiles).where(eq(builderProfiles.id, plan.builderId)).limit(1);
@@ -858,7 +858,7 @@ const propertyDisputeRouter = router({
             await db.update(wallets).set({
               balance: String(Number(buyerWallet.balance) + input.refundAmountUsd),
               updatedAt: new Date(),
-            }).where(eq(wallets.id, buyerWallet.id));
+            }).where(eq(wallets.id, buyerWallet.id)).returning();
           }
 
           // Record refund transaction
@@ -874,7 +874,7 @@ const propertyDisputeRouter = router({
             reference: `ESCROW-REFUND-${input.disputeId}`,
           } as any);
 
-          await db.update(propertyEscrowPlans).set({ status: "refunded", updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id));
+          await db.update(propertyEscrowPlans).set({ status: "refunded", updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
           updates.refundCompletedAt = new Date();
           updates.status = "refund_completed";
         }
@@ -882,7 +882,7 @@ const propertyDisputeRouter = router({
         // Unfreeze escrow plan
         const [plan] = await db.select().from(propertyEscrowPlans).where(eq(propertyEscrowPlans.id, dispute.escrowPlanId)).limit(1);
         if (plan) {
-          await db.update(propertyEscrowPlans).set({ status: "active", updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id));
+          await db.update(propertyEscrowPlans).set({ status: "active", updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
         }
       }
 
@@ -923,7 +923,7 @@ const propertyDisputeRouter = router({
         await db.update(wallets).set({
           balance: String(Number(wallet.balance) + refundAmount),
           updatedAt: new Date(),
-        }).where(eq(wallets.id, wallet.id));
+        }).where(eq(wallets.id, wallet.id)).returning();
       }
 
       await db.insert(transactions).values({
@@ -938,7 +938,7 @@ const propertyDisputeRouter = router({
         reference: `ESCROW-FULLREFUND-${plan.planId}`,
       } as any);
 
-      await db.update(propertyEscrowPlans).set({ status: "refunded", cancelledAt: new Date(), updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id));
+      await db.update(propertyEscrowPlans).set({ status: "refunded", cancelledAt: new Date(), updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "ESCROW_FULL_REFUND", metadata: { planId: plan.planId, refundAmount, reason: input.reason } });
 
       return { planId: plan.planId, refundAmount, status: "refunded", message: `$${refundAmount.toFixed(2)} refunded to your wallet` };

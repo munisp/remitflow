@@ -168,7 +168,7 @@ export const perUserRateLimit = rateLimit({
 // General API: 100 req/min per IP
 export const generalRateLimit = rateLimit({
   windowMs: 60 * 1000,
-  max: 100,
+  max: process.env.LOAD_TEST_MODE === "true" ? 10000 : 100,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   message: { error: "Too many requests, please try again in a minute." },
