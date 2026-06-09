@@ -9,6 +9,7 @@ import { eq, desc, and, like, ilike, sql, inArray } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc.js";
 import { getDb } from "../db.js";
+import { subtractMoney, compareMoney, multiplyMoney, safeParseAmount } from "../lib/safeDecimal.js";
 import {
   ngxStocks,
   stockWatchlists,
@@ -350,7 +351,7 @@ export const realEstateRouter = router({
       if (listing.availableShares < input.sharesCount)
         throw new TRPCError({ code: "BAD_REQUEST", message: "Not enough shares available" });
 
-      const pricePerShare = parseFloat(listing.pricePerShareUsd);
+      const pricePerShare = safeParseAmount(listing.pricePerShareUsd);
       const totalUsd = pricePerShare * input.sharesCount;
       const ownershipPct = (input.sharesCount / listing.totalShares) * 100;
 
@@ -359,14 +360,14 @@ export const realEstateRouter = router({
         .select()
         .from(wallets)
         .where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD")));
-      if (!wallet || parseFloat(wallet.balance) < totalUsd) {
+      if (!wallet || compareMoney(wallet.balance, totalUsd) < 0) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient USD wallet balance" });
       }
 
-      // Debit wallet
+      // Debit wallet using safe decimal math
       await (await getDbConn())
         .update(wallets)
-        .set({ balance: (parseFloat(wallet.balance) - totalUsd).toFixed(2) })
+        .set({ balance: subtractMoney(wallet.balance, totalUsd) })
         .where(eq(wallets.id, wallet.id));
 
       // Reduce available shares
@@ -537,12 +538,12 @@ export const startupRouter = router({
           .select()
           .from(wallets)
           .where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD")));
-        if (!wallet || parseFloat(wallet.balance) < input.amountUsd) {
+        if (!wallet || compareMoney(wallet.balance, input.amountUsd) < 0) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient USD wallet balance" });
         }
         await (await getDbConn())
           .update(wallets)
-          .set({ balance: (parseFloat(wallet.balance) - input.amountUsd).toFixed(2) })
+          .set({ balance: subtractMoney(wallet.balance, input.amountUsd) })
           .where(eq(wallets.id, wallet.id));
       }
 

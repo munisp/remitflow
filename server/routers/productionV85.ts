@@ -651,13 +651,13 @@ export const complianceAlertsRouter = router({
       const [_row] = await db.update(complianceAlerts)
         .set({ snoozeUntil: null, status: 'open' })
         .where(eq(complianceAlerts.id, input.alertId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
       await db.insert(complianceAlertNotes).values({
         alertId: input.alertId,
         authorId: ctx.user.id,
         content: `Alert unsnoozed and re-opened by ${ctx.user.name ?? ctx.user.email}`,
         isInternal: true,
       });
-      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
       return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 

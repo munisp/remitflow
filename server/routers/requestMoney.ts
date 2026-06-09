@@ -98,7 +98,7 @@ export const requestMoneyRouter = router({
       // Mark request as paid
       await db.update(paymentRequests)
         .set({ status: "paid", payerUserId: ctx.user.id, paidAt: new Date(), updatedAt: new Date() })
-        .where(eq(paymentRequests.id, req.id));
+        .where(eq(paymentRequests.id, req.id)).returning();
       return { success: true, verified: true, transactionRef: txRef };
     }),
 

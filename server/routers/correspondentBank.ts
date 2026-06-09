@@ -68,7 +68,7 @@ export const correspondentBankRouter = router({
       requireAdmin(ctx.user.role);
       const db = await getDb();
       const correspondentId = `CORR-${input.swiftCode}-${Date.now()}`;
-      await db.insert(correspondentBanks).values({
+      const [_row] = await db.insert(correspondentBanks).values({
         correspondentId,
         bankName: input.bankName,
         swiftCode: input.swiftCode,
@@ -82,8 +82,8 @@ export const correspondentBankRouter = router({
         settlementRail: input.settlementRail,
         status: "active",
         createdAt: new Date(),
-      });
-      return { correspondentId, success: true };
+      }).returning();
+      return { correspondentId, success: true, verified: true };
     }),
 
   updateCorrespondentStatus: protectedProcedure
