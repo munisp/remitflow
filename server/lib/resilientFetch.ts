@@ -14,7 +14,7 @@
  *     body: JSON.stringify(payload),
  *   });
  */
-import { createHmac } from "crypto";
+import { createHmac, randomBytes } from "crypto";
 import { logger } from "../_core/logger";
 import { executeWithCircuitBreaker } from "../middleware/circuitBreaker";
 
@@ -72,7 +72,7 @@ function generateServiceToken(): string {
 
 function retryDelay(attempt: number, config: RetryConfig): number {
   const delay = Math.min(config.baseDelayMs * Math.pow(2, attempt), config.maxDelayMs);
-  const jitter = delay * 0.3 * (Math.random() * 2 - 1);
+  const jitter = delay * 0.3 * (randomBytes(4).readUInt32BE() / 0xFFFFFFFF * 2 - 1);
   return Math.max(50, delay + jitter);
 }
 

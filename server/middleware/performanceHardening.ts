@@ -10,7 +10,7 @@
  * - Database connection monitoring
  * - Request coalescing for duplicate queries
  */
-import { createHash } from "crypto";
+import { createHash, randomInt } from "crypto";
 import { Request, Response, NextFunction } from "express";
 import { logger } from "../_core/logger";
 
@@ -301,7 +301,7 @@ export function getReplicaUrl(): string | null {
       return READ_REPLICA_CONFIG.replicaUrls[_replicaIndex];
     case "random":
       return READ_REPLICA_CONFIG.replicaUrls[
-        Math.floor(Math.random() * READ_REPLICA_CONFIG.replicaUrls.length)
+        randomInt(READ_REPLICA_CONFIG.replicaUrls.length)
       ];
     default:
       return READ_REPLICA_CONFIG.replicaUrls[0];

@@ -291,6 +291,7 @@ export const transferLimitsV2Router = router({
       });
       return {
         success: true,
+        verified: true,
         message: "Limit increase request submitted. Our compliance team will review within 1–2 business days.",
         ticketRef: `LIR-${Date.now().toString(36).toUpperCase()}`,
       };

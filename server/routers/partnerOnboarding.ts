@@ -303,6 +303,7 @@ export const partnerOnboardingRouter = router({
 
       return {
         success: true,
+        verified: true,
         tenantId: newTenant.id,
         slug: newTenant.slug,
         dashboardUrl: `/tenant/${newTenant.slug}/dashboard`,
@@ -600,6 +601,7 @@ export const adminInviteCodesRouter = router({
 
       return {
         success: true,
+        verified: true,
         code: newCode.code,
         id: newCode.id,
         onboardingUrl: `/partner/onboard?code=${newCode.code}`,

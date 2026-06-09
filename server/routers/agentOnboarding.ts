@@ -112,6 +112,7 @@ export const agentOnboardingRouter = router({
 
       return {
         success: true,
+        verified: true,
         agentCode,
         tier: input.tier,
         dailyLimit: TIER_LIMITS[input.tier],

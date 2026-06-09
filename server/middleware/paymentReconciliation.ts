@@ -10,7 +10,7 @@
  * - Payment state machine with audit trail
  * - Auto-refund on timeout
  */
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHmac, timingSafeEqual, randomBytes } from "crypto";
 import { logger } from "../_core/logger";
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
@@ -91,7 +91,7 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
 export function calculateRetryDelay(attempt: number, config: RetryConfig = DEFAULT_RETRY_CONFIG): number {
   const exponentialDelay = config.baseDelayMs * Math.pow(config.backoffMultiplier, attempt);
   const cappedDelay = Math.min(exponentialDelay, config.maxDelayMs);
-  const jitter = cappedDelay * config.jitterFactor * (Math.random() * 2 - 1);
+  const jitter = cappedDelay * config.jitterFactor * (randomBytes(4).readUInt32BE() / 0xFFFFFFFF * 2 - 1);
   return Math.max(0, cappedDelay + jitter);
 }
 

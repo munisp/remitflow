@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { logger } from '../_core/logger';
 /**
  * RemitFlow — Dapr Client (Production v2)
@@ -251,7 +252,7 @@ class DaprClient {
 
   /** Execute a function while holding a distributed lock */
   async withLock<T>(resourceId: string, fn: () => Promise<T>, expiryInSeconds = 30): Promise<T | null> {
-    const owner = `remitflow-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const owner = `remitflow-${Date.now()}-${crypto.randomBytes(8).toString("hex")}`;
     const acquired = await this.acquireLock(resourceId, owner, expiryInSeconds);
     if (!acquired) {
       logger.warn(`[DAPR] Could not acquire lock: ${resourceId}`);

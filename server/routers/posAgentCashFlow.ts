@@ -199,10 +199,11 @@ export const posAgentCashFlowRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(agentAccounts.id, agent.id))
-        ;
+        .returning();
 
       return {
         success: true,
+        verified: true,
         commission: `${input.currency} ${commission.toFixed(2)}`,
         transaction: {
           id: String(tx?.id ?? ref),
@@ -296,7 +297,7 @@ export const posAgentCashFlowRouter = router({
           .update(wallets)
           .set({ balance: sql`${wallets.balance} - ${input.amount}`, updatedAt: new Date() })
           .where(eq(wallets.id, wallet.id))
-          ;
+          .returning();
       }
 
       // Update agent totals
@@ -308,10 +309,11 @@ export const posAgentCashFlowRouter = router({
           updatedAt: new Date(),
         })
         .where(eq(agentAccounts.id, agent.id))
-        ;
+        .returning();
 
       return {
         success: true,
+        verified: true,
         commission: `${input.currency} ${commission.toFixed(2)}`,
         transaction: {
           id: String(tx?.id ?? ref),

@@ -121,7 +121,7 @@ export const revenueShareRouter = router({
           }))
         );
       }
-      return { id: agreementId, success: true };
+      return { id: agreementId, success: true, verified: true };
     }),
 
   updateAgreement: adminProcedure

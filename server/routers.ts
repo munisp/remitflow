@@ -483,7 +483,7 @@ export const appRouter = router({
         // Mark token as used
         await db.update(impersonationTokens)
           .set({ usedAt: new Date() })
-          .where(eq(impersonationTokens.id, record.id));
+          .where(eq(impersonationTokens.id, record.id)).returning();
         // Fetch the target user
         const [targetUser] = await db.select().from(users).where(eq(users.id, record.targetUserId)).limit(1);
         if (!targetUser) throw new TRPCError({ code: "NOT_FOUND", message: "Target user not found" });
@@ -1461,7 +1461,7 @@ export const appRouter = router({
     }),
     deleteAlert: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(fxAlerts).where(and(eq(fxAlerts.id, input.id), eq(fxAlerts.userId, ctx.user.id)));
+      await db.delete(fxAlerts).where(and(eq(fxAlerts.id, input.id), eq(fxAlerts.userId, ctx.user.id))).returning();
       return { success: true, deletedAlertId: input.id };
     }),
   }),
@@ -1501,14 +1501,14 @@ export const appRouter = router({
       const { id, ...updates } = input;
       const [existing] = await db.select().from(beneficiaries).where(and(eq(beneficiaries.id, id), eq(beneficiaries.userId, ctx.user!.id))).limit(1);
       if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Beneficiary not found" });
-      await db.update(beneficiaries).set(updates).where(eq(beneficiaries.id, id));
+      await db.update(beneficiaries).set(updates).where(eq(beneficiaries.id, id)).returning();
       return { success: true, beneficiary: { ...existing, ...updates } };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const [existing] = await db.select().from(beneficiaries).where(and(eq(beneficiaries.id, input.id), eq(beneficiaries.userId, ctx.user.id))).limit(1);
       if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Beneficiary not found" });
-      await db.delete(beneficiaries).where(eq(beneficiaries.id, input.id));
+      await db.delete(beneficiaries).where(eq(beneficiaries.id, input.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "BENEFICIARY_REMOVED", description: `Beneficiary removed: ${(existing as any).name}` });
       return { success: true, removedId: input.id };
     }),
@@ -1517,7 +1517,7 @@ export const appRouter = router({
       const [b] = await db.select().from(beneficiaries).where(and(eq(beneficiaries.id, input.id), eq(beneficiaries.userId, ctx.user.id))).limit(1);
       if (!b) throw new TRPCError({ code: "NOT_FOUND", message: "Beneficiary not found" });
       const newFavorite = !b.isFavorite;
-      await db.update(beneficiaries).set({ isFavorite: newFavorite }).where(eq(beneficiaries.id, input.id));
+      await db.update(beneficiaries).set({ isFavorite: newFavorite }).where(eq(beneficiaries.id, input.id)).returning();
       return { success: true, isFavorite: newFavorite };
     }),
     topSenders: protectedProcedure.query(async ({ ctx }) => {
@@ -1564,7 +1564,7 @@ export const appRouter = router({
       const [card] = await db.select().from(cards).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id))).limit(1);
       if (!card) throw new TRPCError({ code: "NOT_FOUND", message: "Card not found" });
       if (card.status === "cancelled") throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot freeze a cancelled card" });
-      await db.update(cards).set({ status: "frozen" }).where(eq(cards.id, input.id));
+      await db.update(cards).set({ status: "frozen" }).where(eq(cards.id, input.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "CARD_FROZEN", description: `Card ending ${card.last4} frozen` });
       return { success: true, cardId: input.id, status: "frozen" };
     }),
@@ -1573,7 +1573,7 @@ export const appRouter = router({
       const [card] = await db.select().from(cards).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id))).limit(1);
       if (!card) throw new TRPCError({ code: "NOT_FOUND", message: "Card not found" });
       if (card.status !== "frozen") throw new TRPCError({ code: "BAD_REQUEST", message: "Card is not frozen" });
-      await db.update(cards).set({ status: "active" }).where(eq(cards.id, input.id));
+      await db.update(cards).set({ status: "active" }).where(eq(cards.id, input.id)).returning();
       return { success: true, cardId: input.id, status: "active" };
     }),
     cancel: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
@@ -1581,7 +1581,7 @@ export const appRouter = router({
       const [card] = await db.select().from(cards).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id))).limit(1);
       if (!card) throw new TRPCError({ code: "NOT_FOUND", message: "Card not found" });
       if (card.status === "cancelled") throw new TRPCError({ code: "BAD_REQUEST", message: "Card is already cancelled" });
-      await db.update(cards).set({ status: "cancelled" }).where(eq(cards.id, input.id));
+      await db.update(cards).set({ status: "cancelled" }).where(eq(cards.id, input.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "CARD_CANCELLED", description: `Card ending ${card.last4} cancelled` });
       return { success: true, cardId: input.id, status: "cancelled" };
     }),
@@ -1590,7 +1590,7 @@ export const appRouter = router({
       const [card] = await db.select().from(cards).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id))).limit(1);
       if (!card) throw new TRPCError({ code: "NOT_FOUND", message: "Card not found" });
       if (card.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: "Can only update limits on active cards" });
-      await db.update(cards).set({ spendLimit: input.limit.toString() }).where(eq(cards.id, input.id));
+      await db.update(cards).set({ spendLimit: input.limit.toString() }).where(eq(cards.id, input.id)).returning();
       return { success: true, cardId: input.id, newLimit: input.limit };
     }),
   }),
@@ -1659,10 +1659,10 @@ export const appRouter = router({
         }
         if (input.amount > Number((target as any).currentAmount)) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Amount exceeds goal balance' });
         const newAmt = Number((target as any).currentAmount) - input.amount;
-        await db.update(savingsGoals).set({ currentAmount: newAmt.toFixed(2), status: newAmt <= 0 ? 'completed' : 'active' }).where(eq(savingsGoals.id, input.goalId));
+        await db.update(savingsGoals).set({ currentAmount: newAmt.toFixed(2), status: newAmt <= 0 ? 'completed' : 'active' }).where(eq(savingsGoals.id, input.goalId)).returning();
         const [goalWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
         if (goalWallet) {
-          await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` }).where(eq(wallets.id, goalWallet.id));
+          await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` }).where(eq(wallets.id, goalWallet.id)).returning();
         } else {
           await db.insert(wallets).values({ userId: ctx.user.id, currency: "USD", balance: input.amount.toFixed(2), isDefault: false, status: "active" });
         }
@@ -1676,14 +1676,14 @@ export const appRouter = router({
         if (remaining <= 0) break;
         const deduct = Math.min(Number(g.currentAmount), remaining);
         const newAmt = Number(g.currentAmount) - deduct;
-        await db.update(savingsGoals).set({ currentAmount: newAmt.toFixed(2), status: newAmt <= 0 ? 'completed' : 'active' }).where(eq(savingsGoals.id, g.id));
+        await db.update(savingsGoals).set({ currentAmount: newAmt.toFixed(2), status: newAmt <= 0 ? 'completed' : 'active' }).where(eq(savingsGoals.id, g.id)).returning();
         remaining -= deduct;
       }
       const [usdWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
       if (usdWallet) {
-        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` }).where(eq(wallets.id, usdWallet.id));
+        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` }).where(eq(wallets.id, usdWallet.id)).returning();
       } else {
-        await db.insert(wallets).values({ userId: ctx.user.id, currency: "USD", balance: input.amount.toFixed(2), isDefault: false, status: "active" });
+        await db.insert(wallets).values({ userId: ctx.user.id, currency: "USD", balance: input.amount.toFixed(2), isDefault: false, status: "active" }).returning();
       }
       await createAuditLog({ userId: ctx.user.id, action: 'SAVINGS_WITHDRAWAL', description: `Withdrawal: $${input.amount}` });
       await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0", description: `Savings withdrawal: $${input.amount}` });
@@ -1721,17 +1721,17 @@ export const appRouter = router({
       if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
       const newAmount = Math.min(Number(goal.currentAmount) + input.amount, Number(goal.targetAmount));
       const status = newAmount >= Number(goal.targetAmount) ? "completed" : "active";
-      await db.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id));
+      await db.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
       return { success: true, newAmount };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id)));
+      await db.delete(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).returning();
       return { success: true, removedGoalId: input.id };
     }),
     getGoalProgress: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const [goal] = await db.select().from(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).limit(1);
+      const [goal] = await db.select().from(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).limit(1).returning();
       if (!goal) throw new TRPCError({ code: "NOT_FOUND", message: "Goal not found" });
       const target = Number(goal.targetAmount);
       const current = Number(goal.currentAmount);
@@ -1767,12 +1767,12 @@ export const appRouter = router({
       if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
       const newAmount = Math.min(Number(goal.currentAmount) + input.amount, Number(goal.targetAmount));
       const status = newAmount >= Number(goal.targetAmount) ? "completed" : "active";
-      await db.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id));
+      await db.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
       return { success: true, newAmount };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id)));
+      await db.delete(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).returning();
       return { success: true, removedGoalId: input.id };
     }),
   }),
@@ -1785,14 +1785,14 @@ export const appRouter = router({
     }),
     markRead: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(notifications).set({ isRead: true }).where(and(eq(notifications.id, input.id), eq(notifications.userId, ctx.user.id)));
+      await db.update(notifications).set({ isRead: true }).where(and(eq(notifications.id, input.id), eq(notifications.userId, ctx.user.id))).returning();
       const remaining = await getUnreadNotificationCount(ctx.user.id);
       return { success: true, markedId: input.id, remainingUnread: remaining };
     }),
     markAllRead: protectedProcedure.mutation(async ({ ctx }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const beforeCount = await getUnreadNotificationCount(ctx.user.id);
-      await db.update(notifications).set({ isRead: true }).where(eq(notifications.userId, ctx.user.id));
+      await db.update(notifications).set({ isRead: true }).where(eq(notifications.userId, ctx.user.id)).returning();
       return { success: true, markedCount: beforeCount };
     }),
     unreadCount: protectedProcedure.query(async ({ ctx }) => {
@@ -1803,7 +1803,7 @@ export const appRouter = router({
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const [existing] = await db.select({ id: notifications.id }).from(notifications).where(and(eq(notifications.id, input.id), eq(notifications.userId, ctx.user.id))).limit(1);
       if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Notification not found" });
-      await db.delete(notifications).where(eq(notifications.id, input.id));
+      await db.delete(notifications).where(eq(notifications.id, input.id)).returning();
       return { success: true, removedId: input.id };
     }),
     getPreferences: protectedProcedure.query(async ({ ctx }) => {
@@ -1870,7 +1870,7 @@ export const appRouter = router({
       // Mark previous docs of the same type as superseded (version history)
       await db.update(kycDocuments)
         .set({ supersededAt: new Date(), updatedAt: new Date() })
-        .where(and(eq(kycDocuments.userId, ctx.user.id), sql`${kycDocuments.docType} = ${input.type}`, sql`${kycDocuments.supersededAt} IS NULL`));
+        .where(and(eq(kycDocuments.userId, ctx.user.id), sql`${kycDocuments.docType} = ${input.type}`, sql`${kycDocuments.supersededAt} IS NULL`)).returning();
       // LLM OCR extraction — run non-blocking, store result in extractedData
       let extractedData: Record<string, any> | null = null;
       if (input.mimeType.startsWith("image/")) {
@@ -2228,11 +2228,11 @@ export const appRouter = router({
       await db.insert(referrals).values({ referrerId, referredId: ctx.user.id, rewardAmount: finalReward.toString(), status: "completed" as any } as any);
       const [ngnWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "NGN"))).limit(1);
       if (ngnWallet) {
-        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, ngnWallet.id));
+        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, ngnWallet.id)).returning();
       }
       const [referrerWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, referrerId), eq(wallets.currency, "NGN"))).limit(1);
       if (referrerWallet) {
-        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, referrerWallet.id));
+        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, referrerWallet.id)).returning();
       }
       return { success: true, reward: finalReward, message: `Referral applied! ₦${finalReward} bonus added to your wallet.` };
     }),
@@ -2273,7 +2273,7 @@ export const appRouter = router({
     update: protectedProcedure.input(z.object({ id: z.number(), description: z.string().optional(), status: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const { id, ...updates } = input;
-      await db.update(disputes).set(updates as any).where(and(eq(disputes.id, id), eq(disputes.userId, ctx.user.id)));
+      await db.update(disputes).set(updates as any).where(and(eq(disputes.id, id), eq(disputes.userId, ctx.user.id))).returning();
       return { success: true, disputeId: id };
     }),
   }),
@@ -2350,7 +2350,7 @@ export const appRouter = router({
         ...rest,
         ...(amount !== undefined ? { amount: amount.toString() } : {}),
         ...(endDate !== undefined ? { endDate: new Date(endDate) } : {}),
-      } as any).where(eq(recurringPayments.id, id));
+      } as any).where(eq(recurringPayments.id, id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "RECURRING_EDITED", description: `Recurring payment ${input.id} updated` });
       return { success: true, updatedId: id };
     }),
@@ -2359,7 +2359,7 @@ export const appRouter = router({
       const [existing] = await db.select().from(recurringPayments).where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id))).limit(1);
       if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring payment not found" });
       if ((existing as any).status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot pause a ${(existing as any).status} schedule` });
-      await db.update(recurringPayments).set({ status: "paused" }).where(eq(recurringPayments.id, input.id));
+      await db.update(recurringPayments).set({ status: "paused" }).where(eq(recurringPayments.id, input.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "RECURRING_PAUSED", description: `Recurring transfer ${(existing as any).name} paused` });
       return { success: true, scheduleId: input.id, status: "paused" };
     }),
@@ -2368,7 +2368,7 @@ export const appRouter = router({
       const [existing] = await db.select().from(recurringPayments).where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id))).limit(1);
       if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring payment not found" });
       if ((existing as any).status !== "paused") throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot resume a ${(existing as any).status} schedule. Only paused schedules can be resumed.` });
-      await db.update(recurringPayments).set({ status: "active" }).where(eq(recurringPayments.id, input.id));
+      await db.update(recurringPayments).set({ status: "active" }).where(eq(recurringPayments.id, input.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "RECURRING_RESUMED", description: `Recurring transfer ${(existing as any).name} resumed` });
       return { success: true, scheduleId: input.id, status: "active" };
     }),
@@ -2377,7 +2377,7 @@ export const appRouter = router({
       const [existing] = await db.select().from(recurringPayments).where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id))).limit(1);
       if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring payment not found" });
       if ((existing as any).status === "cancelled") throw new TRPCError({ code: "BAD_REQUEST", message: "Schedule is already cancelled" });
-      await db.update(recurringPayments).set({ status: "cancelled" }).where(eq(recurringPayments.id, input.id));
+      await db.update(recurringPayments).set({ status: "cancelled" }).where(eq(recurringPayments.id, input.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "RECURRING_CANCELLED", description: `Recurring transfer cancelled: ${(existing as any).name}` });
       return { success: true, scheduleId: input.id, status: "cancelled" };
     }),
@@ -2399,7 +2399,7 @@ export const appRouter = router({
       });
       await db.update(recurringPayments).set({
         lastRunAt: new Date(), executionCount: (schedule.executionCount ?? 0) + 1, lastRunStatus: "success"
-      }).where(eq(recurringPayments.id, input.id));
+      }).where(eq(recurringPayments.id, input.id)).returning();
       return { success: true, scheduleId: input.id, executedAt: new Date().toISOString() };
     }),
   }),
@@ -2417,8 +2417,8 @@ export const appRouter = router({
     }),
     process: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(batchPayments).set({ status: "processing" }).where(and(eq(batchPayments.id, input.id), eq(batchPayments.userId, ctx.user.id)));
-      db.update(batchPayments).set({ status: "completed" }).where(eq(batchPayments.id, input.id))
+      await db.update(batchPayments).set({ status: "processing" }).where(and(eq(batchPayments.id, input.id), eq(batchPayments.userId, ctx.user.id))).returning();
+      db.update(batchPayments).set({ status: "completed" }).where(eq(batchPayments.id, input.id)).returning()
         .catch((err: unknown) => logger.error({ err: err instanceof Error ? err.message : String(err) }, "Batch payment completion failed"));
       return { success: true, batchId: input.id, status: "processing" };
     }),
@@ -2436,7 +2436,7 @@ export const appRouter = router({
       if (input.phone) updates.phone = input.phone;
       if (input.address) updates.address = input.address;
       if (input.dateOfBirth) updates.dateOfBirth = new Date(input.dateOfBirth);
-      if (Object.keys(updates).length > 0) await db.update(users).set(updates).where(eq(users.openId, ctx.user.openId));
+      if (Object.keys(updates).length > 0) await db.update(users).set(updates).where(eq(users.openId, ctx.user.openId)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "PROFILE_UPDATED", description: "Profile information updated" });
       return { success: true, updatedFields: Object.keys(input).filter(k => k !== "id") };
     }),
@@ -2445,7 +2445,7 @@ export const appRouter = router({
       const buffer = Buffer.from(input.fileBase64, "base64");
       const key = `avatars/${ctx.user.id}-${Date.now()}.jpg`;
       const { url } = await storagePut(key, buffer, input.mimeType);
-      await db.update(users).set({ avatar: url }).where(eq(users.openId, ctx.user.openId));
+      await db.update(users).set({ avatar: url }).where(eq(users.openId, ctx.user.openId)).returning();
       return { success: true, url };
     }),
   }),
@@ -2488,7 +2488,7 @@ export const appRouter = router({
       if (!secret) throw new TRPCError({ code: "BAD_REQUEST", message: "2FA not set up" });
       const valid = await verifyTOTP(input.code, secret);
       if (!valid) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid 2FA code" });
-      if (db) await db.update(users).set({ twoFactorEnabled: true } as any).where(eq(users.openId, ctx.user.openId));
+      if (db) await db.update(users).set({ twoFactorEnabled: true } as any).where(eq(users.openId, ctx.user.openId)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "2FA_VERIFIED", description: "Two-factor authentication verified and activated" });
       return { success: true, twoFactorEnabled: true };
     }),
@@ -2519,14 +2519,14 @@ export const appRouter = router({
       const otpauth = `otpauth://totp/RemitFlow:${encodeURIComponent(email)}?secret=${secret}&issuer=RemitFlow&algorithm=SHA1&digits=6&period=30`;
       const qrCode = await generateQRCode(otpauth);
       const db = await getDb();
-      if (db) await db.update(users).set({ twoFactorSecret: secret } as any).where(eq(users.openId, ctx.user.openId));
+      if (db) await db.update(users).set({ twoFactorSecret: secret } as any).where(eq(users.openId, ctx.user.openId)).returning();
       const backupCodes = Array.from({ length: 8 }, () => randomBytes(4).toString("hex").toUpperCase());
       await createAuditLog({ userId: ctx.user.id, action: "2FA_ENABLED", description: "Two-factor authentication enabled" });
       return { success: true, secret, qrCode, otpauth, backupCodes };
     }),
     disable2fa: protectedProcedure.input(z.object({ code: z.string() })).mutation(async ({ ctx }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(users).set({ twoFactorEnabled: false }).where(eq(users.openId, ctx.user.openId));
+      await db.update(users).set({ twoFactorEnabled: false }).where(eq(users.openId, ctx.user.openId)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "2FA_DISABLED", description: "Two-factor authentication disabled" });
       return { success: true, twoFactorEnabled: false };
     }),
@@ -2585,7 +2585,7 @@ export const appRouter = router({
     }),
     update: protectedProcedure.input(z.object({ language: z.string().optional(), currency: z.string().optional(), timezone: z.string().optional(), theme: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      if (input.currency) await db.update(users).set({ defaultCurrency: input.currency }).where(eq(users.openId, ctx.user.openId));
+      if (input.currency) await db.update(users).set({ defaultCurrency: input.currency }).where(eq(users.openId, ctx.user.openId)).returning();
       return { success: true, updated: Object.keys(input).filter(k => (input as Record<string, unknown>)[k] !== undefined) };
     }),
   }),
@@ -2640,8 +2640,8 @@ export const appRouter = router({
     }),
     deleteSession: protectedProcedure.input(z.object({ sessionId: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(chatMessages).where(eq(chatMessages.sessionId, input.sessionId));
-      await db.delete(chatSessions).where(and(eq(chatSessions.id, input.sessionId), eq(chatSessions.userId, ctx.user.id)));
+      await db.delete(chatMessages).where(eq(chatMessages.sessionId, input.sessionId)).returning();
+      await db.delete(chatSessions).where(and(eq(chatSessions.id, input.sessionId), eq(chatSessions.userId, ctx.user.id))).returning();
       return { success: true, deletedSessionId: input.sessionId };
     }),
     chat: protectedProcedure.input(z.object({
@@ -2682,7 +2682,7 @@ export const appRouter = router({
       if (db && sessionId) {
         await db.insert(chatMessages).values({ sessionId, role: "assistant", content: reply });
         // Update session title if it was auto-created
-        await db.update(chatSessions).set({ updatedAt: new Date() }).where(eq(chatSessions.id, sessionId));
+        await db.update(chatSessions).set({ updatedAt: new Date() }).where(eq(chatSessions.id, sessionId)).returning();
       }
       return { reply, success: true, sessionId };
     }),
@@ -3052,7 +3052,7 @@ export const appRouter = router({
       const [senderWallet] = await db.select().from(cbdcWallets).where(and(eq(cbdcWallets.userId, ctx.user.id), eq(cbdcWallets.currency, input.currency))).limit(1);
       if (!senderWallet || Number(senderWallet.balance) < input.amount) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient CBDC balance' });
       const transferId = `CBDC-${Date.now()}-${randomBytes(3).toString('hex').toUpperCase()}`;
-      await db.update(cbdcWallets).set({ balance: (Number(senderWallet.balance) - input.amount).toFixed(2), updatedAt: new Date() }).where(eq(cbdcWallets.id, senderWallet.id));
+      await db.update(cbdcWallets).set({ balance: (Number(senderWallet.balance) - input.amount).toFixed(2), updatedAt: new Date() }).where(eq(cbdcWallets.id, senderWallet.id)).returning();
       await db.insert(africbdcTransfers).values({ userId: ctx.user.id, transferId, cbdcType: 'send', sendAmount: input.amount.toFixed(6), currency: input.currency, country: 'NG', senderWallet: `user:${ctx.user.id}`, receiverWallet: input.to, purpose: input.description ?? 'CBDC transfer', status: 'completed', mojaloopRouted: false, createdAt: new Date(), updatedAt: new Date() });
       await createAuditLog({ userId: ctx.user.id, action: 'CBDC_TRANSFER', description: `CBDC transfer: ${input.amount} ${input.currency} to ${input.to}`, severity: 'info' });
       return { success: true, reference: transferId };
@@ -3104,7 +3104,7 @@ export const appRouter = router({
       if (receiverWallet) {
         await db.update(cbdcWallets)
           .set({ balance: (Number(receiverWallet.balance) + input.amount).toFixed(2), updatedAt: new Date() })
-          .where(eq(cbdcWallets.id, receiverWallet.id));
+          .where(eq(cbdcWallets.id, receiverWallet.id)).returning();
       } else {
         // Auto-provision a new CBDC wallet for this currency
         const issuerMap: Record<string, string> = {
@@ -3247,13 +3247,13 @@ export const appRouter = router({
       // Debit from-wallet
       const [fromWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.from))).limit(1);
       if (!fromWallet || Number(fromWallet.balance) < input.amount) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient balance' });
-      await db.update(wallets).set({ balance: (Number(fromWallet.balance) - input.amount).toFixed(8) }).where(eq(wallets.id, fromWallet.id));
+      await db.update(wallets).set({ balance: (Number(fromWallet.balance) - input.amount).toFixed(8) }).where(eq(wallets.id, fromWallet.id)).returning();
       // Credit to-wallet (upsert)
       const [toWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.to))).limit(1);
       if (toWallet) {
-        await db.update(wallets).set({ balance: (Number(toWallet.balance) + toAmount).toFixed(8) }).where(eq(wallets.id, toWallet.id));
+        await db.update(wallets).set({ balance: (Number(toWallet.balance) + toAmount).toFixed(8) }).where(eq(wallets.id, toWallet.id)).returning();
       } else {
-        await db.insert(wallets).values({ userId: ctx.user.id, currency: input.to, balance: toAmount.toFixed(8), isDefault: false, status: 'active' });
+        await db.insert(wallets).values({ userId: ctx.user.id, currency: input.to, balance: toAmount.toFixed(8), isDefault: false, status: 'active' }).returning();
       }
       const txHash = `0x${randomBytes(32).toString('hex')}`;
       await createTransaction({ userId: ctx.user.id, type: 'swap', status: 'completed', fromCurrency: input.from, fromAmount: input.amount.toString(), toCurrency: input.to, toAmount: toAmount.toString(), fee: fee.toFixed(8), description: `Stablecoin swap: ${input.amount} ${input.from} → ${toAmount.toFixed(6)} ${input.to}` });
@@ -3348,7 +3348,7 @@ export const appRouter = router({
       if (!wallet) throw new TRPCError({ code: "BAD_REQUEST", message: `No ${currency} wallet found` });
       await db.update(wallets)
         .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` })
-        .where(eq(wallets.id, wallet.id));
+        .where(eq(wallets.id, wallet.id)).returning();
       const ref = await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: currency, fromAmount: input.amount.toString(), fee: "0", description: "QR code payment received" });
       return { success: true, reference: ref };
     }),
@@ -3368,7 +3368,7 @@ export const appRouter = router({
         const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         const [acct] = await db.select().from(virtualAccounts).where(and(eq(virtualAccounts.id, input.id), eq(virtualAccounts.userId, ctx.user.id)));
         if (!acct) throw new TRPCError({ code: "NOT_FOUND", message: "Virtual account not found" });
-        await db.update(virtualAccounts).set({ status: "closed" }).where(eq(virtualAccounts.id, input.id));
+        await db.update(virtualAccounts).set({ status: "closed" }).where(eq(virtualAccounts.id, input.id)).returning();
         await createAuditLog({ userId: ctx.user.id, action: "virtual_account.close", targetType: "virtual_account", targetId: input.id, description: `Closed virtual account ${acct.accountNumber}`, metadata: { accountNumber: acct.accountNumber } });
         return { success: true, accountId: input.id, status: "closed" };
       }),
@@ -3425,7 +3425,7 @@ export const appRouter = router({
     submitReport: protectedProcedure.input(z.object({ reportId: z.number() })).mutation(async ({ input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const { complianceReports } = await import("../drizzle/schema");
-      await db.update(complianceReports).set({ status: "submitted", submittedAt: new Date() }).where(eq(complianceReports.id, input.reportId));
+      await db.update(complianceReports).set({ status: "submitted", submittedAt: new Date() }).where(eq(complianceReports.id, input.reportId)).returning();
       return { success: true, reportId: input.reportId, status: "submitted" };
     }),
   }),
@@ -3626,14 +3626,14 @@ export const appRouter = router({
     }),
     updateStatus: protectedProcedure.input(z.object({ id: z.number(), status: z.enum(["active", "offline", "suspended"]) })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      await db.update(posTerminals).set({ status: input.status, updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id)));
+      await db.update(posTerminals).set({ status: input.status, updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id))).returning();
       return { success: true, terminalId: input.id, status: input.status };
     }),
     restart: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(posTerminals).set({ status: "offline", updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id)));
-      await db.update(posTerminals).set({ status: "active", lastSeen: new Date(), updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id)));
+      await db.update(posTerminals).set({ status: "offline", updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id))).returning();
+      await db.update(posTerminals).set({ status: "active", lastSeen: new Date(), updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id))).returning();
       return { success: true, message: "Terminal restart command sent" };
     }),
   }),
@@ -3687,7 +3687,7 @@ export const appRouter = router({
     }),
     deleteWebhook: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      await db.update(webhooksTable).set({ isActive: false }).where(and(eq(webhooksTable.id, input.id), eq(webhooksTable.createdBy, ctx.user.id)));
+      await db.update(webhooksTable).set({ isActive: false }).where(and(eq(webhooksTable.id, input.id), eq(webhooksTable.createdBy, ctx.user.id))).returning();
       return { success: true, deletedId: input.id };
     }),
   }),
@@ -3705,7 +3705,7 @@ export const appRouter = router({
     }),
     remove: protectedProcedure.input(z.object({ id: z.number(), type: z.string().default("card") })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(cards).set({ status: "cancelled" }).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id)));
+      await db.update(cards).set({ status: "cancelled" }).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id))).returning();
       return { success: true, cardId: input.id, status: "cancelled" };
     }),
   }),
@@ -4039,7 +4039,7 @@ export const appRouter = router({
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.update(users).set({ role: input.role }).where(eq(users.id, input.userId));
+        await db.update(users).set({ role: input.role }).where(eq(users.id, input.userId)).returning();
         // Audit trail
         logAdminAction({
           actorId: ctx.user.id,
@@ -4059,7 +4059,7 @@ export const appRouter = router({
         if (input.userId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot delete your own account" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.delete(users).where(eq(users.id, input.userId));
+        await db.delete(users).where(eq(users.id, input.userId)).returning();
         return { success: true, deletedUserId: input.userId };
       }),
     listPendingKyc: protectedProcedure
@@ -4084,12 +4084,12 @@ export const appRouter = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [doc] = await db.select().from(kycDocuments).where(eq(kycDocuments.id, input.docId)).limit(1);
         if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Document not found" });
-        await db.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, input.docId));
+        await db.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, input.docId)).returning();
         if (input.advanceTier) {
           const [user] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, doc.userId)).limit(1);
           const tierMap: Record<string, string> = { tier0: "tier1", tier1: "tier2", tier2: "tier3", tier3: "tier3" };
           const nextTier = tierMap[user?.kycTier ?? "tier0"] ?? "tier1";
-          await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId));
+          await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
         }
         // Audit trail
         logAdminAction({
@@ -4120,7 +4120,7 @@ export const appRouter = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [doc] = await db.select().from(kycDocuments).where(eq(kycDocuments.id, input.docId)).limit(1);
         if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Document not found" });
-        await db.update(kycDocuments).set({ status: "rejected", rejectionReason: input.reason, reviewedAt: new Date() }).where(eq(kycDocuments.id, input.docId));
+        await db.update(kycDocuments).set({ status: "rejected", rejectionReason: input.reason, reviewedAt: new Date() }).where(eq(kycDocuments.id, input.docId)).returning();
         // Audit trail
         logAdminAction({
           actorId: ctx.user.id,
@@ -4139,7 +4139,7 @@ export const appRouter = router({
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.update(kycDocuments).set({ status: "under_review" }).where(eq(kycDocuments.id, input.docId));
+        await db.update(kycDocuments).set({ status: "under_review" }).where(eq(kycDocuments.id, input.docId)).returning();
         return { success: true, docId: input.docId, status: "under_review" };
       }),
     bulkApproveKyc: protectedProcedure
@@ -4152,12 +4152,12 @@ export const appRouter = router({
         for (const docId of input.docIds) {
           const [doc] = await db.select().from(kycDocuments).where(eq(kycDocuments.id, docId)).limit(1);
           if (!doc) continue;
-          await db.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, docId));
+          await db.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, docId)).returning();
           if (input.advanceTier) {
             const [user] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, doc.userId)).limit(1);
             const tierMap: Record<string, string> = { tier0: "tier1", tier1: "tier2", tier2: "tier3", tier3: "tier3" };
             const nextTier = tierMap[user?.kycTier ?? "tier0"] ?? "tier1";
-            await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId));
+            await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
           }
           approved++;
         }
@@ -4219,7 +4219,7 @@ export const appRouter = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const slaHours: Record<string, number> = { critical: 4, high: 24, medium: 48, low: 168 };
         const dueAt = input.autoSla ? new Date(Date.now() + (slaHours[input.priority] ?? 48) * 60 * 60 * 1000) : undefined;
-        await db.update(complianceCases).set({ priority: input.priority, updatedAt: new Date(), ...(dueAt ? { dueAt } : {}) }).where(eq(complianceCases.id, input.caseId));
+        await db.update(complianceCases).set({ priority: input.priority, updatedAt: new Date(), ...(dueAt ? { dueAt } : {}) }).where(eq(complianceCases.id, input.caseId)).returning();
         await logAdminAction({ actorId: ctx.user.id, action: "setCasePriority", targetId: input.caseId, targetType: "complianceCase", description: `Set case #${input.caseId} priority to ${input.priority}${dueAt ? ` (SLA: ${dueAt.toISOString()})` : ""}`, severity: "info" });
         return { success: true, dueAt: dueAt?.toISOString() };
       }),
@@ -4239,7 +4239,7 @@ export const appRouter = router({
         if (input.assignedTo !== undefined) updates.assignedTo = input.assignedTo;
         if (input.status === "resolved") updates.resolvedAt = new Date();
         if (input.status === "escalated") updates.escalatedAt = new Date();
-        await db.update(complianceCases).set(updates).where(eq(complianceCases.id, input.caseId));
+        await db.update(complianceCases).set(updates).where(eq(complianceCases.id, input.caseId)).returning();
         // Send escalation email to compliance team (non-blocking)
         if (input.status === "escalated") {
           const [caseRow] = await db.select().from(complianceCases).where(eq(complianceCases.id, input.caseId)).limit(1);
@@ -4272,7 +4272,7 @@ export const appRouter = router({
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const assignedTo = ctx.user.name ?? ctx.user.email ?? `User #${ctx.user.id}`;
-        await db.update(complianceCases).set({ assignedTo, status: "under_review" }).where(eq(complianceCases.id, input.caseId));
+        await db.update(complianceCases).set({ assignedTo, status: "under_review" }).where(eq(complianceCases.id, input.caseId)).returning();
         // Audit trail
         logAdminAction({
           actorId: ctx.user.id,
@@ -4357,7 +4357,7 @@ Case: #${input.caseId}`,
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.delete(caseComments).where(and(eq(caseComments.id, input.commentId), eq(caseComments.authorId, ctx.user.id)));
+        await db.delete(caseComments).where(and(eq(caseComments.id, input.commentId), eq(caseComments.authorId, ctx.user.id))).returning();
         return { success: true, deletedCommentId: input.commentId };
       }),
     // ─── Bulk Case Status Update ─────────────────────────────────────────────
@@ -4419,7 +4419,7 @@ Case: #${input.caseId}`,
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.delete(analyticsThresholds).where(eq(analyticsThresholds.metric, input.metric));
+        await db.delete(analyticsThresholds).where(eq(analyticsThresholds.metric, input.metric)).returning();
         return { success: true, deletedMetric: input.metric };
       }),
     // ─── Admin Home Summary ────────────────────────────────────────────────────
@@ -4503,7 +4503,7 @@ Case: #${input.caseId}`,
         if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.update(kycDocuments).set({ expiresAt: new Date(input.expiresAt) }).where(eq(kycDocuments.id, input.docId));
+        await db.update(kycDocuments).set({ expiresAt: new Date(input.expiresAt) }).where(eq(kycDocuments.id, input.docId)).returning();
         logAdminAction({
           actorId: ctx.user.id,
           action: "setKycExpiry",
@@ -4526,7 +4526,7 @@ Case: #${input.caseId}`,
         const dueAtDate = input.dueAt ? new Date(input.dueAt) : null;
         await db.update(complianceCases)
           .set({ dueAt: dueAtDate, updatedAt: new Date() })
-          .where(eq(complianceCases.id, input.caseId));
+          .where(eq(complianceCases.id, input.caseId)).returning();
         await logAdminAction({ actorId: ctx.user.id, action: "setCaseDueAt", targetId: input.caseId, targetType: "complianceCase",
           description: `Set SLA due date to ${input.dueAt ?? "none"} on case #${input.caseId}`, metadata: { dueAt: input.dueAt } });
         return { success: true, caseId: input.caseId, dueAt: input.dueAt };
@@ -4638,7 +4638,7 @@ Case: #${input.caseId}`,
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const dueAtDate = input.dueAt ? new Date(input.dueAt) : null;
         for (const caseId of input.caseIds) {
-          await db.update(complianceCases).set({ dueAt: dueAtDate }).where(eq(complianceCases.id, caseId));
+          await db.update(complianceCases).set({ dueAt: dueAtDate }).where(eq(complianceCases.id, caseId)).returning();
         }
         await logAdminAction({
           actorId: ctx.user.id, action: "bulkSetCaseDueAt", targetId: input.caseIds[0],
@@ -4889,7 +4889,7 @@ Case: #${input.caseId}`,
         const [admin] = await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, input.adminId)).limit(1);
         if (!admin) throw new TRPCError({ code: "NOT_FOUND", message: "Admin user not found" });
         const assignedTo = admin.name ?? admin.email ?? `Admin #${admin.id}`;
-        await db.update(complianceCases).set({ assignedTo, status: "under_review" }).where(eq(complianceCases.id, input.caseId));
+        await db.update(complianceCases).set({ assignedTo, status: "under_review" }).where(eq(complianceCases.id, input.caseId)).returning();
         // Send notification to assigned admin
         await sendNotification({ userId: admin.id, type: "system", title: "Case Assigned to You", message: `Compliance case #${input.caseId} has been assigned to you by ${ctx.user.name ?? "an admin"}.`, metadata: { caseId: input.caseId } });
         logAdminAction({ actorId: ctx.user.id, action: "assignCaseToAdmin", targetId: input.caseId, targetType: "complianceCase", description: `Assigned case #${input.caseId} to ${assignedTo}`, severity: "info", metadata: { assignedTo, adminId: admin.id } }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
@@ -5496,7 +5496,7 @@ Case: #${input.caseId}`,
         if (listing) {
           await db.update(marketListings)
             .set({ viewCount: (listing.viewCount ?? 0) + 1 })
-            .where(eq(marketListings.id, input.id));
+            .where(eq(marketListings.id, input.id)).returning();
         }
         return listing ?? null;
       }),
@@ -5565,10 +5565,10 @@ Case: #${input.caseId}`,
         if (!order) throw new TRPCError({ code: "NOT_FOUND", message: "Order not found" });
         await db.update(marketOrders)
           .set({ status: "delivered", deliveryConfirmedAt: new Date(), updatedAt: new Date() })
-          .where(eq(marketOrders.id, input.orderId));
+          .where(eq(marketOrders.id, input.orderId)).returning();
         await db.update(marketListings)
           .set({ status: "sold", updatedAt: new Date() })
-          .where(eq(marketListings.id, order.listingId));
+          .where(eq(marketListings.id, order.listingId)).returning();
         return { success: true, orderId: order.id };
       }),
 
@@ -5627,7 +5627,7 @@ Case: #${input.caseId}`,
       if (!order) throw new Error("Order not found");
       const now = new Date();
       await db.insert(complianceCases).values({ userId: ctx.user.id, caseType: "aml_review" as any, severity: "medium" as any, status: "open" as any, title: `Marketplace Dispute — Order #${input.orderId}`, description: `Buyer raised dispute: ${input.reason}`, riskScore: 30, createdAt: now, updatedAt: now });
-      await db.update(marketOrders).set({ status: "disputed" as any, updatedAt: now }).where(eq(marketOrders.id, input.orderId));
+      await db.update(marketOrders).set({ status: "disputed" as any, updatedAt: now }).where(eq(marketOrders.id, input.orderId)).returning();
       return { success: true, orderId: input.orderId, status: "disputed" };
     }),
     adminListOrders: protectedProcedure.query(async ({ ctx }) => {
@@ -5656,13 +5656,13 @@ Case: #${input.caseId}`,
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { familyMembers } = await import("../drizzle/schema.js");
       const { id, ...updates } = input;
-      await db.update(familyMembers).set({ ...updates, updatedAt: new Date() }).where(and(eq(familyMembers.id, id), eq(familyMembers.userId, ctx.user.id)));
+      await db.update(familyMembers).set({ ...updates, updatedAt: new Date() }).where(and(eq(familyMembers.id, id), eq(familyMembers.userId, ctx.user.id))).returning();
       return { success: true, memberId: id };
     }),
     deleteMember: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { familyMembers } = await import("../drizzle/schema.js");
-      await db.delete(familyMembers).where(and(eq(familyMembers.id, input.id), eq(familyMembers.userId, ctx.user.id)));
+      await db.delete(familyMembers).where(and(eq(familyMembers.id, input.id), eq(familyMembers.userId, ctx.user.id))).returning();
       return { success: true, removedMemberId: input.id };
     }),
     setBudget: protectedProcedure.input(z.object({ familyMemberId: z.number(), monthlyLimit: z.number().positive(), currency: z.string().default("USD"), alertThreshold: z.number().min(10).max(100).default(80) })).mutation(async ({ ctx, input }) => {
@@ -5670,7 +5670,7 @@ Case: #${input.caseId}`,
       const { familyBudgets } = await import("../drizzle/schema.js");
       const existing = await db.select().from(familyBudgets).where(and(eq(familyBudgets.userId, ctx.user.id), eq(familyBudgets.familyMemberId, input.familyMemberId))).limit(1);
       if (existing.length) {
-        await db.update(familyBudgets).set({ monthlyLimit: String(input.monthlyLimit), currency: input.currency, alertThreshold: input.alertThreshold, updatedAt: new Date() }).where(eq(familyBudgets.id, existing[0].id));
+        await db.update(familyBudgets).set({ monthlyLimit: String(input.monthlyLimit), currency: input.currency, alertThreshold: input.alertThreshold, updatedAt: new Date() }).where(eq(familyBudgets.id, existing[0].id)).returning();
       } else {
         await db.insert(familyBudgets).values({ userId: ctx.user.id, familyMemberId: input.familyMemberId, monthlyLimit: String(input.monthlyLimit), currency: input.currency, alertThreshold: input.alertThreshold });
       }
@@ -5726,7 +5726,7 @@ Case: #${input.caseId}`,
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { talentBookings, talentOpportunities } = await import("../drizzle/schema.js");
       const [booking] = await db.insert(talentBookings).values({ opportunityId: input.opportunityId, expertUserId: ctx.user.id, message: input.message, proposedRate: input.proposedRate ? String(input.proposedRate) : null, currency: input.currency }).returning();
-      await db.update(talentOpportunities).set({ applicantCount: sql`applicant_count + 1` }).where(eq(talentOpportunities.id, input.opportunityId));
+      await db.update(talentOpportunities).set({ applicantCount: sql`applicant_count + 1` }).where(eq(talentOpportunities.id, input.opportunityId)).returning();
       return booking;
     }),
     listMyBookings: protectedProcedure.query(async ({ ctx }) => {
@@ -5737,7 +5737,7 @@ Case: #${input.caseId}`,
     updateBookingStatus: protectedProcedure.input(z.object({ bookingId: z.number(), status: z.enum(["accepted", "declined", "completed", "cancelled"]) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { talentBookings } = await import("../drizzle/schema.js");
-      await db.update(talentBookings).set({ status: input.status, updatedAt: new Date(), completedAt: input.status === "completed" ? new Date() : null }).where(and(eq(talentBookings.id, input.bookingId), eq(talentBookings.expertUserId, ctx.user.id)));
+      await db.update(talentBookings).set({ status: input.status, updatedAt: new Date(), completedAt: input.status === "completed" ? new Date() : null }).where(and(eq(talentBookings.id, input.bookingId), eq(talentBookings.expertUserId, ctx.user.id))).returning();
       return { success: true, bookingId: input.bookingId, status: input.status };
     }),
   }),
@@ -5757,7 +5757,7 @@ Case: #${input.caseId}`,
     contribute: protectedProcedure.input(z.object({ fundId: z.number(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { communityFunds } = await import("../drizzle/schema.js");
-      await db.update(communityFunds).set({ totalRaised: sql`total_raised + ${input.amount}`, contributorCount: sql`contributor_count + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, input.fundId));
+      await db.update(communityFunds).set({ totalRaised: sql`total_raised + ${input.amount}`, contributorCount: sql`contributor_count + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, input.fundId)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "community.contribute", targetType: "community_fund", targetId: input.fundId, severity: "info", metadata: { amount: input.amount } });
       return { success: true, fundId: input.fundId, amount: input.amount };
     }),
@@ -5782,7 +5782,7 @@ Case: #${input.caseId}`,
       if (input.vote === "for") { await db.update(fundProposals).set({ votesFor: sql`votes_for + 1` }).where(eq(fundProposals.id, input.proposalId)); }
       else { await db.update(fundProposals).set({ votesAgainst: sql`votes_against + 1` }).where(eq(fundProposals.id, input.proposalId)); }
       // Fetch updated counts and publish to Go community feed for real-time SSE
-      const [updated] = await db.select({ title: fundProposals.title, votesFor: fundProposals.votesFor, votesAgainst: fundProposals.votesAgainst, submittedByUserId: fundProposals.submittedByUserId }).from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1);
+      const [updated] = await db.select({ title: fundProposals.title, votesFor: fundProposals.votesFor, votesAgainst: fundProposals.votesAgainst, submittedByUserId: fundProposals.submittedByUserId }).from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1).returning();
       try {
         const { communityFeedClient } = await import("./services/community-feed-client.js");
         await communityFeedClient.publish({
@@ -5856,7 +5856,7 @@ Case: #${input.caseId}`,
       if (!proposal) throw new TRPCError({ code: "NOT_FOUND", message: "Proposal not found" });
       if (proposal.submittedByUserId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "Only the proposal submitter can request disbursement" });
       if (proposal.status !== "approved" && Number(proposal.votesFor ?? 0) < 10) throw new TRPCError({ code: "BAD_REQUEST", message: "Proposal must be approved before disbursement" });
-      await db.update(fundProposals).set({ status: "funded", updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId));
+      await db.update(fundProposals).set({ status: "funded", updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId)).returning();
       await db.insert(notifications).values({ userId: ctx.user.id, type: "disbursement_requested", title: "Disbursement Requested", message: `Your proposal "${proposal.title}" has been submitted for disbursement review.`, isRead: false, createdAt: new Date() });
       const { notifyOwner: _notifyOwner } = await import("./_core/notification.js");
       await _notifyOwner({ title: "Fund Disbursement Request", content: `Proposal "${proposal.title}" (ID: ${proposal.id}) has been submitted for disbursement by ${ctx.user.name ?? ctx.user.email}. Amount: ${proposal.requestedAmount} ${proposal.currency}. Method: ${input.disbursementMethod}.` }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
@@ -5874,9 +5874,9 @@ Case: #${input.caseId}`,
       const [proposal] = await db.select().from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1);
       if (!proposal) throw new TRPCError({ code: "NOT_FOUND" });
       const newStatus = input.action === "approve" ? "completed" : "rejected";
-      await db.update(fundProposals).set({ status: newStatus as any, fundedAt: input.action === "approve" ? new Date() : undefined, updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId));
+      await db.update(fundProposals).set({ status: newStatus as any, fundedAt: input.action === "approve" ? new Date() : undefined, updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId)).returning();
       if (input.action === "approve") {
-        await db.update(communityFunds).set({ beneficiaryCount: sql`${communityFunds.beneficiaryCount} + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, proposal.fundId));
+        await db.update(communityFunds).set({ beneficiaryCount: sql`${communityFunds.beneficiaryCount} + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, proposal.fundId)).returning();
       }
       await db.insert(notifications).values({ userId: proposal.submittedByUserId, type: "disbursement_" + input.action + "d", title: `Disbursement ${input.action === "approve" ? "Approved" : "Rejected"}`, message: `Your proposal "${proposal.title}" disbursement has been ${input.action === "approve" ? "approved and processed" : "rejected"}. ${input.adminNotes ? "Note: " + input.adminNotes : ""}`, isRead: false, createdAt: new Date() });
       return { success: true, status: newStatus };
@@ -5977,7 +5977,7 @@ Case: #${input.caseId}`,
       const existing = await db.select().from(diasporaCollectiveMembers).where(and(eq(diasporaCollectiveMembers.collectiveId, input.collectiveId), eq(diasporaCollectiveMembers.userId, ctx.user.id))).limit(1);
       if (existing.length) throw new Error("Already a member");
       await db.insert(diasporaCollectiveMembers).values({ collectiveId: input.collectiveId, userId: ctx.user.id, role: "member" });
-      await db.update(diasporaCollectives).set({ memberCount: sql`member_count + 1`, updatedAt: new Date() }).where(eq(diasporaCollectives.id, input.collectiveId));
+      await db.update(diasporaCollectives).set({ memberCount: sql`member_count + 1`, updatedAt: new Date() }).where(eq(diasporaCollectives.id, input.collectiveId)).returning();
       return { success: true, collectiveId: input.collectiveId };
     }),
     getCollectiveDetails: publicProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
@@ -6268,7 +6268,7 @@ Case: #${input.caseId}`,
         const qty = input.quantity ?? Number(inv.quantity);
         const total = currentPrice * qty;
         const fee = total * 0.001;
-        await db.update(userInvestments).set({ status: "sold", soldAt: new Date(), soldPrice: currentPrice.toString(), updatedAt: new Date() }).where(eq(userInvestments.id, input.investmentId));
+        await db.update(userInvestments).set({ status: "sold", soldAt: new Date(), soldPrice: currentPrice.toString(), updatedAt: new Date() }).where(eq(userInvestments.id, input.investmentId)).returning();
         await db.insert(investmentOrders).values({ userId: ctx.user.id, assetId: inv.assetId, orderType: "sell", quantity: qty.toString(), priceAtOrder: currentPrice.toString(), totalAmount: total.toString(), currency: inv.currency ?? "USD", status: "completed", fee: fee.toString() });
         return { success: true, symbol: asset?.symbol, quantity: qty, price: currentPrice, total: total - fee, fee };
       }),
@@ -6316,7 +6316,7 @@ Case: #${input.caseId}`,
       .mutation(async ({ input, ctx }) => {
         const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         const { investmentWatchlist } = await import("../drizzle/schema.js");
-        await db.delete(investmentWatchlist).where(and(eq(investmentWatchlist.userId, ctx.user.id), eq(investmentWatchlist.assetId, input.assetId)));
+        await db.delete(investmentWatchlist).where(and(eq(investmentWatchlist.userId, ctx.user.id), eq(investmentWatchlist.assetId, input.assetId))).returning();
         await db.insert(investmentWatchlist).values({ userId: ctx.user.id, assetId: input.assetId, alertPrice: input.alertPrice?.toString() });
         return { success: true, assetId: input.assetId };
       }),
@@ -6325,7 +6325,7 @@ Case: #${input.caseId}`,
       .mutation(async ({ input, ctx }) => {
         const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         const { investmentWatchlist } = await import("../drizzle/schema.js");
-        await db.delete(investmentWatchlist).where(and(eq(investmentWatchlist.userId, ctx.user.id), eq(investmentWatchlist.assetId, input.assetId)));
+        await db.delete(investmentWatchlist).where(and(eq(investmentWatchlist.userId, ctx.user.id), eq(investmentWatchlist.assetId, input.assetId))).returning();
         return { success: true, removedAssetId: input.assetId };
       }),
     getWatchlist: protectedProcedure.query(async ({ ctx }) => {
