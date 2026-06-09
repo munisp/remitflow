@@ -189,10 +189,10 @@ export const rateLockRouter = router({
       if (!lock) return { valid: false, reason: "Lock not found" };
       if (lock.status !== "active") return { valid: false, reason: "Lock already used or expired" };
       if (lock.expiresAt && lock.expiresAt < new Date()) {
-        await db.update(rateLocks).set({ status: "expired" }).where(eq(rateLocks.id, input.lockId));
+        await db.update(rateLocks).set({ status: "expired" }).where(eq(rateLocks.id, input.lockId)).returning();
         return { valid: false, reason: "Lock expired" };
       }
-      await db.update(rateLocks).set({ status: "used" as typeof lock.status }).where(eq(rateLocks.id, input.lockId));
+      await db.update(rateLocks).set({ status: "used" as typeof lock.status }).where(eq(rateLocks.id, input.lockId)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "RATE_LOCK_USED", metadata: { lockId: input.lockId, rate: Number(lock.lockedRate) } });
       return {
         valid: true,

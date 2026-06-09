@@ -96,7 +96,7 @@ export const westAfricaRouter = router({
       // Update status
       await db.update(westAfricaTransfers)
         .set({ status: result.status ?? "processing", mojaloopTxnId: result.mojaloop_txn_id })
-        .where(eq(westAfricaTransfers.transferId, transferId));
+        .where(eq(westAfricaTransfers.transferId, transferId)).returning();
 
       return { ...result, transferId };
     }),

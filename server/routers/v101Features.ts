@@ -347,7 +347,7 @@ const amlBatchEngineRouter = router({
     .input(z.object({ screeningId: z.string(), resolution: z.enum(["clear", "escalate", "block"]), notes: z.string().optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      await db.update(sanctionsChecks).set({ result: input.resolution === "clear" ? "clear" : "hit", reviewedAt: new Date() }).where(eq(sanctionsChecks.screeningId, input.screeningId));
+      await db.update(sanctionsChecks).set({ result: input.resolution === "clear" ? "clear" : "hit", reviewedAt: new Date() }).where(eq(sanctionsChecks.screeningId, input.screeningId)).returning();
       return { screeningId: input.screeningId, resolution: input.resolution, resolvedAt: new Date() };
     }),
 });
@@ -368,15 +368,17 @@ const merchantKYBRouter = router({
     .input(z.object({ kycId: z.number().int(), notes: z.string().optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      await db.update(kycDocuments).set({ status: "approved", updatedAt: new Date() }).where(eq(kycDocuments.id, input.kycId));
-      return { kycId: input.kycId, status: "approved", approvedAt: new Date() };
+      const [_row] = await db.update(kycDocuments).set({ status: "approved", updatedAt: new Date() }).where(eq(kycDocuments.id, input.kycId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "KYC document not found" });
+      return { kycId: input.kycId, status: "approved", approvedAt: new Date(), verified: true };
     }),
   reject: auditedProcedure
     .input(z.object({ kycId: z.number().int(), reason: z.string().min(1).max(500).trim() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      await db.update(kycDocuments).set({ status: "rejected", updatedAt: new Date() }).where(eq(kycDocuments.id, input.kycId));
-      return { kycId: input.kycId, status: "rejected", reason: input.reason, rejectedAt: new Date() };
+      const [_row] = await db.update(kycDocuments).set({ status: "rejected", updatedAt: new Date() }).where(eq(kycDocuments.id, input.kycId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "KYC document not found" });
+      return { kycId: input.kycId, status: "rejected", reason: input.reason, rejectedAt: new Date(), verified: true };
     }),
   getStats: protectedProcedure.query(async () => {
     const db = await getDb();
@@ -559,8 +561,9 @@ const openBankingPSD2Router = router({
     .input(z.object({ consentId: z.string() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      await db.update(openBankingConsents).set({ status: "revoked" }).where(eq(openBankingConsents.consentId, input.consentId));
-      return { consentId: input.consentId, status: "revoked", revokedAt: new Date() };
+      const [_row] = await db.update(openBankingConsents).set({ status: "revoked" }).where(eq(openBankingConsents.consentId, input.consentId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Consent not found" });
+      return { consentId: input.consentId, status: "revoked", revokedAt: new Date(), verified: true };
     }),
   getAccountData: protectedProcedure
     .input(z.object({ consentId: z.string() }))

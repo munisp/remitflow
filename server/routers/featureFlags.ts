@@ -716,7 +716,7 @@ export const whiteLabelRouter = router({
       if (accentColor !== undefined) brandingUpdate.accentColor = accentColor;
       if (supportEmail !== undefined) brandingUpdate.supportEmail = supportEmail;
       if (customDomain !== undefined) brandingUpdate.customDomain = customDomain;
-      await db.update(tenants).set(brandingUpdate).where(eq(tenants.id, tenantId));
+      await db.update(tenants).set(brandingUpdate).where(eq(tenants.id, tenantId)).returning();
 
       // Upsert white-label config
       const [existing] = await db.select().from(whiteLabelConfigs).where(eq(whiteLabelConfigs.tenantId, tenantId)).limit(1);

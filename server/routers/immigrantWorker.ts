@@ -105,7 +105,7 @@ export const immigrantWorkerRouter = router({
             annualLimitUsd: newAnnualLimit,
             verifiedAt: new Date(),
           })
-          .where(eq(immigrantWorkerKyc.userId, ctx.user.id));
+          .where(eq(immigrantWorkerKyc.userId, ctx.user.id)).returning();
       }
 
       return result;
@@ -197,7 +197,7 @@ export const immigrantWorkerRouter = router({
             monthlyUsedUsd: newMonthlyUsed.toFixed(2),
             annualUsedUsd: newAnnualUsed.toFixed(2),
           })
-          .where(eq(immigrantWorkerKyc.userId, ctx.user.id));
+          .where(eq(immigrantWorkerKyc.userId, ctx.user.id)).returning();
       }
 
       return result;

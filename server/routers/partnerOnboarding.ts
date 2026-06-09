@@ -111,7 +111,7 @@ export const partnerOnboardingRouter = router({
       const updatedData = { ...session.data as Record<string, unknown>, ...input, step: 2 };
       await db.update(tenantOnboardingSessions)
         .set({ step: 2, data: updatedData, updatedAt: new Date() })
-        .where(eq(tenantOnboardingSessions.id, session.id));
+        .where(eq(tenantOnboardingSessions.id, session.id)).returning();
 
       return { success: true, verified: true, step: 2, message: "Company info saved. Next: customize your branding." };
     }),
@@ -146,7 +146,7 @@ export const partnerOnboardingRouter = router({
       const updatedData = { ...session.data as Record<string, unknown>, branding: input, step: 3 };
       await db.update(tenantOnboardingSessions)
         .set({ step: 3, data: updatedData, updatedAt: new Date() })
-        .where(eq(tenantOnboardingSessions.id, session.id));
+        .where(eq(tenantOnboardingSessions.id, session.id)).returning();
 
       return { success: true, verified: true, step: 3, message: "Branding saved. Next: configure your corridors and fees." };
     }),
@@ -185,7 +185,7 @@ export const partnerOnboardingRouter = router({
       const updatedData = { ...session.data as Record<string, unknown>, corridors: input, step: 4 };
       await db.update(tenantOnboardingSessions)
         .set({ step: 4, data: updatedData, updatedAt: new Date() })
-        .where(eq(tenantOnboardingSessions.id, session.id));
+        .where(eq(tenantOnboardingSessions.id, session.id)).returning();
 
       return { success: true, verified: true, step: 4, message: "Corridors configured. Next: review and launch." };
     }),
@@ -293,12 +293,12 @@ export const partnerOnboardingRouter = router({
       // Mark invite code as used
       await db.update(partnerInviteCodes)
         .set({ usedCount: sql`${partnerInviteCodes.usedCount} + 1` })
-        .where(eq(partnerInviteCodes.id, session.inviteCodeId));
+        .where(eq(partnerInviteCodes.id, session.inviteCodeId)).returning();
 
       // Mark session as completed
       await db.update(tenantOnboardingSessions)
         .set({ status: "completed", completedAt: new Date(), tenantId: newTenant.id, userId: ctx.user.id, step: 6, updatedAt: new Date() })
-        .where(eq(tenantOnboardingSessions.id, session.id));
+        .where(eq(tenantOnboardingSessions.id, session.id)).returning();
 
       return {
         success: true,
@@ -643,7 +643,8 @@ export const adminInviteCodesRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      await db.delete(partnerInviteCodes).where(eq(partnerInviteCodes.id, input.id));
+      const [_deleted] = await db.delete(partnerInviteCodes).where(eq(partnerInviteCodes.id, input.id)).returning();
+      if (!_deleted) throw new TRPCError({ code: "NOT_FOUND", message: "Invite code not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 

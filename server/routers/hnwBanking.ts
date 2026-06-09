@@ -142,7 +142,7 @@ export const hnwBankingRouter = router({
       // Mark lock as executed
       await db.update(hnwRateLocks)
         .set({ status: "executed" })
-        .where(eq(hnwRateLocks.lockId, input.rateLockId));
+        .where(eq(hnwRateLocks.lockId, input.rateLockId)).returning();
 
       // Record transfer
       await db.insert(hnwTransfers).values({

@@ -454,7 +454,7 @@ export const v98Router = router({
         if (wallet) {
           await db.update(wallets)
             .set({ balance: String(balanceAfter), updatedAt: new Date() })
-            .where(eq(wallets.id, wallet.id));
+            .where(eq(wallets.id, wallet.id)).returning();
         } else {
           await db.insert(wallets).values({
             userId: input.userId,
@@ -524,7 +524,7 @@ export const v98Router = router({
 
         await db.update(wallets)
           .set({ balance: String(balanceAfter), updatedAt: new Date() })
-          .where(eq(wallets.id, wallet.id));
+          .where(eq(wallets.id, wallet.id)).returning();
 
         await db.insert(cbdcMintBurnLog).values({
           userId: input.userId,
@@ -634,7 +634,7 @@ export const v98Router = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         await db.update(communityActivityFeed)
           .set({ likesCount: sql`${communityActivityFeed.likesCount} + 1` })
-          .where(eq(communityActivityFeed.id, input.id));
+          .where(eq(communityActivityFeed.id, input.id)).returning();
         return { liked: true };
       }),
 
@@ -772,7 +772,7 @@ export const v98Router = router({
             filedAt: input.status === "filed" ? new Date() : null,
             notes: input.notes,
           })
-          .where(eq(ctrAutoFlags.id, input.id));
+          .where(eq(ctrAutoFlags.id, input.id)).returning();
         return { reviewed: true };
       }),
 
@@ -844,7 +844,7 @@ export const v98Router = router({
         const { id, ...updates } = input;
         await db.update(mojaloopFsps)
           .set({ ...updates, updatedAt: new Date() })
-          .where(eq(mojaloopFsps.id, id));
+          .where(eq(mojaloopFsps.id, id)).returning();
         return { updated: true };
       }),
 
@@ -854,8 +854,9 @@ export const v98Router = router({
       .mutation(async ({ input }) => {
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-        await db.delete(mojaloopFsps).where(eq(mojaloopFsps.id, input.id));
-        return { deleted: true };
+        const [_deleted] = await db.delete(mojaloopFsps).where(eq(mojaloopFsps.id, input.id)).returning();
+        if (!_deleted) throw new TRPCError({ code: "NOT_FOUND", message: "FSP not found" });
+        return { deleted: true, verified: true };
       }),
   }),
 
@@ -875,7 +876,7 @@ export const v98Router = router({
         for (const userId of input.userIds) {
           await db.update(wallets)
             .set({ status: "suspended" })
-            .where(eq(wallets.userId, userId));
+            .where(eq(wallets.userId, userId)).returning();
         }
 
         await db.insert(bulkUserActionLog).values({
@@ -906,7 +907,7 @@ export const v98Router = router({
         for (const userId of input.userIds) {
           await db.update(wallets)
             .set({ status: "active" })
-            .where(eq(wallets.userId, userId));
+            .where(eq(wallets.userId, userId)).returning();
         }
 
         await db.insert(bulkUserActionLog).values({
@@ -1015,7 +1016,7 @@ export const v98Router = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         await db.update(stripeWebhookRetryLog)
           .set({ status: "completed", resolvedAt: new Date() })
-          .where(eq(stripeWebhookRetryLog.id, input.id));
+          .where(eq(stripeWebhookRetryLog.id, input.id)).returning();
         return { resolved: true };
       }),
 
@@ -1027,7 +1028,7 @@ export const v98Router = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         await db.update(stripeWebhookRetryLog)
           .set({ status: "abandoned", errorMessage: input.reason })
-          .where(eq(stripeWebhookRetryLog.id, input.id));
+          .where(eq(stripeWebhookRetryLog.id, input.id)).returning();
         return { abandoned: true };
       }),
 
@@ -1173,8 +1174,9 @@ export const v98Router = router({
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-        await db.delete(fxAlerts).where(and(eq(fxAlerts.id, input.id), eq(fxAlerts.userId, ctx.user.id)));
-        return { deleted: true };
+        const [_deleted] = await db.delete(fxAlerts).where(and(eq(fxAlerts.id, input.id), eq(fxAlerts.userId, ctx.user.id))).returning();
+        if (!_deleted) throw new TRPCError({ code: "NOT_FOUND", message: "FX alert not found" });
+        return { deleted: true, verified: true };
       }),
     toggle: protectedProcedure
       .input(z.object({ id: z.number() }))
@@ -1380,7 +1382,7 @@ export const v98Router = router({
         if (!row) throw new TRPCError({ code: "NOT_FOUND" });
         await db.update(stripeWebhookRetryLog)
           .set({ status: "pending", attemptCount: (row.attemptCount ?? 0) + 1, lastError: null })
-          .where(eq(stripeWebhookRetryLog.id, input.id));
+          .where(eq(stripeWebhookRetryLog.id, input.id)).returning();
         return { message: "Webhook queued for retry" };
       }),
     retryAllFailed: adminProcedure.mutation(async () => {
@@ -1391,7 +1393,7 @@ export const v98Router = router({
       if (failed.length > 0) {
         await db.update(stripeWebhookRetryLog)
           .set({ status: "pending" })
-          .where(inArray(stripeWebhookRetryLog.id, failed.map((r: any) => r.id)));
+          .where(inArray(stripeWebhookRetryLog.id, failed.map((r: any) => r.id))).returning();
       }
       return { queued: failed.length };
     }),
@@ -1425,7 +1427,7 @@ export const v98Router = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
         await db.update(ipLoginHistory)
           .set({ isBlocked: true })
-          .where(eq(ipLoginHistory.ipAddress, input.ipAddress));
+          .where(eq(ipLoginHistory.ipAddress, input.ipAddress)).returning();
         return { message: `IP ${input.ipAddress} blocked` };
       }),
   }),

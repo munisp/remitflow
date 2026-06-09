@@ -69,7 +69,7 @@ export const webhookRetryRouter = router({
 
       await db.update(webhookDeliveries)
         .set({ status: "retrying", attemptCount: (delivery.attemptCount ?? 0) + 1, nextRetryAt: new Date() })
-        .where(eq(webhookDeliveries.id, input.deliveryId));
+        .where(eq(webhookDeliveries.id, input.deliveryId)).returning();
 
       try {
         const [endpoint] = await db.select().from(webhookEndpoints)
@@ -85,12 +85,12 @@ export const webhookRetryRouter = router({
         const success = res.status >= 200 && res.status < 300;
         await db.update(webhookDeliveries)
           .set({ status: success ? "delivered" : "failed", responseStatus: res.status, deliveredAt: success ? new Date() : undefined })
-          .where(eq(webhookDeliveries.id, input.deliveryId));
+          .where(eq(webhookDeliveries.id, input.deliveryId)).returning();
         return { success, status: res.status, message: success ? "Delivery succeeded" : `HTTP ${res.status}` };
       } catch (err: any) {
         await db.update(webhookDeliveries)
           .set({ status: "failed", responseBody: err.message })
-          .where(eq(webhookDeliveries.id, input.deliveryId));
+          .where(eq(webhookDeliveries.id, input.deliveryId)).returning();
         return { success: false, status: 0, message: err.message };
       }
     }),
@@ -102,7 +102,7 @@ export const webhookRetryRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       await db.update(webhookDeliveries)
         .set({ status: "retrying", nextRetryAt: new Date() })
-        .where(inArray(webhookDeliveries.id, input.deliveryIds));
+        .where(inArray(webhookDeliveries.id, input.deliveryIds)).returning();
       return { queued: input.deliveryIds.length };
     }),
 
@@ -235,10 +235,10 @@ export const partnerPayoutAutomationRouter = router({
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-      await db.update(partnerPayouts)
+      const approved = await db.update(partnerPayouts)
         .set({ status: "approved", processedAt: new Date(), processedBy: ctx.user.id })
-        .where(inArray(partnerPayouts.id, input.payoutIds));
-      return { approved: input.payoutIds.length };
+        .where(inArray(partnerPayouts.id, input.payoutIds)).returning();
+      return { approved: approved.length, verified: true };
     }),
 
   rejectPayout: adminProcedure
@@ -449,7 +449,7 @@ export const notificationCenterV2Router = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       await db.update(notifications)
         .set({ isRead: true })
-        .where(and(inArray(notifications.id, input.notificationIds), eq(notifications.userId, ctx.user.id)));
+        .where(and(inArray(notifications.id, input.notificationIds), eq(notifications.userId, ctx.user.id))).returning();
       return { success: true, verified: true, marked: input.notificationIds.length };
     }),
 
@@ -631,7 +631,8 @@ export const fraudRulesCrudRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-      await db.delete(feeRules).where(eq(feeRules.id, input.id));
+      const [_deleted] = await db.delete(feeRules).where(eq(feeRules.id, input.id)).returning();
+      if (!_deleted) throw new TRPCError({ code: "NOT_FOUND", message: "Fee rule not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });
@@ -668,12 +669,12 @@ export const kycLifecycleRouter = router({
       if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Document not found" });
       await db.update(kycDocuments)
         .set({ status: "approved", reviewedAt: new Date() })
-        .where(eq(kycDocuments.id, input.documentId));
+        .where(eq(kycDocuments.id, input.documentId)).returning();
       // Update user KYC status if no more pending docs
       const [{ pendingCount }] = await db.select({ pendingCount: count() }).from(kycDocuments)
         .where(and(eq(kycDocuments.userId, doc.userId), eq(kycDocuments.status, "pending")));
       if (Number(pendingCount) === 0) {
-        await db.update(users).set({ kycStatus: "approved" }).where(eq(users.id, doc.userId));
+        await db.update(users).set({ kycStatus: "approved" }).where(eq(users.id, doc.userId)).returning();
       }
       return { success: true, verified: true, documentId: input.documentId, userKycUpdated: Number(pendingCount) === 0 };
     }),

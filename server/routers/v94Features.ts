@@ -210,7 +210,7 @@ export const referralBonusRouter = router({
           paidAt: input.status === "paid" ? new Date() : undefined,
           updatedAt: new Date(),
         })
-        .where(eq(referralBonuses.id, input.bonusId));
+        .where(eq(referralBonuses.id, input.bonusId)).returning();
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -498,7 +498,7 @@ export const rateAlertHistoryRouter = router({
       const snoozedUntil = new Date(Date.now() + input.snoozeHours * 3600 * 1000);
       await db.update(rateAlertHistory)
         .set({ status: "snoozed" as any, snoozedUntil })
-        .where(and(eq(rateAlertHistory.id, input.alertHistoryId), eq(rateAlertHistory.userId, ctx.user.id)));
+        .where(and(eq(rateAlertHistory.id, input.alertHistoryId), eq(rateAlertHistory.userId, ctx.user.id))).returning();
       return { success: true, verified: true, snoozedUntil };
     }),
 

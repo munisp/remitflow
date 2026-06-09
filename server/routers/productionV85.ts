@@ -130,7 +130,7 @@ export const sandboxScenariosRouter = router({
       // Increment run count
       await db.update(sandboxScenarios)
         .set({ runCount: (scenario.runCount ?? 0) + 1, lastRunAt: new Date() })
-        .where(eq(sandboxScenarios.id, input.id));
+        .where(eq(sandboxScenarios.id, input.id)).returning();
       // Parse payload and simulate execution
       let payload: any = {};
       try { payload = JSON.parse(scenario.payload); } catch {}
@@ -294,7 +294,7 @@ export const complianceAlertsRouter = router({
       if (input.action === "acknowledge") { updates.status = "acknowledged"; updates.acknowledgedBy = ctx.user.id; updates.acknowledgedAt = new Date(); }
       else if (input.action === "resolve") { updates.status = "resolved"; updates.resolvedAt = new Date(); }
       else if (input.action === "dismiss") { updates.status = "dismissed"; }
-      await db.update(complianceAlerts).set(updates as any).where(inArray(complianceAlerts.id, input.ids));
+      await db.update(complianceAlerts).set(updates as any).where(inArray(complianceAlerts.id, input.ids)).returning();
       broadcastAdminEvent({ type: "bulk_action", payload: { ids: input.ids, action: input.action, by: ctx.user.id } });
       return { updated: input.ids.length, action: input.action };
     }),
@@ -633,7 +633,7 @@ export const complianceAlertsRouter = router({
       const snoozeUntil = new Date(Date.now() + input.hours * 3600 * 1000);
       await db.update(complianceAlerts)
         .set({ snoozeUntil, status: 'snoozed' as any })
-        .where(eq(complianceAlerts.id, input.alertId));
+        .where(eq(complianceAlerts.id, input.alertId)).returning();
       await db.insert(complianceAlertNotes).values({
         alertId: input.alertId,
         authorId: ctx.user.id,
@@ -801,7 +801,7 @@ export const mfaRouter = router({
       // Validate TOTP code (simplified: accept any 6-digit code in sandbox)
       const isValid = /^\d{6}$/.test(input.code);
       if (!isValid) {
-        await db.update(mfaSettings).set({ failedAttempts: (setting.failedAttempts ?? 0) + 1 }).where(eq(mfaSettings.userId, ctx.user.id));
+        await db.update(mfaSettings).set({ failedAttempts: (setting.failedAttempts ?? 0) + 1 }).where(eq(mfaSettings.userId, ctx.user.id)).returning();
         throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid TOTP code" });
       }
       await db.update(mfaSettings).set({
@@ -809,7 +809,7 @@ export const mfaRouter = router({
         enrolledAt: new Date(),
         lastUsedAt: new Date(),
         failedAttempts: 0,
-      }).where(eq(mfaSettings.userId, ctx.user.id));
+      }).where(eq(mfaSettings.userId, ctx.user.id)).returning();
       // Log security event
       await db.insert(securityEvents).values({
         userId: ctx.user.id,
@@ -842,7 +842,7 @@ export const mfaRouter = router({
     const codes = Array.from({ length: 8 }, () =>
       randomBytes(3).toString("hex").toUpperCase() + "-" + randomBytes(3).toString("hex").toUpperCase()
     );
-    await db.update(mfaSettings).set({ backupCodes: JSON.stringify(codes) }).where(eq(mfaSettings.userId, ctx.user.id));
+    await db.update(mfaSettings).set({ backupCodes: JSON.stringify(codes) }).where(eq(mfaSettings.userId, ctx.user.id)).returning();
     return { codes };
   }),
 });

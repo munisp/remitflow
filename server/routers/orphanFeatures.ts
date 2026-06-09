@@ -63,7 +63,7 @@ export const paymentMethodsExtRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (input.isDefault) {
-        await db.update(achPaymentMethods).set({ isDefault: false }).where(eq(achPaymentMethods.userId, ctx.user.id));
+        await db.update(achPaymentMethods).set({ isDefault: false }).where(eq(achPaymentMethods.userId, ctx.user.id)).returning();
       }
       const [method] = await db.insert(achPaymentMethods).values({
         userId: ctx.user.id,
@@ -85,7 +85,7 @@ export const paymentMethodsExtRouter = router({
       const [existing] = await db.select().from(achPaymentMethods)
         .where(and(eq(achPaymentMethods.id, input.id), eq(achPaymentMethods.userId, ctx.user.id)));
       if (!existing) throw new TRPCError({ code: "NOT_FOUND" });
-      await db.update(achPaymentMethods).set({ isDefault: false }).where(eq(achPaymentMethods.userId, ctx.user.id));
+      await db.update(achPaymentMethods).set({ isDefault: false }).where(eq(achPaymentMethods.userId, ctx.user.id)).returning();
       const [_row] = await db.update(achPaymentMethods).set({ isDefault: true }).where(eq(achPaymentMethods.id, input.id)).returning();
 
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
@@ -126,7 +126,7 @@ export const paymentMethodsExtRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid IBAN format" });
       }
       if (input.isDefault) {
-        await db.update(sepaPaymentMethods).set({ isDefault: false }).where(eq(sepaPaymentMethods.userId, ctx.user.id));
+        await db.update(sepaPaymentMethods).set({ isDefault: false }).where(eq(sepaPaymentMethods.userId, ctx.user.id)).returning();
       }
       const [method] = await db.insert(sepaPaymentMethods).values({
         userId: ctx.user.id,
@@ -175,7 +175,7 @@ export const paymentMethodsExtRouter = router({
       }
       const db = await getDb();
       if (input.isDefault) {
-        await db.update(interacPaymentMethods).set({ isDefault: false }).where(eq(interacPaymentMethods.userId, ctx.user.id));
+        await db.update(interacPaymentMethods).set({ isDefault: false }).where(eq(interacPaymentMethods.userId, ctx.user.id)).returning();
       }
       const [method] = await db.insert(interacPaymentMethods).values({
         userId: ctx.user.id,
@@ -393,7 +393,7 @@ export const hnwExtRouter = router({
       if (!profile) throw new TRPCError({ code: "NOT_FOUND", message: "HNW profile not found" });
       const [rm] = await db.select().from(hnwRelationshipManagers).where(eq(hnwRelationshipManagers.id, input.rmId));
       if (!rm) throw new TRPCError({ code: "NOT_FOUND", message: "Relationship manager not found" });
-      await db.update(hnwProfiles).set({ assignedRmId: input.rmId, updatedAt: new Date() }).where(eq(hnwProfiles.id, profile.id));
+      await db.update(hnwProfiles).set({ assignedRmId: input.rmId, updatedAt: new Date() }).where(eq(hnwProfiles.id, profile.id)).returning();
       return { success: true, verified: true, rmName: rm.displayName };
     }),
 });
@@ -445,7 +445,7 @@ export const diasporaProfilesRouter = router({
     const [existing] = await db.select().from(diasporaUsaProfiles).where(eq(diasporaUsaProfiles.userId, ctx.user.id));
     if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "USA profile not found. Create profile first." });
     const now = new Date();
-    await db.update(diasporaUsaProfiles).set({ complianceDisclosureAcceptedAt: now, updatedAt: now }).where(eq(diasporaUsaProfiles.id, existing.id));
+    await db.update(diasporaUsaProfiles).set({ complianceDisclosureAcceptedAt: now, updatedAt: now }).where(eq(diasporaUsaProfiles.id, existing.id)).returning();
     return { accepted: true, acceptedAt: now };
   }),
 
@@ -724,7 +724,7 @@ export const securityExtRouter = router({
       unlockToken: token,
       unlockTokenExpiresAt: expiresAt,
       unlockRequestedAt: new Date(),
-    }).where(eq(userLockouts.userId, ctx.user.id));
+    }).where(eq(userLockouts.userId, ctx.user.id)).returning();
     return { success: true, verified: true, message: "Unlock link sent to your email. Valid for 30 minutes." };
   }),
 
@@ -1204,7 +1204,7 @@ export const pushPrefsRouter = router({
         await db.update(pushNotificationPreferences).set({
           isEnabled: input.isEnabled,
           updatedAt: new Date(),
-        }).where(eq(pushNotificationPreferences.id, existing.id));
+        }).where(eq(pushNotificationPreferences.id, existing.id)).returning();
       } else {
         await db.insert(pushNotificationPreferences).values({
           userId: ctx.user.id,
@@ -1224,7 +1224,7 @@ export const pushPrefsRouter = router({
           const [existing] = await db.select().from(pushNotificationPreferences)
             .where(and(eq(pushNotificationPreferences.userId, ctx.user.id), eq(pushNotificationPreferences.preferenceKey, key)));
           if (existing) {
-            await db.update(pushNotificationPreferences).set({ isEnabled: enabled, updatedAt: new Date() }).where(eq(pushNotificationPreferences.id, existing.id));
+            await db.update(pushNotificationPreferences).set({ isEnabled: enabled, updatedAt: new Date() }).where(eq(pushNotificationPreferences.id, existing.id)).returning();
           } else {
             await db.insert(pushNotificationPreferences).values({ userId: ctx.user.id, preferenceKey: key, isEnabled: enabled });
           }

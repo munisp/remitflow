@@ -150,7 +150,7 @@ export const revenueShareRouter = router({
           ...(minPayoutThreshold !== undefined ? { minPayoutThreshold: minPayoutThreshold.toString() } : {}),
           updatedAt: new Date(),
         })
-        .where(eq(revenueShareAgreements.id, id));
+        .where(eq(revenueShareAgreements.id, id)).returning();
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -283,7 +283,7 @@ export const revenueShareRouter = router({
             partnerEarnings: partnerEarnings.toString(), platformEarnings: platformEarnings.toString(),
             appliedRate, generatedAt: new Date(),
           })
-          .where(eq(revenueShareReports.id, existing[0].id));
+          .where(eq(revenueShareReports.id, existing[0].id)).returning();
         return { id: existing[0].id, updated: true };
       }
       const [report] = await db.insert(revenueShareReports).values({

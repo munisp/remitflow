@@ -533,7 +533,7 @@ const escrowPlanRouter = router({
         status: isComplete ? "completed" : "active",
         completedAt: isComplete ? new Date() : undefined,
         updatedAt: new Date(),
-      } as any).where(eq(propertyEscrowPlans.id, plan.id));
+      } as any).where(eq(propertyEscrowPlans.id, plan.id)).returning();
 
       await createAuditLog({ userId: ctx.user.id, action: "ESCROW_INSTALLMENT_PAID", metadata: { planId: plan.planId, installment: nextInstallment.installmentNumber, amount } });
 
@@ -631,7 +631,7 @@ const milestoneRouter = router({
         verifiedBy: ctx.user.id,
         verifiedAt: new Date(),
         rejectionReason: input.approved ? null : (input.rejectionReason ?? null),
-      }).where(eq(milestoneEvidence.id, evidence.id));
+      }).where(eq(milestoneEvidence.id, evidence.id)).returning();
 
       if (!input.approved) {
         await db.update(propertyMilestones).set({ status: "rejected", rejectedReason: input.rejectionReason ?? "Evidence rejected by inspector", updatedAt: new Date() }).where(eq(propertyMilestones.id, evidence.milestoneId)).returning();
@@ -886,7 +886,7 @@ const propertyDisputeRouter = router({
         }
       }
 
-      await db.update(propertyEscrowDisputes).set(updates as any).where(eq(propertyEscrowDisputes.id, dispute.id));
+      await db.update(propertyEscrowDisputes).set(updates as any).where(eq(propertyEscrowDisputes.id, dispute.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "PROPERTY_DISPUTE_RESOLVED", metadata: { disputeId: input.disputeId, resolution: input.resolution } });
 
       return { disputeId: input.disputeId, status: input.resolution, refundAmount: input.refundAmountUsd };

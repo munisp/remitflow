@@ -525,7 +525,8 @@ export const systemConfigRouter = router({
   delete: adminProcedure.input(z.object({ key: z.string() })).mutation(async ({ input }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-    await db.delete(systemConfig).where(eq(systemConfig.key, input.key));
+    const [_deleted] = await db.delete(systemConfig).where(eq(systemConfig.key, input.key)).returning();
+      if (!_deleted) throw new TRPCError({ code: "NOT_FOUND", message: "Config key not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
   }),
 });

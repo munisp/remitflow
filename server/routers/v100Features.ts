@@ -110,12 +110,12 @@ const notificationsV2Router = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       if (input.markAll) {
-        await db.update(notifications).set({ isRead: true }).where(eq(notifications.userId, ctx.user.id));
+        await db.update(notifications).set({ isRead: true }).where(eq(notifications.userId, ctx.user.id)).returning();
         return { success: true, verified: true, updated: -1 };
       }
       if (input.notificationId) {
         await db.update(notifications).set({ isRead: true })
-          .where(and(eq(notifications.id, input.notificationId), eq(notifications.userId, ctx.user.id)));
+          .where(and(eq(notifications.id, input.notificationId), eq(notifications.userId, ctx.user.id))).returning();
         return { success: true, verified: true, updated: 1 };
       }
       return { success: false, updated: 0 };

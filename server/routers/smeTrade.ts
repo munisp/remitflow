@@ -200,7 +200,7 @@ export const smeTradeRouter = router({
           succeeded: result.succeeded ?? 0,
           failed: result.failed ?? 0,
         })
-        .where(eq(smeTradeBatches.batchId, batchId));
+        .where(eq(smeTradeBatches.batchId, batchId)).returning();
 
       return { ...result, batchId };
     }),

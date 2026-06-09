@@ -538,11 +538,11 @@ export const documentVaultRenewalRouter = router({
       // Archive old document
       await db.update(documentVaultTable)
         .set({ status: "archived", updatedAt: new Date() })
-        .where(eq(documentVaultTable.id, renewal.originalDocId));
+        .where(eq(documentVaultTable.id, renewal.originalDocId)).returning();
       // Close all pending reminder logs for old document
       await db.update(docReminderLog)
         .set({ status: "dismissed" })
-        .where(eq(docReminderLog.documentId, renewal.originalDocId));
+        .where(eq(docReminderLog.documentId, renewal.originalDocId)).returning();
       // Complete renewal record
       const [completed] = await db.update(documentRenewals)
         .set({ status: "completed", newDocId: input.newDocumentId, completedAt: new Date() })
@@ -767,7 +767,7 @@ export const webhookRetryRouter = router({
       // Mark as processing
       await db.update(webhookRetryQueue)
         .set({ status: "processing", lastAttemptAt: now, updatedAt: now })
-        .where(eq(webhookRetryQueue.id, entry.id));
+        .where(eq(webhookRetryQueue.id, entry.id)).returning();
 
       try {
         // Get endpoint details
@@ -776,7 +776,7 @@ export const webhookRetryRouter = router({
         if (!endpoint || !endpoint.isActive) {
           await db.update(webhookRetryQueue)
             .set({ status: "exhausted", lastError: "Endpoint inactive or deleted", updatedAt: new Date() })
-            .where(eq(webhookRetryQueue.id, entry.id));
+            .where(eq(webhookRetryQueue.id, entry.id)).returning();
           failed++;
           continue;
         }
@@ -797,10 +797,10 @@ export const webhookRetryRouter = router({
           if (res.ok) {
             await db.update(webhookRetryQueue)
               .set({ status: "succeeded", updatedAt: new Date() })
-              .where(eq(webhookRetryQueue.id, entry.id));
+              .where(eq(webhookRetryQueue.id, entry.id)).returning();
             await db.update(webhookDeliveries)
               .set({ status: "delivered", responseStatus: res.status, deliveredAt: new Date() })
-              .where(eq(webhookDeliveries.id, entry.deliveryId));
+              .where(eq(webhookDeliveries.id, entry.deliveryId)).returning();
             succeeded++;
           } else {
             throw new Error(`HTTP ${res.status}`);
@@ -811,10 +811,10 @@ export const webhookRetryRouter = router({
           if (nextAttempt >= entry.maxAttempts) {
             await db.update(webhookRetryQueue)
               .set({ status: "exhausted", lastError: err.message, updatedAt: new Date() })
-              .where(eq(webhookRetryQueue.id, entry.id));
+              .where(eq(webhookRetryQueue.id, entry.id)).returning();
             await db.update(webhookDeliveries)
               .set({ status: "failed" })
-              .where(eq(webhookDeliveries.id, entry.deliveryId));
+              .where(eq(webhookDeliveries.id, entry.deliveryId)).returning();
           } else {
             const delaySeconds = BACKOFF_DELAYS_SECONDS[Math.min(nextAttempt, BACKOFF_DELAYS_SECONDS.length - 1)];
             await db.update(webhookRetryQueue)
@@ -825,14 +825,14 @@ export const webhookRetryRouter = router({
                 lastError: err.message,
                 updatedAt: new Date(),
               })
-              .where(eq(webhookRetryQueue.id, entry.id));
+              .where(eq(webhookRetryQueue.id, entry.id)).returning();
           }
           failed++;
         }
       } catch (err: any) {
         await db.update(webhookRetryQueue)
           .set({ status: "exhausted", lastError: err.message, updatedAt: new Date() })
-          .where(eq(webhookRetryQueue.id, entry.id));
+          .where(eq(webhookRetryQueue.id, entry.id)).returning();
         failed++;
       }
     }
@@ -906,7 +906,7 @@ export const apiKeyRotationRouter = router({
       }).returning();
 
       // Revoke old key
-      await db.update(apiKeys).set({ status: "revoked", updatedAt: new Date() }).where(eq(apiKeys.id, input.keyId));
+      await db.update(apiKeys).set({ status: "revoked", updatedAt: new Date() }).where(eq(apiKeys.id, input.keyId)).returning();
 
       // Log rotation
       await db.insert(apiKeyRotationLog).values({
@@ -1034,7 +1034,7 @@ export const batchPaymentV97Router = router({
       if (batch.status !== "draft") throw new TRPCError({ code: "BAD_REQUEST", message: "Batch already processed" });
 
       // Mark as processing
-      await db.update(batchPayments).set({ status: "processing", updatedAt: new Date() }).where(eq(batchPayments.id, input.batchId));
+      await db.update(batchPayments).set({ status: "processing", updatedAt: new Date() }).where(eq(batchPayments.id, input.batchId)).returning();
 
       const items = await db.select().from(batchPaymentItems).where(eq(batchPaymentItems.batchId, input.batchId));
       let successCount = 0;
@@ -1048,7 +1048,7 @@ export const batchPaymentV97Router = router({
           if (fraudResult.fraudScore > 85) {
             await db.update(batchPaymentItems)
               .set({ status: "failed", errorMessage: `Fraud score too high: ${fraudResult.fraudScore}`, processedAt: new Date() })
-              .where(eq(batchPaymentItems.id, item.id));
+              .where(eq(batchPaymentItems.id, item.id)).returning();
             failedCount++;
             continue;
           }
@@ -1071,12 +1071,12 @@ export const batchPaymentV97Router = router({
           }).returning();
           await db.update(batchPaymentItems)
             .set({ status: "completed", transactionId: tx.id, processedAt: new Date() })
-            .where(eq(batchPaymentItems.id, item.id));
+            .where(eq(batchPaymentItems.id, item.id)).returning();
           successCount++;
         } catch (err: any) {
           await db.update(batchPaymentItems)
             .set({ status: "failed", errorMessage: err.message?.substring(0, 500) ?? "Unknown error", processedAt: new Date() })
-            .where(eq(batchPaymentItems.id, item.id));
+            .where(eq(batchPaymentItems.id, item.id)).returning();
           failedCount++;
         }
       }
@@ -1085,7 +1085,7 @@ export const batchPaymentV97Router = router({
       const finalStatus = failedCount === 0 ? "completed" : successCount === 0 ? "failed" : "partial";
       await db.update(batchPayments)
         .set({ status: finalStatus, successCount, failedCount, updatedAt: new Date() })
-        .where(eq(batchPayments.id, input.batchId));
+        .where(eq(batchPayments.id, input.batchId)).returning();
 
       await sendAuditLog({ userId: ctx.user.id, action: "batch_payment.process", resource: "batch_payment", resourceId: String(input.batchId), severity: "info", details: { successCount, failedCount, status: finalStatus } });
 
@@ -1119,10 +1119,10 @@ export const batchPaymentV97Router = router({
       // Reset failed items to pending
       await db.update(batchPaymentItems)
         .set({ status: "pending", errorMessage: null, processedAt: null })
-        .where(and(eq(batchPaymentItems.batchId, input.batchId), eq(batchPaymentItems.status, "failed")));
+        .where(and(eq(batchPaymentItems.batchId, input.batchId), eq(batchPaymentItems.status, "failed"))).returning();
       await db.update(batchPayments)
         .set({ status: "draft", updatedAt: new Date() })
-        .where(eq(batchPayments.id, input.batchId));
+        .where(eq(batchPayments.id, input.batchId)).returning();
       return { success: true, verified: true, message: "Failed items reset to pending. Re-process to retry." };
     }),
 });

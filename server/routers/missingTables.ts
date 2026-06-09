@@ -358,7 +358,7 @@ export const bnplRouter = router({
         nextDueDate: nextDue,
         completedAt: isComplete ? new Date() : null,
         updatedAt: new Date(),
-      }).where(eq(bnplPlans.id, input.id));
+      }).where(eq(bnplPlans.id, input.id)).returning();
       return { success: true, verified: true, paid: installmentAmt, remaining: Math.max(0, Number(plan.totalAmount) - newPaid), completed: isComplete };
     }),
 

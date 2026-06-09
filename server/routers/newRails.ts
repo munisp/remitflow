@@ -178,7 +178,7 @@ export const newRailsRouter = router({
         if (!serviceResp.queued) {
           await db.update(bricspayTransfers)
             .set({ status: "submitted", updatedAt: new Date() })
-            .where(eq(bricspayTransfers.transferId, input.transferId));
+            .where(eq(bricspayTransfers.transferId, input.transferId)).returning();
         }
 
         await createAuditLog({
@@ -398,7 +398,7 @@ export const newRailsRouter = router({
               ghipssRouted: serviceResp.ghipssRouted ?? false,
               updatedAt: new Date(),
             })
-            .where(eq(papssTransfers.transferId, input.transferId));
+            .where(eq(papssTransfers.transferId, input.transferId)).returning();
         }
 
         await createAuditLog({

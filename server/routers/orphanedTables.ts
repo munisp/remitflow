@@ -59,7 +59,7 @@ export const outboxEventsRouter = router({
       if (!event) throw new TRPCError({ code: "NOT_FOUND" });
       await db.update(outboxEvents)
         .set({ status: "pending", retryCount: (event.retryCount ?? 0) + 1, failedAt: null, errorMessage: null })
-        .where(eq(outboxEvents.id, input.id));
+        .where(eq(outboxEvents.id, input.id)).returning();
       return { success: true, verified: true, message: "Event queued for retry" };
     }),
 
@@ -85,9 +85,9 @@ export const outboxEventsRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const cutoff = new Date(Date.now() - input.olderThanDays * 86400000);
       const result = await db.delete(outboxEvents)
-        .where(and(eq(outboxEvents.status, "published"), sql`${outboxEvents.publishedAt} < ${cutoff}`));
-      await createAuditLog({ userId: ctx.user.id, action: "OUTBOX_PURGE", description: `Purged published outbox events older than ${input.olderThanDays} days` });
-      return { success: true, verified: true, message: `Purged events older than ${input.olderThanDays} days` };
+        .where(and(eq(outboxEvents.status, "published"), sql`${outboxEvents.publishedAt} < ${cutoff}`)).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "OUTBOX_PURGE", description: `Purged ${result.length} published outbox events older than ${input.olderThanDays} days` });
+      return { success: true, verified: true, purgedCount: result.length, message: `Purged ${result.length} events older than ${input.olderThanDays} days` };
     }),
 });
 

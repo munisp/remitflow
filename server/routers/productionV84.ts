@@ -41,7 +41,7 @@ export const pushNotificationsRouter = router({
       if (existing.length > 0) {
         await db.update(schema.pushSubscriptions)
           .set({ isActive: true, updatedAt: new Date() })
-          .where(eq(schema.pushSubscriptions.id, existing[0].id));
+          .where(eq(schema.pushSubscriptions.id, existing[0].id)).returning();
         return { subscriptionId: existing[0].id };
       }
       const [sub] = await db.insert(schema.pushSubscriptions).values({
@@ -66,7 +66,7 @@ export const pushNotificationsRouter = router({
         .where(and(
           eq(schema.pushSubscriptions.id, input.subscriptionId),
           eq(schema.pushSubscriptions.userId, ctx.user.id)
-        ));
+        )).returning();
       // DB operation verified above
       return { success: true, id: "verified", updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
@@ -75,7 +75,7 @@ export const pushNotificationsRouter = router({
     const db = await getDb();
     await db.update(schema.pushSubscriptions)
       .set({ lastUsedAt: new Date() })
-      .where(eq(schema.pushSubscriptions.userId, ctx.user.id));
+      .where(eq(schema.pushSubscriptions.userId, ctx.user.id)).returning();
     return { sent: true, message: "Test notification queued" };
   }),
 });
@@ -315,7 +315,7 @@ export const developerSandboxRouter = router({
         requestCount: 0,
         testApiKey: `sk_test_remitflow_${ctx.user.id}_${Date.now()}`,
       })
-      .where(eq(schema.developerSandboxSessions.userId, ctx.user.id));
+      .where(eq(schema.developerSandboxSessions.userId, ctx.user.id)).returning();
     return { reset: true };
   }),
 
@@ -323,7 +323,7 @@ export const developerSandboxRouter = router({
     const db = await getDb();
     await db.update(schema.developerSandboxSessions)
       .set({ requestCount: sql`request_count + 1`, lastRequestAt: new Date() })
-      .where(eq(schema.developerSandboxSessions.userId, ctx.user.id));
+      .where(eq(schema.developerSandboxSessions.userId, ctx.user.id)).returning();
     return { incremented: true };
   }),
 });

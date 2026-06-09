@@ -123,7 +123,7 @@ export const rateAlertsRouter = router({
 
         await db.update(fxAlerts)
           .set({ lastCheckedRate: currentRate.toString(), lastCheckedAt: new Date() })
-          .where(eq(fxAlerts.id, alert.id));
+          .where(eq(fxAlerts.id, alert.id)).returning();
 
         const isTriggered = (alert.direction === "above" && currentRate >= target) ||
                            (alert.direction === "below" && currentRate <= target);
@@ -131,7 +131,7 @@ export const rateAlertsRouter = router({
         if (isTriggered) {
           await db.update(fxAlerts)
             .set({ triggered: true, triggeredAt: new Date(), isActive: false, notifiedAt: new Date() })
-            .where(eq(fxAlerts.id, alert.id));
+            .where(eq(fxAlerts.id, alert.id)).returning();
           triggered.push({ alertId: alert.id, corridor: `${alert.fromCurrency}/${alert.toCurrency}`, targetRate: target, currentRate });
           logger.info({ alertId: alert.id, userId: ctx.user.id, corridor: `${alert.fromCurrency}/${alert.toCurrency}`, currentRate, targetRate: target }, "Rate alert triggered");
           await createAuditLog({ userId: ctx.user.id, action: "FX_ALERT_TRIGGERED", metadata: { alertId: alert.id, currentRate, targetRate: target } });
