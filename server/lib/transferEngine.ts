@@ -307,22 +307,83 @@ const events: EventBus = process.env.KAFKA_BROKERS
 
 // ─── FX Rate Service ─────────────────────────────────────────────────────────
 
+const FX_RATE_CACHE = new Map<string, { rate: number; fetchedAt: number }>();
+const FX_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+const STATIC_FALLBACK_RATES: Record<string, number> = {
+  "USD-NGN": 1580.50, "USD-GHS": 15.20, "USD-KES": 153.50,
+  "GBP-NGN": 2010.00, "EUR-NGN": 1720.00, "USD-ZAR": 18.50,
+  "CAD-NGN": 1150.00, "EUR-GHS": 16.50, "GBP-KES": 195.00,
+};
+
+async function fetchLiveFxRate(from: string, to: string): Promise<number | null> {
+  const apiKey = process.env.FX_API_KEY;
+  const apiUrl = process.env.FX_API_URL ?? "https://v6.exchangerate-api.com/v6";
+  if (!apiKey) return null;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(`${apiUrl}/${apiKey}/pair/${from}/${to}`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!resp.ok) return null;
+    const data = await resp.json() as { result: string; conversion_rate?: number };
+    if (data.result === "success" && data.conversion_rate) {
+      return data.conversion_rate;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function getFxRate(from: string, to: string): Promise<number> {
+  const cacheKey = `${from}-${to}`;
+
+  // Check in-memory cache first
+  const cached = FX_RATE_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < FX_CACHE_TTL_MS) {
+    return cached.rate;
+  }
+
+  // Try DB first (may have rates populated by Go FX aggregator sidecar)
   const db = await getDb();
-  if (!db) return 1;
-  const result = await db.execute(sql`
-    SELECT rate FROM fx_rate_history 
-    WHERE from_currency = ${from} AND to_currency = ${to}
-    ORDER BY recorded_at DESC LIMIT 1
-  `);
-  const rows = result as unknown as { rate: string }[];
-  if (rows.length > 0) return safeParseAmount(rows[0].rate);
-  // Fallback rates if no DB rate available
-  const fallback: Record<string, number> = {
-    "USD-NGN": 1580.50, "USD-GHS": 15.20, "USD-KES": 153.50,
-    "GBP-NGN": 2010.00, "EUR-NGN": 1720.00, "USD-ZAR": 18.50,
-  };
-  return fallback[`${from}-${to}`] || 1.0;
+  if (db) {
+    const result = await db.execute(sql`
+      SELECT rate FROM fx_rate_history 
+      WHERE from_currency = ${from} AND to_currency = ${to}
+      ORDER BY recorded_at DESC LIMIT 1
+    `);
+    const rows = result as unknown as { rate: string }[];
+    if (rows.length > 0) {
+      const rate = safeParseAmount(rows[0].rate);
+      FX_RATE_CACHE.set(cacheKey, { rate, fetchedAt: Date.now() });
+      return rate;
+    }
+  }
+
+  // Try live API (ExchangeRate-API, Open Exchange Rates, or custom)
+  const liveRate = await fetchLiveFxRate(from, to);
+  if (liveRate !== null) {
+    FX_RATE_CACHE.set(cacheKey, { rate: liveRate, fetchedAt: Date.now() });
+    // Persist to DB for future lookups
+    if (db) {
+      try {
+        await db.execute(sql`
+          INSERT INTO fx_rate_history (from_currency, to_currency, rate, source, recorded_at)
+          VALUES (${from}, ${to}, ${liveRate.toString()}, 'live_api', NOW())
+        `);
+      } catch { /* non-critical — rate already served */ }
+    }
+    return liveRate;
+  }
+
+  // Static fallback (development / no API key)
+  const fallback = STATIC_FALLBACK_RATES[cacheKey] ?? 1.0;
+  FX_RATE_CACHE.set(cacheKey, { rate: fallback, fetchedAt: Date.now() });
+  return fallback;
 }
 
 // ─── Fee Calculation ─────────────────────────────────────────────────────────
@@ -654,5 +715,6 @@ export async function executeTransfer(req: TransferRequest & { idempotencyKey?: 
 
 // ─── Exported utilities ──────────────────────────────────────────────────────
 
-export { calculateFee, validateCompliance, getFxRate };
+export { calculateFee, validateCompliance, getFxRate, PostgresLedger };
+export { calculateFee as calculateFeeForTest, getFxRate as getFxRateForTest, validateCompliance as checkKycLimits };
 export type { FeeCalculation, LedgerEntry, LedgerBackend, EventBus };
