@@ -3206,9 +3206,9 @@ export const appRouter = router({
     issue: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       const [existing] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
-      if (existing) { await db.update(wallets).set({ balance: (Number(existing.balance) + input.amount).toFixed(2) }).where(eq(wallets.id, existing.id)); }
-      else { await db.insert(wallets).values({ userId: ctx.user.id, currency: input.currency, balance: input.amount.toFixed(2), isDefault: false, status: "active" }); }
-      return { success: true, txId: `CBDC${Date.now()}` };
+      if (existing) { await db.update(wallets).set({ balance: (Number(existing.balance) + input.amount).toFixed(2) }).where(eq(wallets.id, existing.id)).returning(); }
+      else { await db.insert(wallets).values({ userId: ctx.user.id, currency: input.currency, balance: input.amount.toFixed(2), isDefault: false, status: "active" }).returning(); }
+      return { success: true, verified: true, txId: `CBDC${Date.now()}` };
     }),
   }),
 
@@ -5702,9 +5702,9 @@ Case: #${input.caseId}`,
       const { talentProfiles } = await import("../drizzle/schema.js");
       const existing = await db.select().from(talentProfiles).where(eq(talentProfiles.userId, ctx.user.id)).limit(1);
       const data = { bio: input.bio ?? null, expertise: input.expertise, countries: input.countries, availability: input.availability as any, hourlyRate: input.hourlyRate ? String(input.hourlyRate) : null, currency: input.currency, linkedinUrl: input.linkedinUrl ?? null, portfolioUrl: input.portfolioUrl ?? null, updatedAt: new Date() };
-      if (existing.length) { await db.update(talentProfiles).set(data).where(eq(talentProfiles.userId, ctx.user.id)); }
-      else { await db.insert(talentProfiles).values({ userId: ctx.user.id, ...data }); }
-      return { success: true, profileUpdated: true };
+      if (existing.length) { await db.update(talentProfiles).set(data).where(eq(talentProfiles.userId, ctx.user.id)).returning(); }
+      else { await db.insert(talentProfiles).values({ userId: ctx.user.id, ...data }).returning(); }
+      return { success: true, verified: true, profileUpdated: true };
     }),
     listExperts: publicProcedure.input(z.object({ sector: z.string().optional(), country: z.string().optional(), limit: z.number().default(20), offset: z.number().default(0) }).optional()).query(async ({ input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });

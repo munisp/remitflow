@@ -24,6 +24,7 @@
 
 import { KAFKA_TOPICS } from "./kafka";
 import { getDb, createAuditLog } from "../db";
+import { logger } from "../_core/logger";
 
 const CONSUMER_GROUP = process.env.KAFKA_CONSUMER_GROUP || "remitflow-main-consumer";
 
@@ -298,16 +299,16 @@ export async function startKafkaConsumers(): Promise<void> {
           _stats.lastMessageAt = new Date().toISOString();
         } catch (err) {
           _stats.messagesErrored++;
-          console.error(`Kafka consumer error [${topic}]:`, err);
+          logger.error({ topic, err: err instanceof Error ? err.message : String(err) }, `Kafka consumer error [${topic}]`);
         }
       },
     });
 
     _consumerRunning = true;
     _stats.startedAt = new Date().toISOString();
-    console.log(`Kafka consumers started for ${handlers.length} topics`);
+    logger.info(`Kafka consumers started for ${handlers.length} topics`);
   } catch (err) {
-    console.warn("Kafka consumers not started (broker unavailable):", (err as Error).message);
+    logger.warn({ err: (err as Error).message }, "Kafka consumers not started (broker unavailable)");
   }
 }
 

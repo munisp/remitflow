@@ -11,7 +11,7 @@ const OPENSEARCH_USER = process.env.OPENSEARCH_USER || "admin";
 const OPENSEARCH_PASS = process.env.OPENSEARCH_PASS || "";
 
 if (!process.env.OPENSEARCH_PASS && process.env.NODE_ENV === "production") {
-  console.warn("[OpenSearch] OPENSEARCH_PASS not set in production — authentication will fail");
+  logger.warn("[OpenSearch] OPENSEARCH_PASS not set in production — authentication will fail");
 }
 
 // ── Index Names ───────────────────────────────────────────────────────────────
