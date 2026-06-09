@@ -9,7 +9,7 @@ import { eq, desc, and, like, ilike, sql, inArray } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc.js";
 import { getDb } from "../db.js";
-import { subtractMoney, compareMoney, multiplyMoney, safeParseAmount } from "../lib/safeDecimal.js";
+import { subtractMoney, addMoney, compareMoney, multiplyMoney, safeParseAmount } from "../lib/safeDecimal.js";
 import {
   ngxStocks,
   stockWatchlists,
@@ -826,7 +826,7 @@ export const paypalTopupRouter = router({
       if (wallet) {
         await (await getDbConn())
           .update(wallets)
-          .set({ balance: (parseFloat(wallet.balance) + capturedAmount).toFixed(2) })
+          .set({ balance: addMoney(wallet.balance, capturedAmount) })
           .where(eq(wallets.id, wallet.id));
       }
       await (await getDbConn())
@@ -950,7 +950,7 @@ export const flutterwaveTopupRouter = router({
       if (wallet) {
         await (await getDbConn())
           .update(wallets)
-          .set({ balance: (parseFloat(wallet.balance) + amount).toFixed(2) })
+          .set({ balance: addMoney(wallet.balance, amount) })
           .where(eq(wallets.id, wallet.id));
       }
       await (await getDbConn())

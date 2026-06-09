@@ -29,7 +29,7 @@ export const diasporaEURouter = router({
       crossSellScore: "0",
       acquisitionChannel: "organic",
       createdAt: new Date(),
-    });
+    }).returning();
 
     const [created] = await db.select().from(diasporaProfiles)
       .where(and(eq(diasporaProfiles.userId, ctx.user.id), eq(diasporaProfiles.diasporaRegion, "eu")));
@@ -111,7 +111,7 @@ export const diasporaEURouter = router({
         recipientAccount: input.recipientIban,
         status: "pending",
         createdAt: new Date(),
-      });
+      }).returning();
 
       return {
         transferId,

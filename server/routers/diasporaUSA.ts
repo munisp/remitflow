@@ -27,7 +27,7 @@ async function getOrCreateDiasporaProfile(userId: number, region: string) {
     crossSellScore: "0",
     acquisitionChannel: "organic",
     createdAt: new Date(),
-  });
+  }).returning();
 
   const [created] = await db.select().from(diasporaProfiles)
     .where(and(eq(diasporaProfiles.userId, userId), eq(diasporaProfiles.diasporaRegion, region)));
@@ -120,7 +120,7 @@ export const diasporaUSARouter = router({
         recipientAccount: input.recipientAccountNumber,
         status: "pending",
         createdAt: new Date(),
-      });
+      }).returning();
 
       return {
         transferId,

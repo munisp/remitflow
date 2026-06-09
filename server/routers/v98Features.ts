@@ -461,7 +461,7 @@ export const v98Router = router({
             currency: input.currency,
             balance: String(balanceAfter),
             isDefault: false,
-          });
+          }).returning();
         }
 
         // Log the operation

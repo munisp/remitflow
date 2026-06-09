@@ -288,7 +288,7 @@ export const partnerOnboardingRouter = router({
           { id: "wallet", label: "Fund Wallet", required: false, order: 3, enabled: true },
           { id: "transfer", label: "First Transfer", required: false, order: 4, enabled: true },
         ],
-      });
+      }).returning();
 
       // Mark invite code as used
       await db.update(partnerInviteCodes)

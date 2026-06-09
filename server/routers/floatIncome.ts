@@ -16,6 +16,7 @@ import { TRPCError } from "@trpc/server";
 import { eq, sql, gte, and } from "drizzle-orm";
 import { protectedProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
+import { safeParseAmount } from "../lib/safeDecimal.js";
 import { treasuryPositions } from "../../drizzle/schema";
 import { createAuditLog } from "../audit.service";
 
@@ -58,7 +59,7 @@ export const floatIncomeRouter = router({
     const positions = await db.select().from(treasuryPositions);
     const positionMap: Record<string, number> = {};
     for (const pos of positions) {
-      positionMap[pos.currency] = parseFloat(pos.balance as string);
+      positionMap[pos.currency] = safeParseAmount(pos.balance as string);
     }
 
     // Load custom rates from system_config (key: float_rate_USD, float_rate_GBP, etc.)
@@ -157,7 +158,7 @@ export const floatIncomeRouter = router({
       for (let d = 0; d < Math.min(input.days, 90); d++) {
         const date = new Date(Date.now() - d * 86400000).toISOString().split("T")[0];
         for (const pos of currencies) {
-          const balance = parseFloat(pos.balance as string);
+          const balance = safeParseAmount(pos.balance as string);
           const rate = DEFAULT_FLOAT_RATES[pos.currency]?.rate ?? 0.04;
           const yieldAmount = calculateDailyYield(balance, rate);
           records.push({
@@ -234,7 +235,7 @@ export const floatIncomeRouter = router({
 
       const results = [];
       for (const pos of positions) {
-        const balance = parseFloat(pos.balance as string);
+        const balance = safeParseAmount(pos.balance as string);
         const rate = rateOverrides[pos.currency] ?? DEFAULT_FLOAT_RATES[pos.currency]?.rate ?? 0.04;
         const yieldAmount = calculateDailyYield(balance, rate);
 

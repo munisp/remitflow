@@ -185,7 +185,7 @@ export const posAgentCashFlowRouter = router({
             status: "completed" as any,
             description: `Cash-in via agent ${agent.agentCode}`,
             reference: ref,
-          });
+          }).returning();
           return [{ id: Date.now(), reference: ref }];
         });
 
@@ -285,7 +285,7 @@ export const posAgentCashFlowRouter = router({
             status: "completed" as any,
             description: `Cash-out via agent ${agent.agentCode}`,
             reference: ref,
-          });
+          }).returning();
           return [{ id: Date.now(), reference: ref }];
         });
 

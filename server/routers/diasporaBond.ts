@@ -359,7 +359,7 @@ export const diasporaBondRouter = router({
           reference: subscriptionRef,
           description: `Diaspora bond subscription: ${bond.bondName}`,
           metadata: { bondId: input.bondId, subscriptionId: subscription.id },
-        });
+        }).returning();
       }
 
       return {

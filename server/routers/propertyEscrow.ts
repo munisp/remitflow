@@ -324,7 +324,7 @@ const escrowPlanRouter = router({
           dueDate,
           amountUsd: String(Math.round(installmentAmount * 100) / 100),
           status: i === 0 ? "scheduled" : "scheduled",
-        });
+        }).returning();
       }
 
       await createAuditLog({ userId: ctx.user.id, action: "PROPERTY_ESCROW_CREATED", metadata: { planId, listingId: input.listingId, builderId: input.builderId, totalPriceUsd } });
@@ -437,7 +437,7 @@ const escrowPlanRouter = router({
         toCurrency: "USD",
         description: `Property escrow deposit for plan ${plan.planId}`,
         reference: `ESCROW-DEP-${plan.planId}`,
-      } as any);
+      } as any).returning();
 
       // Activate plan
       const nextPaymentDate = new Date();
@@ -872,7 +872,7 @@ const propertyDisputeRouter = router({
             toCurrency: "USD",
             description: `Property escrow refund — dispute ${input.disputeId}`,
             reference: `ESCROW-REFUND-${input.disputeId}`,
-          } as any);
+          } as any).returning();
 
           await db.update(propertyEscrowPlans).set({ status: "refunded", updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
           updates.refundCompletedAt = new Date();
@@ -936,7 +936,7 @@ const propertyDisputeRouter = router({
         toCurrency: "USD",
         description: `Property escrow full refund — plan ${plan.planId}: ${input.reason}`,
         reference: `ESCROW-FULLREFUND-${plan.planId}`,
-      } as any);
+      } as any).returning();
 
       await db.update(propertyEscrowPlans).set({ status: "refunded", cancelledAt: new Date(), updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "ESCROW_FULL_REFUND", metadata: { planId: plan.planId, refundAmount, reason: input.reason } });

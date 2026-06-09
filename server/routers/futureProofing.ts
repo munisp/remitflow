@@ -22,6 +22,7 @@ import { TRPCError } from "@trpc/server";
 import { randomBytes, randomUUID, createHash, createCipheriv, createDecipheriv, generateKeyPairSync } from "crypto";
 import { router, protectedProcedure, adminProcedure, publicProcedure } from "../_core/trpc.js";
 import { getDb } from "../db.js";
+import { compareMoney } from "../lib/safeDecimal.js";
 import { createAuditLog } from "../audit.service.js";
 import { getKafkaProducer } from "../middleware/kafka.js";
 import { sql, eq, desc, and, gte, lte } from "drizzle-orm";
@@ -772,7 +773,7 @@ const cbdcFullRouter = router({
       const [senderWallet] = await db.select().from(cbdcWallets)
         .where(and(eq(cbdcWallets.userId, ctx.user.id), eq(cbdcWallets.currency, "eNGN"))).limit(1) as any[];
       if (!senderWallet) throw new TRPCError({ code: "BAD_REQUEST", message: "No eNaira wallet found" });
-      if (parseFloat(senderWallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient eNaira balance" });
+      if (compareMoney(senderWallet.balance, input.amount) < 0) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient eNaira balance" });
 
       const txId = genId("eNGN-TXF");
 
@@ -837,7 +838,7 @@ const cbdcFullRouter = router({
       // Verify CBDC balance
       const [wallet] = await db.select().from(cbdcWallets)
         .where(and(eq(cbdcWallets.userId, ctx.user.id), eq(cbdcWallets.currency, input.fromCurrency.replace("e", "")))).limit(1) as any[];
-      if (!wallet || parseFloat(wallet.balance) < input.amount) {
+      if (!wallet || compareMoney(wallet.balance, input.amount) < 0) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient CBDC balance" });
       }
 

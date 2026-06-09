@@ -1017,7 +1017,7 @@ export const batchPaymentV97Router = router({
           amount: String(r.amount),
           currency: input.currency,
         }))
-      );
+      ).returning();
       await sendAuditLog({ userId: ctx.user.id, action: "batch_payment.create", resource: "batch_payment", resourceId: String(batch.id), severity: "info", details: { totalAmount, count: input.recipients.length } });
       return batch;
     }),

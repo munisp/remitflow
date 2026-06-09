@@ -181,7 +181,7 @@ export const smeTradeRouter = router({
         batchReference: input.batchReference,
         status: "processing",
         createdAt: new Date(),
-      });
+      }).returning();
 
       // Submit to Go SME trade service
       const result = await callSmeService(SME_TRADE_URL, "/batch", {

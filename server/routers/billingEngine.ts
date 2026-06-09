@@ -272,7 +272,7 @@ export const billingEngineRouter = router({
         createdByUserId: String(ctx.user.id),
         billingConfigVersion: cfg.version ?? "default",
         eventTimestampMs: now,
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
 
       return {
         eventId,
@@ -660,7 +660,7 @@ export const billingEngineRouter = router({
         changeReason: "Initial provisioning via onboarding wizard",
         createdAtMs: now,
         updatedAtMs: now,
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
       await createAuditLog({
         userId: ctx.user.id,
         action: "billing.tenant.provisioned",

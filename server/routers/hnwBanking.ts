@@ -158,7 +158,7 @@ export const hnwBankingRouter = router({
         purposeCode: input.purposeCode,
         status: result.status ?? "processing",
         createdAt: new Date(),
-      });
+      }).returning();
 
       return result;
     }),

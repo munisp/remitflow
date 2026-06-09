@@ -544,7 +544,7 @@ const paymentOrchestrationRouter = router({
           currency: input.fromCurrency, status: "processing",
           beneficiaryId: input.beneficiaryId, description: `Payment via ${input.rail}`,
           destinationCurrency: input.toCurrency,
-        });
+        }).returning();
       }
       return {
         success: true, paymentId: `PAY-${Date.now()}`, status: "processing",

@@ -79,7 +79,7 @@ export const westAfricaRouter = router({
         purposeCode: input.purposeCode,
         status: "pending",
         createdAt: new Date(),
-      });
+      }).returning();
 
       // Submit to XOF adapter
       const result = await callXofAdapter("/submit", {
