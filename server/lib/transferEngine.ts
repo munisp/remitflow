@@ -572,11 +572,60 @@ export async function executeTransfer(req: TransferRequest & { idempotencyKey?: 
   }
   // ── END TRANSACTION ────────────────────────────────────────────────────────
 
-  // Step 11: Publish events outside transaction (Kafka in production)
+  // Step 11: Initiate external disbursement via payment provider (sandbox in dev)
+  // Middleware-ready: in production, this calls Stripe/Flutterwave/M-Pesa/MTN MoMo
+  let disbursementStatus: "completed" | "pending_settlement" = "completed";
+  let providerRef = "";
+  try {
+    const { initiatePayment } = await import('./paymentProviders.js');
+    const railMap: Record<string, string> = {
+      bank_transfer: "bank_transfer",
+      mobile_money: "mobile_money",
+      cash_pickup: "bank_transfer",
+      wallet: "bank_transfer",
+    };
+    const paymentResult = await initiatePayment({
+      amount: creditAmount,
+      currency: req.toCurrency,
+      fromCurrency: req.fromCurrency,
+      toCurrency: req.toCurrency,
+      recipientAccountNumber: req.beneficiaryAccount,
+      recipientPhone: req.beneficiaryAccount,
+      description: `RemitFlow: ${req.fromCurrency}→${req.toCurrency} for ${req.beneficiaryName}`,
+      userId: req.senderId,
+      transactionId: transferId,
+      callbackUrl: process.env.WEBHOOK_CALLBACK_URL ?? `${process.env.BASE_URL ?? 'http://localhost:3001'}/api/webhooks/payment`,
+    }, railMap[req.payoutMethod] ?? "bank_transfer");
+
+    providerRef = paymentResult.providerRef;
+    if (!paymentResult.success) {
+      disbursementStatus = "pending_settlement";
+      await events.publish("transfer.disbursement_failed", {
+        transferId, userId: req.senderId, provider: paymentResult.providerName,
+        error: paymentResult.errorMessage,
+      });
+    }
+    // Update transfer with provider reference
+    await db.execute(sql`
+      UPDATE transfers SET provider_ref = ${providerRef},
+        status = ${disbursementStatus === "completed" ? "completed" : "pending_settlement"},
+        "updatedAt" = NOW()
+      WHERE "referenceId" = ${transferId}
+    `);
+  } catch (disbursementErr) {
+    // Non-fatal: internal ledger transfer succeeded, external disbursement can be retried
+    disbursementStatus = "pending_settlement";
+    await events.publish("transfer.disbursement_error", {
+      transferId, userId: req.senderId, error: String(disbursementErr),
+    });
+  }
+
+  // Step 12: Publish events outside transaction (Kafka in production)
   await events.publish("transfer.completed", {
     transferId, userId: req.senderId,
     amount: req.amount, fromCurrency: req.fromCurrency, toCurrency: req.toCurrency,
     creditAmount, fxRate, fee: fee.totalFee, corridor: req.corridor,
+    providerRef, disbursementStatus,
   });
 
   const deliveryMap: Record<string, string> = {
@@ -588,7 +637,7 @@ export async function executeTransfer(req: TransferRequest & { idempotencyKey?: 
 
   return {
     transferId,
-    status: "completed",
+    status: disbursementStatus,
     debitAmount: totalCharged,
     creditAmount,
     fxRate,
