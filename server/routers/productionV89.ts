@@ -468,8 +468,9 @@ export const notificationCenterV2Router = router({
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-      await db.delete(notifications)
-        .where(and(eq(notifications.id, input.notificationId), eq(notifications.userId, ctx.user.id)));
+      const _deleted = await db.delete(notifications)
+        .where(and(eq(notifications.id, input.notificationId), eq(notifications.userId, ctx.user.id))).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 

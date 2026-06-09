@@ -164,7 +164,8 @@ const builderKybRouter = router({
         updates.kybRejectionReason = input.rejectionReason ?? "Did not meet verification requirements";
       }
 
-      await db.update(builderProfiles).set(updates as any).where(eq(builderProfiles.id, input.builderId));
+      const [_row] = await db.update(builderProfiles).set(updates as any).where(eq(builderProfiles.id, input.builderId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       await createAuditLog({ userId: ctx.user.id, action: input.approved ? "BUILDER_KYB_APPROVED" : "BUILDER_KYB_REJECTED", metadata: { builderId: input.builderId, adminId: ctx.user.id } });
 
       return { builderId: input.builderId, status: input.approved ? "verified" : "rejected" };

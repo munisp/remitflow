@@ -34,13 +34,13 @@ describe("Go Rate Limit Sidecar Integration", () => {
 
   it("should allow a request within rate limits", async () => {
     if (!available) return;
-    const res = await fetch(`${RATELIMIT_URL}/check`, {
+    const res = await fetch(`${RATELIMIT_URL}/ratelimit/check`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         key: "test-user-ratelimit-001",
         limit: 100,
-        window: 60,
+        windowSecs: 60,
       }),
     });
     expect(res.ok).toBe(true);
@@ -54,10 +54,10 @@ describe("Go Rate Limit Sidecar Integration", () => {
     // Burst 10 requests in quick succession
     const key = `test-burst-${Date.now()}`;
     const promises = Array.from({ length: 10 }, () =>
-      fetch(`${RATELIMIT_URL}/check`, {
+      fetch(`${RATELIMIT_URL}/ratelimit/check`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key, limit: 5, window: 60 }),
+        body: JSON.stringify({ key, limit: 5, windowSecs: 60 }),
       })
     );
     const results = await Promise.all(promises);

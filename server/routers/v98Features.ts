@@ -291,8 +291,9 @@ export const v98Router = router({
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-        await db.delete(transactionExports)
-          .where(and(eq(transactionExports.id, input.id), eq(transactionExports.userId, ctx.user.id)));
+        const _deleted = await db.delete(transactionExports)
+          .where(and(eq(transactionExports.id, input.id), eq(transactionExports.userId, ctx.user.id))).returning();
+        if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         return { deleted: true };
       }),
   }),
@@ -1183,7 +1184,8 @@ export const v98Router = router({
         const [existing] = await db.select({ isActive: fxAlerts.isActive }).from(fxAlerts)
           .where(and(eq(fxAlerts.id, input.id), eq(fxAlerts.userId, ctx.user.id))).limit(1);
         if (!existing) throw new TRPCError({ code: "NOT_FOUND" });
-        await db.update(fxAlerts).set({ isActive: !existing.isActive }).where(eq(fxAlerts.id, input.id));
+        const [_row] = await db.update(fxAlerts).set({ isActive: !existing.isActive }).where(eq(fxAlerts.id, input.id)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         return { toggled: true, isActive: !existing.isActive };
       }),
   }),
@@ -1231,7 +1233,8 @@ export const v98Router = router({
         // Mark the transaction as having fee resolved
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-        await db.update(transactions).set({ fee: "0" }).where(eq(transactions.id, input.id));
+        const [_row] = await db.update(transactions).set({ fee: "0" }).where(eq(transactions.id, input.id)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         return { resolved: true };
       }),
     reconciliationSummary: adminProcedure.query(async () => {

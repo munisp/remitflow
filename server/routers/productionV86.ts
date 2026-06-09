@@ -179,7 +179,8 @@ export const promoCodesAdminRouter = router({
       if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(promoCodes).where(eq(promoCodes.id, input.id));
+      const _deleted = await db.delete(promoCodes).where(eq(promoCodes.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -587,8 +588,9 @@ export const rateAlertsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(exchangeRateAlerts)
-        .where(and(eq(exchangeRateAlerts.id, input.id), eq(exchangeRateAlerts.userId, ctx.user.id)));
+      const _deleted = await db.delete(exchangeRateAlerts)
+        .where(and(eq(exchangeRateAlerts.id, input.id), eq(exchangeRateAlerts.userId, ctx.user.id))).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 

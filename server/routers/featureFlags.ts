@@ -147,13 +147,15 @@ export const featureFlagsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(featureFlags)
+      const [_row] = await db.update(featureFlags)
         .set({
           defaultEnabled: input.enabled,
           ...(input.rolloutPct !== undefined ? { rolloutPct: input.rolloutPct } : {}),
           updatedAt: new Date(),
         })
-        .where(eq(featureFlags.id, input.flagId));
+        .where(eq(featureFlags.id, input.flagId))
+        .returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Feature flag not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -179,14 +181,14 @@ export const featureFlagsRouter = router({
           .set({ enabled: input.enabled, reason: input.reason ?? null, overriddenBy: ctx.user.id, updatedAt: new Date(), expiresAt: input.expiresAt ? new Date(input.expiresAt) : null })
           .where(eq(tenantFeatureFlags.id, existing[0].id)).returning();
       } else {
-        await db.insert(tenantFeatureFlags).values({
+        [_row] = await db.insert(tenantFeatureFlags).values({
           tenantId: input.tenantId, flagId: input.flagId, enabled: input.enabled,
           reason: input.reason ?? null, overriddenBy: ctx.user.id,
           expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
-        });
+        }).returning();
       }
-      // DB operation verified above
-      return { success: true, id: "verified", updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Admin: remove tenant override (revert to global default)
@@ -195,8 +197,10 @@ export const featureFlagsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(tenantFeatureFlags)
-        .where(and(eq(tenantFeatureFlags.tenantId, input.tenantId), eq(tenantFeatureFlags.flagId, input.flagId)));
+      const deleted = await db.delete(tenantFeatureFlags)
+        .where(and(eq(tenantFeatureFlags.tenantId, input.tenantId), eq(tenantFeatureFlags.flagId, input.flagId)))
+        .returning();
+      if (deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Tenant override not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -212,7 +216,7 @@ export const featureFlagsRouter = router({
       if (existing.length > 0) {
         [_row] = await db.update(userFeatureFlags).set({ enabled: input.enabled }).where(eq(userFeatureFlags.id, existing[0].id)).returning();
       } else {
-        await db.insert(userFeatureFlags).values({ userId: input.userId, flagId: input.flagId, enabled: input.enabled });
+        [_row] = await db.insert(userFeatureFlags).values({ userId: input.userId, flagId: input.flagId, enabled: input.enabled }).returning();
       }
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
       return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
@@ -235,7 +239,8 @@ export const featureFlagsRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
       if (input.id) {
-        await db.update(featureFlags).set({ ...input, updatedAt: new Date() }).where(eq(featureFlags.id, input.id));
+        const [_row] = await db.update(featureFlags).set({ ...input, updatedAt: new Date() }).where(eq(featureFlags.id, input.id)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         return { id: input.id };
       } else {
         const [row] = await db.insert(featureFlags).values({ ...input }).returning({ id: featureFlags.id });
@@ -249,7 +254,8 @@ export const featureFlagsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(featureFlags).where(eq(featureFlags.id, input.id));
+      const _deleted = await db.delete(featureFlags).where(eq(featureFlags.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -618,7 +624,8 @@ export const tenantsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(tenants).where(eq(tenants.id, input.id));
+      const _deleted = await db.delete(tenants).where(eq(tenants.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -636,8 +643,9 @@ export const tenantsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(tenantUsers)
-        .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.userId)));
+      const _deleted = await db.delete(tenantUsers)
+        .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.userId))).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 

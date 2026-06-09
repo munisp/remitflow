@@ -338,8 +338,9 @@ export const documentVaultRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(documentVaultTable)
-        .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id)));
+      const _deleted = await db.delete(documentVaultTable)
+        .where(and(eq(documentVaultTable.id, input.documentId), eq(documentVaultTable.userId, ctx.user.id))).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 

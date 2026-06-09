@@ -692,7 +692,8 @@ export const partnerWebhooksV2Router = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database unavailable");
-      await db.update(partnerWebhooks).set({ isActive: input.active }).where(eq(partnerWebhooks.id, input.id));
+      const [_row] = await db.update(partnerWebhooks).set({ isActive: input.active }).where(eq(partnerWebhooks.id, input.id)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { id: input.id, active: input.active };
     }),
 
@@ -701,7 +702,8 @@ export const partnerWebhooksV2Router = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new Error("Database unavailable");
-      await db.delete(partnerWebhooks).where(eq(partnerWebhooks.id, input.id));
+      const _deleted = await db.delete(partnerWebhooks).where(eq(partnerWebhooks.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { deleted: true, id: input.id };
     }),
 });

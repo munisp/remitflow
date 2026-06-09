@@ -149,7 +149,8 @@ export const velocityCheckAdminRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(velocityRules).where(eq(velocityRules.id, input.id));
+      const _deleted = await db.delete(velocityRules).where(eq(velocityRules.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -200,7 +201,8 @@ export const velocityCheckAdminRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(velocityOverrides).where(eq(velocityOverrides.id, input.id));
+      const _deleted = await db.delete(velocityOverrides).where(eq(velocityOverrides.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -243,7 +245,8 @@ export const velocityCheckAdminRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(velocityWhitelist).where(eq(velocityWhitelist.id, input.id));
+      const _deleted = await db.delete(velocityWhitelist).where(eq(velocityWhitelist.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -364,7 +367,8 @@ export const kycLifecycleRouter = router({
       });
       // Update user KYC tier
       const tierMap: Record<number, string> = { 1: "tier1", 2: "tier2", 3: "tier3", 4: "tier3" };
-      await db.update(users).set({ kycTier: tierMap[input.tier ?? existing.tier] as any }).where(eq(users.id, input.userId));
+      const [_row] = await db.update(users).set({ kycTier: tierMap[input.tier ?? existing.tier] as any }).where(eq(users.id, input.userId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       await sendAuditLog({ userId: ctx.user.id, action: "kyc_lifecycle.approve", resource: "kyc_lifecycle", resourceId: String(existing.id), severity: "info", details: { targetUserId: input.userId } });
       return updated;
     }),

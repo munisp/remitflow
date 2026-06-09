@@ -392,8 +392,9 @@ export const partnerApplicationCommentsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(partnerApplicationComments)
-        .where(eq(partnerApplicationComments.id, input.id));
+      const _deleted = await db.delete(partnerApplicationComments)
+        .where(eq(partnerApplicationComments.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       await createAuditLog({ userId: ctx.user.id, action: "PARTNER_COMMENT_DELETED", description: `Partner application comment ${input.id} deleted` });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),

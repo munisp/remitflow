@@ -111,7 +111,8 @@ export const apiChangelogRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(apiChangelogs).where(eq(apiChangelogs.id, input.id));
+      const _deleted = await db.delete(apiChangelogs).where(eq(apiChangelogs.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });

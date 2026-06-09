@@ -425,8 +425,11 @@ export const partnerOnboardingRouter = router({
       if (!membership) throw new TRPCError({ code: "FORBIDDEN", message: "Only tenant admins can remove members." });
       if (input.targetUserId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot remove yourself." });
 
-      await db.delete(tenantUsers)
-        .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.targetUserId)));
+      const _deleted = await db.delete(tenantUsers)
+
+        .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.targetUserId))).returning();
+
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
