@@ -2409,7 +2409,7 @@ export const appRouter = router({
       const bp = await getBatchPaymentsByUserId(ctx.user.id);
       return bp.map((b: any) => ({ ...b, totalAmount: Number(b.totalAmount) }));
     }),
-    create: protectedProcedure.input(z.object({ name: z.string(), currency: z.string().default("NGN"), recipients: z.array(z.object({ name: z.string(), account: z.string(), amount: z.number() })) })).mutation(async ({ ctx, input }) => {
+    create: protectedProcedure.input(z.object({ name: z.string(), currency: z.string().default("NGN"), recipients: z.array(z.object({ name: z.string(), account: z.string(), amount: z.number().positive() })) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const totalAmount = input.recipients.reduce((s, r) => s + r.amount, 0);
       await db.insert(batchPayments).values({ userId: ctx.user.id, name: input.name, currency: input.currency, totalAmount: totalAmount.toString(), totalRecipients: input.recipients.length, status: "draft", payments: input.recipients });
@@ -3581,7 +3581,7 @@ export const appRouter = router({
       const rfFee = calculateFee(input.amount / fromRate, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       return { rate, fee: Math.round(fee * 100) / 100, toAmount: Math.round((input.amount - fee) * rate * 100) / 100, estimatedDelivery: "1-2 business days", comparison: [{ provider: "RemitFlow", rate: rate * 0.995, fee: Math.round(rfFee.totalFee * fromRate * 100) / 100, toAmount: Math.round((input.amount - rfFee.totalFee * fromRate) * rate * 0.995 * 100) / 100 }, { provider: "Wise", rate, fee: Math.round(fee * 100) / 100, toAmount: Math.round((input.amount - fee) * rate * 100) / 100 }, { provider: "Western Union", rate: rate * 0.985, fee: 4.99, toAmount: Math.round((input.amount - 4.99) * rate * 0.985 * 100) / 100 }] };
     }),
-    send: strictRateLimitedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number(), recipientName: z.string(), recipientAccount: z.string() })).mutation(async ({ ctx, input }) => {
+    send: strictRateLimitedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive(), recipientName: z.string(), recipientAccount: z.string() })).mutation(async ({ ctx, input }) => {
       await enforceTransferLimits(ctx.user.id, input.amount, input.from, ctx.user.kycTier);
       const wiseSendFee = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       const totalDebit = input.amount + wiseSendFee.totalFee;
@@ -3664,7 +3664,7 @@ export const appRouter = router({
   }),
 
   checkout: router({
-    createSession: protectedProcedure.input(z.object({ amount: z.number(), currency: z.string(), description: z.string(), callbackUrl: z.string().optional() })).mutation(({ ctx, input }) => ({
+    createSession: protectedProcedure.input(z.object({ amount: z.number().positive(), currency: z.string(), description: z.string(), callbackUrl: z.string().optional() })).mutation(({ ctx, input }) => ({
       sessionId: `cs_${Date.now()}`, checkoutUrl: `https://checkout.remitflow.app/pay/cs_${Date.now()}`, publicKey: `pk_live_remitflow_${ctx.user.id}`, ...input,
     })),
     apiKeys: protectedProcedure.query(({ ctx }) => ({
@@ -5971,7 +5971,7 @@ Case: #${input.caseId}`,
     /** Run a transaction through the AML rules engine */
     amlScreen: protectedProcedure.input(z.object({
       transactionId: z.string(),
-      amountUsd: z.number(),
+      amountUsd: z.number().positive(),
       senderCountry: z.string().optional(),
       receiverCountry: z.string().optional(),
       senderName: z.string().optional(),
