@@ -762,7 +762,7 @@ export const appRouter = router({
       return { success: true, orderId: order.id, approvalUrl: approvalLink?.href ?? `https://www.sandbox.paypal.com/checkoutnow?token=${order.id}`, sandboxMode: ENV.paypalClientId.startsWith("AZDx") };
     }),
     paypalCapture: protectedProcedure.input(z.object({
-      orderId: z.string(),
+      orderId: z.string().regex(/^[A-Za-z0-9\-]+$/, "Invalid order ID format"),
       walletCurrency: z.string().default("USD"),
       amount: z.number().positive(),
     })).mutation(async ({ ctx, input }) => {
@@ -861,7 +861,7 @@ export const appRouter = router({
       return { success: true, paymentLink: pay.data.link, txRef, sandboxMode: false };
     }),
     flutterwaveVerify: protectedProcedure.input(z.object({
-      txRef: z.string(),
+      txRef: z.string().regex(/^[A-Za-z0-9_\-]+$/, "Invalid transaction reference format"),
       amount: z.number().positive(),
       walletCurrency: z.string().default("NGN"),
     })).mutation(async ({ ctx, input }) => {

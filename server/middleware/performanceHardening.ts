@@ -101,20 +101,26 @@ export function staticCacheHeaders(req: Request, res: Response, next: NextFuncti
 
 // ─── ETag Support ────────────────────────────────────────────────────────────
 
+const ETAG_MAX_BODY_SIZE = 64 * 1024; // Only compute ETag for responses ≤64KB
+
 export function etagSupport(req: Request, res: Response, next: NextFunction) {
-  // Enable weak ETags for API responses
   const originalJson = res.json.bind(res);
   res.json = function (body: unknown) {
     if (req.method === "GET" && body) {
-      const hash = createHash("md5")
-        .update(JSON.stringify(body))
-        .digest("hex");
-      const etag = `W/"${hash}"`;
-      res.setHeader("ETag", etag);
+      const serialized = JSON.stringify(body);
+      // Skip expensive hashing for large payloads — not worth the CPU cost
+      if (serialized.length <= ETAG_MAX_BODY_SIZE) {
+        const hash = createHash("sha256")
+          .update(serialized)
+          .digest("base64url")
+          .slice(0, 16);
+        const etag = `W/"${hash}"`;
+        res.setHeader("ETag", etag);
 
-      if (req.headers["if-none-match"] === etag) {
-        res.status(304).end();
-        return res;
+        if (req.headers["if-none-match"] === etag) {
+          res.status(304).end();
+          return res;
+        }
       }
     }
     return originalJson(body);

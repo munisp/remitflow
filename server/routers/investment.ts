@@ -854,7 +854,10 @@ export const flutterwaveTopupRouter = router({
     .input(
       z.object({
         amountUsd: z.number().min(5).max(50000),
-        redirectUrl: z.string().url().max(500),
+        redirectUrl: z.string().url().max(500).refine(
+          (url) => { try { const h = new URL(url).hostname; return h.endsWith("remitflow.com") || h.endsWith("remitflow.app") || h === "localhost"; } catch { return false; } },
+          { message: "Redirect URL must be on an allowed domain" }
+        ),
       })
     )
     .mutation(async ({ ctx, input }) => {
