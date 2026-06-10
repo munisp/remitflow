@@ -31,13 +31,20 @@ export async function closeDb() {
   }
 }
 
-function buildPoolConfig(): { max: number; idle_timeout: number; max_lifetime: number; connect_timeout: number; prepare: boolean } {
+function buildPoolConfig() {
   return {
     max: parseInt(process.env.DB_POOL_MAX || (process.env.NODE_ENV === "test" ? "10" : "50"), 10),
     idle_timeout: parseInt(process.env.DB_POOL_IDLE_TIMEOUT || "30", 10),
     max_lifetime: parseInt(process.env.DB_POOL_MAX_LIFETIME || "1800", 10),
     connect_timeout: 10,
     prepare: true,
+    // Prevent runaway queries from blocking the connection pool
+    types: undefined,
+    connection: {
+      statement_timeout: parseInt(process.env.DB_STATEMENT_TIMEOUT || "30000", 10),
+      lock_timeout: parseInt(process.env.DB_LOCK_TIMEOUT || "10000", 10),
+      idle_in_transaction_session_timeout: parseInt(process.env.DB_IDLE_TX_TIMEOUT || "60000", 10),
+    },
   };
 }
 
