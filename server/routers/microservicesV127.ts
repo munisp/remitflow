@@ -78,7 +78,7 @@ export const amlEngineV127Router = router({
   }),
   screen: protectedProcedure.input(z.object({
     transactionId: z.string(),
-    amount: z.number(),
+    amount: z.number().positive(),
     currency: z.string(),
     senderId: z.number(),
     receiverId: z.number(),
@@ -109,7 +109,7 @@ export const fraudMlV127Router = router({
   }),
   predict: protectedProcedure.input(z.object({
     transactionId: z.string(),
-    amount: z.number(),
+    amount: z.number().positive(),
     userId: z.number(),
     ipAddress: z.string().optional(),
     deviceFingerprint: z.string().optional(),

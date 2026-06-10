@@ -83,7 +83,7 @@ export const extendedCrudRouter = router({
   mojaloopTransfers: router({
     list: protectedProcedure.query(({ ctx }) => getMojaloopTransfers(ctx.user.id)),
     create: protectedProcedure
-      .input(z.object({ transferId: z.string(), amount: z.number(), currency: z.string(), payerFsp: z.string(), payeeFsp: z.string() }))
+      .input(z.object({ transferId: z.string(), amount: z.number().positive(), currency: z.string(), payerFsp: z.string(), payeeFsp: z.string() }))
       .mutation(({ input, ctx }) => createMojaloopTransfer({ ...input, userId: ctx.user.id, amount: String(input.amount) })),
     updateStatus: adminProcedure
       .input(z.object({ id: z.number(), status: z.string() }))
@@ -265,13 +265,13 @@ export const extendedCrudRouter = router({
       .input(z.object({ name: z.string(), description: z.string().optional(), targetAmount: z.number().optional(), currency: z.string().default("USD") }))
       .mutation(({ input, ctx }) => createCommunityFund({ ...input, createdByUserId: ctx.user.id })),
     contribute: protectedProcedure
-      .input(z.object({ fundId: z.number(), amount: z.number() }))
+      .input(z.object({ fundId: z.number(), amount: z.number().positive() }))
       .mutation(({ input }) => updateCommunityFundBalance(input.fundId, input.amount)),
     proposals: publicProcedure
       .input(z.object({ fundId: z.number() }))
       .query(({ input }) => getFundProposals(input.fundId)),
     createProposal: protectedProcedure
-      .input(z.object({ fundId: z.number(), title: z.string(), description: z.string(), requestedAmount: z.number() }))
+      .input(z.object({ fundId: z.number(), title: z.string(), description: z.string(), requestedAmount: z.number().positive() }))
       .mutation(({ input, ctx }) => createFundProposal({ ...input, submittedByUserId: ctx.user.id, requestedAmount: String((input as any).requestedAmount ?? '0') })),
     updateProposalStatus: adminProcedure
       .input(z.object({ id: z.number(), status: z.string() }))

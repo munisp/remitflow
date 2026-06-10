@@ -1107,7 +1107,7 @@ export const goamlRouter = router({
         customerId: z.string(),
         customerName: z.string(),
         transactionId: z.string().optional(),
-        amount: z.number(),
+        amount: z.number().positive(),
         currency: z.string().length(3),
         suspicionReason: z.string().min(10),
         riskLevel: z.enum(["low", "medium", "high", "critical"]),
@@ -1248,8 +1248,8 @@ export const cbnTierLimitsRouter = router({
     .input(
       z.object({
         tier: z.enum(["tier1", "tier2", "tier3"]),
-        currentBalance: z.number(),
-        transactionAmount: z.number(),
+        currentBalance: z.number().min(0),
+        transactionAmount: z.number().positive(),
       })
     )
     .query(({ input }) => {

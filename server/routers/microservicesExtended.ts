@@ -363,7 +363,7 @@ export const lakehouseRouter = router({
 // ─── AML Engine Router (Python) ───────────────────────────────────────────────
 export const amlEngineRouter = router({
   screenTransaction: protectedProcedure
-    .input(z.object({ transactionId: z.string(), amount: z.number(), senderName: z.string(), receiverName: z.string(), corridor: z.string() }))
+    .input(z.object({ transactionId: z.string(), amount: z.number().positive(), senderName: z.string(), receiverName: z.string(), corridor: z.string() }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.amlEngine}/screen`, input);

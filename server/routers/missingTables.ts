@@ -282,7 +282,7 @@ export const paymentMetricsRouter = router({
       corridor: z.string(),
       success: z.boolean(),
       processingMs: z.number(),
-      amount: z.number(),
+      amount: z.number().positive(),
       period: z.string().default("daily"),
     }))
     .mutation(async ({ ctx, input }) => {
