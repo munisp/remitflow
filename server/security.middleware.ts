@@ -589,7 +589,7 @@ export function securityAuditMiddleware(req: Request, res: Response, next: NextF
   const isHighRisk = HIGH_RISK_PATHS.some(p => req.path.startsWith(p));
   if (isHighRisk && req.method === "POST") {
     const requestId = (res.locals as any).requestId ?? "unknown";
-    console.info(`[SecurityAudit] ${req.method} ${req.path} | IP: ${req.ip} | ReqID: ${requestId}`);
+    logger.info(`[SecurityAudit] ${req.method} ${req.path} | IP: ${req.ip} | ReqID: ${requestId}`);
   }
   next();
 }

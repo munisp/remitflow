@@ -46,7 +46,7 @@ export function requestLoggingMiddleware(req: Request, res: Response, next: Next
     };
     if (level === "error") logger.error("[HTTP]", JSON.stringify(log));
     else if (level === "warn") logger.warn("[HTTP]", JSON.stringify(log));
-    else if (duration > 500) console.info("[HTTP]", JSON.stringify(log));
+    else if (duration > 500) logger.info("[HTTP]", JSON.stringify(log));
   });
 
   next();
