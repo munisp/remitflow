@@ -223,10 +223,13 @@ export const continuousMonitoringRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
+      const intervalMap: Record<string, string> = { daily: "day", weekly: "week", monthly: "month" };
+      const intervalUnit = intervalMap[input.frequency];
+      if (!intervalUnit) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid frequency" });
       await db.execute(sql`
         INSERT INTO continuous_monitoring (user_id, monitoring_type, frequency, enrolled_by, status, next_check_at, created_at)
         VALUES (${input.userId}, ${input.monitoringType}, ${input.frequency}, ${ctx.user.id}, 'active',
-          NOW() + INTERVAL '1 ${sql.raw(input.frequency === "daily" ? "day" : input.frequency === "weekly" ? "week" : "month")}',
+          NOW() + INTERVAL '1 ${sql.raw(intervalUnit)}',
           NOW())
         ON CONFLICT (user_id, monitoring_type) DO UPDATE SET 
           frequency = EXCLUDED.frequency,

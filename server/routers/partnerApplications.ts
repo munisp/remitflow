@@ -156,11 +156,14 @@ export const partnerApplicationsRouter = router({
         bankStatementDocUrl: "bank_statement_doc_url",
       };
       const col = colMap[input.docType];
-      await db.execute(sql`
+      if (!col) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid document type" });
+      const result = await db.execute(sql`
         UPDATE partner_applications
         SET ${sql.raw(col)} = ${input.fileUrl}, updated_at = NOW()
         WHERE id = ${input.applicationId} AND submitted_by_user_id = ${ctx.user.id}
+        RETURNING id
       `);
+      if (!result.length) throw new TRPCError({ code: "NOT_FOUND", message: "Application not found or access denied" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -173,11 +176,13 @@ export const partnerApplicationsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.execute(sql`
+      const result = await db.execute(sql`
         UPDATE partner_applications
         SET sla_signed_at = NOW(), sla_version = ${input.slaVersion}, updated_at = NOW()
         WHERE id = ${input.applicationId} AND submitted_by_user_id = ${ctx.user.id}
+        RETURNING id
       `);
+      if (!result.length) throw new TRPCError({ code: "NOT_FOUND", message: "Application not found or access denied" });
       return { success: true, verified: true, signedAt: new Date().toISOString() };
     }),
 
@@ -190,7 +195,7 @@ export const partnerApplicationsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.execute(sql`
+      const result = await db.execute(sql`
         UPDATE partner_applications
         SET status = 'submitted',
             additional_info_provided_at = NOW(),
@@ -198,7 +203,9 @@ export const partnerApplicationsRouter = router({
             updated_at = NOW()
         WHERE id = ${input.applicationId} AND submitted_by_user_id = ${ctx.user.id}
           AND status = 'additional_info_required'
+        RETURNING id
       `);
+      if (!result.length) throw new TRPCError({ code: "NOT_FOUND", message: "Application not found or not awaiting additional info" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -578,7 +585,9 @@ export const userOnboardingRouter = router({
         firstTransfer: { col: "first_transfer_made", tsCol: "first_transfer_at" },
         notifications: { col: "notifications_enabled", tsCol: null as any },
       };
-      const { col, tsCol } = colMap[input.step];
+      const mapping = colMap[input.step];
+      if (!mapping) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid onboarding step" });
+      const { col, tsCol } = mapping;
       const tsUpdate = tsCol ? sql`, ${sql.raw(tsCol)} = NOW()` : sql``;
       await db.execute(sql`
         INSERT INTO user_onboarding_progress (user_id, status, ${sql.raw(col)}, created_at, updated_at)

@@ -13,7 +13,7 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { randomBytes } from "crypto";
-import { router, publicProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
 import { getDb, createAuditLog } from "../db";
 import { sql } from "drizzle-orm";
@@ -23,7 +23,7 @@ function generateEntryId(): string {
 }
 
 export const doubleEntryRouter = router({
-  recordTransaction: publicProcedure
+  recordTransaction: protectedProcedure
     .input(z.object({
       transactionId: z.string(),
       entries: z.array(z.object({
@@ -94,7 +94,7 @@ export const doubleEntryRouter = router({
       return { success: true, verified: true, transactionId: input.transactionId, entryCount: entries.length, totalDebits, totalCredits };
     }),
 
-  verifyIntegrity: publicProcedure.query(async () => {
+  verifyIntegrity: adminProcedure.query(async () => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -129,7 +129,7 @@ export const doubleEntryRouter = router({
     };
   }),
 
-  getAccountBalance: publicProcedure
+  getAccountBalance: protectedProcedure
     .input(z.object({ accountId: z.string() }))
     .query(async ({ input }) => {
       const db = await getDb();
@@ -155,7 +155,7 @@ export const doubleEntryRouter = router({
       };
     }),
 
-  trialBalance: publicProcedure.query(async () => {
+  trialBalance: adminProcedure.query(async () => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
