@@ -252,11 +252,20 @@ fn main() {
                     let (status, content_type, body_response) =
                         handle_request(&state, method, path, body);
 
+                    let origin = std::env::var("CORS_ALLOWED_ORIGIN").unwrap_or_default();
+                    let cors_header = if !origin.is_empty() {
+                        format!("Access-Control-Allow-Origin: {}", origin)
+                    } else if std::env::var("NODE_ENV").unwrap_or_default() != "production" {
+                        "Access-Control-Allow-Origin: *".to_string()
+                    } else {
+                        String::new()
+                    };
                     let response = format!(
-                        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{}\r\n\r\n{}",
                         status,
                         content_type,
                         body_response.len(),
+                        cors_header,
                         body_response
                     );
 

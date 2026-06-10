@@ -6,7 +6,7 @@ import { randomBytes } from "crypto";
  * white-label preview, tenant analytics, API changelog
  */
 import { z } from "zod";
-import { router, protectedProcedure, publicProcedure ,
+import { router, protectedProcedure, publicProcedure, adminProcedure,
   auditedProcedure, rateLimitedProcedure
 } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
@@ -221,7 +221,7 @@ export const travelRuleRouter = router({
     }),
 
   /** Admin: list all travel rule records with filtering */
-  adminList: protectedProcedure
+  adminList: adminProcedure
     .input(z.object({
       status: z.enum(["submitted", "verified", "rejected", "pending"]).optional(),
       search: z.string().optional(),
@@ -229,7 +229,6 @@ export const travelRuleRouter = router({
       offset: z.number().default(0),
     }))
     .query(async ({ input, ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
@@ -286,7 +285,7 @@ export const agentNetworkRouter = router({
     }),
 
   /** Create new agent (admin only) */
-  create: protectedProcedure
+  create: adminProcedure
     .input(z.object({
       name: z.string().min(2).max(100),
       country: z.string().length(2),
@@ -302,7 +301,6 @@ export const agentNetworkRouter = router({
       currency: z.string().default("USD"),
     }))
     .mutation(async ({ input, ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const result = await db.execute(sql`
@@ -314,7 +312,7 @@ export const agentNetworkRouter = router({
     }),
 
   /** Update agent */
-  update: protectedProcedure
+  update: adminProcedure
     .input(z.object({
       id: z.number(),
       name: z.string().min(2).max(100).optional(),
@@ -325,7 +323,6 @@ export const agentNetworkRouter = router({
       dailyLimit: z.number().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`
@@ -343,10 +340,9 @@ export const agentNetworkRouter = router({
     }),
 
   /** Delete agent */
-  delete: protectedProcedure
+  delete: adminProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input, ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`DELETE FROM agent_network WHERE id = ${input.id}`);
@@ -369,10 +365,9 @@ export const agentNetworkRouter = router({
 // ─────────────────────────────────────────────────────────────────────────────
 export const corridorAnalyticsRouter = router({
   /** Get top corridors by volume */
-  topCorridors: protectedProcedure
+  topCorridors: adminProcedure
     .input(z.object({ days: z.number().default(30), limit: z.number().default(10) }))
     .query(async ({ input, ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(); since.setDate(since.getDate() - input.days);
@@ -392,10 +387,9 @@ export const corridorAnalyticsRouter = router({
     }),
 
   /** Get corridor performance metrics */
-  performance: protectedProcedure
+  performance: adminProcedure
     .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), days: z.number().default(30) }))
     .query(async ({ input, ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(); since.setDate(since.getDate() - input.days);
@@ -417,10 +411,9 @@ export const corridorAnalyticsRouter = router({
     }),
 
   /** Get transfer success rate broken down by payment method */
-  successByPaymentMethod: protectedProcedure
+  successByPaymentMethod: adminProcedure
     .input(z.object({ days: z.number().default(30) }))
     .query(async ({ input, ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const FALLBACK = [
         { method: "Bank Transfer", total: 420, completed: 399, failed: 21, successRate: 95.0 },
@@ -545,10 +538,9 @@ export const referralEngineRouter = router({
 // ─────────────────────────────────────────────────────────────────────────────
 export const whiteLabelPreviewRouter = router({
   /** Get white-label config for a tenant */
-  getConfig: protectedProcedure
+  getConfig: adminProcedure
     .input(z.object({ tenantId: z.number() }))
     .query(async ({ input, ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
@@ -570,7 +562,7 @@ export const whiteLabelPreviewRouter = router({
     }),
 
   /** Save white-label config */
-  saveConfig: protectedProcedure
+  saveConfig: adminProcedure
     .input(z.object({
       tenantId: z.number(),
       primaryColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
@@ -585,7 +577,6 @@ export const whiteLabelPreviewRouter = router({
       fontFamily: z.string().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`
@@ -754,10 +745,9 @@ export const familyEnhancedRouter = router({
 // ─────────────────────────────────────────────────────────────────────────────
 export const tenantAnalyticsRouter = router({
   /** Get analytics filtered by tenant */
-  summary: protectedProcedure
+  summary: adminProcedure
     .input(z.object({ tenantId: z.number().optional(), days: z.number().default(30) }))
     .query(async ({ input, ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const since = new Date(); since.setDate(since.getDate() - input.days);

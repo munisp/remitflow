@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { checkPolicy } from "../security.pbac";
 import { getDb, createAuditLog } from "../db";
 import {
@@ -135,10 +135,9 @@ export const invoiceFinancingRouter = router({
     }),
 
   // Admin: approve and fund
-  adminFund: protectedProcedure
+  adminFund: adminProcedure
     .input(z.object({ applicationId: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const [app] = await db
         .select()
@@ -315,10 +314,9 @@ export const letterOfCreditRouter = router({
     }),
 
   // Admin: issue LC
-  adminIssue: protectedProcedure
+  adminIssue: adminProcedure
     .input(z.object({ lcId: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const [updated] = await db
         .update(lettersOfCredit)

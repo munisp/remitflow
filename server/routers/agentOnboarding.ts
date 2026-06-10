@@ -5,7 +5,7 @@ import { TRPCError } from "@trpc/server";
  * Handles agent registration, KYB workflow, and onboarding status tracking.
  */
 import { z } from "zod";
-import { router, protectedProcedure } from "../_core/trpc.js";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc.js";
 import { getDb } from "../db.js";
 import { agentAccounts, users } from "../../drizzle/schema.js";
 import { eq } from "drizzle-orm";
@@ -134,8 +134,7 @@ export const agentOnboardingRouter = router({
   }),
 
   /** Admin: list all pending KYB applications */
-  listPending: protectedProcedure.query(async ({ ctx }) => {
-    if (ctx.user.role !== "admin") throw new Error("FORBIDDEN");
+  listPending: adminProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     return db
       .select()
@@ -145,10 +144,9 @@ export const agentOnboardingRouter = router({
   }),
 
   /** Admin: approve an agent application */
-  approve: protectedProcedure
+  approve: adminProcedure
     .input(z.object({ agentId: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new Error("FORBIDDEN");
       const db = await getDb();
       const [_row] = await db
         .update(agentAccounts)
@@ -159,10 +157,9 @@ export const agentOnboardingRouter = router({
     }),
 
   /** Admin: reject an agent application */
-  reject: protectedProcedure
+  reject: adminProcedure
     .input(z.object({ agentId: z.number(), reason: z.string().min(5) }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new Error("FORBIDDEN");
       const db = await getDb();
       const [_row] = await db
         .update(agentAccounts)

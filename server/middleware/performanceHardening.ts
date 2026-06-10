@@ -38,15 +38,22 @@ const poolMetrics: PoolMetrics = {
   lastCheck: new Date().toISOString(),
 };
 
-const queryTimes: number[] = [];
+// Circular buffer for O(1) insert (avoids O(n) shift on bounded arrays)
+const QUERY_BUFFER_SIZE = 1000;
+const queryTimes = new Float64Array(QUERY_BUFFER_SIZE);
+let queryWriteIdx = 0;
 let queryCount = 0;
+let querySum = 0;
 let slowQueryCount = 0;
 const SLOW_QUERY_THRESHOLD_MS = parseInt(process.env.SLOW_QUERY_THRESHOLD_MS || "500", 10);
 
 export function trackQueryPerformance(durationMs: number, query?: string) {
-  queryTimes.push(durationMs);
+  // Subtract the value being overwritten, add the new value
+  querySum -= queryTimes[queryWriteIdx];
+  queryTimes[queryWriteIdx] = durationMs;
+  querySum += durationMs;
+  queryWriteIdx = (queryWriteIdx + 1) % QUERY_BUFFER_SIZE;
   queryCount++;
-  if (queryTimes.length > 1000) queryTimes.shift();
 
   if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
     slowQueryCount++;
@@ -56,8 +63,8 @@ export function trackQueryPerformance(durationMs: number, query?: string) {
     });
   }
 
-  poolMetrics.avgQueryTimeMs =
-    queryTimes.reduce((a, b) => a + b, 0) / queryTimes.length;
+  const sampleCount = Math.min(queryCount, QUERY_BUFFER_SIZE);
+  poolMetrics.avgQueryTimeMs = sampleCount > 0 ? querySum / sampleCount : 0;
   poolMetrics.slowQueries = slowQueryCount;
   poolMetrics.lastCheck = new Date().toISOString();
 }
@@ -118,6 +125,7 @@ export function etagSupport(req: Request, res: Response, next: NextFunction) {
 // ─── Request Coalescing ──────────────────────────────────────────────────────
 // Prevents duplicate concurrent requests from hitting the database
 
+const MAX_PENDING_REQUESTS = 10000;
 const pendingRequests = new Map<string, Promise<unknown>>();
 
 export function requestCoalescing<T>(
@@ -127,6 +135,12 @@ export function requestCoalescing<T>(
 ): Promise<T> {
   const existing = pendingRequests.get(cacheKey);
   if (existing) return existing as Promise<T>;
+
+  // Evict oldest entries if map exceeds size limit (prevents memory leak under load)
+  if (pendingRequests.size >= MAX_PENDING_REQUESTS) {
+    const firstKey = pendingRequests.keys().next().value;
+    if (firstKey !== undefined) pendingRequests.delete(firstKey);
+  }
 
   const promise = fn().finally(() => {
     setTimeout(() => pendingRequests.delete(cacheKey), ttlMs);

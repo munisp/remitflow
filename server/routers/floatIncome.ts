@@ -14,7 +14,7 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { eq, sql, gte, and } from "drizzle-orm";
-import { protectedProcedure, router } from "../_core/trpc";
+import { protectedProcedure, adminProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
 import { safeParseAmount } from "../lib/safeDecimal.js";
 import { treasuryPositions } from "../../drizzle/schema";
@@ -178,16 +178,13 @@ export const floatIncomeRouter = router({
    * Update yield rate for a currency (admin only)
    * Stores override in system_config as float_rate_{CURRENCY}.
    */
-  updateRate: protectedProcedure
+  updateRate: adminProcedure
     .input(z.object({
       currency: z.string().length(3),
       rate: z.number().min(0).max(0.5), // 0–50% annual rate
       reason: z.string().min(5).max(500),
     }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
-      }
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -211,11 +208,8 @@ export const floatIncomeRouter = router({
    * Accrue daily yield for all currencies (called by cron job)
    * Reads real balances from treasury_positions, writes to float_income_records.
    */
-  accrueDaily: protectedProcedure
+  accrueDaily: adminProcedure
     .mutation(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
-      }
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 

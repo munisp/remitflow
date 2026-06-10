@@ -431,7 +431,7 @@ export const documentVaultRouter = router({
     }),
 
   // List reminder log (history of sent reminders)
-  reminderLog: protectedProcedure
+  reminderLog: adminProcedure
     .input(z.object({ limit: z.number().default(50) }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
@@ -456,7 +456,6 @@ export const documentVaultRouter = router({
 
   // Manually trigger reminder scan (admin only)
   triggerReminderScan: auditedProcedure.mutation(async ({ ctx }) => {
-    if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
     try {
       const { sendDocumentVaultExpiryReminders } = await import("../scheduler.js");
       await sendDocumentVaultExpiryReminders();

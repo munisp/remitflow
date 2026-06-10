@@ -6,7 +6,7 @@
  *         Dispute Evidence, PayPal/Flutterwave webhooks
  */
 import { z } from "zod";
-import { router, protectedProcedure, publicProcedure ,
+import { router, protectedProcedure, publicProcedure, adminProcedure,
   auditedProcedure, rateLimitedProcedure
 } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
@@ -23,7 +23,7 @@ async function getDb() {
 async function getUser(openId: string) {
   const db = await getDb();
   const [u] = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
-  if (!u) throw new TRPCError({ code: "UNAUTHORIZED" });
+  if (!u) throw new TRPCError({ code: "UNAUTHORIZED", message: "Authentication required" });
   return u;
 }
 
@@ -456,11 +456,10 @@ export const agentNetworkFullRouter = router({
       return rows.rows;
     }),
 
-  adminList: protectedProcedure
+  adminList: adminProcedure
     .input(z.object({ status: z.string().max(20).optional(), limit: z.number().min(1).max(100).default(50) }))
     .query(async ({ ctx, input }) => {
       const user = await getUser(ctx.user.openId);
-      if (user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const rows = await db.execute(sql`
         SELECT ar.*, u.name as agent_name, u.email as agent_email
@@ -471,11 +470,10 @@ export const agentNetworkFullRouter = router({
       return rows.rows;
     }),
 
-  approve:auditedProcedure
+  approve:adminProcedure
     .input(z.object({ agentId: z.number().int().positive(), tier: z.enum(["basic", "silver", "gold", "platinum"]).default("basic") }))
     .mutation(async ({ ctx, input }) => {
       const user = await getUser(ctx.user.openId);
-      if (user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const limits: Record<string, number> = { basic: 100000, silver: 500000, gold: 2000000, platinum: 10000000 };
       await db.execute(sql`
@@ -570,11 +568,10 @@ export const supportRouter = router({
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
-  adminList: protectedProcedure
+  adminList: adminProcedure
     .input(z.object({ status: z.string().max(20).optional(), priority: z.string().max(20).optional(), limit: z.number().min(1).max(100).default(50) }))
     .query(async ({ ctx, input }) => {
       const user = await getUser(ctx.user.openId);
-      if (user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const rows = await db.execute(sql`
         SELECT st.*, u.name as user_name, u.email as user_email
@@ -663,11 +660,10 @@ export const distributionsRouter = router({
     return rows.rows;
   }),
 
-  adminProcess: auditedProcedure
+  adminProcess: adminProcedure
     .input(z.object({ distributionId: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const user = await getUser(ctx.user.openId);
-      if (user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       await db.execute(sql`
         UPDATE investment_distributions SET status = 'paid', paid_at = NOW()
@@ -676,11 +672,10 @@ export const distributionsRouter = router({
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
-  adminList: protectedProcedure
+  adminList: adminProcedure
     .input(z.object({ status: z.string().max(20).optional(), limit: z.number().min(1).max(100).default(50) }))
     .query(async ({ ctx, input }) => {
       const user = await getUser(ctx.user.openId);
-      if (user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const rows = await db.execute(sql`
         SELECT id.*, u.name as user_name
@@ -708,11 +703,10 @@ export const notificationLogRouter = router({
       return rows.rows;
     }),
 
-  adminLog: protectedProcedure
+  adminLog: adminProcedure
     .input(z.object({ limit: z.number().min(1).max(200).default(100), status: z.string().max(20).optional() }))
     .query(async ({ ctx, input }) => {
       const user = await getUser(ctx.user.openId);
-      if (user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const rows = await db.execute(sql`
         SELECT nl.*, u.name as user_name

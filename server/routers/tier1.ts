@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { checkPolicy } from "../security.pbac";
 import { getDb, createAuditLog } from "../db";
 import {
@@ -523,12 +523,11 @@ export const merchantKybRouter = router({
   }),
 
   // Admin: list all KYB applications
-  adminList: protectedProcedure
+  adminList: adminProcedure
     .input(z.object({
       status: z.enum(["pending", "under_review", "approved", "rejected", "suspended"]).optional(),
     }))
     .query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const conditions = [];
       if (input.status) conditions.push(eq(merchantKybReviews.status, input.status));
@@ -540,7 +539,7 @@ export const merchantKybRouter = router({
     }),
 
   // Admin: review KYB application
-  adminReview: protectedProcedure
+  adminReview: adminProcedure
     .input(z.object({
       reviewId:        z.number(),
       decision:        z.enum(["approved", "rejected", "under_review"]),
@@ -549,7 +548,6 @@ export const merchantKybRouter = router({
       notes:           z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const [updated] = await db
         .update(merchantKybReviews)

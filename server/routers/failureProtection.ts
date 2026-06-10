@@ -830,7 +830,7 @@ export const splitBillProtectionRouter = router({
       const db = await getDb();
       // Verify caller is bill creator
       const billRows = await db.execute(sql`SELECT id FROM split_bills WHERE id = ${input.billId} AND creator_id = ${ctx.user.id}`);
-      if ((billRows.rows as Array<unknown>).length === 0) throw new TRPCError({ code: "FORBIDDEN" });
+      if ((billRows.rows as Array<unknown>).length === 0) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       await notify(db, input.participantUserId, "split_bill_reminder",
         "Friendly reminder: you have a pending split bill payment. Please pay before the deadline to avoid being marked as defaulted.");

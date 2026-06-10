@@ -377,7 +377,7 @@ async function startServer() {
         .setProtectedHeader({ alg: "HS256", typ: "JWT" })
         .setExpirationTime(expirationSeconds)
         .sign(secretKey);
-      res.cookie(COOKIE_NAME, sessionToken, { httpOnly: true, secure: true, sameSite: "none", maxAge: expiresInMs, path: "/" });
+      res.cookie(COOKIE_NAME, sessionToken, { httpOnly: true, secure: true, sameSite: "lax", maxAge: expiresInMs, path: "/" });
       // Redirect to dashboard with impersonation flag in query
       // SECURITY: validate redirect origin against allowlist to prevent open redirect
       const { validateRedirectOrigin } = await import("../security.middleware.js");

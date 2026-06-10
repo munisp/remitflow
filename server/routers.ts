@@ -448,7 +448,7 @@ export const appRouter = router({
   auth: router({
     me: protectedProcedure.query(({ ctx }) => ctx.user),
     logout: protectedProcedure.mutation(({ ctx }) => {
-      ctx.res.clearCookie(COOKIE_NAME, { maxAge: -1, path: "/", secure: true, sameSite: "none", httpOnly: true });
+      ctx.res.clearCookie(COOKIE_NAME, { maxAge: -1, path: "/", secure: true, sameSite: "lax", httpOnly: true });
       return { success: true };
     }),
     // Re-sign the session cookie with a fresh 1-year expiry
@@ -464,7 +464,7 @@ export const appRouter = router({
         .setExpirationTime(Math.floor((Date.now() + SESSION_EXPIRY_MS) / 1000))
         .sign(secret);
       ctx.res.cookie(COOKIE_NAME, newToken, {
-        httpOnly: true, secure: true, sameSite: "none",
+        httpOnly: true, secure: true, sameSite: "lax",
         maxAge: SESSION_EXPIRY_MS, path: "/",
       });
       return { success: true, refreshedAt: new Date().toISOString() };

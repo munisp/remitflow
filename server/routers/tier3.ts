@@ -4,7 +4,7 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { checkPolicy } from "../security.pbac";
 import { getDb, createAuditLog } from "../db";
 import {
@@ -324,14 +324,13 @@ export const diasporaMortgageRouter = router({
     }),
 
   // Admin: approve mortgage
-  adminApprove: protectedProcedure
+  adminApprove: adminProcedure
     .input(z.object({
       applicationId: z.number(),
       approvedUsd:   z.number().positive(),
       notes:         z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const offerExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
       const [updated] = await db

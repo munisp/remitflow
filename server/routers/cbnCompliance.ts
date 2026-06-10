@@ -13,7 +13,7 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
+import { router, protectedProcedure, publicProcedure, adminProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import {
   settlementAccounts,
@@ -36,11 +36,6 @@ import { logger } from '../_core/logger';
 import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function adminOnly(ctx: { user: { role: string | null } }) {
-  if (ctx.user.role !== "admin") {
-    throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
-  }
-}
 
 /** Publish event to Kafka via Dapr pubsub sidecar */
 async function publishKafkaEvent(topic: string, data: Record<string, unknown>) {
@@ -199,13 +194,12 @@ export const cbnComplianceRouter = router({
   }),
 
   // ── Settlement Account Registry ──────────────────────────────────────────
-  listSettlementAccounts: protectedProcedure
+  listSettlementAccounts: adminProcedure
     .input(z.object({
       corridor: z.string().optional(),
       status: z.string().optional(),
     }))
     .query(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const conditions = [];
       if (input.corridor) conditions.push(eq(settlementAccounts.corridor, input.corridor));
@@ -218,7 +212,7 @@ export const cbnComplianceRouter = router({
         .orderBy(desc(settlementAccounts.isPrimary), desc(settlementAccounts.createdAt));
     }),
 
-  createSettlementAccount: protectedProcedure
+  createSettlementAccount: adminProcedure
     .input(z.object({
       corridor: z.string().min(1),
       adbName: z.string().min(1),
@@ -230,7 +224,6 @@ export const cbnComplianceRouter = router({
       notes: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const [account] = await db
         .insert(settlementAccounts)
@@ -264,7 +257,7 @@ export const cbnComplianceRouter = router({
       return account;
     }),
 
-  updateSettlementAccount: protectedProcedure
+  updateSettlementAccount: adminProcedure
     .input(z.object({
       id: z.number(),
       adbName: z.string().optional(),
@@ -274,7 +267,6 @@ export const cbnComplianceRouter = router({
       status: z.enum(["active", "pending_cbn_filing", "filed", "suspended", "closed"]).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const { id, ...updates } = input;
       const [updated] = await db
@@ -285,13 +277,12 @@ export const cbnComplianceRouter = router({
       return updated;
     }),
 
-  markCbnFiled: protectedProcedure
+  markCbnFiled: adminProcedure
     .input(z.object({
       accountIds: z.array(z.number()).min(1),
       cbnReferenceNumber: z.string().min(1),
     }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const now = new Date();
       for (const id of input.accountIds) {
@@ -321,10 +312,9 @@ export const cbnComplianceRouter = router({
       return { success: true, verified: true, filedCount: input.accountIds.length };
     }),
 
-  exportCbnFilingDocument: protectedProcedure
+  exportCbnFilingDocument: adminProcedure
     .input(z.object({ format: z.enum(["json", "csv"]).default("json") }))
     .query(async ({ ctx }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const accounts = await db
         .select()
@@ -341,8 +331,7 @@ export const cbnComplianceRouter = router({
       };
     }),
 
-  getSettlementStats: protectedProcedure.query(async ({ ctx }) => {
-    adminOnly(ctx);
+  getSettlementStats: adminProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     const [total] = await db.select({ count: count() }).from(settlementAccounts);
     const [filed] = await db.select({ count: count() }).from(settlementAccounts).where(eq(settlementAccounts.status, "filed"));
@@ -411,13 +400,12 @@ export const cbnComplianceRouter = router({
       return { ...event, isNfemApproved, blockedReason };
     }),
 
-  getFundingEvents: protectedProcedure
+  getFundingEvents: adminProcedure
     .input(z.object({
       limit: z.number().min(1).max(200).default(50),
       onlyBlocked: z.boolean().default(false),
     }))
     .query(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const conditions = input.onlyBlocked
         ? [eq(walletFundingEvents.isNfemApproved, false)]
@@ -431,10 +419,9 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── BDC Partner Management ───────────────────────────────────────────────
-  listBdcPartners: protectedProcedure
+  listBdcPartners: adminProcedure
     .input(z.object({ status: z.string().optional() }))
     .query(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const conditions = input.status
         ? [eq(bdcPartners.status, input.status as "pending_review" | "approved" | "suspended" | "rejected")]
@@ -446,7 +433,7 @@ export const cbnComplianceRouter = router({
         .orderBy(desc(bdcPartners.createdAt));
     }),
 
-  createBdcPartner: protectedProcedure
+  createBdcPartner: adminProcedure
     .input(z.object({
       name: z.string().min(1),
       cbnLicenceNumber: z.string().min(1),
@@ -458,7 +445,6 @@ export const cbnComplianceRouter = router({
       notes: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const [partner] = await db
         .insert(bdcPartners)
@@ -474,10 +460,9 @@ export const cbnComplianceRouter = router({
       return partner;
     }),
 
-  approveBdcPartner: protectedProcedure
+  approveBdcPartner: adminProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const [partner] = await db
         .update(bdcPartners)
@@ -587,7 +572,7 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── BDC Liquidity Request History ───────────────────────────────────────
-  listBdcLiquidityRequests: protectedProcedure
+  listBdcLiquidityRequests: adminProcedure
     .input(z.object({
       bdcPartnerId: z.number().optional(),
       status: z.enum(["pending", "approved", "rejected", "disbursed"]).optional(),
@@ -597,7 +582,6 @@ export const cbnComplianceRouter = router({
       offset: z.number().min(0).default(0),
     }))
     .query(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const conditions = [];
       if (input.bdcPartnerId) conditions.push(eq(bdcLiquidityRequests.bdcPartnerId, input.bdcPartnerId));
@@ -636,13 +620,12 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── BDC Bulk Disburse ─────────────────────────────────────────────────
-  bulkDisburseLiquidityRequests: protectedProcedure
+  bulkDisburseLiquidityRequests: adminProcedure
     .input(z.object({
       requestIds: z.array(z.number()).min(1).max(100).optional(),
       // If requestIds is omitted, disburse ALL approved requests
     }))
     .mutation(async ({ ctx }) => {
-      adminOnly(ctx);
       const db = await getDb();
 
       // Fetch all approved requests (or the specified IDs)
@@ -704,7 +687,7 @@ export const cbnComplianceRouter = router({
       return { disbursed: approvedRequests.length, totalUsd, batchRef, references };
     }),
 
-  approveLiquidityRequest: protectedProcedure
+  approveLiquidityRequest: adminProcedure
     .input(z.object({
       requestId: z.number(),
       approvedAmountUsd: z.number().min(0),
@@ -712,7 +695,6 @@ export const cbnComplianceRouter = router({
       action: z.enum(["approve", "reject", "disburse"]),
     }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const statusMap: Record<string, string> = {
         approve: "approved",
@@ -749,14 +731,13 @@ export const cbnComplianceRouter = router({
       return updated;
     }),
 
-  createBdcLiquidityRequest: protectedProcedure
+  createBdcLiquidityRequest: adminProcedure
     .input(z.object({
       bdcPartnerId: z.number(),
       settlementAccountId: z.number().optional(),
       requestedAmountUsd: z.number().min(1000),
     }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       // Fetch current BMATCH rate for evidence
       const rate = await fetchBmatchRate("USD/NGN");
@@ -781,7 +762,7 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── CBN Corridor Rate Alerts ─────────────────────────────────────────────
-  createRateAlert: protectedProcedure
+  createRateAlert: adminProcedure
     .input(z.object({
       fromCurrency: z.string().min(2).max(10),
       toCurrency: z.string().min(2).max(10),
@@ -789,7 +770,6 @@ export const cbnComplianceRouter = router({
       direction: z.enum(["above", "below"]).default("above"),
     }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const [alert] = await db
         .insert(exchangeRateAlerts)
@@ -815,12 +795,11 @@ export const cbnComplianceRouter = router({
       return alert;
     }),
 
-  listRateAlerts: protectedProcedure
+  listRateAlerts: adminProcedure
     .input(z.object({
       activeOnly: z.boolean().default(true),
     }).optional())
     .query(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const conditions = [];
       if (input?.activeOnly !== false) conditions.push(eq(exchangeRateAlerts.isActive, true));
@@ -834,10 +813,9 @@ export const cbnComplianceRouter = router({
       return rows;
     }),
 
-  deleteRateAlert: protectedProcedure
+  deleteRateAlert: adminProcedure
     .input(z.object({ alertId: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const [_row] = await db
         .update(exchangeRateAlerts)
@@ -853,9 +831,8 @@ export const cbnComplianceRouter = router({
       return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
-  checkRateAlerts: protectedProcedure
+  checkRateAlerts: adminProcedure
     .mutation(async ({ ctx }) => {
-      adminOnly(ctx);
       const db = await getDb();
       // Auto-rearm any alerts whose snooze window has expired
       const now = new Date();
@@ -987,7 +964,7 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── CBN Compliance Export ────────────────────────────────────────────────
-  generateComplianceExport: protectedProcedure
+  generateComplianceExport: adminProcedure
     .input(z.object({
       exportType: z.enum(["transaction_report", "settlement_account_list", "fx_rate_audit"]),
       fromDate: z.string(),
@@ -995,7 +972,6 @@ export const cbnComplianceRouter = router({
       corridor: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const from = new Date(input.fromDate);
       const to = new Date(input.toDate);
@@ -1105,8 +1081,7 @@ export const cbnComplianceRouter = router({
     return rows;
   }),
 
-  listComplianceExports: protectedProcedure.query(async ({ ctx }) => {
-    adminOnly(ctx);
+  listComplianceExports: adminProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     return db
       .select()
@@ -1116,8 +1091,7 @@ export const cbnComplianceRouter = router({
   }),
 
   // ── Dashboard Summary ────────────────────────────────────────────────────
-  getComplianceDashboard: protectedProcedure.query(async ({ ctx }) => {
-    adminOnly(ctx);
+  getComplianceDashboard: adminProcedure.query(async ({ ctx }) => {
     const db = await getDb();
 
     const [settlementStats] = await db
@@ -1172,7 +1146,7 @@ export const cbnComplianceRouter = router({
   }),
 
   // ─── v194: BDC Onboarding Email Preview ────────────────────────────────────
-  getBdcOnboardingEmailPreview: protectedProcedure
+  getBdcOnboardingEmailPreview: adminProcedure
     .input(
       z.object({
         partnerName: z.string().default("Acme BDC Limited"),
@@ -1182,7 +1156,6 @@ export const cbnComplianceRouter = router({
       }).optional()
     )
     .query(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const partnerName = input?.partnerName ?? "Acme BDC Limited";
       const cbnLicenceNumber = input?.cbnLicenceNumber ?? "BDC/2024/DEMO-001";
       const adbName = input?.adbName ?? "Access Bank Nigeria";
@@ -1242,10 +1215,9 @@ export const cbnComplianceRouter = router({
     }),
 
   // ─── v194: Rate Alert Re-arm ──────────────────────────────────────────────
-  resetRateAlert: protectedProcedure
+  resetRateAlert: adminProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const [alert] = await db
         .select()
@@ -1270,7 +1242,7 @@ export const cbnComplianceRouter = router({
     }),
 
   // ─── v194: Rate Alert History ─────────────────────────────────────────────
-  listRateAlertHistory: protectedProcedure
+  listRateAlertHistory: adminProcedure
     .input(
       z.object({
         limit: z.number().min(1).max(200).default(50),
@@ -1279,7 +1251,6 @@ export const cbnComplianceRouter = router({
       }).optional()
     )
     .query(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const limit = input?.limit ?? 50;
       const offset = input?.offset ?? 0;
@@ -1323,13 +1294,12 @@ export const cbnComplianceRouter = router({
       };
     }),
 
-  snoozeRateAlert: protectedProcedure
+  snoozeRateAlert: adminProcedure
     .input(z.object({
       id: z.number().int().positive(),
       hours: z.number().int().min(1).max(168).default(24), // 1 hour to 7 days
     }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const snoozeUntil = new Date(Date.now() + input.hours * 60 * 60 * 1000);
       const [updated] = await db
@@ -1360,13 +1330,12 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── Bulk BDC Partner Approval ─────────────────────────────────────────────
-  bulkApproveBdcPartners: protectedProcedure
+  bulkApproveBdcPartners: adminProcedure
     .input(z.object({
       partnerIds: z.array(z.number().int().positive()).min(1).max(50),
       note: z.string().max(500).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const results: Array<{ id: number; name: string; success: boolean; error?: string; verified?: boolean }> = [];
       for (const partnerId of input.partnerIds) {
@@ -1402,13 +1371,12 @@ export const cbnComplianceRouter = router({
     }),
 
   // ── CBN Filing Export (CSV download) ───────────────────────────────────────────
-  exportCbnFilingCsv: protectedProcedure
+  exportCbnFilingCsv: adminProcedure
     .input(z.object({
       fromDate: z.string().optional(),
       toDate: z.string().optional(),
     }))
     .query(async ({ ctx, input }) => {
-      adminOnly(ctx);
       const db = await getDb();
       const partners = await db
         .select()

@@ -38,8 +38,8 @@ export function getSessionCookieOptions(
   return {
     httpOnly: true,
     path: "/",
-    // SameSite=None requires Secure=true; fall back to Lax for plain HTTP dev
-    sameSite: isSecure ? "none" : "lax",
+    // SameSite=Lax blocks CSRF while allowing OAuth redirects (top-level navigations)
+    sameSite: "lax",
     secure: isSecure,
   };
 }

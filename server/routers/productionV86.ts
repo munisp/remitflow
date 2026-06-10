@@ -10,7 +10,7 @@
  *  - rateAlerts: Exchange rate alert management
  */
 import { z } from "zod";
-import { router, protectedProcedure, publicProcedure ,
+import { router, protectedProcedure, publicProcedure, adminProcedure,
   auditedProcedure, rateLimitedProcedure
 } from "../_core/trpc";
 import { getDb } from "../db";
@@ -76,7 +76,7 @@ async function calcFeeWithPromo(db: Awaited<ReturnType<typeof getDb>>, amount: n
 
 // ─── Promo Codes Admin Router ─────────────────────────────────────────────────
 export const promoCodesAdminRouter = router({
-  list: protectedProcedure
+  list: adminProcedure
     .input(z.object({
       search: z.string().optional(),
       activeOnly: z.boolean().optional(),
@@ -84,7 +84,6 @@ export const promoCodesAdminRouter = router({
       limit: z.number().min(1).max(100).default(20),
     }))
     .query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
@@ -102,7 +101,7 @@ export const promoCodesAdminRouter = router({
       return { items, total: Number(count) };
     }),
 
-  create: protectedProcedure
+  create: adminProcedure
     .input(z.object({
       code: z.string().min(3).max(50).toUpperCase(),
       description: z.string().max(500).optional(),
@@ -117,7 +116,6 @@ export const promoCodesAdminRouter = router({
       corridors: z.array(z.string()).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [existing] = await db.select({ id: promoCodes.id }).from(promoCodes).where(eq(promoCodes.code, input.code)).limit(1);
@@ -139,7 +137,7 @@ export const promoCodesAdminRouter = router({
       return created;
     }),
 
-  update: protectedProcedure
+  update: adminProcedure
     .input(z.object({
       id: z.number(),
       description: z.string().max(500).optional(),
@@ -154,7 +152,6 @@ export const promoCodesAdminRouter = router({
       isActive: z.boolean().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { id, ...updates } = input;
@@ -176,7 +173,6 @@ export const promoCodesAdminRouter = router({
   delete: auditedProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _deleted = await db.delete(promoCodes).where(eq(promoCodes.id, input.id)).returning();
@@ -184,10 +180,9 @@ export const promoCodesAdminRouter = router({
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
-  redemptions: protectedProcedure
+  redemptions: adminProcedure
     .input(z.object({ promoCodeId: z.number(), limit: z.number().default(50) }))
     .query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select({
@@ -205,8 +200,7 @@ export const promoCodesAdminRouter = router({
         .limit(input.limit);
     }),
 
-  stats: protectedProcedure.query(async ({ ctx }) => {
-    if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+  stats: adminProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const [[totals], [active], [redemptionStats]] = await Promise.all([
@@ -340,10 +334,9 @@ export const volumeWidgetRouter = router({
       return { data, summary: { totalVolume, totalTxns, avgDailyVolume: totalVolume / data.length, peakDay } };
     }),
 
-  adminDaily: protectedProcedure
+  adminDaily: adminProcedure
     .input(z.object({ days: z.number().min(7).max(365).default(30) }))
     .query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const data = [];

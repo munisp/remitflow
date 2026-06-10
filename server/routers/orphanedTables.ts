@@ -342,7 +342,7 @@ export const partnerApplicationCommentsRouter = router({
       if (!app) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const isAdmin = ctx.user.role === "admin";
       if (!isAdmin && app.applicantId !== ctx.user.id) {
-        throw new TRPCError({ code: "FORBIDDEN" });
+        throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
       }
       const conditions: any[] = [eq(partnerApplicationComments.applicationId, input.applicationId)];
       // Non-admins only see external comments

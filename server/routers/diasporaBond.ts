@@ -273,7 +273,7 @@ export const diasporaBondRouter = router({
 
       // Check KYC status
       const [user] = await db.select().from(users).where(eq(users.id, ctx.user.id));
-      if (!user) throw new TRPCError({ code: "UNAUTHORIZED" });
+      if (!user) throw new TRPCError({ code: "UNAUTHORIZED", message: "Authentication required" });
       if (user.kycStatus !== "approved") {
         throw new TRPCError({
           code: "FORBIDDEN",

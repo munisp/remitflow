@@ -11,7 +11,7 @@
  * - receiptPdf: PDF generation for Stripe receipts
  * - adminBulkActions: bulk user management
  */
-import { router, protectedProcedure, publicProcedure ,
+import { router, protectedProcedure, publicProcedure, adminProcedure,
   auditedProcedure, rateLimitedProcedure
 } from "../_core/trpc";
 import { z } from "zod";
@@ -909,7 +909,7 @@ export const feeEngineRouter = router({
     return db.select().from(feeRules).orderBy(feeRules.corridor, feeRules.minAmount);
   }),
 
-  upsertRule: protectedProcedure
+  upsertRule: adminProcedure
     .input(z.object({
       id: z.number().optional(),
       corridor: z.string(),
@@ -922,7 +922,6 @@ export const feeEngineRouter = router({
       maxFee: z.number().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const values = {
@@ -1102,10 +1101,9 @@ export const receiptPdfRouter = router({
 
 // ─── Admin Bulk Actions Router ────────────────────────────────────────────────
 export const adminBulkRouter = router({
-  bulkSuspendUsers: auditedProcedure
+  bulkSuspendUsers: adminProcedure
     .input(z.object({ userIds: z.array(z.number()).min(1).max(100) }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Log security event for each suspension
@@ -1120,13 +1118,12 @@ export const adminBulkRouter = router({
       return { success: true, verified: true, affected: input.userIds.length };
     }),
 
-  exportUsers: protectedProcedure
+  exportUsers: adminProcedure
     .input(z.object({
       format: z.enum(["csv", "json"]).default("csv"),
       kycTier: z.string().optional(),
     }))
     .query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select({

@@ -211,7 +211,7 @@ export const splitBillRouter = router({
         .from(splitBillGroups)
         .where(and(eq(splitBillGroups.groupId, participant.groupId), eq(splitBillGroups.creatorId, ctx.user.id)));
 
-      if (!group) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!group) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       const payLink = `${ctx.req?.headers?.origin ?? "https://remitflow.app"}/pay-request?token=${participant.token}`;
       await sendEmail({

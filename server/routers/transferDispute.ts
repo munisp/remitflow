@@ -8,7 +8,7 @@
  *  - Transfer refund procedure for resolved disputes
  */
 import { z } from "zod";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
@@ -205,7 +205,7 @@ const listMyDisputes = protectedProcedure
   });
 
 // ─── Admin: list all disputes ─────────────────────────────────────────────────
-const adminListDisputes = protectedProcedure
+const adminListDisputes = adminProcedure
   .input(
     z.object({
       status: z.enum(["open", "under_review", "resolved", "closed", "all"]).default("all"),
@@ -214,7 +214,6 @@ const adminListDisputes = protectedProcedure
     })
   )
   .query(async ({ input, ctx }) => {
-    if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -241,7 +240,7 @@ const adminListDisputes = protectedProcedure
   });
 
 // ─── Admin: update dispute status (with SMS notification to user) ─────────────
-const adminUpdateDispute = protectedProcedure
+const adminUpdateDispute = adminProcedure
   .input(
     z.object({
       disputeId: z.number().int().positive(),
@@ -250,7 +249,6 @@ const adminUpdateDispute = protectedProcedure
     })
   )
   .mutation(async ({ input, ctx }) => {
-    if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -311,8 +309,7 @@ const adminUpdateDispute = protectedProcedure
   });
 
 // ─── Admin: get dispute stats ─────────────────────────────────────────────────
-const adminDisputeStats = protectedProcedure.query(async ({ ctx }) => {
-  if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+const adminDisputeStats = adminProcedure.query(async ({ ctx }) => {
   const db = await getDb();
   if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 

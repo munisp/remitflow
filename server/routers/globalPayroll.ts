@@ -168,7 +168,7 @@ export const globalPayrollRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       // Tax preview from Go engine
       let taxPreview = null;
@@ -210,7 +210,7 @@ export const globalPayrollRouter = router({
         .select({ id: payrollCompanies.id })
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       return db
         .select()
@@ -235,7 +235,7 @@ export const globalPayrollRouter = router({
         .select({ id: payrollCompanies.id })
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, emp.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       const [updated] = await db
         .update(payrollEmployees)
@@ -256,7 +256,7 @@ export const globalPayrollRouter = router({
         .select({ id: payrollCompanies.id })
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, emp.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       const [updated] = await db
         .update(payrollEmployees)
@@ -303,7 +303,7 @@ export const globalPayrollRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       // Get employees for this run
       const employeeQuery = input.employeeIds?.length
@@ -417,7 +417,7 @@ export const globalPayrollRouter = router({
         .select({ id: payrollCompanies.id })
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       return db
         .select()
@@ -437,7 +437,7 @@ export const globalPayrollRouter = router({
         .select({ id: payrollCompanies.id })
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, run.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       const items = await db
         .select({
@@ -465,7 +465,7 @@ export const globalPayrollRouter = router({
         .select({ id: payrollCompanies.id })
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, run.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       const [updated] = await db
         .update(payrollRuns)
@@ -489,7 +489,7 @@ export const globalPayrollRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, run.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       // Update run status to processing
       await db
@@ -573,7 +573,7 @@ export const globalPayrollRouter = router({
         .select({ id: payrollCompanies.id })
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, run.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       const [updated] = await db
         .update(payrollRuns)
@@ -593,7 +593,7 @@ export const globalPayrollRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       const runs = await db
         .select()
