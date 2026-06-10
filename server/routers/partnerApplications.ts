@@ -159,8 +159,8 @@ export const partnerApplicationsRouter = router({
       if (!col) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid document type" });
       const result = await db.execute(sql`
         UPDATE partner_applications
-        SET ${sql.raw(col)} = ${input.fileUrl}, updated_at = NOW()
-        WHERE id = ${input.applicationId} AND submitted_by_user_id = ${ctx.user.id}
+        SET ${sql.raw(col)} = ${input.fileUrl}, submitted_by_user_id = ${ctx.user.id}, updated_at = NOW()
+        WHERE id = ${input.applicationId} AND (submitted_by_user_id = ${ctx.user.id} OR submitted_by_user_id IS NULL)
         RETURNING id
       `);
       if (!result.length) throw new TRPCError({ code: "NOT_FOUND", message: "Application not found or access denied" });
@@ -178,8 +178,8 @@ export const partnerApplicationsRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const result = await db.execute(sql`
         UPDATE partner_applications
-        SET sla_signed_at = NOW(), sla_version = ${input.slaVersion}, updated_at = NOW()
-        WHERE id = ${input.applicationId} AND submitted_by_user_id = ${ctx.user.id}
+        SET sla_signed_at = NOW(), sla_version = ${input.slaVersion}, submitted_by_user_id = ${ctx.user.id}, updated_at = NOW()
+        WHERE id = ${input.applicationId} AND (submitted_by_user_id = ${ctx.user.id} OR submitted_by_user_id IS NULL)
         RETURNING id
       `);
       if (!result.length) throw new TRPCError({ code: "NOT_FOUND", message: "Application not found or access denied" });
@@ -199,9 +199,10 @@ export const partnerApplicationsRouter = router({
         UPDATE partner_applications
         SET status = 'submitted',
             additional_info_provided_at = NOW(),
+            submitted_by_user_id = ${ctx.user.id},
             business_description = COALESCE(business_description, '') || E'\n\n[Additional Info]\n' || ${input.response},
             updated_at = NOW()
-        WHERE id = ${input.applicationId} AND submitted_by_user_id = ${ctx.user.id}
+        WHERE id = ${input.applicationId} AND (submitted_by_user_id = ${ctx.user.id} OR submitted_by_user_id IS NULL)
           AND status = 'additional_info_required'
         RETURNING id
       `);
