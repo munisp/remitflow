@@ -81,9 +81,9 @@ async function startServer() {
     next();
   });
 
-  // Body parser — reduced to 10mb (KYC uploads go through S3 presigned URLs)
-  app.use(express.json({ limit: "10mb" }));
-  app.use(express.urlencoded({ limit: "10mb", extended: true }));
+  // Body parser — 1MB for API payloads (KYC uploads go through S3 presigned URLs)
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ limit: "1mb", extended: true }));
 
   // Health check endpoint (public, no auth) — returns 503 during shutdown
   app.get("/health", (_req, res) => {
