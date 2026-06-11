@@ -78,7 +78,7 @@ export const amlEngineV127Router = router({
   }),
   screen: protectedProcedure.input(z.object({
     transactionId: z.string(),
-    amount: z.number().positive(),
+    amount: z.number().positive().max(10_000_000),
     currency: z.string(),
     senderId: z.number(),
     receiverId: z.number(),
@@ -109,7 +109,7 @@ export const fraudMlV127Router = router({
   }),
   predict: protectedProcedure.input(z.object({
     transactionId: z.string(),
-    amount: z.number().positive(),
+    amount: z.number().positive().max(10_000_000),
     userId: z.number(),
     ipAddress: z.string().optional(),
     deviceFingerprint: z.string().optional(),
@@ -182,7 +182,7 @@ export const ledgerServiceRouter = router({
   postEntry: protectedProcedure.input(z.object({
     accountId: z.number(),
     entryType: z.enum(["credit", "debit"]),
-    amount: z.number().positive(),
+    amount: z.number().positive().max(10_000_000),
     currency: z.string().default("USD"),
     reference: z.string(),
     description: z.string().optional(),
@@ -397,7 +397,7 @@ export const rustTigerBeetleRouter = router({
   postTransfer: protectedProcedure.input(z.object({
     debitAccountId: z.number(),
     creditAccountId: z.number(),
-    amount: z.number().positive(),
+    amount: z.number().positive().max(10_000_000),
     currency: z.string().default("USD"),
     reference: z.string(),
     description: z.string().optional(),
@@ -853,7 +853,7 @@ export const rustUpiAdapterRouter = router({
   }),
   initiatePayment: protectedProcedure.input(z.object({
     vpa: z.string(),
-    amount: z.number().positive(),
+    amount: z.number().positive().max(10_000_000),
     currency: z.string().default("INR"),
     note: z.string().optional(),
   })).mutation(async ({ input, ctx }) => {
@@ -871,7 +871,7 @@ export const rustUpiAdapterRouter = router({
 export const pythonPixAdapterRouter = router({
   health: publicProcedure.query(() => checkHealth(SVC_URLS.pythonPixAdapter)),
   generateQRCode: protectedProcedure.input(z.object({
-    amount: z.number().positive(),
+    amount: z.number().positive().max(10_000_000),
     description: z.string().optional(),
     pixKey: z.string(),
   })).mutation(async ({ input, ctx }) => {

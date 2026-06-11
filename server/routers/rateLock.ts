@@ -25,7 +25,7 @@ export const rateLockRouter = router({
     .input(z.object({
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       rate: z.number().positive(),
       durationSeconds: z.number().min(15).max(300).default(60),
     }))
@@ -114,7 +114,7 @@ export const rateLockRouter = router({
     .input(z.object({
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
     }))
     .query(async ({ input }) => {
       const db = await getDb();
@@ -141,7 +141,7 @@ export const rateLockRouter = router({
     .input(z.object({
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       rate: z.number().positive(),
       durationSeconds: z.number().min(15).max(300).default(60),
     }))

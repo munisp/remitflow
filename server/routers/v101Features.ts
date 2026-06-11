@@ -124,7 +124,7 @@ const multiCurrencyWalletV2Router = router({
     return { wallets: enriched, totalUsdEquivalent: Math.round(totalUSD * 100) / 100, currency: "USD", updatedAt: new Date() };
   }),
   convert: auditedProcedure
-    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() }))
+    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       const rateRow = await db.select().from(fxRateHistory)
@@ -153,7 +153,7 @@ const crossBorderComplianceRouter = router({
   checkTransaction: auditedProcedure
     .input(z.object({
       userId: z.number().int(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       fromCountry: z.string(),
       toCountry: z.string(),
       currency: z.string(),
@@ -279,7 +279,7 @@ const liquidityStressTestingRouter = router({
 // ─── 7. Payment Orchestration V2 ─────────────────────────────────────────────
 const paymentOrchestrationV2Router = router({
   getRoutes: publicProcedure
-    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() }))
+    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) }))
     .query(async ({ input }) => {
       const db = await getDb();
       const corridorRows = await db.select().from(corridorMarginHistory)
@@ -650,7 +650,7 @@ const treasuryALMRouter = router({
     };
   }),
   rebalance: auditedProcedure
-    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive(), reason: z.string().min(1).max(500).trim() }))
+    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000), reason: z.string().min(1).max(500).trim() }))
     .mutation(async ({ input }) => {
       return { fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, amount: input.amount, reason: input.reason, status: "initiated", rebalanceId: `RBL-${Date.now()}`, initiatedAt: new Date() };
     }),

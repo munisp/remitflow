@@ -20,7 +20,7 @@ import { users, transactions, wallets, kycDocuments } from "../../drizzle/schema
 export const bnplRouter = router({
   /** Get available BNPL plans for a given amount */
   getPlans: protectedProcedure
-    .input(z.object({ amount: z.number().positive(), currency: z.string().default("USD") }))
+    .input(z.object({ amount: z.number().positive().max(10_000_000), currency: z.string().default("USD") }))
     .query(async ({ input, ctx }) => {
       // Business rule: BNPL available for amounts $50-$5000
       if (input.amount < 50) throw new TRPCError({ code: "BAD_REQUEST", message: "Minimum BNPL amount is $50" });
@@ -39,7 +39,7 @@ export const bnplRouter = router({
   applyForBNPL: protectedProcedure
     .input(z.object({
       planId: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("USD"),
       purpose: z.string().min(3).max(200),
       beneficiaryId: z.number().optional(),
@@ -149,7 +149,7 @@ export const bnplRouter = router({
 export const travelRuleRouter = router({
   /** Get travel rule requirements for a transfer */
   requirements: protectedProcedure
-    .input(z.object({ amount: z.number().positive(), fromCurrency: z.string(), toCurrency: z.string(), toCountry: z.string() }))
+    .input(z.object({ amount: z.number().positive().max(10_000_000), fromCurrency: z.string(), toCurrency: z.string(), toCountry: z.string() }))
     .query(async ({ input }) => {
       // FATF threshold: $1,000 USD equivalent triggers travel rule
       const threshold = 1000;
@@ -710,7 +710,7 @@ export const familyEnhancedRouter = router({
   setSpendingLimit: protectedProcedure
     .input(z.object({
       memberId: z.number(),
-      monthlyLimit: z.number().positive(),
+      monthlyLimit: z.number().positive().max(10_000_000),
       currency: z.string().default("USD"),
     }))
     .mutation(async ({ input, ctx }) => {

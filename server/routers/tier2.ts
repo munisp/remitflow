@@ -159,7 +159,7 @@ export const invoiceFinancingRouter = router({
   repay: protectedProcedure
     .input(z.object({
       applicationId: z.number(),
-      amountUsd:     z.number().positive(),
+      amountUsd:     z.number().positive().max(10_000_000),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -211,7 +211,7 @@ export const letterOfCreditRouter = router({
       beneficiaryBank:    z.string().optional(),
       lcType:             z.enum(["sight", "usance", "standby", "revolving"]).default("sight"),
       currency:           z.string().length(3).default("USD"),
-      amountUsd:          z.number().positive(),
+      amountUsd:          z.number().positive().max(10_000_000),
       expiryDate:         z.string(), // ISO date
       description:        z.string().optional(),
       requiredDocuments:  z.array(z.string()).default([]),
@@ -392,7 +392,7 @@ export const multiEntityTreasuryRouter = router({
       groupId:       z.number(),
       fromCompanyId: z.number(),
       toCompanyId:   z.number(),
-      amountUsd:     z.number().positive(),
+      amountUsd:     z.number().positive().max(10_000_000),
       fromCurrency:  z.string().length(3),
       toCurrency:    z.string().length(3),
       purpose:       z.string().optional(),
@@ -718,7 +718,7 @@ export const businessSavingsRouter = router({
   withdraw: protectedProcedure
     .input(z.object({
       accountId: z.number(),
-      amountUsd: z.number().positive(),
+      amountUsd: z.number().positive().max(10_000_000),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();

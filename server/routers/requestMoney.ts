@@ -11,7 +11,7 @@ export const requestMoneyRouter = router({
   // Create a new payment request (Request Money)
   create: protectedProcedure
     .input(z.object({
-      amount: z.number().positive().optional(),
+      amount: z.number().positive().max(10_000_000).optional(),
       currency: z.string().default("USD"),
       description: z.string().max(256).optional(),
       expiresInHours: z.number().min(1).max(168).default(48),
@@ -73,7 +73,7 @@ export const requestMoneyRouter = router({
   pay: protectedProcedure
     .input(z.object({
       token: z.string().length(64),
-      amount: z.number().positive().optional(), // override if request has no fixed amount
+      amount: z.number().positive().max(10_000_000).optional(), // override if request has no fixed amount
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -107,7 +107,7 @@ export const requestMoneyRouter = router({
     .input(z.object({
       recipientEmail: z.string().email(),
       recipientName: z.string().min(1).max(100),
-      amount: z.number().positive().optional(),
+      amount: z.number().positive().max(10_000_000).optional(),
       currency: z.string().default("USD"),
       note: z.string().max(500).optional(),
       expiresInHours: z.number().min(1).max(168).default(48),

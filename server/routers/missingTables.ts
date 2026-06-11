@@ -147,7 +147,7 @@ export const directDebitRouter = router({
     .input(z.object({
       creditor: z.string().min(2).max(255),
       creditorAccount: z.string().optional(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("NGN"),
       frequency: z.enum(["weekly", "biweekly", "monthly", "quarterly", "annually"]).default("monthly"),
       nextDebitDate: z.string().optional(),
@@ -282,7 +282,7 @@ export const paymentMetricsRouter = router({
       corridor: z.string(),
       success: z.boolean(),
       processingMs: z.number(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       period: z.string().default("daily"),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -312,7 +312,7 @@ export const bnplRouter = router({
     .input(z.object({
       merchant: z.string().min(2).max(200),
       description: z.string().optional(),
-      totalAmount: z.number().positive(),
+      totalAmount: z.number().positive().max(10_000_000),
       currency: z.string().default("NGN"),
       installments: z.number().min(2).max(12).default(4),
     }))
@@ -412,7 +412,7 @@ export const stablecoinRouter = router({
     }),
 
   transfer: protectedProcedure
-    .input(z.object({ walletId: z.number(), toAddress: z.string(), amount: z.number().positive() }))
+    .input(z.object({ walletId: z.number(), toAddress: z.string(), amount: z.number().positive().max(10_000_000) }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -438,7 +438,7 @@ export const mojaloopRouter = router({
 
   initiate: protectedProcedure
     .input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("USD"),
       payeeFsp: z.string(),
       payeeId: z.string(),
@@ -615,7 +615,7 @@ export const chargebackRouter = router({
     .input(z.object({
       transactionId: z.number().optional(),
       stripeChargeId: z.string().optional(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("USD"),
       reason: z.string().min(5).max(100),
       notes: z.string().optional(),
@@ -744,7 +744,7 @@ export const bulkBatchRouter = router({
       name: z.string().min(2).max(200),
       description: z.string().optional(),
       currency: z.string().default("USD"),
-      payments: z.array(z.object({ recipient: z.string(), amount: z.number().positive(), reference: z.string().optional() })),
+      payments: z.array(z.object({ recipient: z.string(), amount: z.number().positive().max(10_000_000), reference: z.string().optional() })),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();

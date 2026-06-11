@@ -29,7 +29,7 @@ import { safeParseAmount } from "../lib/safeDecimal";
 export const feeNegotiationRouter = router({
   // Get current fee tiers for a corridor
   getFeeTiers: protectedProcedure
-    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() }))
+    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
       const corridor = `${input.fromCurrency}-${input.toCurrency}`;
@@ -51,7 +51,7 @@ export const feeNegotiationRouter = router({
 
   // Negotiate a loyalty discount
   negotiate: protectedProcedure
-    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() }))
+    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       // Calculate loyalty based on transaction history
@@ -110,7 +110,7 @@ export const feeNegotiationRouter = router({
 // ─── 2. Multi-Hop FX Routing ──────────────────────────────────────────────────
 export const multiHopRoutingRouter = router({
   findOptimalRoute: protectedProcedure
-    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() }))
+    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) }))
     .query(async ({ input }) => {
       // Define routing options for major corridors
       const routes = [
@@ -552,7 +552,7 @@ export const feeRulesEngineRouter = router({
   }),
 
   simulate: adminProcedure
-    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() }))
+    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) }))
     .query(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -748,7 +748,7 @@ export const beneficiaryGroupsV2Router = router({
   bulkSend: protectedProcedure
     .input(z.object({
       groupName: z.string().min(1),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       fromCurrency: z.string(),
       description: z.string().optional(),
     }))

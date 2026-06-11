@@ -120,7 +120,7 @@ export const loyaltyPointsRouter = router({
 
   earnPoints: protectedProcedure
     .input(z.object({
-      transferAmount: z.number().positive(),
+      transferAmount: z.number().positive().max(10_000_000),
       currency: z.string().length(3),
       corridor: z.string(),
       transferId: z.string().optional(),

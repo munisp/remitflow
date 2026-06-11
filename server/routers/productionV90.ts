@@ -142,7 +142,7 @@ export const embeddingIndexRouter = router({
   indexTransaction: protectedProcedure
     .input(z.object({
       transactionId: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       sourceCurrency: z.string().length(3),
       destCurrency: z.string().length(3),
       sourceCountry: z.string().length(2),
@@ -501,7 +501,7 @@ export const paymentRailsRouter = router({
       rail: z.enum(["cips", "upi", "pix", "mojaloop", "swift", "sepa"]),
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       recipientId: z.string().min(1),
       recipientName: z.string().optional(),
       recipientBank: z.string().optional(),
@@ -828,7 +828,7 @@ export const disputeManagementRouter = router({
       disputeId: z.string(),
       resolution: z.enum(["refund_approved", "refund_denied", "investigation_complete", "chargeback_filed"]),
       notes: z.string().max(2000).optional(),
-      refundAmount: z.number().positive().optional(),
+      refundAmount: z.number().positive().max(10_000_000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();

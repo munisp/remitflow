@@ -196,7 +196,7 @@ const gnnFraudRouter = router({
   score: protectedProcedure
     .input(z.object({
       transactionId: z.string(),
-      amountUsd: z.number().positive(),
+      amountUsd: z.number().positive().max(10_000_000),
       senderCountry: z.string().default("US"),
       receiverCountry: z.string().default("NG"),
       hourOfDay: z.number().min(0).max(23).default(12),

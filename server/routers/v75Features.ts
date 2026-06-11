@@ -723,7 +723,7 @@ export const investmentKycGateRouter = router({
   check: protectedProcedure
     .input(z.object({
       assetType: z.enum(["stock", "real_estate", "startup"]),
-      amountUsd: z.number().positive(),
+      amountUsd: z.number().positive().max(10_000_000),
     }))
     .query(async ({ ctx, input }) => {
       const user = await getUser(ctx.user.openId);

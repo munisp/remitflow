@@ -18,7 +18,7 @@ export const splitBillRouter = router({
     .input(
       z.object({
         title: z.string().min(1).max(200),
-        totalAmount: z.number().positive(),
+        totalAmount: z.number().positive().max(10_000_000),
         currency: z.string().length(3),
         participants: z
           .array(

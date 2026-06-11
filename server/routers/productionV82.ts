@@ -149,7 +149,7 @@ export const treasuryRouter = router({
     { poolId: "pool_eur_kes", corridor: "EUR→KES", totalLiquidity: "1,800,000", utilizationPct: 45.6, providers: 2, apy: 5.1, status: "healthy" },
     { poolId: "pool_usd_ghs", corridor: "USD→GHS", totalLiquidity: "950,000", utilizationPct: 91.2, providers: 2, apy: 6.3, status: "critical" },
   ])),
-  rebalance: adminProcedure.input(z.object({ poolId: z.string(), targetAmount: z.number().positive(), currency: z.string() })).mutation(async ({ input }) => ({
+  rebalance: adminProcedure.input(z.object({ poolId: z.string(), targetAmount: z.number().positive().max(10_000_000), currency: z.string() })).mutation(async ({ input }) => ({
     poolId: input.poolId, action: "rebalance_initiated", targetAmount: input.targetAmount,
     currency: input.currency, transactionRef: genId("rebal"),
     estimatedCompletion: new Date(Date.now() + 3600000).toISOString(),
@@ -246,7 +246,7 @@ export const chargebackRouter = router({
     return (rows as any).rows ?? [];
   }),
   raise: auditedProcedure.input(z.object({
-    transactionRef: z.string(), amount: z.number().positive(), currency: z.string().length(3),
+    transactionRef: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().length(3),
     reason: z.enum(["unauthorized_transaction", "goods_not_received", "duplicate_charge", "wrong_amount", "subscription_cancelled", "other"]),
     description: z.string().min(20).max(1000), evidenceUrl: z.string().url().optional(),
   })).mutation(async ({ ctx, input }) => {
@@ -318,7 +318,7 @@ export const developerSandboxRouter = router({
 export const smartRoutingRouter = router({
   getRoute: protectedProcedure.input(z.object({
     fromCurrency: z.string().length(3), toCurrency: z.string().length(3),
-    amount: z.number().positive(), priority: z.enum(["speed", "cost", "reliability"]).default("cost"),
+    amount: z.number().positive().max(10_000_000), priority: z.enum(["speed", "cost", "reliability"]).default("cost"),
   })).query(async ({ input }) => {
     const routes = [
       { routeId: "route_direct", name: "Direct Transfer", gateway: "RemitFlow Core", fee: safeParseAmount((input.amount * 0.008).toFixed(2)), estimatedTime: "2-4 hours", reliability: 99.8, score: input.priority === "cost" ? 95 : 78 },
@@ -402,7 +402,7 @@ export const rateEngineRouter = router({
     })(),
   })),
   calculateFee: publicProcedure.input(z.object({
-    amount: z.number().positive(), fromCurrency: z.string(), toCurrency: z.string(),
+    amount: z.number().positive().max(10_000_000), fromCurrency: z.string(), toCurrency: z.string(),
     userTier: z.string().default("Starter"),
   })).query(async ({ input }) => {
     const rates: Record<string, number> = { Starter: 0.012, Regular: 0.009, Premium: 0.006, Business: 0.004 };
@@ -496,7 +496,7 @@ export const fxHedgingRouter = router({
   }),
   createForward: auditedProcedure.input(z.object({
     fromCurrency: z.string().length(3), toCurrency: z.string().length(3),
-    amount: z.number().positive(), settlementDays: z.number().min(1).max(365),
+    amount: z.number().positive().max(10_000_000), settlementDays: z.number().min(1).max(365),
   })).mutation(async ({ input }) => {
     let lockedRate = 1538.46;
     try {
@@ -579,7 +579,7 @@ export const ledgerRouter = router({
   }),
   doubleEntry: adminProcedure.input(z.object({
     debitAccount: z.string(), creditAccount: z.string(),
-    amount: z.number().positive(), currency: z.string().length(3),
+    amount: z.number().positive().max(10_000_000), currency: z.string().length(3),
     reference: z.string().min(1).max(100).trim(), description: z.string().min(0).max(500).trim(),
   })).mutation(async ({ input }) => ({
     entryId: genId("LE"), debitAccount: input.debitAccount, creditAccount: input.creditAccount,
@@ -600,7 +600,7 @@ export const transferGoalsRouter = router({
     return (rows as any).rows ?? [];
   }),
   create: protectedProcedure.input(z.object({
-    name: z.string().min(2).max(100), targetAmount: z.number().positive(),
+    name: z.string().min(2).max(100), targetAmount: z.number().positive().max(10_000_000),
     currency: z.string().length(3), deadline: z.string().optional(),
     autoTransferEnabled: z.boolean().default(false),
     autoTransferDay: z.number().min(1).max(28).optional(),
@@ -610,7 +610,7 @@ export const transferGoalsRouter = router({
     if (db) await db.execute(sql`INSERT INTO transfer_goals (user_id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status, created_at) VALUES (${ctx.user.id}, ${input.name}, ${input.targetAmount}, 0, ${input.currency}, ${input.deadline ?? null}, ${input.autoTransferEnabled}, 'active', NOW())`);
     return { goalId: genId("TG"), name: input.name, status: "active" };
   }),
-  topup: auditedProcedure.input(z.object({ goalId: z.number(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
+  topup: auditedProcedure.input(z.object({ goalId: z.number(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
     if (db) await db.execute(sql`UPDATE transfer_goals SET current_amount = current_amount + ${input.amount} WHERE id = ${input.goalId} AND user_id = ${ctx.user.id}`);
     return { topped: true, amount: input.amount };
@@ -745,7 +745,7 @@ export const beneficiaryGroupsRouter = router({
     if (db) await db.execute(sql`INSERT INTO beneficiary_group_members (group_id, beneficiary_id, added_at) VALUES (${input.groupId}, ${input.beneficiaryId}, NOW()) ON CONFLICT DO NOTHING`);
     return { added: true };
   }),
-  bulkSend: auditedProcedure.input(z.object({ groupId: z.number(), amount: z.number().positive(), currency: z.string().length(3), note: z.string().optional() })).mutation(async ({ input }) => ({
+  bulkSend: auditedProcedure.input(z.object({ groupId: z.number(), amount: z.number().positive().max(10_000_000), currency: z.string().length(3), note: z.string().optional() })).mutation(async ({ input }) => ({
     batchRef: genId("BULK"), groupId: input.groupId, amount: input.amount,
     currency: input.currency, status: "processing",
     estimatedCompletion: new Date(Date.now() + 3600000).toISOString(),

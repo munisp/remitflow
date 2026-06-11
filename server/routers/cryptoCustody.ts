@@ -443,7 +443,7 @@ export const cryptoCustodyRouter = {
     .input(z.object({
       asset: z.string(),
       toAddress: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       idempotencyKey: z.string(),
       memo: z.string().optional(),
     }))

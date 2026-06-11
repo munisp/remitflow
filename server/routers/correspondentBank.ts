@@ -106,7 +106,7 @@ export const correspondentBankRouter = router({
     .input(z.object({
       correspondentId: z.string(),
       currency: z.string().length(3),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       direction: z.enum(["nostro_top_up", "vostro_drawdown"]),
     }))
     .mutation(async ({ input, ctx }) => {

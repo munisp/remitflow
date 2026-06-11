@@ -19,7 +19,7 @@ export const transferCoreRouter = router({
   /** Get a transfer quote (fee + FX rate) without executing */
   quote: protectedProcedure
     .input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
       payoutMethod: z.enum(["bank_transfer", "mobile_money", "cash_pickup", "wallet"]).default("wallet"),

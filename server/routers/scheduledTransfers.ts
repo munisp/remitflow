@@ -21,7 +21,7 @@ export const scheduledTransfersV117Router = router({
         beneficiaryId: z.number().int().positive().optional(),
         fromCurrency: z.string().length(3),
         toCurrency: z.string().length(3),
-        amount: z.number().positive(),
+        amount: z.number().positive().max(10_000_000),
         frequency: frequencyEnum,
         startDate: z.string().datetime(), // ISO string
         maxRuns: z.number().int().positive().optional(),
@@ -114,7 +114,7 @@ export const scheduledTransfersV117Router = router({
     .input(
       z.object({
         id: z.number().int().positive(),
-        amount: z.number().positive().optional(),
+        amount: z.number().positive().max(10_000_000).optional(),
         frequency: frequencyEnum.optional(),
         nextRunAt: z.string().datetime().optional(),
         maxRuns: z.number().int().positive().nullable().optional(),

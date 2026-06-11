@@ -119,7 +119,7 @@ async function checkHealth(url: string): Promise<{ status: "healthy" | "unavaila
 export const cipsRouter = router({
   initiateTransfer: protectedProcedure
     .input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("CNY"),
       debtorAccount: z.string(),
       creditorAccount: z.string(),
@@ -156,7 +156,7 @@ export const upiRouter = router({
     .input(z.object({
       payerVpa: z.string(),
       payeeVpa: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("INR"),
       remarks: z.string().optional(),
       merchantCode: z.string().optional(),
@@ -190,7 +190,7 @@ export const pixRouter = router({
     .input(z.object({
       pixKey: z.string(),
       pixKeyType: z.enum(["CPF", "CNPJ", "EMAIL", "PHONE", "EVP"]),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("BRL"),
       description: z.string().optional(),
     }))
@@ -303,7 +303,7 @@ export const tigerBeetleRouter = router({
       }
     }),
   createTransfer: protectedProcedure
-    .input(z.object({ debitAccountId: z.string(), creditAccountId: z.string(), amount: z.number().positive(), ledger: z.number().default(1), code: z.number().default(1) }))
+    .input(z.object({ debitAccountId: z.string(), creditAccountId: z.string(), amount: z.number().positive().max(10_000_000), ledger: z.number().default(1), code: z.number().default(1) }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.tigerBeetle}/transfers`, input);
@@ -363,7 +363,7 @@ export const lakehouseRouter = router({
 // ─── AML Engine Router (Python) ───────────────────────────────────────────────
 export const amlEngineRouter = router({
   screenTransaction: protectedProcedure
-    .input(z.object({ transactionId: z.string(), amount: z.number().positive(), senderName: z.string(), receiverName: z.string(), corridor: z.string() }))
+    .input(z.object({ transactionId: z.string(), amount: z.number().positive().max(10_000_000), senderName: z.string(), receiverName: z.string(), corridor: z.string() }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.amlEngine}/screen`, input);
@@ -385,7 +385,7 @@ export const amlEngineRouter = router({
 // ─── Fraud ML Router (Python) ─────────────────────────────────────────────────
 export const fraudMlRouter = router({
   scoreTransaction: protectedProcedure
-    .input(z.object({ userId: z.number(), amount: z.number().positive(), destinationCountry: z.string(), deviceFingerprint: z.string().optional() }))
+    .input(z.object({ userId: z.number(), amount: z.number().positive().max(10_000_000), destinationCountry: z.string(), deviceFingerprint: z.string().optional() }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.fraudMl}/score`, input);
@@ -407,7 +407,7 @@ export const fraudMlRouter = router({
 // ─── Transfer Engine Router (Go) ──────────────────────────────────────────────
 export const transferEngineRouter = router({
   processTransfer: protectedProcedure
-    .input(z.object({ transferId: z.string(), rail: z.string(), amount: z.number().positive(), currency: z.string(), metadata: z.record(z.string(), z.unknown()).optional() }))
+    .input(z.object({ transferId: z.string(), rail: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string(), metadata: z.record(z.string(), z.unknown()).optional() }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.transferEngine}/process`, input);

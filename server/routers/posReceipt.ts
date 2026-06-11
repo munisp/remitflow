@@ -58,7 +58,7 @@ export const posReceiptRouter = router({
       type: z.enum(["cash_in", "cash_out"]),
       customerName: z.string(),
       customerPhone: z.string().optional(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().length(3),
       fee: z.number().default(0),
       agentCode: z.string(),

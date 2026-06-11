@@ -65,7 +65,7 @@ export const servicesHealthRouter = router({
   amlCheck: protectedProcedure
     .input(z.object({
       userId: z.number(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string(),
       destinationCountry: z.string(),
       beneficiaryName: z.string(),
@@ -78,7 +78,7 @@ export const servicesHealthRouter = router({
   fraudScore: protectedProcedure
     .input(z.object({
       userId: z.number(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       deviceFingerprint: z.string().optional(),
       ipAddress: z.string().optional(),
     }))
@@ -235,7 +235,7 @@ export const servicesHealthRouter = router({
   generateReceipt: protectedProcedure
     .input(z.object({
       id: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string(),
       recipientName: z.string(),
       senderName: z.string(),
@@ -261,7 +261,7 @@ export const servicesHealthRouter = router({
     .input(z.object({
       debitAccount: z.string(),
       creditAccount: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("USD"),
     }))
     .mutation(async ({ input }) => {

@@ -217,7 +217,7 @@ export const diasporaBondRouter = router({
   getSubscriptionQuote: protectedProcedure
     .input(z.object({
       bondId: z.number(),
-      amountUsd: z.number().positive(),
+      amountUsd: z.number().positive().max(10_000_000),
     }))
     .query(async ({ input }) => {
       const db = await getDb();
@@ -256,7 +256,7 @@ export const diasporaBondRouter = router({
   subscribe: protectedProcedure
     .input(z.object({
       bondId: z.number(),
-      amountUsd: z.number().positive(),
+      amountUsd: z.number().positive().max(10_000_000),
       paymentSource: z.enum(["wallet", "bank_transfer", "card"]).default("wallet"),
       acceptedTerms: z.boolean(),
     }))

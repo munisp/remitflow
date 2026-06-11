@@ -63,7 +63,7 @@ export const partnerPayoutsRouter = router({
 
   create: adminProcedure.input(z.object({
     tenantId: z.number(),
-    amount: z.number().positive(),
+    amount: z.number().positive().max(10_000_000),
     currency: z.string().length(3).default("USD"),
     method: z.enum(["bank_transfer", "crypto", "mobile_money", "paypal"]).default("bank_transfer"),
     periodStart: z.string(),

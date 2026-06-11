@@ -504,7 +504,7 @@ export const v98Router = router({
       .input(z.object({
         userId: z.number(),
         currency: z.enum(["eNGN", "eGHS", "eKES", "eZAR"]),
-        amount: z.number().positive(),
+        amount: z.number().positive().max(10_000_000),
         reason: z.string().min(10).max(500),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -665,7 +665,7 @@ export const v98Router = router({
     checkAndFlag: protectedProcedure
       .input(z.object({
         transactionId: z.number(),
-        amount: z.number().positive(),
+        amount: z.number().positive().max(10_000_000),
         currency: z.string(),
       }))
       .mutation(async ({ ctx, input }) => {

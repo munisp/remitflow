@@ -908,7 +908,7 @@ export const travelRuleDbRouter = router({
       beneficiaryName: z.string().min(2).max(255),
       beneficiaryAccount: z.string().max(100).optional(),
       beneficiaryCountry: z.string().length(2).toUpperCase(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().length(3).toUpperCase(),
       vasp: z.string().max(255).optional(),
       direction: z.enum(["outbound", "inbound"]).default("outbound"),

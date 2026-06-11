@@ -317,7 +317,7 @@ export const expenseRouter = router({
       items:       z.array(z.object({
         category:       z.enum(["travel", "accommodation", "meals", "equipment", "software", "marketing", "training", "other"]),
         description:    z.string().min(3),
-        amountUsd:      z.number().positive(),
+        amountUsd:      z.number().positive().max(10_000_000),
         currency:       z.string().length(3).default("USD"),
         expenseDate:    z.string(), // ISO date
         receiptUrl:     z.string().url().optional(),

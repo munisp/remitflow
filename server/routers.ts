@@ -708,7 +708,7 @@ export const appRouter = router({
       broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "Wallet Top-up Successful", message: `Your ${input.currency} wallet has been credited with ${Number(input.amount).toLocaleString()} ${input.currency}`, amount: input.amount, currency: input.currency, newBalance, method: input.method, reference: topupRef } });
       return { success: true, newBalance, currency: input.currency };
     }),
-    stripeTopup: protectedProcedure.input(z.object({ amount: z.number().positive().min(100).max(10_000_000), currency: z.string().default("usd"), walletCurrency: z.string().default("USD"), origin: z.string().optional() })).mutation(async ({ ctx, input }) => {
+    stripeTopup: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000).min(100).max(10_000_000), currency: z.string().default("usd"), walletCurrency: z.string().default("USD"), origin: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const { getStripe } = await import("./stripe");
       const stripe = getStripe();
       // Use origin from input (frontend passes window.location.origin) or fall back to request header
@@ -727,7 +727,7 @@ export const appRouter = router({
       return { success: true, checkoutUrl: session.url, sessionId: session.id };
     }),
     paypalTopup: protectedProcedure.input(z.object({
-      amount: z.number().positive().min(1).max(10_000_000),
+      amount: z.number().positive().max(10_000_000).min(1).max(10_000_000),
       currency: z.string().default("USD"),
       walletCurrency: z.string().default("USD"),
     })).mutation(async ({ ctx, input }) => {
@@ -822,7 +822,7 @@ export const appRouter = router({
       return { success: true, newBalance: Number(newBalance), sandboxMode: false };
     }),
     flutterwaveTopup: protectedProcedure.input(z.object({
-      amount: z.number().positive().min(100).max(10_000_000),
+      amount: z.number().positive().max(10_000_000).min(100).max(10_000_000),
       currency: z.string().default("NGN"),
       walletCurrency: z.string().default("NGN"),
       email: z.string().email().optional(),
@@ -1029,7 +1029,7 @@ export const appRouter = router({
         return { workflowId: input.workflowId, status: temporalStatus, sagaSteps, error: result.error, isFallback: false };
       }),
 
-    send: transferSendProcedure.input(z.object({ fromCurrency: z.string().max(8), amount: z.number().positive(), toCurrency: z.string().max(8), recipientName: z.string().min(1).max(128).trim(), recipientAccount: z.string().max(64).optional(), recipientEmail: z.string().email().max(320).optional(), recipientBank: z.string().max(128).optional(), recipientCountry: z.string().max(64).optional(), deliveryMethod: z.string().max(32).optional(), description: z.string().max(500).optional(), idempotencyKey: z.string().max(200).optional(), totpCode: z.string().length(6).optional() })).mutation(async ({ ctx, input }) => {
+    send: transferSendProcedure.input(z.object({ fromCurrency: z.string().max(8), amount: z.number().positive().max(10_000_000), toCurrency: z.string().max(8), recipientName: z.string().min(1).max(128).trim(), recipientAccount: z.string().max(64).optional(), recipientEmail: z.string().email().max(320).optional(), recipientBank: z.string().max(128).optional(), recipientCountry: z.string().max(64).optional(), deliveryMethod: z.string().max(32).optional(), description: z.string().max(500).optional(), idempotencyKey: z.string().max(200).optional(), totpCode: z.string().length(6).optional() })).mutation(async ({ ctx, input }) => {
       // ─── 2FA enforcement for high-value transfers (> $1,000 USD equivalent) ───
       const HIGH_VALUE_THRESHOLD_USD = 1000;
       const ratesFor2fa = await getLiveRates("USD");
@@ -1690,7 +1690,7 @@ export const appRouter = router({
       await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0", description: `Savings withdrawal: $${input.amount}` });
       return { success: true, withdrawn: input.amount };
     }),
-    createGoal: protectedProcedure.input(z.object({ name: z.string().min(1).max(100), targetAmount: z.number().positive(), deadline: z.string().optional() })).mutation(async ({ ctx, input }) => {
+    createGoal: protectedProcedure.input(z.object({ name: z.string().min(1).max(100), targetAmount: z.number().positive().max(10_000_000), deadline: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
       const existingGoals = await getSavingsGoalsByUserId(ctx.user.id);
       const activeGoals = existingGoals.filter((g: any) => g.status === 'active');
@@ -1703,7 +1703,7 @@ export const appRouter = router({
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
       return goals.map((g: any) => ({ ...g, targetAmount: Number(g.targetAmount), currentAmount: Number(g.currentAmount), autoSaveAmount: g.autoSaveAmount ? Number(g.autoSaveAmount) : undefined }));
     }),
-    create: protectedProcedure.input(z.object({ name: z.string(), emoji: z.string().default("🎯"), targetAmount: z.number().positive(), currency: z.string().default("NGN"), targetDate: z.string().optional(), autoSave: z.boolean().default(false), autoSaveAmount: z.number().optional() })).mutation(async ({ ctx, input }) => {
+    create: protectedProcedure.input(z.object({ name: z.string(), emoji: z.string().default("🎯"), targetAmount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), targetDate: z.string().optional(), autoSave: z.boolean().default(false), autoSaveAmount: z.number().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [created] = await db.insert(savingsGoals).values({ userId: ctx.user.id, ...input, targetAmount: input.targetAmount.toString(), currentAmount: "0.00", autoSaveAmount: input.autoSaveAmount?.toString(), targetDate: input.targetDate ? new Date(input.targetDate) : undefined, status: "active" }).returning();
       return { success: true, goalId: created.id, name: input.name, targetAmount: input.targetAmount };
@@ -1749,7 +1749,7 @@ export const appRouter = router({
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
       return goals.map((g: any) => ({ ...g, targetAmount: Number(g.targetAmount), currentAmount: Number(g.currentAmount), autoSaveAmount: g.autoSaveAmount ? Number(g.autoSaveAmount) : undefined }));
     }),
-    create: protectedProcedure.input(z.object({ name: z.string(), emoji: z.string().default("🎯"), targetAmount: z.number().positive(), currency: z.string().default("NGN"), targetDate: z.string().optional(), autoSave: z.boolean().default(false), autoSaveAmount: z.number().optional() })).mutation(async ({ ctx, input }) => {
+    create: protectedProcedure.input(z.object({ name: z.string(), emoji: z.string().default("🎯"), targetAmount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), targetDate: z.string().optional(), autoSave: z.boolean().default(false), autoSaveAmount: z.number().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [created2] = await db.insert(savingsGoals).values({ userId: ctx.user.id, ...input, targetAmount: input.targetAmount.toString(), currentAmount: "0.00", autoSaveAmount: input.autoSaveAmount?.toString(), targetDate: input.targetDate ? new Date(input.targetDate) : undefined, status: "active" }).returning();
       return { success: true, goalId: created2.id, name: input.name, targetAmount: input.targetAmount };
@@ -2335,7 +2335,7 @@ export const appRouter = router({
       return { success: true, schedule: { ...created, amount: Number((created as any).amount) }, nextRunAt: nextRun };
     }),
     edit: protectedProcedure.input(z.object({
-      id: z.number(), name: z.string().optional(), amount: z.number().positive().optional(),
+      id: z.number(), name: z.string().optional(), amount: z.number().positive().max(10_000_000).optional(),
       currency: z.string().optional(), targetCurrency: z.string().optional(),
       frequency: z.enum(["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly"]).optional(),
       recipientName: z.string().optional(), recipientAccount: z.string().optional(),
@@ -2410,7 +2410,7 @@ export const appRouter = router({
       const bp = await getBatchPaymentsByUserId(ctx.user.id);
       return bp.map((b: any) => ({ ...b, totalAmount: Number(b.totalAmount) }));
     }),
-    create: protectedProcedure.input(z.object({ name: z.string(), currency: z.string().default("NGN"), recipients: z.array(z.object({ name: z.string(), account: z.string(), amount: z.number().positive() })) })).mutation(async ({ ctx, input }) => {
+    create: protectedProcedure.input(z.object({ name: z.string(), currency: z.string().default("NGN"), recipients: z.array(z.object({ name: z.string(), account: z.string(), amount: z.number().positive().max(10_000_000) })) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const totalAmount = input.recipients.reduce((s, r) => s + r.amount, 0);
       await db.insert(batchPayments).values({ userId: ctx.user.id, name: input.name, currency: input.currency, totalAmount: totalAmount.toString(), totalRecipients: input.recipients.length, status: "draft", payments: input.recipients });
@@ -2939,7 +2939,7 @@ export const appRouter = router({
         return lookupParty(input.partyIdType as any, input.partyIdentifier);
       }),
     quote: protectedProcedure
-      .input(z.object({ payeeMsisdn: z.string(), payeeFspId: z.string(), amount: z.number().positive(), currency: z.string(), note: z.string().optional() }))
+      .input(z.object({ payeeMsisdn: z.string(), payeeFspId: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string(), note: z.string().optional() }))
       .mutation(async ({ ctx, input }) => {
         const { requestQuote } = await import("./mojaloop.service.js");
         const dbUser = await getUserByOpenId(ctx.user.openId);
@@ -2959,7 +2959,7 @@ export const appRouter = router({
     ]),
     transfer: protectedProcedure
       .input(z.object({
-        amount: z.number().positive(),
+        amount: z.number().positive().max(10_000_000),
         currency: z.string(),
         payeeFsp: z.string(),
         payeeId: z.string(),
@@ -3059,7 +3059,7 @@ export const appRouter = router({
     receive: protectedProcedure.input(z.object({
       transferId: z.string().min(1),
       senderWallet: z.string().min(1),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().min(2).max(10),
       purpose: z.string().optional(),
       cbdcRef: z.string().optional(),
@@ -3147,7 +3147,7 @@ export const appRouter = router({
     }),
     // Generate a payment request that a sender can use to push CBDC to this user
     generatePaymentRequest: protectedProcedure.input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().min(2).max(10).default('eNGN'),
       purpose: z.string().optional(),
     })).mutation(async ({ ctx, input }) => {
@@ -3202,7 +3202,7 @@ export const appRouter = router({
       if (cbdcWalletRows.length === 0) return [{ currency: "eNGN", balance: 0, type: "retail", status: "active", issuer: "Central Bank of Nigeria", description: "Digital Naira (eNaira)" }];
       return cbdcWalletRows.map((w: any) => ({ ...formatWallet(w), type: "retail", issuer: "Central Bank", description: `Digital ${w.currency}` }));
     }),
-    issue: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
+    issue: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [existing] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (existing) { await db.update(wallets).set({ balance: (Number(existing.balance) + input.amount).toFixed(2) }).where(eq(wallets.id, existing.id)).returning(); }
@@ -3217,7 +3217,7 @@ export const appRouter = router({
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 5 });
       return txns.filter((t: any) => t.type === "send").slice(0, 3).map((t: any) => ({ id: t.id, merchant: t.description ?? "Purchase", description: t.description ?? "Purchase", totalAmount: Number(t.fromAmount), paidAmount: Number(t.fromAmount) * 0.25, installments: 4, nextDue: new Date(Date.now() + 86400000 * 30), status: "active", currency: t.fromCurrency }));
     }),
-    applyPlan: protectedProcedure.input(z.object({ amount: z.number().positive(), currency: z.string().default("NGN"), description: z.string(), installments: z.number().min(2).max(12).default(4) })).mutation(async () => ({
+    applyPlan: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), description: z.string(), installments: z.number().min(2).max(12).default(4) })).mutation(async () => ({
       success: true, planId: `BNPL${Date.now()}`, approved: true, creditLimit: 500000, interestRate: 2.5, firstPaymentDate: new Date(Date.now() + 86400000 * 30),
     })),
   }),
@@ -3261,7 +3261,7 @@ export const appRouter = router({
     send: strictRateLimitedProcedure.input(z.object({
       symbol: z.string(),
       toAddress: z.string().min(10),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
     })).mutation(async ({ ctx, input }) => {
       await enforceTransferLimits(ctx.user.id, input.amount, input.symbol, ctx.user.kycTier);
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -3291,7 +3291,7 @@ export const appRouter = router({
       { id: "safaricom", name: "Safaricom Kenya", logo: "📱", country: "KE", type: "airtime" },
       { id: "mtn-gh", name: "MTN Ghana", logo: "📱", country: "GH", type: "airtime" },
     ]),
-    topup: protectedProcedure.input(z.object({ provider: z.string(), phone: z.string(), amount: z.number().positive(), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
+    topup: protectedProcedure.input(z.object({ provider: z.string(), phone: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
@@ -3313,7 +3313,7 @@ export const appRouter = router({
       { id: "tv", name: "Cable TV", icon: "📺", providers: ["DSTV", "GOtv", "StarTimes"] },
       { id: "insurance", name: "Insurance", icon: "🛡️", providers: ["AXA Mansard", "Leadway", "AIICO"] },
     ]),
-    pay: protectedProcedure.input(z.object({ category: z.string(), provider: z.string(), accountNumber: z.string(), amount: z.number().positive(), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
+    pay: protectedProcedure.input(z.object({ category: z.string(), provider: z.string(), accountNumber: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
@@ -3338,7 +3338,7 @@ export const appRouter = router({
       const qrData = Buffer.from(payload).toString("base64");
       return { qrData, paymentLink: `https://pay.remitflow.app/qr/${qrData}`, expiresAt: new Date(Date.now() + 3600000) };
     }),
-    pay: strictRateLimitedProcedure.input(z.object({ qrData: z.string(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
+    pay: strictRateLimitedProcedure.input(z.object({ qrData: z.string(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       let parsed: { userId?: number; currency?: string } = {};
       try { parsed = JSON.parse(Buffer.from(input.qrData, "base64").toString("utf-8")); } catch { /* invalid QR data */ }
@@ -3561,7 +3561,7 @@ export const appRouter = router({
       const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: mpesaFee.totalFee.toFixed(2), description: `M-Pesa transfer to ${input.phone}` });
       return { success: true, reference: ref, mpesaRef: `MP${Date.now()}`, phone: input.phone, amount: input.amount, fee: Math.round(mpesaFee.totalFee * 100) / 100 };
     }),
-    receive: protectedProcedure.input(z.object({ phone: z.string(), amount: z.number().positive() })).query(({ ctx, input }) => ({
+    receive: protectedProcedure.input(z.object({ phone: z.string(), amount: z.number().positive().max(10_000_000) })).query(({ ctx, input }) => ({
       paymentRequest: { phone: input.phone, amount: input.amount, currency: "KES", shortCode: "174379", accountRef: `RF${ctx.user.id}` },
       instructions: ["Open M-Pesa on your phone", "Select Lipa na M-Pesa", "Enter Business No: 174379", `Enter Account: RF${ctx.user.id}`, `Enter Amount: KES ${input.amount}`, "Enter your M-Pesa PIN"],
     })),
@@ -3575,14 +3575,14 @@ export const appRouter = router({
   }),
 
   wise: router({
-    quote: protectedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive() })).query(async ({ input }) => {
+    quote: protectedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ input }) => {
       const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate;
       const wiseFeeBreakdown = calculateFee(input.amount / fromRate, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       const fee = Math.max(wiseFeeBreakdown.totalFee * fromRate, 0.5);
       const rfFee = calculateFee(input.amount / fromRate, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       return { rate, fee: Math.round(fee * 100) / 100, toAmount: Math.round((input.amount - fee) * rate * 100) / 100, estimatedDelivery: "1-2 business days", comparison: [{ provider: "RemitFlow", rate: rate * 0.995, fee: Math.round(rfFee.totalFee * fromRate * 100) / 100, toAmount: Math.round((input.amount - rfFee.totalFee * fromRate) * rate * 0.995 * 100) / 100 }, { provider: "Wise", rate, fee: Math.round(fee * 100) / 100, toAmount: Math.round((input.amount - fee) * rate * 100) / 100 }, { provider: "Western Union", rate: rate * 0.985, fee: 4.99, toAmount: Math.round((input.amount - 4.99) * rate * 0.985 * 100) / 100 }] };
     }),
-    send: strictRateLimitedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive(), recipientName: z.string(), recipientAccount: z.string() })).mutation(async ({ ctx, input }) => {
+    send: strictRateLimitedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive().max(10_000_000), recipientName: z.string(), recipientAccount: z.string() })).mutation(async ({ ctx, input }) => {
       await enforceTransferLimits(ctx.user.id, input.amount, input.from, ctx.user.kycTier);
       const wiseSendFee = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       const totalDebit = input.amount + wiseSendFee.totalFee;
@@ -3665,7 +3665,7 @@ export const appRouter = router({
   }),
 
   checkout: router({
-    createSession: protectedProcedure.input(z.object({ amount: z.number().positive(), currency: z.string(), description: z.string(), callbackUrl: z.string().optional() })).mutation(({ ctx, input }) => ({
+    createSession: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000), currency: z.string(), description: z.string(), callbackUrl: z.string().optional() })).mutation(({ ctx, input }) => ({
       sessionId: `cs_${Date.now()}`, checkoutUrl: `https://checkout.remitflow.app/pay/cs_${Date.now()}`, publicKey: `pk_live_remitflow_${ctx.user.id}`, ...input,
     })),
     apiKeys: protectedProcedure.query(({ ctx }) => ({
@@ -3791,7 +3791,7 @@ export const appRouter = router({
       recipientName: z.string().min(1).max(200).trim(),
       recipientAccount: z.string().min(1).max(100).trim(),
       recipientBank: z.string().min(1).max(200).trim(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("NGN"),
       frequency: z.enum(["daily","weekly","monthly","quarterly"]),
       startDate: z.string(),
@@ -3808,7 +3808,7 @@ export const appRouter = router({
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(),
-      amount: z.number().positive().optional(),
+      amount: z.number().positive().max(10_000_000).optional(),
       frequency: z.enum(["daily","weekly","monthly","quarterly"]).optional(),
       status: z.enum(["active","paused","cancelled"]).optional(),
       endDate: z.string().optional(),
@@ -5454,7 +5454,7 @@ Case: #${input.caseId}`,
         title: z.string().min(3).max(200),
         description: z.string().optional(),
         category: z.enum(["electronics","fashion","food","crafts","services","real_estate","agriculture","education","health","other"]),
-        price: z.number().positive(),
+        price: z.number().positive().max(10_000_000),
         currency: z.string().min(2).max(10),
         country: z.string().min(2).max(64),
         city: z.string().optional(),
@@ -5612,7 +5612,7 @@ Case: #${input.caseId}`,
       await db.delete(familyMembers).where(and(eq(familyMembers.id, input.id), eq(familyMembers.userId, ctx.user.id))).returning();
       return { success: true, removedMemberId: input.id };
     }),
-    setBudget: protectedProcedure.input(z.object({ familyMemberId: z.number(), monthlyLimit: z.number().positive(), currency: z.string().default("USD"), alertThreshold: z.number().min(10).max(100).default(80) })).mutation(async ({ ctx, input }) => {
+    setBudget: protectedProcedure.input(z.object({ familyMemberId: z.number(), monthlyLimit: z.number().positive().max(10_000_000), currency: z.string().default("USD"), alertThreshold: z.number().min(10).max(100).default(80) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { familyBudgets } = await import("../drizzle/schema.js");
       const existing = await db.select().from(familyBudgets).where(and(eq(familyBudgets.userId, ctx.user.id), eq(familyBudgets.familyMemberId, input.familyMemberId))).limit(1);
@@ -5701,7 +5701,7 @@ Case: #${input.caseId}`,
       const [fund] = await db.insert(communityFunds).values({ createdByUserId: ctx.user.id, name: input.name, description: input.description ?? null, country: input.country ?? null, theme: input.theme ?? null, goalAmount: input.goalAmount ? String(input.goalAmount) : null, currency: input.currency, sdgGoals: input.sdgGoals }).returning();
       return fund;
     }),
-    contribute: protectedProcedure.input(z.object({ fundId: z.number(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
+    contribute: protectedProcedure.input(z.object({ fundId: z.number(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { communityFunds } = await import("../drizzle/schema.js");
       await db.update(communityFunds).set({ totalRaised: sql`total_raised + ${input.amount}`, contributorCount: sql`contributor_count + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, input.fundId)).returning();
@@ -5713,7 +5713,7 @@ Case: #${input.caseId}`,
       const { fundProposals } = await import("../drizzle/schema.js");
       return db.select().from(fundProposals).where(eq(fundProposals.fundId, input.fundId)).orderBy(desc(fundProposals.createdAt)).limit(50);
     }),
-    submitProposal: protectedProcedure.input(z.object({ fundId: z.number(), title: z.string().min(5), description: z.string().optional(), requestedAmount: z.number().positive(), currency: z.string().default("USD"), beneficiaryName: z.string().optional(), beneficiaryCountry: z.string().optional(), impactDescription: z.string().optional() })).mutation(async ({ ctx, input }) => {
+    submitProposal: protectedProcedure.input(z.object({ fundId: z.number(), title: z.string().min(5), description: z.string().optional(), requestedAmount: z.number().positive().max(10_000_000), currency: z.string().default("USD"), beneficiaryName: z.string().optional(), beneficiaryCountry: z.string().optional(), impactDescription: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { fundProposals } = await import("../drizzle/schema.js");
       const deadline = new Date(); deadline.setDate(deadline.getDate() + 14);
@@ -5972,7 +5972,7 @@ Case: #${input.caseId}`,
     /** Run a transaction through the AML rules engine */
     amlScreen: protectedProcedure.input(z.object({
       transactionId: z.string(),
-      amountUsd: z.number().positive(),
+      amountUsd: z.number().positive().max(10_000_000),
       senderCountry: z.string().optional(),
       receiverCountry: z.string().optional(),
       senderName: z.string().optional(),
@@ -6462,7 +6462,7 @@ Case: #${input.caseId}`,
         return { totalAgents: Number(row.total ?? 0), activeAgents: Number(row.active ?? 0), totalVolume: 0, totalCommissions: 0 };
       } catch { return { totalAgents: 0, activeAgents: 0, totalVolume: 0, totalCommissions: 0 }; }
     }),
-    cashIn: protectedProcedure.input(z.object({ customerId: z.string(), amountNgn: z.number().positive(), channel: z.enum(["cash", "pos", "mobile_money"]).default("cash"), reference: z.string().optional() })).mutation(async ({ ctx, input }) => {
+    cashIn: protectedProcedure.input(z.object({ customerId: z.string(), amountNgn: z.number().positive().max(10_000_000), channel: z.enum(["cash", "pos", "mobile_money"]).default("cash"), reference: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const ref = input.reference ?? `CASHIN-${Date.now()}-${randomBytes(3).toString("hex").toUpperCase()}`;
       try { await db.execute(sql`INSERT INTO agent_cash_transactions (agent_user_id, customer_id, amount_ngn, channel, reference, type, status, created_at) VALUES (${ctx.user.id}, ${input.customerId}, ${input.amountNgn}, ${input.channel}, ${ref}, 'cash_in', 'completed', NOW()) ON CONFLICT DO NOTHING`); } catch { /* table may not exist */ }

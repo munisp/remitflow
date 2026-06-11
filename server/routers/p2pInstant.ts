@@ -1067,7 +1067,7 @@ export const p2pInstantRouter = router({
   // #12: QR code payment data generation (via Rust P2P engine)
   generateQR: protectedProcedure
     .input(z.object({
-      amount: z.number().positive().optional(),
+      amount: z.number().positive().max(10_000_000).optional(),
       currency: z.string().length(3).default("NGN"),
       note: z.string().max(200).optional(),
     }))
@@ -1126,7 +1126,7 @@ export const p2pInstantRouter = router({
   // #14: Generate shareable payment link
   generatePaymentLink: protectedProcedure
     .input(z.object({
-      amount: z.number().positive().optional(),
+      amount: z.number().positive().max(10_000_000).optional(),
       currency: z.string().length(3).default("NGN"),
       note: z.string().max(200).optional(),
       singleUse: z.boolean().default(true),
@@ -1235,7 +1235,7 @@ export const p2pInstantRouter = router({
     .input(z.object({
       transferId: z.number().int().positive(),
       resolution: z.enum(["refund", "reject", "partial_refund"]),
-      refundAmount: z.number().positive().optional(),
+      refundAmount: z.number().positive().max(10_000_000).optional(),
       notes: z.string().max(2000).optional(),
     }))
     .mutation(async ({ input }) => {

@@ -1263,7 +1263,7 @@ export const smeBulkRouter = router({
   createBatch: protectedProcedure
     .input(z.object({
       totalPayments: z.number().int().positive().max(1000),
-      totalAmountNgn: z.number().positive(),
+      totalAmountNgn: z.number().positive().max(10_000_000),
       csvFileUrl: z.string().url().optional(),
     }))
     .mutation(async ({ ctx, input }) => {

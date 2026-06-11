@@ -854,7 +854,7 @@ export const feeEngineRouter = router({
     .input(z.object({
       fromCurrency: z.string(),
       toCurrency: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
     }))
     .query(async ({ input }) => {
       const db = await getDb();

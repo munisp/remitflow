@@ -393,7 +393,7 @@ export const smartRoutingV2Router = router({
     .input(z.object({
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       priority: z.enum(["speed", "cost", "reliability"]).default("cost"),
     }))
     .mutation(async ({ input }) => {

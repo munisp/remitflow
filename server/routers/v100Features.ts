@@ -375,7 +375,7 @@ const liquidityEngineRouter = router({
   }),
 
   rebalance: auditedAdminProcedure
-    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() }))
+    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) }))
     .mutation(async ({ ctx, input }) => {
       const transactionId = `LIQ-${Date.now()}`;
       await createAuditLog({ userId: ctx.user.id, action: "LIQUIDITY_REBALANCE", description: `Rebalanced ${input.amount} ${input.fromCurrency} to ${input.toCurrency}`, severity: "warning", metadata: input });
@@ -527,7 +527,7 @@ const beneficiaryVerificationRouter = router({
 // ── 11. Payment Orchestration ─────────────────────────────────────────────────
 const paymentOrchestrationRouter = router({
   getRoutes: protectedProcedure
-    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() }))
+    .input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) }))
     .query(async ({ input }) => {
       const routes = [
         { id: 1, name: "Direct Bank Transfer", rail: "SWIFT", fee: input.amount * 0.015, feeUSD: input.amount * 0.015, estimatedHours: 24, reliability: 99.2, recommended: false },
@@ -541,7 +541,7 @@ const paymentOrchestrationRouter = router({
   executePayment: auditedProcedure
     .input(z.object({
       routeId: z.number().int(), fromCurrency: z.string(), toCurrency: z.string(),
-      amount: z.number().positive(), beneficiaryId: z.number().int(), rail: z.string(),
+      amount: z.number().positive().max(10_000_000), beneficiaryId: z.number().int(), rail: z.string(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();

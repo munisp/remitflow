@@ -272,7 +272,7 @@ export const agentProtectionRouter = router({
     .input(z.object({
       disputeId: z.string(),
       resolution: z.enum(["refund_customer", "dismiss", "suspend_agent", "terminate_agent"]),
-      refundAmount: z.number().positive().optional(),
+      refundAmount: z.number().positive().max(10_000_000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -848,7 +848,7 @@ export const cardProtectionRouter = router({
     .input(z.object({
       cardId: z.number(),
       transactionRef: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       merchantName: z.string().max(200),
       disputeReason: z.enum(["unauthorized", "duplicate", "not_as_described", "cancelled_subscription", "counterfeit"]),
       description: z.string().min(10).max(2000),
@@ -890,7 +890,7 @@ export const cardProtectionRouter = router({
     .input(z.object({
       chargebackId: z.string(),
       resolution: z.enum(["refund_customer", "deny", "partial_refund"]),
-      refundAmount: z.number().positive().optional(),
+      refundAmount: z.number().positive().max(10_000_000).optional(),
       notes: z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {

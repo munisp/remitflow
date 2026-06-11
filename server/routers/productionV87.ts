@@ -212,7 +212,7 @@ export const qdrantRouter = router({
     .input(z.object({
       id: z.number(),
       userId: z.number(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string(),
       toCurrency: z.string(),
       beneficiaryName: z.string(),

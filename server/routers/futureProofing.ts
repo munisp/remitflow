@@ -109,7 +109,7 @@ const conversationalPaymentsRouter = router({
       correlationId: z.string().uuid(),
       confirmed: z.boolean(),
       overrides: z.object({
-        amount: z.number().positive().optional(),
+        amount: z.number().positive().max(10_000_000).optional(),
         currency: z.string().optional(),
         beneficiaryId: z.number().optional(),
       }).optional(),
@@ -471,7 +471,7 @@ const openBankingFullRouter = router({
     .input(z.object({
       payerEmail: z.string().email(),
       payerPhone: z.string().optional(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("NGN"),
       description: z.string().max(256),
       expiresInHours: z.number().min(1).max(168).default(48),
@@ -500,7 +500,7 @@ const openBankingFullRouter = router({
   createCheckoutSession: publicProcedure
     .input(z.object({
       merchantId: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("NGN"),
       description: z.string(),
       successUrl: z.string().url(),
@@ -670,7 +670,7 @@ const iso20022Router = router({
     .input(z.object({
       payments: z.array(z.object({
         endToEndId: z.string(),
-        amount: z.number().positive(),
+        amount: z.number().positive().max(10_000_000),
         currency: z.string().length(3),
         creditorName: z.string().max(140),
         creditorIban: z.string().min(15).max(34),
@@ -829,7 +829,7 @@ const cbdcFullRouter = router({
     .input(z.object({
       fromCurrency: z.enum(["eNGN", "eGHS", "eKES", "eZAR"]),
       toCurrency: z.string().length(3),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       destinationAccount: z.string(),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -875,7 +875,7 @@ const cbdcFullRouter = router({
   /** 4.7 Programmable Money (Smart Contracts) */
   createConditionalPayment: protectedProcedure
     .input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("eNGN"),
       recipientId: z.number(),
       conditions: z.array(z.object({
@@ -1281,7 +1281,7 @@ const paymentRailsFullRouter = router({
   /** 7.8 Payment Orchestration — real implementation connecting to payment-rails.service.ts */
   orchestrate: protectedProcedure
     .input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
       beneficiaryId: z.number().optional(),
@@ -1706,7 +1706,7 @@ const businessModelRouter = router({
   /** 10.1 Dynamic Pricing Engine */
   dynamicPricing: protectedProcedure
     .input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
     }))

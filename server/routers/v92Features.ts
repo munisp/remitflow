@@ -64,7 +64,7 @@ export const feeEngineV92Router = router({
     .input(z.object({
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
     }))
     .query(({ input }) => {
       const fee = calculateFee(input.fromCurrency, input.toCurrency, input.amount);
@@ -104,7 +104,7 @@ export const feeEngineV92Router = router({
 export const transferLimitsRouter = router({
   check: protectedProcedure
     .input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().length(3).default("USD"),
     }))
     .query(async ({ ctx, input }) => {
@@ -218,7 +218,7 @@ export const transferLimitsRouter = router({
     .input(z.object({
       tier: z.enum(["tier1", "tier2", "tier3"]),
       dailyLimit: z.number().positive(),
-      monthlyLimit: z.number().positive(),
+      monthlyLimit: z.number().positive().max(10_000_000),
       singleLimit: z.number().positive(),
     }))
     .mutation(async ({ input }) => {
@@ -255,7 +255,7 @@ export const fxRateLockRouter = router({
     .input(z.object({
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       rate: z.number().positive(),
     }))
     .mutation(({ ctx, input }) => {
@@ -297,9 +297,9 @@ export const fxRateLockRouter = router({
 export const complianceTriggersRouter = router({
   checkTransaction: protectedProcedure
     .input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().length(3),
-      amountUsd: z.number().positive(),
+      amountUsd: z.number().positive().max(10_000_000),
       transferId: z.number().int().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -932,7 +932,7 @@ export const emailDeliveryRouter = router({
       to: z.string().email(),
       recipientName: z.string(),
       senderName: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       fromCurrency: z.string(),
       toCurrency: z.string(),
       toAmount: z.number().positive(),
