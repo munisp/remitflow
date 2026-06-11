@@ -360,7 +360,7 @@ export const billingEngineRouter = router({
         beforeState: JSON.stringify(existing[0]),
         afterState: JSON.stringify({ ...existing[0], ...updates, version: newVersion }),
         occurredAtMs: now,
-      });
+      }).returning();
 
       // Audit log for billing config change
       await createAuditLog({
@@ -563,7 +563,7 @@ export const billingEngineRouter = router({
         ownerEmail: `admin@${input.tenantId}.com`,
         ownerName: input.tenantName,
         onboardedAt: new Date(),
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
 
       // Provision billing config
       await db.insert(billingConfigs).values({
@@ -585,7 +585,7 @@ export const billingEngineRouter = router({
         changeReason: "Initial provisioning at tenant onboarding",
         createdAtMs: now,
         updatedAtMs: now,
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
 
       // Audit log
       await db.insert(billingAuditLog).values({
@@ -597,7 +597,7 @@ export const billingEngineRouter = router({
         actorRole: ctx.user.role ?? "admin",
         afterState: JSON.stringify({ configId, tenantId: input.tenantId }),
         occurredAtMs: now,
-      });
+      }).returning();
 
       return { success: true, verified: true, configId, tenantId: input.tenantId };
     }),
@@ -641,7 +641,7 @@ export const billingEngineRouter = router({
         isActive: true,
         contactEmail: input.contactEmail,
         onboardedAt: new Date(),
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
       await db.insert(billingConfigs).values({
         configId,
         tenantId,

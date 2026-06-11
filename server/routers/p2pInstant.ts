@@ -1474,7 +1474,7 @@ export const p2pInstantRouter = router({
         SELECT sender_id, receiver_id, CAST(send_amount AS numeric) as amount, send_currency as currency,
                EXTRACT(EPOCH FROM created_at) * 1000 as timestamp_ms
         FROM p2p_transfers
-        WHERE created_at > NOW() - INTERVAL '${sql.raw(String(input.windowHours))} hours'
+        WHERE created_at > NOW() - (${input.windowHours} || ' hours')::interval
           AND CAST(send_amount AS numeric) >= ${input.minAmount}
           AND status IN ('completed', 'settling')
         ORDER BY created_at DESC LIMIT 10000

@@ -427,7 +427,8 @@ export const extendedCrudRouter = router({
           for (const pref of prefs) {
             await db.insert(schema.notificationPreferences)
               .values({ userId: ctx.user.id, category: pref.key, inAppEnabled: pref.enabled, pushEnabled: pref.enabled })
-              .onConflictDoUpdate({ target: [schema.notificationPreferences.userId, schema.notificationPreferences.category], set: { inAppEnabled: pref.enabled, pushEnabled: pref.enabled } });
+              .onConflictDoUpdate({ target: [schema.notificationPreferences.userId, schema.notificationPreferences.category], set: { inAppEnabled: pref.enabled, pushEnabled: pref.enabled } })
+              .returning();
           }
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
         }),
