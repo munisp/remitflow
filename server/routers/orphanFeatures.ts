@@ -1210,7 +1210,7 @@ export const pushPrefsRouter = router({
           userId: ctx.user.id,
           preferenceKey: input.preferenceKey,
           isEnabled: input.isEnabled,
-        });
+        }).returning();
       }
       return { success: true, verified: true, preferenceKey: input.preferenceKey, isEnabled: input.isEnabled };
     }),
@@ -1226,7 +1226,7 @@ export const pushPrefsRouter = router({
           if (existing) {
             await db.update(pushNotificationPreferences).set({ isEnabled: enabled, updatedAt: new Date() }).where(eq(pushNotificationPreferences.id, existing.id)).returning();
           } else {
-            await db.insert(pushNotificationPreferences).values({ userId: ctx.user.id, preferenceKey: key, isEnabled: enabled });
+            await db.insert(pushNotificationPreferences).values({ userId: ctx.user.id, preferenceKey: key, isEnabled: enabled }).returning();
           }
           return { key, enabled };
         })

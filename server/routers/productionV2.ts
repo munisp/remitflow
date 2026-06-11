@@ -567,7 +567,7 @@ export const notificationPrefsRouter = router({
         .onConflictDoUpdate({
           target: [notificationPreferences.userId, notificationPreferences.category],
           set: { emailEnabled: pref.emailEnabled, inAppEnabled: pref.inAppEnabled, pushEnabled: pref.pushEnabled },
-        });
+        }).returning();
     }
     return { success: true, verified: true, updated: input.length };
   }),

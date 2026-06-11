@@ -54,7 +54,7 @@ export const cronJobsRouter = router({
     if (existing.length === 0) {
       await db.insert(cronJobs).values(
         DEFAULT_JOBS.map(j => ({ ...j, nextRunAt: getNextRun(j.schedule) }))
-      ).onConflictDoNothing();
+      ).onConflictDoNothing().returning();
     }
     
     return db.select().from(cronJobs).orderBy(cronJobs.category, cronJobs.name);

@@ -309,7 +309,7 @@ const escrowPlanRouter = router({
           deadline,
           verificationType: m.verificationType,
           status: "pending",
-        });
+        }).returning();
       }
 
       // Create payment schedule

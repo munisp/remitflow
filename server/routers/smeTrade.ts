@@ -139,7 +139,7 @@ export const smeTradeRouter = router({
           },
           status: serviceResult.is_valid ? "validated" : "rejected",
           createdAt: new Date(),
-        });
+        }).returning();
       } catch (dbErr) {
         // Non-fatal: log but don't block the response
         logger.error({ err: dbErr }, '[validateFormM] Failed to persist to form_m_documents:');

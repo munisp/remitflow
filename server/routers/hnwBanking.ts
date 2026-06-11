@@ -89,7 +89,7 @@ export const hnwBankingRouter = router({
         status: "active",
         expiresAt: new Date(Date.now() + input.durationMinutes * 60_000),
         createdAt: new Date(),
-      });
+      }).returning();
 
       return result;
     }),
@@ -190,7 +190,7 @@ export const hnwBankingRouter = router({
         topic: input.topic,
         status: "pending",
         createdAt: new Date(),
-      });
+      }).returning();
 
       await notifyOwner({
         title: `HNW RM Contact Request — User ${ctx.user.id}`,

@@ -153,7 +153,7 @@ export const corridorPricingRouter = router({
           changedBy: ctx.user.id,
           changedByName: ctx.user.name ?? ctx.user.email ?? "Admin",
           reason: input.reason ?? "Admin update",
-        });
+        }).returning();
       } catch (dbErr) {
         logger.error({ err: dbErr }, '[corridorMarginHistory] DB insert failed:');
       }
@@ -199,7 +199,7 @@ export const corridorPricingRouter = router({
           changedBy: ctx.user.id,
           changedByName: ctx.user.name ?? ctx.user.email ?? "Admin",
           reason: input.reason ?? "SLA update",
-        });
+        }).returning();
       } catch (dbErr) {
         logger.error({ err: dbErr }, '[corridorMarginHistory] DB insert failed:');
       }
@@ -244,7 +244,7 @@ export const corridorPricingRouter = router({
           changedBy: ctx.user.id,
           changedByName: ctx.user.name ?? ctx.user.email ?? "Admin",
           reason: input.reason ?? (input.enabled ? "Corridor enabled" : "Corridor disabled"),
-        });
+        }).returning();
       } catch (dbErr) {
         logger.error({ err: dbErr }, '[corridorMarginHistory] DB insert failed:');
       }

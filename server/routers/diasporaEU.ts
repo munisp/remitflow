@@ -201,7 +201,7 @@ export const diasporaEURouter = router({
         diasporaRegion: "eu",
         status: "active",
         claimedAt: new Date(),
-      });
+      }).returning();
 
       return { success: true, verified: true, offerType: input.offerType };
     }),

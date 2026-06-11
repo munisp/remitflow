@@ -66,7 +66,7 @@ export const partnerOnboardingRouter = router({
         data: { inviteCode: input.code, plan: invite.plan },
         status: "in_progress",
         expiresAt,
-      });
+      }).returning();
 
       return {
         valid: true,
@@ -273,7 +273,7 @@ export const partnerOnboardingRouter = router({
         tenantId: newTenant.id,
         userId: ctx.user.id,
         role: "admin",
-      });
+      }).returning();
 
       // Create white-label config
       await db.insert(whiteLabelConfigs).values({

@@ -35,7 +35,7 @@ export const apiChangelogRouter = router({
       // Seed if empty
       const existing = await db.select({ id: apiChangelogs.id }).from(apiChangelogs).limit(1);
       if (existing.length === 0) {
-        await db.insert(apiChangelogs).values(DEFAULT_CHANGELOGS).onConflictDoNothing();
+        await db.insert(apiChangelogs).values(DEFAULT_CHANGELOGS).onConflictDoNothing().returning();
       }
       
       const conditions = [];

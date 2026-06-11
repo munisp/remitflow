@@ -449,7 +449,7 @@ export const notifPrefsRouter = router({
       if (existing) {
         [_row] = await db.update(userNotifPrefs).set(updateData).where(eq(userNotifPrefs.userId, ctx.user.id)).returning();
       } else {
-        await db.insert(userNotifPrefs).values({ userId: ctx.user.id, ...updateData });
+        await db.insert(userNotifPrefs).values({ userId: ctx.user.id, ...updateData }).returning();
       }
       // DB operation verified above
       return { success: true, id: "verified", updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };

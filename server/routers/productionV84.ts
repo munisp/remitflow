@@ -148,7 +148,7 @@ export const apiUsageRouter = router({
         latencyMs: input.latencyMs,
         ipAddress: input.ipAddress,
         createdAt: new Date(),
-      });
+      }).returning();
       return { recorded: true };
     }),
 });

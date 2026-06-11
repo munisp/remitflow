@@ -139,7 +139,7 @@ export const v98Router = router({
           status: input.status,
           errorMessage: input.errorMessage,
           lastConsumedAt: new Date(),
-        });
+        }).returning();
         return { recorded: true, lag };
       }),
 
@@ -354,7 +354,7 @@ export const v98Router = router({
           isSuspicious,
           suspiciousReason,
           deviceFingerprint: input.deviceFingerprint,
-        });
+        }).returning();
 
         if (isSuspicious) {
           // Notify user via SSE
@@ -475,7 +475,7 @@ export const v98Router = router({
           authorizedBy: ctx.user.id,
           reason: input.reason,
           status: "completed",
-        });
+        }).returning();
 
         await createAuditLog({
           userId: ctx.user.id,
@@ -536,7 +536,7 @@ export const v98Router = router({
           authorizedBy: ctx.user.id,
           reason: input.reason,
           status: "completed",
-        });
+        }).returning();
 
         await createAuditLog({
           userId: ctx.user.id,
@@ -886,7 +886,7 @@ export const v98Router = router({
           affectedCount: input.userIds.length,
           status: "completed",
           notes: input.reason,
-        });
+        }).returning();
 
         await createAuditLog({
           userId: ctx.user.id,
@@ -916,7 +916,7 @@ export const v98Router = router({
           targetUserIds: input.userIds as any,
           affectedCount: input.userIds.length,
           status: "completed",
-        });
+        }).returning();
 
         return { affected: input.userIds.length };
       }),
@@ -972,7 +972,7 @@ export const v98Router = router({
           targetUserIds: rows.map((r: any) => r.id) as any,
           affectedCount: rows.length,
           status: "completed",
-        });
+        }).returning();
 
         return { csv, count: rows.length, exportedAt: new Date().toISOString() };
       }),

@@ -130,7 +130,7 @@ export const abTestingRouter = router({
         variantId: input.variantId,
         eventType: input.eventType as any,
         metadata: input.metadata ?? {},
-      });
+      }).returning();
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -424,7 +424,7 @@ export const documentVaultRouter = router({
           notifyEmail: input.notifyEmail ?? true,
           notifyInApp: input.notifyInApp ?? true,
           notifyPush: input.notifyPush ?? false,
-        });
+        }).returning();
       }
       // DB operation verified above
       return { success: true, id: "verified", updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };

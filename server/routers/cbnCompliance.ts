@@ -1075,7 +1075,7 @@ export const cbnComplianceRouter = router({
         { corridor: "USD/GHS", papssEnabled: true, exchangeRate: "15.80", transferFeePercent: "0.5", settlementTimeHours: 1, minAmountUsd: 1, maxAmountUsd: 50000 },
         { corridor: "USD/KES", papssEnabled: true, exchangeRate: "130.00", transferFeePercent: "0.5", settlementTimeHours: 1, minAmountUsd: 1, maxAmountUsd: 50000 },
       ];
-      await db.insert(cbnCorridors).values(defaults).onConflictDoNothing();
+      await db.insert(cbnCorridors).values(defaults).onConflictDoNothing().returning();
       return db.select().from(cbnCorridors).where(eq(cbnCorridors.isActive, true)).orderBy(cbnCorridors.corridor);
     }
     return rows;

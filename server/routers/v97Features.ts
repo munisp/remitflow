@@ -138,7 +138,7 @@ export const velocityCheckAdminRouter = router({
       const { id, maxAmount, ...rest } = input;
       const updates: Record<string, unknown> = { ...rest, updatedAt: new Date() };
       if (maxAmount !== undefined) updates.maxAmount = String(maxAmount);
-      const [updated] = await db.update(velocityRules).set(updates).where(eq(velocityRules.id, id)).returning();
+      const [updated] = await db.update(velocityRules).set(updates).where(eq(velocityRules.id, id));
       if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
@@ -201,7 +201,7 @@ export const velocityCheckAdminRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const _deleted = await db.delete(velocityOverrides).where(eq(velocityOverrides.id, input.id)).returning();
+      const _deleted = await db.delete(velocityOverrides).where(eq(velocityOverrides.id, input.id));
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
@@ -245,7 +245,7 @@ export const velocityCheckAdminRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const _deleted = await db.delete(velocityWhitelist).where(eq(velocityWhitelist.id, input.id)).returning();
+      const _deleted = await db.delete(velocityWhitelist).where(eq(velocityWhitelist.id, input.id));
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
@@ -310,7 +310,7 @@ export const kycLifecycleRouter = router({
         lifecycleId: lifecycle.id, userId: ctx.user.id,
         fromStage: fromStage as any, toStage: "documents_submitted", changedBy: ctx.user.id,
         reason: "User submitted documents",
-      });
+      }).returning();
       // Fire compliance check via Python sidecar
       await runComplianceCheck({ transferId: `kyc-${ctx.user.id}-${Date.now()}`, userId: ctx.user.id, amount: 0, fromCurrency: "USD", toCurrency: "USD", fromCountry: "US", toCountry: "US" });
       await sendAuditLog({ userId: ctx.user.id, action: "kyc_lifecycle.submit", resource: "kyc_lifecycle", resourceId: String(lifecycle.id), severity: "info", details: { tier: input.tier } });
@@ -330,12 +330,12 @@ export const kycLifecycleRouter = router({
       }
       const [updated] = await db.update(kycLifecycle)
         .set({ stage: "under_review", reviewStartedAt: new Date(), reviewedBy: ctx.user.id, notes: input.notes ?? null, updatedAt: new Date() })
-        .where(eq(kycLifecycle.id, existing.id)).returning();
+        .where(eq(kycLifecycle.id, existing.id));
       await db.insert(kycLifecycleHistory).values({
         lifecycleId: existing.id, userId: input.userId,
         fromStage: "documents_submitted", toStage: "under_review", changedBy: ctx.user.id,
         reason: input.notes ?? "Review started",
-      });
+      }).returning();
       return updated;
     }),
 
@@ -364,7 +364,7 @@ export const kycLifecycleRouter = router({
         lifecycleId: existing.id, userId: input.userId,
         fromStage: "under_review", toStage: "approved", changedBy: ctx.user.id,
         reason: input.notes ?? "KYC approved",
-      });
+      }).returning();
       // Update user KYC tier
       const tierMap: Record<number, string> = { 1: "tier1", 2: "tier2", 3: "tier3", 4: "tier3" };
       const [_row] = await db.update(users).set({ kycTier: tierMap[input.tier ?? existing.tier] as any }).where(eq(users.id, input.userId)).returning();
@@ -390,12 +390,12 @@ export const kycLifecycleRouter = router({
       const [updated] = await db.update(kycLifecycle)
         .set({ stage: "rejected", rejectedAt: new Date(), reviewedAt: new Date(), reviewedBy: ctx.user.id,
           rejectionReason: input.rejectionReason, updatedAt: new Date() })
-        .where(eq(kycLifecycle.id, existing.id)).returning();
+        .where(eq(kycLifecycle.id, existing.id));
       await db.insert(kycLifecycleHistory).values({
         lifecycleId: existing.id, userId: input.userId,
         fromStage: "under_review", toStage: "rejected", changedBy: ctx.user.id,
         reason: input.rejectionReason,
-      });
+      }).returning();
       await sendAuditLog({ userId: ctx.user.id, action: "kyc_lifecycle.reject", resource: "kyc_lifecycle", resourceId: String(existing.id), severity: "warning", details: { targetUserId: input.userId, reason: input.rejectionReason } });
       return updated;
     }),
@@ -419,7 +419,7 @@ export const kycLifecycleRouter = router({
         lifecycleId: existing.id, userId: input.userId,
         fromStage: existing.stage, toStage: "additional_info_required", changedBy: ctx.user.id,
         reason: input.additionalInfoRequired,
-      });
+      }).returning();
       return updated;
     }),
 
@@ -438,7 +438,7 @@ export const kycLifecycleRouter = router({
       await db.insert(kycLifecycleHistory).values({
         lifecycleId: existing.id, userId: input.userId,
         fromStage: existing.stage, toStage: "suspended", changedBy: ctx.user.id, reason: input.reason,
-      });
+      }).returning();
       await sendAuditLog({ userId: ctx.user.id, action: "kyc_lifecycle.suspend", resource: "kyc_lifecycle", resourceId: String(existing.id), severity: "critical", details: { targetUserId: input.userId } });
       return updated;
     }),
@@ -538,7 +538,7 @@ export const documentVaultRenewalRouter = router({
       // Archive old document
       await db.update(documentVaultTable)
         .set({ status: "archived", updatedAt: new Date() })
-        .where(eq(documentVaultTable.id, renewal.originalDocId)).returning();
+        .where(eq(documentVaultTable.id, renewal.originalDocId));
       // Close all pending reminder logs for old document
       await db.update(docReminderLog)
         .set({ status: "dismissed" })
@@ -693,7 +693,7 @@ export const systemConfigHotReloadRouter = router({
         changedBy: ctx.user.id,
         changeReason: input.changeReason,
         reloadTriggered: true,
-      });
+      }).returning();
       // Invalidate cache
       invalidateConfigCache(input.key);
       await sendAuditLog({ userId: ctx.user.id, action: "system_config.set", resource: "system_config", resourceId: input.key, severity: "warning", details: { key: input.key, reason: input.changeReason } });
@@ -747,7 +747,7 @@ export const webhookRetryRouter = router({
         payload: input.payload,
         maxAttempts: input.maxAttempts,
         nextAttemptAt,
-      }).returning();
+      });
       return entry;
     }),
 
@@ -914,7 +914,7 @@ export const apiKeyRotationRouter = router({
         newKeyId: newKey.id,
         userId: ctx.user.id,
         reason: input.reason,
-      });
+      }).returning();
 
       await sendAuditLog({ userId: ctx.user.id, action: "api_key.rotate", resource: "api_key", resourceId: String(input.keyId), severity: "warning", details: { newKeyId: newKey.id, reason: input.reason } });
 
@@ -1034,7 +1034,7 @@ export const batchPaymentV97Router = router({
       if (batch.status !== "draft") throw new TRPCError({ code: "BAD_REQUEST", message: "Batch already processed" });
 
       // Mark as processing
-      await db.update(batchPayments).set({ status: "processing", updatedAt: new Date() }).where(eq(batchPayments.id, input.batchId)).returning();
+      await db.update(batchPayments).set({ status: "processing", updatedAt: new Date() }).where(eq(batchPayments.id, input.batchId));
 
       const items = await db.select().from(batchPaymentItems).where(eq(batchPaymentItems.batchId, input.batchId));
       let successCount = 0;
@@ -1119,7 +1119,7 @@ export const batchPaymentV97Router = router({
       // Reset failed items to pending
       await db.update(batchPaymentItems)
         .set({ status: "pending", errorMessage: null, processedAt: null })
-        .where(and(eq(batchPaymentItems.batchId, input.batchId), eq(batchPaymentItems.status, "failed"))).returning();
+        .where(and(eq(batchPaymentItems.batchId, input.batchId), eq(batchPaymentItems.status, "failed")));
       await db.update(batchPayments)
         .set({ status: "draft", updatedAt: new Date() })
         .where(eq(batchPayments.id, input.batchId)).returning();
@@ -1171,7 +1171,7 @@ export const adminComplianceTriggerRouter = router({
                 reminderType: `${daysAhead}d`,
                 channel: "admin_trigger",
                 status: "sent",
-              });
+              }).returning();
               remindersQueued++;
             }
           }

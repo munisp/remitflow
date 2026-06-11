@@ -90,7 +90,7 @@ export const agentOnboardingRouter = router({
         country: input.country,
         phone: input.phone,
         metadata: kybMeta,
-      } as any).catch(() => {
+      } as any).returning().catch(() => {
         // Fallback: insert with minimal fields if extended columns not yet migrated
         return db.insert(agentAccounts).values({
           userId: ctx.user.id,
@@ -101,7 +101,7 @@ export const agentOnboardingRouter = router({
           dailyLimit: TIER_LIMITS[input.tier].toString(),
           totalVolume: "0",
           totalCommission: "0",
-        } as any);
+        } as any).returning();
       });
 
       // Notify owner for KYB review

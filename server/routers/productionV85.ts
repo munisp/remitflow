@@ -233,7 +233,7 @@ export const complianceAlertsRouter = router({
       const [alert] = await db.update(complianceAlerts)
         .set({ status: "acknowledged", acknowledgedBy: ctx.user.id, acknowledgedAt: new Date() })
         .where(eq(complianceAlerts.id, input.id))
-        .returning();
+        ;
       broadcastAdminEvent({ type: "case_updated", payload: { id: input.id, action: "acknowledged", acknowledgedBy: ctx.user.id } });
       return alert;
     }),
@@ -272,7 +272,7 @@ export const complianceAlertsRouter = router({
         authorId: ctx.user.id,
         content: `Escalated to MLRO. Reason: ${input.reason}`,
         isInternal: true,
-      });
+      }).returning();
       // Notify owner
       await notifyOwner({
         title: `⚠️ Alert #${input.id} Escalated to MLRO`,
@@ -295,7 +295,7 @@ export const complianceAlertsRouter = router({
       if (input.action === "acknowledge") { updates.status = "acknowledged"; updates.acknowledgedBy = ctx.user.id; updates.acknowledgedAt = new Date(); }
       else if (input.action === "resolve") { updates.status = "resolved"; updates.resolvedAt = new Date(); }
       else if (input.action === "dismiss") { updates.status = "dismissed"; }
-      await db.update(complianceAlerts).set(updates as any).where(inArray(complianceAlerts.id, input.ids)).returning();
+      await db.update(complianceAlerts).set(updates as any).where(inArray(complianceAlerts.id, input.ids));
       broadcastAdminEvent({ type: "bulk_action", payload: { ids: input.ids, action: input.action, by: ctx.user.id } });
       return { updated: input.ids.length, action: input.action };
     }),
@@ -386,7 +386,7 @@ export const complianceAlertsRouter = router({
           content: `Alert assigned to ${assignee?.name ?? `Officer #${input.assignedTo}`} by ${ctx.user.name ?? `User #${ctx.user.id}`}`,
           isInternal: true,
           createdAt: now,
-        });
+        }).returning();
       } else {
         await db.insert(complianceAlertNotes).values({
           alertId: input.alertId,
@@ -394,7 +394,7 @@ export const complianceAlertsRouter = router({
           content: `Alert unassigned by ${ctx.user.name ?? `User #${ctx.user.id}`}`,
           isInternal: true,
           createdAt: now,
-        });
+        }).returning();
       }
       return updated;
     }),
@@ -432,7 +432,7 @@ export const complianceAlertsRouter = router({
         content: `SAR submitted by ${ctx.user.name ?? `MLRO #${ctx.user.id}`}. Reference: ${input.fiuReference ?? sarRef}. Activity type: ${input.suspiciousActivityType}. Amount: ${input.amountInvolved ? `${input.amountInvolved} ${input.currency ?? 'USD'}` : 'Not specified'}.`,
         isInternal: true,
         createdAt: now,
-      });
+      }).returning();
       // Notify owner
       await notifyOwner({
         title: `SAR Submitted — ${sarRef}`,
@@ -586,7 +586,7 @@ export const complianceAlertsRouter = router({
             content: `Bulk SAR submitted by ${ctx.user.name ?? `User #${ctx.user.id}`}. Reference: ${sarRef}. Activity: ${input.suspiciousActivityType}${input.fiuReference ? `. FIU Ref: ${input.fiuReference}` : ''}`,
             isInternal: true,
             createdAt: now,
-          });
+          }).returning();
           results.push({ id: alertId, sarReference: sarRef });
         }
       }
@@ -640,7 +640,7 @@ export const complianceAlertsRouter = router({
         authorId: ctx.user.id,
         content: `Alert snoozed for ${input.hours}h until ${snoozeUntil.toISOString()} by ${ctx.user.name ?? ctx.user.email}`,
         isInternal: true,
-      });
+      }).returning();
       return { success: true, verified: true, snoozeUntil };
     }),
 
@@ -658,7 +658,7 @@ export const complianceAlertsRouter = router({
         authorId: ctx.user.id,
         content: `Alert unsnoozed and re-opened by ${ctx.user.name ?? ctx.user.email}`,
         isInternal: true,
-      });
+      }).returning();
       return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -732,7 +732,7 @@ export const securityEventsRouter = router({
         eventType: input.eventType,
         severity: input.severity,
         details: input.details ? JSON.stringify(input.details) : null,
-      });
+      }).returning();
       if (input.severity === "critical") {
         broadcastAdminEvent({ type: "fraud_alert", payload: { userId: ctx.user.id, eventType: input.eventType } });
       }
@@ -788,7 +788,7 @@ export const mfaRouter = router({
     }).onConflictDoUpdate({
       target: mfaSettings.userId,
       set: { totpSecret: secret, totpEnabled: false },
-    });
+    }).returning();
     return { secret, otpAuthUrl, qrCodeUrl: `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(otpAuthUrl)}` };
   }),
 
@@ -817,7 +817,7 @@ export const mfaRouter = router({
         eventType: "mfa_enabled",
         severity: "info",
         details: JSON.stringify({ method: "totp" }),
-      });
+      }).returning();
       return { success: true, verified: true, message: "MFA enabled successfully" };
     }),
 
@@ -832,7 +832,7 @@ export const mfaRouter = router({
         eventType: "mfa_disabled",
         severity: "warning",
         details: JSON.stringify({ method: "totp" }),
-      });
+      }).returning();
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
       return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
@@ -1113,7 +1113,7 @@ export const adminBulkRouter = router({
           eventType: "account_suspended",
           severity: "warning",
           details: JSON.stringify({ suspendedBy: ctx.user.id }),
-        });
+        }).returning();
       }
       return { success: true, verified: true, affected: input.userIds.length };
     }),

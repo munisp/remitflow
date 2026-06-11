@@ -51,7 +51,7 @@ export const splitBillRouter = router({
         note: input.note ?? null,
         status: "active",
         expiresAt,
-      } as any);
+      } as any).returning();
 
       // Create one participant record per person
       const created: { id: number; token: string; name: string; email?: string; amount: number }[] = [];
@@ -68,7 +68,7 @@ export const splitBillRouter = router({
             token,
             status: "pending",
           } as any)
-          .returning({ id: splitBillParticipants.id });
+          .returning({ id: splitBillParticipants.id }).returning();
 
         created.push({ id: row.id, token, name: p.name, email: p.email, amount: p.shareAmount });
       }

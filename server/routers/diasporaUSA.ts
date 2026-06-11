@@ -158,7 +158,7 @@ export const diasporaUSARouter = router({
         diasporaRegion: "usa",
         status: "active",
         claimedAt: new Date(),
-      });
+      }).returning();
 
       return { success: true, verified: true, offerType: input.offerType };
     }),

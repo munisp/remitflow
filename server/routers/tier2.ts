@@ -664,7 +664,7 @@ export const businessSavingsRouter = router({
         amountUsd:   input.principalUsd.toFixed(2),
         description: "Initial deposit",
         balanceAfter: input.principalUsd.toFixed(2),
-      });
+      }).returning();
 
       return { account, product };
     }),
@@ -764,7 +764,7 @@ export const businessSavingsRouter = router({
         amountUsd:    input.amountUsd.toFixed(2),
         description:  penalty > 0 ? `Withdrawal (early penalty: $${penalty.toFixed(2)})` : "Withdrawal",
         balanceAfter: newBalance.toFixed(2),
-      });
+      }).returning();
 
       return { netWithdrawal, penalty, newBalance };
     }),

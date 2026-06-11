@@ -713,7 +713,7 @@ export const tenantConfigsRouter = router({
       if (existing) {
         [_row] = await db.update(tenantConfigs).set(updates).where(eq(tenantConfigs.tenantId, tenantId)).returning();
       } else {
-        await db.insert(tenantConfigs).values({ tenantId, tenantName: tenantName ?? tenantId, ...updates });
+        await db.insert(tenantConfigs).values({ tenantId, tenantName: tenantName ?? tenantId, ...updates }).returning();
       }
       // DB operation verified above
       return { success: true, id: "verified", updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
@@ -969,7 +969,7 @@ export const onboardingProgressRouter = router({
       if (existing) {
         [_row] = await db.update(userOnboardingProgress).set(updates).where(eq(userOnboardingProgress.userId, ctx.user.id)).returning();
       } else {
-        await db.insert(userOnboardingProgress).values({ userId: ctx.user.id, status: "in_progress", ...updates }).onConflictDoUpdate({ target: userOnboardingProgress.userId, set: updates });
+        await db.insert(userOnboardingProgress).values({ userId: ctx.user.id, status: "in_progress", ...updates }).onConflictDoUpdate({ target: userOnboardingProgress.userId, set: updates }).returning();
       }
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
       return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
@@ -1157,7 +1157,7 @@ export const securityIncidentsRouter = router({
         blocked: input.blocked,
         responseCode: input.responseCode,
         details: input.details,
-      });
+      }).returning();
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });

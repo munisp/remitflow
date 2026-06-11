@@ -52,7 +52,7 @@ export const vapidPushRouter = router({
     if (db) await db.insert(notifications).values({
       userId: ctx.user.id, type: "system", title: input.title,
       message: input.body, isRead: false, createdAt: new Date(),
-    });
+    }).returning();
     return { sent: true };
   }),
 });
@@ -132,7 +132,7 @@ export const treasuryRouter = router({
       provider: "RemitFlow Treasury",
       accountRef: `TREAS-${ccy}-001`,
     }));
-    await db.insert(treasuryPositions).values(defaults).onConflictDoNothing();
+    await db.insert(treasuryPositions).values(defaults).onConflictDoNothing().returning();
     return defaults.map(d => ({
       currency: d.currency,
       nostroBalance: d.balance,
@@ -293,7 +293,7 @@ export const developerSandboxRouter = router({
       title: `[SANDBOX] ${input.eventType}`,
       message: `Simulated: ${input.eventType}. Payload: ${JSON.stringify(input.payload ?? {})}`,
       isRead: false, createdAt: new Date(),
-    });
+    }).returning();
     return { eventId: genId("evt_test"), eventType: input.eventType, simulated: true, timestamp: new Date().toISOString() };
   }),
   resetTestData: auditedProcedure.mutation(async () => ({

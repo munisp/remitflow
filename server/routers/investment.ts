@@ -406,7 +406,7 @@ export const realEstateRouter = router({
         description: `Real estate investment: ${listing.title} (${input.sharesCount} shares)`,
         reference: generateTxRef("RE"),
         channel: "real_estate",
-      });
+      }).returning();
 
       return investment;
     }),
@@ -588,7 +588,7 @@ export const startupRouter = router({
           description: `Startup investment: ${deal.companyName} (${deal.instrumentType})`,
           reference: generateTxRef("SI"),
           channel: "startup_invest",
-        });
+        }).returning();
       }
 
       return investment;
@@ -777,7 +777,7 @@ export const paypalTopupRouter = router({
         paypalOrderId: orderData.id,
         amountUsd: input.amountUsd.toFixed(2),
         status: "created",
-      });
+      }).returning();
 
       return { orderId: orderData.id, approvalUrl: approvalLink };
     }),
@@ -917,7 +917,7 @@ export const flutterwaveTopupRouter = router({
         amountUsd: input.amountUsd.toFixed(2),
         paymentLink,
         status: "pending",
-      });
+      }).returning();
 
       return { paymentLink, txRef, flwRef };
     }),

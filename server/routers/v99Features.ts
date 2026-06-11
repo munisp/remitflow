@@ -288,7 +288,7 @@ export const transferLimitsV2Router = router({
         }),
         ipAddress: null,
         userAgent: null,
-      });
+      }).returning();
       return {
         success: true,
         verified: true,

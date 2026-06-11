@@ -60,7 +60,7 @@ export const immigrantWorkerRouter = router({
           verificationProvider: result.provider ?? "internal",
           verifiedAt: result.verified ? new Date() : null,
           createdAt: new Date(),
-        });
+        }).returning();
       }
 
       return result;

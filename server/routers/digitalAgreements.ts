@@ -496,7 +496,7 @@ export const digitalAgreementsRouter = router({
         signedAt: now,
         isValid: true,
         verificationHash,
-      });
+      }).returning();
 
       const auditTrail = [...(doc.auditTrail || []), {
         event: "platform_countersigned",

@@ -243,7 +243,7 @@ export const featureFlagsRouter = router({
         if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         return { id: input.id };
       } else {
-        const [row] = await db.insert(featureFlags).values({ ...input }).returning({ id: featureFlags.id });
+        const [row] = await db.insert(featureFlags).values({ ...input }).returning({ id: featureFlags.id }).returning();
         return { id: row.id };
       }
     }),
@@ -560,7 +560,7 @@ export const tenantsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const [row] = await db.insert(tenants).values({ ...input, status: "trial" }).returning({ id: tenants.id });
+      const [row] = await db.insert(tenants).values({ ...input, status: "trial" }).returning({ id: tenants.id }).returning();
       return { id: row.id };
     }),
 
@@ -634,7 +634,7 @@ export const tenantsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.insert(tenantUsers).values(input).onConflictDoNothing();
+      await db.insert(tenantUsers).values(input).onConflictDoNothing().returning();
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
@@ -724,7 +724,7 @@ export const whiteLabelRouter = router({
       if (existing) {
         [_row] = await db.update(whiteLabelConfigs).set({ ...configData, updatedAt: new Date() }).where(eq(whiteLabelConfigs.id, existing.id)).returning();
       } else {
-        await db.insert(whiteLabelConfigs).values({ tenantId, ...configData });
+        await db.insert(whiteLabelConfigs).values({ tenantId, ...configData }).returning();
       }
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
       return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
@@ -770,7 +770,7 @@ async function seedPlatformFlags(db: Awaited<ReturnType<typeof getDb>>) {
       await db.insert(featureFlags).values({
         key: f.key, name: f.name, description: f.description,
         scope: "global", defaultEnabled: true, rolloutPct: 100, category: f.category,
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
     } catch { /* already exists */ }
   }
 }

@@ -1290,7 +1290,7 @@ export const p2pInstantRouter = router({
       if (existing) return { walletId: existing.id, currency: input.currency, created: false };
       const [newWallet] = await db.insert(wallets).values({
         userId: ctx.user.id, currency: input.currency, balance: "0.00", status: "active",
-      }).returning({ id: wallets.id });
+      }).returning({ id: wallets.id }).returning();
       logger.info({ userId: ctx.user.id, currency: input.currency }, "[P2P] Auto-created wallet for cross-border receive");
       return { walletId: newWallet.id, currency: input.currency, created: true };
     }),
