@@ -5327,8 +5327,8 @@ export type EscrowPaymentScheduleEntry = typeof escrowPaymentSchedule.$inferSele
 export const p2pAliasTypeEnum = pgEnum("p2p_alias_type", ["phone", "email"]);
 export const p2pAliasStatusEnum = pgEnum("p2p_alias_status", ["active", "pending_verification", "suspended", "deactivated"]);
 export const p2pRequestStatusEnum = pgEnum("p2p_request_status", ["pending", "approved", "declined", "expired", "cancelled"]);
-export const p2pTransferStatusEnum = pgEnum("p2p_transfer_status", ["initiated", "alias_resolved", "quoted", "compliance_cleared", "debited", "fx_converted", "settling", "completed", "failed", "compensated"]);
-export const p2pTransferRailEnum = pgEnum("p2p_transfer_rail", ["internal", "mojaloop", "papss", "mpesa", "upi", "pix", "sepa", "fednow", "swift"]);
+export const p2pTransferStatusEnum = pgEnum("p2p_transfer_status", ["initiated", "alias_resolved", "quoted", "compliance_cleared", "debited", "fx_converted", "settling", "completed", "failed", "compensated", "disputed", "escrowed", "streaming", "scheduled", "pending", "cancelled", "favorite"]);
+export const p2pTransferRailEnum = pgEnum("p2p_transfer_rail", ["internal", "mojaloop", "papss", "mpesa", "upi", "pix", "sepa", "fednow", "swift", "batch", "ilp_stream", "escrow", "favorite", "scheduled"]);
 
 export const paymentAliases = pgTable("payment_aliases", {
   id: serial("id").primaryKey(),
