@@ -1366,7 +1366,7 @@ export const p2pInstantRouter = router({
           transfer_id: tx.id,
           sender_display_name: tx.senderId === ctx.user.id ? "You" : "Someone",
           receiver_display_name: tx.receiverId === ctx.user.id ? "You" : "Someone",
-          amount: parseFloat(tx.amount),
+          amount: parseFloat(tx.sendAmount),
           currency: tx.sendCurrency,
           note: tx.note,
           social_opt_in: true,

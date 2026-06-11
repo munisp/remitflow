@@ -149,7 +149,7 @@ export const treasuryRouter = router({
     { poolId: "pool_eur_kes", corridor: "EUR→KES", totalLiquidity: "1,800,000", utilizationPct: 45.6, providers: 2, apy: 5.1, status: "healthy" },
     { poolId: "pool_usd_ghs", corridor: "USD→GHS", totalLiquidity: "950,000", utilizationPct: 91.2, providers: 2, apy: 6.3, status: "critical" },
   ])),
-  rebalance: adminProcedure.input(z.object({ poolId: z.string(), targetAmount: z.number(), currency: z.string() })).mutation(async ({ input }) => ({
+  rebalance: adminProcedure.input(z.object({ poolId: z.string(), targetAmount: z.number().positive(), currency: z.string() })).mutation(async ({ input }) => ({
     poolId: input.poolId, action: "rebalance_initiated", targetAmount: input.targetAmount,
     currency: input.currency, transactionRef: genId("rebal"),
     estimatedCompletion: new Date(Date.now() + 3600000).toISOString(),
