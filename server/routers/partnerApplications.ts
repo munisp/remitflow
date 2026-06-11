@@ -659,7 +659,7 @@ export const complianceEmailRouter = router({
     const rows = await db.execute(sql`SELECT * FROM compliance_email_config ORDER BY created_at DESC`);
     return (rows as any[]).map((r: any) => ({
       ...r,
-      report_types: typeof r.report_types === 'string' ? JSON.parse(r.report_types) : (r.report_types ?? []),
+      report_types: (() => { try { return typeof r.report_types === 'string' ? JSON.parse(r.report_types) : (r.report_types ?? []); } catch { return []; } })(),
     }));
   }),
 

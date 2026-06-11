@@ -119,7 +119,8 @@ const conversationalPaymentsRouter = router({
 
       const convState = await redis.hGetAll(`conv:${ctx.user.id}`);
       if (!convState.lastIntent) throw new TRPCError({ code: "BAD_REQUEST", message: "No pending intent found" });
-      const intent = JSON.parse(convState.lastIntent);
+      let intent: any;
+      try { intent = JSON.parse(convState.lastIntent); } catch { throw new TRPCError({ code: "BAD_REQUEST", message: "Corrupted intent data" }); }
       const amount = input.overrides?.amount ?? intent.amount;
       const currency = input.overrides?.currency ?? intent.currency ?? "NGN";
 
@@ -318,7 +319,8 @@ const fxForecastingRouter = router({
       // Time-series analysis: exponential moving average + linear regression
       // fxRateCache.rates is a JSON object keyed by currency code (e.g. {"NGN": 1371.48, "GBP": 0.79})
       const values = (rates as any[]).reverse().map((r: any) => {
-        const ratesObj = typeof r.rates === "string" ? JSON.parse(r.rates) : r.rates;
+        let ratesObj: any;
+        try { ratesObj = typeof r.rates === "string" ? JSON.parse(r.rates) : r.rates; } catch { ratesObj = {}; }
         return safeParseAmount(ratesObj?.[input.toCurrency] ?? "0");
       }).filter((v: number) => v > 0 && !isNaN(v));
       const ema5 = calcEMA(values, 5);
@@ -1577,8 +1579,10 @@ const securityFullRouter = router({
         let anomalyDetected = false;
 
         if (baseline) {
-          const baselineData = JSON.parse(baseline);
-          anomalyDetected = fingerprint.riskScore > baselineData.avgRiskScore * 1.5;
+          try {
+            const baselineData = JSON.parse(baseline);
+            anomalyDetected = fingerprint.riskScore > baselineData.avgRiskScore * 1.5;
+          } catch { /* corrupted baseline — skip anomaly detection */ }
         }
 
         // Update baseline
