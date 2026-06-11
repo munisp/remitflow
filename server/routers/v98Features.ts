@@ -665,7 +665,7 @@ export const v98Router = router({
     checkAndFlag: protectedProcedure
       .input(z.object({
         transactionId: z.number(),
-        amount: z.number(),
+        amount: z.number().positive(),
         currency: z.string(),
       }))
       .mutation(async ({ ctx, input }) => {

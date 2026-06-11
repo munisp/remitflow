@@ -303,7 +303,7 @@ export const tigerBeetleRouter = router({
       }
     }),
   createTransfer: protectedProcedure
-    .input(z.object({ debitAccountId: z.string(), creditAccountId: z.string(), amount: z.number(), ledger: z.number().default(1), code: z.number().default(1) }))
+    .input(z.object({ debitAccountId: z.string(), creditAccountId: z.string(), amount: z.number().positive(), ledger: z.number().default(1), code: z.number().default(1) }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.tigerBeetle}/transfers`, input);
@@ -385,7 +385,7 @@ export const amlEngineRouter = router({
 // ─── Fraud ML Router (Python) ─────────────────────────────────────────────────
 export const fraudMlRouter = router({
   scoreTransaction: protectedProcedure
-    .input(z.object({ userId: z.number(), amount: z.number(), destinationCountry: z.string(), deviceFingerprint: z.string().optional() }))
+    .input(z.object({ userId: z.number(), amount: z.number().positive(), destinationCountry: z.string(), deviceFingerprint: z.string().optional() }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.fraudMl}/score`, input);
@@ -407,7 +407,7 @@ export const fraudMlRouter = router({
 // ─── Transfer Engine Router (Go) ──────────────────────────────────────────────
 export const transferEngineRouter = router({
   processTransfer: protectedProcedure
-    .input(z.object({ transferId: z.string(), rail: z.string(), amount: z.number(), currency: z.string(), metadata: z.record(z.string(), z.unknown()).optional() }))
+    .input(z.object({ transferId: z.string(), rail: z.string(), amount: z.number().positive(), currency: z.string(), metadata: z.record(z.string(), z.unknown()).optional() }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.transferEngine}/process`, input);

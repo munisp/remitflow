@@ -149,7 +149,7 @@ export const bnplRouter = router({
 export const travelRuleRouter = router({
   /** Get travel rule requirements for a transfer */
   requirements: protectedProcedure
-    .input(z.object({ amount: z.number(), fromCurrency: z.string(), toCurrency: z.string(), toCountry: z.string() }))
+    .input(z.object({ amount: z.number().positive(), fromCurrency: z.string(), toCurrency: z.string(), toCountry: z.string() }))
     .query(async ({ input }) => {
       // FATF threshold: $1,000 USD equivalent triggers travel rule
       const threshold = 1000;
