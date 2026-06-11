@@ -685,7 +685,7 @@ export const appRouter = router({
       return txns.map(formatTxn);
     }),
     virtualAccount: protectedProcedure.query(async ({ ctx }) => getVirtualAccountsByUserId(ctx.user.id)),
-    topup: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive(), method: z.string().default("bank_transfer") })).mutation(async ({ ctx, input }) => {
+    topup: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000), method: z.string().default("bank_transfer") })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const walletRows = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!walletRows.length) throw new TRPCError({ code: "NOT_FOUND", message: "Wallet not found" });
@@ -708,7 +708,7 @@ export const appRouter = router({
       broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "Wallet Top-up Successful", message: `Your ${input.currency} wallet has been credited with ${Number(input.amount).toLocaleString()} ${input.currency}`, amount: input.amount, currency: input.currency, newBalance, method: input.method, reference: topupRef } });
       return { success: true, newBalance, currency: input.currency };
     }),
-    stripeTopup: protectedProcedure.input(z.object({ amount: z.number().positive().min(100), currency: z.string().default("usd"), walletCurrency: z.string().default("USD"), origin: z.string().optional() })).mutation(async ({ ctx, input }) => {
+    stripeTopup: protectedProcedure.input(z.object({ amount: z.number().positive().min(100).max(10_000_000), currency: z.string().default("usd"), walletCurrency: z.string().default("USD"), origin: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const { getStripe } = await import("./stripe");
       const stripe = getStripe();
       // Use origin from input (frontend passes window.location.origin) or fall back to request header
@@ -727,7 +727,7 @@ export const appRouter = router({
       return { success: true, checkoutUrl: session.url, sessionId: session.id };
     }),
     paypalTopup: protectedProcedure.input(z.object({
-      amount: z.number().positive().min(1),
+      amount: z.number().positive().min(1).max(10_000_000),
       currency: z.string().default("USD"),
       walletCurrency: z.string().default("USD"),
     })).mutation(async ({ ctx, input }) => {
@@ -765,7 +765,7 @@ export const appRouter = router({
     paypalCapture: protectedProcedure.input(z.object({
       orderId: z.string().regex(/^[A-Za-z0-9\-]+$/, "Invalid order ID format"),
       walletCurrency: z.string().default("USD"),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
     })).mutation(async ({ ctx, input }) => {
       const { ENV } = await import("./_core/env.js");
       // In sandbox mode, simulate capture (production: fail loudly)
@@ -822,7 +822,7 @@ export const appRouter = router({
       return { success: true, newBalance: Number(newBalance), sandboxMode: false };
     }),
     flutterwaveTopup: protectedProcedure.input(z.object({
-      amount: z.number().positive().min(100),
+      amount: z.number().positive().min(100).max(10_000_000),
       currency: z.string().default("NGN"),
       walletCurrency: z.string().default("NGN"),
       email: z.string().email().optional(),
@@ -863,7 +863,7 @@ export const appRouter = router({
     }),
     flutterwaveVerify: protectedProcedure.input(z.object({
       txRef: z.string().regex(/^[A-Za-z0-9_\-]+$/, "Invalid transaction reference format"),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       walletCurrency: z.string().default("NGN"),
     })).mutation(async ({ ctx, input }) => {
       const { ENV } = await import("./_core/env.js");
@@ -913,7 +913,7 @@ export const appRouter = router({
       broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "Flutterwave Top-up Successful", message: `Your ${input.walletCurrency} wallet has been credited via Flutterwave`, amount: ver.data.amount, currency: input.walletCurrency } });
       return { success: true, newBalance: Number(newBalance), sandboxMode: false };
     }),
-    withdraw: walletWithdrawProcedure.input(z.object({ currency: z.string(), amount: z.number().positive(), bankAccount: z.string().optional() })).mutation(async ({ ctx, input }) => {
+    withdraw: walletWithdrawProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000), bankAccount: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // ─── KYC Tier Withdrawal Limit Enforcement ──────────────────────────────
       const [dbUserW] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user!.id)).limit(1);
@@ -1388,7 +1388,7 @@ export const appRouter = router({
       }) }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       return { success: true, reference: ref, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, fxRate, orchestrated: false, mlRisk: anomalyResult ? { isAnomaly: anomalyResult.isAnomaly, confidence: anomalyResult.confidence, requiresReview: anomalyResult.isAnomaly && anomalyResult.confidence > 0.65 } : null };
     }),
-    quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() })).query(async ({ input }) => {
+    quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ input }) => {
       const rates = await getLiveRates("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const fxRate = toRate / fromRate;
       const feeBreakdown = calculateFee(input.amount / fromRate, { from: input.fromCurrency.slice(0, 2), to: input.toCurrency.slice(0, 2) });
       const fee = feeBreakdown.totalFee * fromRate;
@@ -1409,7 +1409,7 @@ export const appRouter = router({
         : rates;
       return { rates: filtered, base: input.base, source, timestamp: new Date().toISOString(), pairCount: Object.keys(filtered).length };
     }),
-    calculate: publicProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive() })).query(async ({ input }) => {
+    calculate: publicProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ input }) => {
       const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate;
       const feeBreakdown = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       const convertedAmount = input.amount * rate;
@@ -1708,7 +1708,7 @@ export const appRouter = router({
       const [created] = await db.insert(savingsGoals).values({ userId: ctx.user.id, ...input, targetAmount: input.targetAmount.toString(), currentAmount: "0.00", autoSaveAmount: input.autoSaveAmount?.toString(), targetDate: input.targetDate ? new Date(input.targetDate) : undefined, status: "active" }).returning();
       return { success: true, goalId: created.id, name: input.name, targetAmount: input.targetAmount };
     }),
-    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
+    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [goal] = await db.select().from(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).limit(1);
       if (!goal) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
@@ -1754,7 +1754,7 @@ export const appRouter = router({
       const [created2] = await db.insert(savingsGoals).values({ userId: ctx.user.id, ...input, targetAmount: input.targetAmount.toString(), currentAmount: "0.00", autoSaveAmount: input.autoSaveAmount?.toString(), targetDate: input.targetDate ? new Date(input.targetDate) : undefined, status: "active" }).returning();
       return { success: true, goalId: created2.id, name: input.name, targetAmount: input.targetAmount };
     }),
-    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
+    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [goal] = await db.select().from(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).limit(1);
       if (!goal) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
