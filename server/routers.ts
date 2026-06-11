@@ -301,6 +301,7 @@ import { propertyEscrowRouter } from "./routers/propertyEscrow";
 import { failureProtectionRouter } from "./routers/failureProtection";
 import { mlPipelineRouter } from "./routers/mlPipeline";
 import { transferCoreRouter } from "./routers/transferCore";
+import { p2pInstantRouter } from "./routers/p2pInstant";
 import { secretsRotationRouter } from "./secrets-rotation";
 import { soc2EvidenceRouter } from "./compliance/soc2-evidence";
 import { businessKpiRouter } from "./lib/business-kpi";
@@ -6934,5 +6935,7 @@ Case: #${input.caseId}`,
   supportTicketing: supportTicketingRouter,
   abTestingV2: abTestingV2Router,
   quickWins: quickWinsRouter,
+  // ── P2P Instant Payments (Zelle-style cross-border) ──
+  p2p: p2pInstantRouter,
 });
 export type AppRouter = typeof appRouter;

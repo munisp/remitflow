@@ -5319,3 +5319,94 @@ export const escrowPaymentSchedule = pgTable("escrow_payment_schedule", {
   index("idx_escrow_schedule_status").on(t.status),
 ]);
 export type EscrowPaymentScheduleEntry = typeof escrowPaymentSchedule.$inferSelect;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// P2P Instant Payments (Zelle-style) — Alias Directory + Payment Requests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const p2pAliasTypeEnum = pgEnum("p2p_alias_type", ["phone", "email"]);
+export const p2pAliasStatusEnum = pgEnum("p2p_alias_status", ["active", "pending_verification", "suspended", "deactivated"]);
+export const p2pRequestStatusEnum = pgEnum("p2p_request_status", ["pending", "approved", "declined", "expired", "cancelled"]);
+export const p2pTransferStatusEnum = pgEnum("p2p_transfer_status", ["initiated", "alias_resolved", "quoted", "compliance_cleared", "debited", "fx_converted", "settling", "completed", "failed", "compensated"]);
+export const p2pTransferRailEnum = pgEnum("p2p_transfer_rail", ["internal", "mojaloop", "papss", "mpesa", "upi", "pix", "sepa", "fednow", "swift"]);
+
+export const paymentAliases = pgTable("payment_aliases", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  aliasType: p2pAliasTypeEnum("alias_type").notNull(),
+  aliasValue: varchar("alias_value", { length: 320 }).notNull(),
+  normalizedValue: varchar("normalized_value", { length: 320 }).notNull(),
+  currency: varchar("currency", { length: 8 }).notNull(),
+  walletId: integer("wallet_id"),
+  country: varchar("country", { length: 3 }).notNull(),
+  fspId: varchar("fsp_id", { length: 64 }).default("remitflow-fsp"),
+  status: p2pAliasStatusEnum("status").default("active").notNull(),
+  isPrimary: boolean("is_primary").default(false),
+  verifiedAt: timestamp("verified_at"),
+  mojaloopRegistered: boolean("mojaloop_registered").default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => [
+  uniqueIndex("payment_aliases_normalized_unique").on(t.normalizedValue, t.aliasType),
+  index("payment_aliases_user_idx").on(t.userId),
+  index("payment_aliases_country_idx").on(t.country),
+]);
+export type PaymentAlias = typeof paymentAliases.$inferSelect;
+
+export const p2pPaymentRequests = pgTable("p2p_payment_requests", {
+  id: serial("id").primaryKey(),
+  requesterId: integer("requester_id").notNull(),
+  requesterAlias: varchar("requester_alias", { length: 320 }).notNull(),
+  payerAlias: varchar("payer_alias", { length: 320 }).notNull(),
+  payerId: integer("payer_id"),
+  amount: numeric("amount", { precision: 18, scale: 2 }).notNull(),
+  currency: varchar("currency", { length: 8 }).notNull(),
+  note: varchar("note", { length: 500 }),
+  status: p2pRequestStatusEnum("status").default("pending").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  respondedAt: timestamp("responded_at"),
+  transferId: integer("transfer_id"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => [
+  index("p2p_payment_requests_payer_idx").on(t.payerAlias),
+  index("p2p_payment_requests_requester_idx").on(t.requesterId),
+  index("p2p_payment_requests_status_idx").on(t.status),
+]);
+export type P2pPaymentRequest = typeof p2pPaymentRequests.$inferSelect;
+
+export const p2pTransfers = pgTable("p2p_transfers", {
+  id: serial("id").primaryKey(),
+  senderId: integer("sender_id").notNull(),
+  senderAlias: varchar("sender_alias", { length: 320 }),
+  receiverAlias: varchar("receiver_alias", { length: 320 }).notNull(),
+  receiverId: integer("receiver_id"),
+  receiverFspId: varchar("receiver_fsp_id", { length: 64 }),
+  sendAmount: numeric("send_amount", { precision: 18, scale: 2 }).notNull(),
+  sendCurrency: varchar("send_currency", { length: 8 }).notNull(),
+  receiveAmount: numeric("receive_amount", { precision: 18, scale: 2 }),
+  receiveCurrency: varchar("receive_currency", { length: 8 }),
+  fxRate: numeric("fx_rate", { precision: 18, scale: 8 }),
+  fee: numeric("fee", { precision: 18, scale: 2 }).default("0.00"),
+  rail: p2pTransferRailEnum("rail"),
+  corridorCode: varchar("corridor_code", { length: 10 }),
+  status: p2pTransferStatusEnum("status").default("initiated").notNull(),
+  mojaloopTransferId: varchar("mojaloop_transfer_id", { length: 64 }),
+  ilpCondition: varchar("ilp_condition", { length: 128 }),
+  ilpFulfillment: varchar("ilp_fulfillment", { length: 128 }),
+  amlCheckId: varchar("aml_check_id", { length: 64 }),
+  fraudScore: numeric("fraud_score", { precision: 5, scale: 4 }),
+  paymentRequestId: integer("payment_request_id"),
+  note: varchar("note", { length: 500 }),
+  idempotencyKey: varchar("idempotency_key", { length: 128 }).unique(),
+  completedAt: timestamp("completed_at"),
+  failedAt: timestamp("failed_at"),
+  failureReason: varchar("failure_reason", { length: 500 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => [
+  index("p2p_transfers_sender_idx").on(t.senderId),
+  index("p2p_transfers_receiver_idx").on(t.receiverId),
+  index("p2p_transfers_status_idx").on(t.status),
+  index("p2p_transfers_idempotency_idx").on(t.idempotencyKey),
+  index("p2p_transfers_corridor_idx").on(t.corridorCode),
+]);
