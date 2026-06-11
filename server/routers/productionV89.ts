@@ -179,7 +179,7 @@ export const tenantWhiteLabelRouter = router({
   update: adminProcedure
     .input(z.object({
       id: z.number(),
-      name: z.string().optional(),
+      name: z.string().max(2000).optional(),
       primaryColor: z.string().optional(),
       secondaryColor: z.string().optional(),
       logoUrl: z.string().url().optional(),
@@ -661,7 +661,7 @@ export const kycLifecycleRouter = router({
     }),
 
   approveDocument: adminProcedure
-    .input(z.object({ documentId: z.number(), notes: z.string().optional() }))
+    .input(z.object({ documentId: z.number(), notes: z.string().max(2000).optional() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });

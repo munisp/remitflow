@@ -140,9 +140,9 @@ export const contractorRouter = router({
       contractorId: z.number(),
       description:  z.string().min(5),
       lineItems:    z.array(z.object({
-        description: z.string(),
+        description: z.string().max(2000),
         quantity:    z.number().positive(),
-        unitPrice:   z.number().positive(),
+        unitPrice:   z.number().positive().max(10_000_000),
         total:       z.number().positive(),
       })),
       currency:     z.string().length(3).default("USD"),
@@ -313,7 +313,7 @@ export const expenseRouter = router({
     .input(z.object({
       companyId:   z.number(),
       title:       z.string().min(3),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       items:       z.array(z.object({
         category:       z.enum(["travel", "accommodation", "meals", "equipment", "software", "marketing", "training", "other"]),
         description:    z.string().min(3),
@@ -545,7 +545,7 @@ export const merchantKybRouter = router({
       decision:        z.enum(["approved", "rejected", "under_review"]),
       riskRating:      z.enum(["low", "medium", "high", "critical"]).optional(),
       rejectionReason: z.string().optional(),
-      notes:           z.string().optional(),
+      notes:           z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -589,7 +589,7 @@ export const bondSecondaryBuyerRouter = router({
   getPricing: protectedProcedure
     .input(z.object({
       bondId:         z.number(),
-      marketPriceUsd: z.number().positive(),
+      marketPriceUsd: z.number().positive().max(10_000_000),
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();

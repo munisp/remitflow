@@ -445,7 +445,7 @@ export const beneficiaryCrudRouter = router({
       bankName: z.string().optional(),
       accountNumber: z.string().optional(),
       isFavorite: z.boolean().optional(),
-      notes: z.string().optional(),
+      notes: z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -935,7 +935,7 @@ export const emailDeliveryRouter = router({
       amount: z.number().positive().max(10_000_000),
       fromCurrency: z.string(),
       toCurrency: z.string(),
-      toAmount: z.number().positive(),
+      toAmount: z.number().positive().max(10_000_000),
       transferId: z.string(),
       status: z.string(),
       estimatedArrival: z.string().optional(),

@@ -45,7 +45,7 @@ export const vapidPushRouter = router({
     return (rows as any).rows ?? [];
   }),
   sendTest: auditedProcedure.input(z.object({
-    title: z.string().default("Test Notification"),
+    title: z.string().max(2000).default("Test Notification"),
     body: z.string().default("This is a test push notification from RemitFlow"),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
@@ -604,7 +604,7 @@ export const transferGoalsRouter = router({
     currency: z.string().length(3), deadline: z.string().optional(),
     autoTransferEnabled: z.boolean().default(false),
     autoTransferDay: z.number().min(1).max(28).optional(),
-    autoTransferAmount: z.number().positive().optional(),
+    autoTransferAmount: z.number().positive().max(10_000_000).optional(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
     if (db) await db.execute(sql`INSERT INTO transfer_goals (user_id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status, created_at) VALUES (${ctx.user.id}, ${input.name}, ${input.targetAmount}, 0, ${input.currency}, ${input.deadline ?? null}, ${input.autoTransferEnabled}, 'active', NOW())`);

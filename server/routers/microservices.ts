@@ -108,8 +108,8 @@ export const corridorPricingRouter = router({
       z.object({
         source_currency: z.string().min(3).max(3),
         dest_currency: z.string().min(3).max(3),
-        amount_usd: z.number().positive().optional(),
-        amount_source: z.number().positive().optional(),
+        amount_usd: z.number().positive().max(10_000_000).optional(),
+        amount_source: z.number().positive().max(10_000_000).optional(),
       })
     )
     .mutation(async ({ input }) => {
@@ -332,7 +332,7 @@ export const fxEngineRouter = router({
     .input(
       z.object({
         pair: z.string().min(6).max(6),
-        amount_base: z.number().positive(),
+        amount_base: z.number().positive().max(10_000_000),
         fee_percent: z.number().min(0).max(5).optional(),
       })
     )
@@ -359,8 +359,8 @@ export const txProcessorRouter = router({
         idempotency_key: z.string().min(1).max(128),
         source_currency: z.string().min(3).max(3),
         dest_currency: z.string().min(3).max(3),
-        amount_source: z.number().positive(),
-        amount_dest: z.number().positive(),
+        amount_source: z.number().positive().max(10_000_000),
+        amount_dest: z.number().positive().max(10_000_000),
         fee_usd: z.number().min(0),
         exchange_rate: z.number().positive(),
         corridor_id: z.string(),
@@ -385,7 +385,7 @@ export const txProcessorRouter = router({
       z.object({
         tx_id: z.string(),
         target_state: z.string(),
-        reason: z.string().optional(),
+        reason: z.string().max(2000).optional(),
       })
     )
     .mutation(async ({ input }) => {
@@ -411,7 +411,7 @@ export const complianceEngineRouter = router({
         full_name: z.string().min(2).max(200),
         date_of_birth: z.string().optional(),
         country: z.string().optional(),
-        amount_usd: z.number().positive().optional(),
+        amount_usd: z.number().positive().max(10_000_000).optional(),
         source_of_funds: z.string().optional(),
       })
     )
@@ -425,7 +425,7 @@ export const complianceEngineRouter = router({
   velocityCheck: protectedProcedure
     .input(
       z.object({
-        amount_usd: z.number().positive(),
+        amount_usd: z.number().positive().max(10_000_000),
         currency: z.string(),
         transaction_type: z.string(),
       })
@@ -448,7 +448,7 @@ export const fraudDetectionRouter = router({
   scoreTransaction: protectedProcedure
     .input(
       z.object({
-        amount_usd: z.number().positive(),
+        amount_usd: z.number().positive().max(10_000_000),
         source_currency: z.string(),
         dest_currency: z.string(),
         source_country: z.string(),
@@ -493,7 +493,7 @@ export const amlComplianceRouter = router({
     .input(
       z.object({
         transaction_id: z.string(),
-        amount_usd: z.number().positive(),
+        amount_usd: z.number().positive().max(10_000_000),
         source_currency: z.string(),
         dest_currency: z.string(),
         source_country: z.string(),

@@ -192,7 +192,7 @@ export const pixRouter = router({
       pixKeyType: z.enum(["CPF", "CNPJ", "EMAIL", "PHONE", "EVP"]),
       amount: z.number().positive().max(10_000_000),
       currency: z.string().default("BRL"),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
     }))
     .mutation(async ({ input }) => {
       try {
@@ -497,7 +497,7 @@ export const keycloakRouter = router({
       }
     }),
   syncUser: adminProcedure
-    .input(z.object({ userId: z.number(), email: z.string(), name: z.string() }))
+    .input(z.object({ userId: z.number(), email: z.string(), name: z.string().max(2000) }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.keycloakBridge}/sync`, input);

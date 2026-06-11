@@ -317,7 +317,7 @@ export const hnwExtRouter = router({
     .input(z.object({
       assetClass: z.enum(["bonds", "equities", "real_estate", "fx_deposits", "commodities", "crypto"]),
       assetName: z.string().min(2).max(200),
-      currentValueUsd: z.number().positive(),
+      currentValueUsd: z.number().positive().max(10_000_000),
       allocationPercent: z.number().min(0).max(100).optional(),
       yieldPercent: z.number().min(0).max(100).optional(),
     }))
@@ -344,7 +344,7 @@ export const hnwExtRouter = router({
   updatePortfolioItem: protectedProcedure
     .input(z.object({
       id: z.number().int().positive(),
-      currentValueUsd: z.number().positive(),
+      currentValueUsd: z.number().positive().max(10_000_000),
       allocationPercent: z.number().min(0).max(100).optional(),
     }))
     .mutation(async ({ ctx, input }) => {

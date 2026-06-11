@@ -587,7 +587,7 @@ export const feeRulesEngineRouter = router({
       fromCurrency: z.string(),
       toCurrency: z.string(),
       feeType: z.enum(["percentage", "flat", "tiered"]),
-      feeValue: z.number().positive(),
+      feeValue: z.number().positive().max(10_000_000),
       minFee: z.number().min(0),
       maxFee: z.number().positive(),
       active: z.boolean().default(true),
@@ -750,7 +750,7 @@ export const beneficiaryGroupsV2Router = router({
       groupName: z.string().min(1),
       amount: z.number().positive().max(10_000_000),
       fromCurrency: z.string(),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();

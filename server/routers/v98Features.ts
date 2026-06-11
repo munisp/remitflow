@@ -759,7 +759,7 @@ export const v98Router = router({
       .input(z.object({
         id: z.number(),
         status: z.enum(["filed", "dismissed", "escalated"]),
-        notes: z.string().optional(),
+        notes: z.string().max(2000).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
@@ -834,7 +834,7 @@ export const v98Router = router({
     update: adminProcedure
       .input(z.object({
         id: z.number(),
-        name: z.string().optional(),
+        name: z.string().max(2000).optional(),
         endpoint: z.string().url().optional(),
         isActive: z.boolean().optional(),
       }))
@@ -1022,7 +1022,7 @@ export const v98Router = router({
 
     /** Abandon a failed webhook */
     abandon: adminProcedure
-      .input(z.object({ id: z.number(), reason: z.string().optional() }))
+      .input(z.object({ id: z.number(), reason: z.string().max(2000).optional() }))
       .mutation(async ({ input }) => {
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -1421,7 +1421,7 @@ export const v98Router = router({
           .limit(input.limit);
       }),
     blockIp: adminProcedure
-      .input(z.object({ ipAddress: z.string(), reason: z.string().optional() }))
+      .input(z.object({ ipAddress: z.string(), reason: z.string().max(2000).optional() }))
       .mutation(async ({ input }) => {
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });

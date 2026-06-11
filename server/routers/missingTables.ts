@@ -311,7 +311,7 @@ export const bnplRouter = router({
   create: protectedProcedure
     .input(z.object({
       merchant: z.string().min(2).max(200),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       totalAmount: z.number().positive().max(10_000_000),
       currency: z.string().default("NGN"),
       installments: z.number().min(2).max(12).default(4),
@@ -443,7 +443,7 @@ export const mojaloopRouter = router({
       payeeFsp: z.string(),
       payeeId: z.string(),
       payeeIdType: z.string().default("MSISDN"),
-      note: z.string().optional(),
+      note: z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -618,7 +618,7 @@ export const chargebackRouter = router({
       amount: z.number().positive().max(10_000_000),
       currency: z.string().default("USD"),
       reason: z.string().min(5).max(100),
-      notes: z.string().optional(),
+      notes: z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -650,7 +650,7 @@ export const chargebackRouter = router({
     }),
 
   adminResolve: adminProcedure
-    .input(z.object({ id: z.number(), status: z.enum(["won", "lost", "withdrawn"]), notes: z.string().optional() }))
+    .input(z.object({ id: z.number(), status: z.enum(["won", "lost", "withdrawn"]), notes: z.string().max(2000).optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -742,7 +742,7 @@ export const bulkBatchRouter = router({
   create: protectedProcedure
     .input(z.object({
       name: z.string().min(2).max(200),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       currency: z.string().default("USD"),
       payments: z.array(z.object({ recipient: z.string(), amount: z.number().positive().max(10_000_000), reference: z.string().optional() })),
     }))
@@ -1068,7 +1068,7 @@ export const chatCannedResponsesRouter = router({
     }),
 
   update: adminProcedure
-    .input(z.object({ id: z.number(), title: z.string().optional(), content: z.string().optional(), isActive: z.boolean().optional() }))
+    .input(z.object({ id: z.number(), title: z.string().max(2000).optional(), content: z.string().max(2000).optional(), isActive: z.boolean().optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });

@@ -64,7 +64,7 @@ export const embeddedPayrollApiRouter = router({
   issueApiKey: protectedProcedure
     .input(z.object({
       partnerName:  z.string().min(2),
-      description:  z.string().optional(),
+      description:  z.string().max(2000).optional(),
       allowedScopes: z.array(z.enum(["run_payroll", "list_employees", "get_reports", "tax_filing"])).default(["run_payroll"]),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -208,8 +208,8 @@ export const diasporaMortgageRouter = router({
       propertyCity:       z.string().min(2),
       propertyAddress:    z.string().optional(),
       propertyType:       z.enum(["residential", "commercial", "land"]).default("residential"),
-      propertyValueUsd:   z.number().positive(),
-      loanAmountUsd:      z.number().positive(),
+      propertyValueUsd:   z.number().positive().max(10_000_000),
+      loanAmountUsd:      z.number().positive().max(10_000_000),
       ltvRatioPct:        z.number().min(10).max(80).default(70),
       termYears:          z.number().min(5).max(30).default(20),
       applicantIncome:    z.number().positive(),
@@ -328,7 +328,7 @@ export const diasporaMortgageRouter = router({
     .input(z.object({
       applicationId: z.number(),
       approvedUsd:   z.number().positive(),
-      notes:         z.string().optional(),
+      notes:         z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();

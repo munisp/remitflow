@@ -83,7 +83,7 @@ const EmployeeSchema = z.object({
   employmentType: z.enum(["full_time", "part_time", "contractor", "intern"]).default("full_time"),
   jurisdiction: z.enum(["NG", "GB", "US", "CA", "DE", "FR", "IT", "AE", "GH", "KE", "ZA"]),
   country: z.string().length(2),
-  grossSalary: z.number().positive(),
+  grossSalary: z.number().positive().max(10_000_000),
   salaryCurrency: z.string().length(3).default("USD"),
   bankName: z.string().optional(),
   bankAccount: z.string().optional(),
@@ -101,7 +101,7 @@ const RunSchema = z.object({
   periodEnd: z.string(),
   payDate: z.string(),
   frequency: z.enum(["weekly", "bi_weekly", "semi_monthly", "monthly"]).default("monthly"),
-  notes: z.string().optional(),
+  notes: z.string().max(2000).optional(),
   employeeIds: z.array(z.number()).optional(), // if empty, include all active
 });
 

@@ -581,7 +581,7 @@ export const diasporaBondRouter = router({
     .input(z.object({
       subscriptionId: z.number(),
       unitsToSell: z.number().positive(),
-      askPriceUsd: z.number().positive(),
+      askPriceUsd: z.number().positive().max(10_000_000),
       expiresInDays: z.number().int().min(1).max(30).default(7),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -748,7 +748,7 @@ export const diasporaBondRouter = router({
   requestEarlyRedemption: protectedProcedure
     .input(z.object({
       subscriptionId: z.number(),
-      reason: z.string().optional(),
+      reason: z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();

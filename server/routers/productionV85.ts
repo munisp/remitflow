@@ -61,7 +61,7 @@ export const sandboxScenariosRouter = router({
   create: protectedProcedure
     .input(z.object({
       name: z.string().min(1).max(100),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       scenarioType: z.enum(["transfer", "fx", "kyc", "webhook", "payment", "compliance"]).default("transfer"),
       payload: z.record(z.string(), z.unknown()),
       tags: z.array(z.string()).optional(),
@@ -86,7 +86,7 @@ export const sandboxScenariosRouter = router({
     .input(z.object({
       id: z.number(),
       name: z.string().min(1).max(100).optional(),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       payload: z.record(z.string(), z.unknown()).optional(),
       tags: z.array(z.string()).optional(),
       isPublic: z.boolean().optional(),
@@ -190,7 +190,7 @@ export const complianceAlertsRouter = router({
       alertType: z.enum(["CTR", "SAR", "OFAC_HIT", "HIGH_RISK", "PEP_MATCH", "VELOCITY", "SANCTIONS", "UNUSUAL_ACTIVITY"]),
       severity: z.enum(["low", "medium", "high", "critical"]).default("medium"),
       title: z.string().min(1).max(200),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       relatedUserId: z.number().optional(),
       relatedTransactionId: z.number().optional(),
       metadata: z.record(z.string(), z.unknown()).optional(),
@@ -963,7 +963,7 @@ export const transferAuditRouter = router({
       fromStatus: z.string().optional(),
       toStatus: z.string(),
       triggeredBy: z.enum(["user", "system", "scheduler", "webhook"]).default("system"),
-      reason: z.string().optional(),
+      reason: z.string().max(2000).optional(),
       metadata: z.record(z.string(), z.unknown()).optional(),
     }))
     .mutation(async ({ ctx, input }) => {

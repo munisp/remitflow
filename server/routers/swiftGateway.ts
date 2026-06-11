@@ -34,7 +34,7 @@ const pacs008Schema = z.object({
   creditorBic: z.string().regex(/^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/, "Invalid BIC"),
   creditorCountry: z.string().length(2),
   // Amount
-  instructedAmount: z.number().positive(),
+  instructedAmount: z.number().positive().max(10_000_000),
   currency: z.string().length(3),
   chargeBearer: z.enum(["DEBT", "CRED", "SHAR", "SLEV"]).default("SHAR"),
   // Remittance info

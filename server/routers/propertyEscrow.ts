@@ -76,7 +76,7 @@ const builderKybRouter = router({
       projectsCompleted: z.number().int().min(0),
       insurancePolicyNo: z.string().max(100).optional(),
       documents: z.array(z.object({
-        name: z.string(),
+        name: z.string().max(2000),
         url: z.string().url(),
         type: z.enum(["cac_certificate", "director_id", "tax_clearance", "insurance", "project_portfolio", "financial_statement", "other"]),
       })).min(1).max(20),

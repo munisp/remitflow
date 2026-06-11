@@ -173,7 +173,7 @@ export const pepScreeningRouter = router({
     .input(z.object({
       entries: z.array(z.object({
         userId: z.number(),
-        name: z.string(),
+        name: z.string().max(2000),
         country: z.string().optional(),
       })).max(100),
     }))

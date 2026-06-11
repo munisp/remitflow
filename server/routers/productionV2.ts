@@ -93,7 +93,7 @@ export const partnerPayoutsRouter = router({
 
   approve: adminProcedure.input(z.object({
     id: z.number(),
-    notes: z.string().optional(),
+    notes: z.string().max(2000).optional(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -107,7 +107,7 @@ export const partnerPayoutsRouter = router({
 
   complete: adminProcedure.input(z.object({
     id: z.number(),
-    notes: z.string().optional(),
+    notes: z.string().max(2000).optional(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
     if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });

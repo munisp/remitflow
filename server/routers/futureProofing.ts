@@ -502,7 +502,7 @@ const openBankingFullRouter = router({
       merchantId: z.string(),
       amount: z.number().positive().max(10_000_000),
       currency: z.string().default("NGN"),
-      description: z.string(),
+      description: z.string().max(2000),
       successUrl: z.string().url(),
       cancelUrl: z.string().url(),
       metadata: z.record(z.string(), z.string()).optional(),

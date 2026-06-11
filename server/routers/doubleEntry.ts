@@ -32,7 +32,7 @@ export const doubleEntryRouter = router({
         debit: z.number().min(0),
         credit: z.number().min(0),
         currency: z.string().length(3),
-        description: z.string(),
+        description: z.string().max(2000),
       })).min(2),
     }))
     .mutation(async ({ input }) => {

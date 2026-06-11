@@ -25,7 +25,7 @@ export const splitBillRouter = router({
             z.object({
               name: z.string().min(1),
               email: z.string().email().optional(),
-              shareAmount: z.number().positive(),
+              shareAmount: z.number().positive().max(10_000_000),
             })
           )
           .min(2)

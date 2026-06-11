@@ -221,7 +221,7 @@ export const cbnComplianceRouter = router({
       accountName: z.string().min(1),
       currency: z.string().default("NGN"),
       isPrimary: z.boolean().default(false),
-      notes: z.string().optional(),
+      notes: z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -262,7 +262,7 @@ export const cbnComplianceRouter = router({
       id: z.number(),
       adbName: z.string().optional(),
       adbCode: z.string().optional(),
-      notes: z.string().optional(),
+      notes: z.string().max(2000).optional(),
       isPrimary: z.boolean().optional(),
       status: z.enum(["active", "pending_cbn_filing", "filed", "suspended", "closed"]).optional(),
     }))
@@ -442,7 +442,7 @@ export const cbnComplianceRouter = router({
       contactEmail: z.string().email().optional(),
       contactPhone: z.string().optional(),
       maxDailyFxUsd: z.number().default(100000),
-      notes: z.string().optional(),
+      notes: z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();

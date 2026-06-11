@@ -112,7 +112,7 @@ export const servicesHealthRouter = router({
 
   // ── Sanctions check ────────────────────────────────────────────────────────
   sanctionsCheck: protectedProcedure
-    .input(z.object({ name: z.string(), country: z.string().optional() }))
+    .input(z.object({ name: z.string().max(2000), country: z.string().optional() }))
     .mutation(async ({ input }) => {
       return checkSanctions(input.name, input.country);
     }),

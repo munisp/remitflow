@@ -319,7 +319,7 @@ export const kycLifecycleRouter = router({
 
   // Admin: start review (documents_submitted → under_review)
   startReview: adminProcedure
-    .input(z.object({ userId: z.number(), notes: z.string().optional() }))
+    .input(z.object({ userId: z.number(), notes: z.string().max(2000).optional() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -345,7 +345,7 @@ export const kycLifecycleRouter = router({
       userId: z.number(),
       tier: z.number().int().min(1).max(4).optional(),
       expiresAt: z.string().optional(),
-      notes: z.string().optional(),
+      notes: z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();

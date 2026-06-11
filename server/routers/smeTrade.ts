@@ -58,7 +58,7 @@ export const smeTradeRouter = router({
     .input(z.object({
       formMNumber: z.string().min(10).max(30),
       corridorCode: z.string().length(2),
-      valueUsd: z.number().positive(),
+      valueUsd: z.number().positive().max(10_000_000),
       importerName: z.string().min(2).max(200).optional(),
       exporterName: z.string().min(2).max(200).optional(),
       goodsDescription: z.string().min(5).max(500).optional(),

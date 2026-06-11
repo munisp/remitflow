@@ -84,7 +84,7 @@ export const revenueShareRouter = router({
       bankSwiftCode: z.string().optional(),
       bankIban: z.string().optional(),
       paypalEmail: z.string().email().optional(),
-      notes: z.string().optional(),
+      notes: z.string().max(2000).optional(),
       tiers: z.array(z.object({
         tierName: z.string(),
         minMonthlyVolume: z.number(),
@@ -127,7 +127,7 @@ export const revenueShareRouter = router({
   updateAgreement: adminProcedure
     .input(z.object({
       id: z.number(),
-      name: z.string().optional(),
+      name: z.string().max(2000).optional(),
       model: z.enum(["percentage", "flat_fee", "tiered", "hybrid"]).optional(),
       baseRate: z.number().min(0).max(1).optional(),
       minPayoutThreshold: z.number().min(0).optional(),
@@ -137,7 +137,7 @@ export const revenueShareRouter = router({
       bankSwiftCode: z.string().optional(),
       bankIban: z.string().optional(),
       paypalEmail: z.string().optional(),
-      notes: z.string().optional(),
+      notes: z.string().max(2000).optional(),
       status: z.enum(["draft", "active", "suspended", "terminated"]).optional(),
     }))
     .mutation(async ({ input }) => {
@@ -168,7 +168,7 @@ export const revenueShareRouter = router({
     }),
 
   terminateAgreement: adminProcedure
-    .input(z.object({ id: z.number(), reason: z.string().optional() }))
+    .input(z.object({ id: z.number(), reason: z.string().max(2000).optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -443,7 +443,7 @@ export const revenueShareRouter = router({
       businessType: z.string().optional(),
       expectedVolume: z.string().optional(),
       targetCorridors: z.string().optional(),
-      message: z.string().optional(),
+      message: z.string().max(2000).optional(),
       agreedToTerms: z.boolean(),
       signatureName: z.string().min(2),
       signatureTitle: z.string().optional(),

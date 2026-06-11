@@ -71,7 +71,7 @@ export const invoiceFinancingRouter = router({
       invoiceNumber:    z.string().min(3),
       debtorName:       z.string().min(2),
       debtorCountry:    z.string().length(2).optional(),
-      invoiceAmountUsd: z.number().positive(),
+      invoiceAmountUsd: z.number().positive().max(10_000_000),
       advanceRatePct:   z.number().min(50).max(90).default(80),
       invoiceDocUrl:    z.string().url().optional(),
       invoiceDueDate:   z.string(), // ISO date
@@ -213,7 +213,7 @@ export const letterOfCreditRouter = router({
       currency:           z.string().length(3).default("USD"),
       amountUsd:          z.number().positive().max(10_000_000),
       expiryDate:         z.string(), // ISO date
-      description:        z.string().optional(),
+      description:        z.string().max(2000).optional(),
       requiredDocuments:  z.array(z.string()).default([]),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -335,7 +335,7 @@ export const multiEntityTreasuryRouter = router({
   createGroup: protectedProcedure
     .input(z.object({
       name:         z.string().min(2),
-      description:  z.string().optional(),
+      description:  z.string().max(2000).optional(),
       baseCurrency: z.string().length(3).default("USD"),
     }))
     .mutation(async ({ ctx, input }) => {

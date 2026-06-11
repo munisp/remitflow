@@ -34,13 +34,13 @@ export const abTestingRouter = router({
   createExperiment: adminProcedure
     .input(z.object({
       name: z.string().min(3).max(200),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       targetPage: z.string().optional(),
       variants: z.array(z.object({
         id: z.string(),
         name: z.string().min(1).max(100).trim(),
         weight: z.number().min(0).max(100),
-        description: z.string().optional(),
+        description: z.string().max(2000).optional(),
       })).min(2),
       startDate: z.string().optional(),
       endDate: z.string().optional(),
@@ -198,7 +198,7 @@ export const referralBonusRouter = router({
     .input(z.object({
       bonusId: z.number(),
       status: z.enum(["approved", "paid", "rejected"]),
-      notes: z.string().optional(),
+      notes: z.string().max(2000).optional(),
     }))
     .mutation(async ({ input }) => {
       const db = await getDb();
@@ -262,7 +262,7 @@ export const documentVaultRouter = router({
   upload: protectedProcedure
     .input(z.object({
       name: z.string().min(1).max(255),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       category: z.enum(["identity", "address", "financial", "compliance", "contract", "other"]).default("other"),
       fileBase64: z.string(),
       mimeType: z.string().default("application/octet-stream"),

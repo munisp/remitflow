@@ -94,7 +94,7 @@ async function callService(url: string, method: "GET" | "POST", body?: unknown) 
 const swiftRouter = router({
   getQuote: protectedProcedure
     .input(z.object({
-      amount_ngn: z.number().positive(),
+      amount_ngn: z.number().positive().max(10_000_000),
       destination_currency: z.string().length(3),
       purpose_code: z.string(),
       sender_segment: z.enum(["labor", "education", "medical", "sme", "hnw"]).optional(),
@@ -103,7 +103,7 @@ const swiftRouter = router({
 
   submitTransfer: protectedProcedure
     .input(z.object({
-      amount_ngn: z.number().positive(),
+      amount_ngn: z.number().positive().max(10_000_000),
       destination_currency: z.string().length(3),
       purpose_code: z.string(),
       sender_segment: z.enum(["labor", "education", "medical", "sme", "hnw"]).optional(),
@@ -149,7 +149,7 @@ const swiftRouter = router({
 
   checkCompliance: protectedProcedure
     .input(z.object({
-      amount_ngn: z.number().positive(),
+      amount_ngn: z.number().positive().max(10_000_000),
       purpose_code: z.string(),
       sender_segment: z.enum(["labor", "education", "medical", "sme", "hnw"]).optional(),
     }))
@@ -221,7 +221,7 @@ const floatIncomeRouter = router({
     .query(async ({ input }) => callService(`${FLOAT_URL}/project`, "POST", input)),
 
   dailyAccrual: protectedProcedure
-    .input(z.object({ float_balance_ngn: z.number().positive() }))
+    .input(z.object({ float_balance_ngn: z.number().positive().max(10_000_000) }))
     .query(async ({ input }) => callService(`${FLOAT_URL}/daily-accrual`, "POST", input)),
 
   healthCheck: publicProcedure
@@ -231,9 +231,9 @@ const floatIncomeRouter = router({
 const revenueAnalyticsV2Router = router({
   classifySegment: protectedProcedure
     .input(z.object({
-      amount_usd: z.number().positive(),
+      amount_usd: z.number().positive().max(10_000_000),
       purpose_code: z.string(),
-      purpose_description: z.string().optional(),
+      purpose_description: z.string().max(2000).optional(),
       frequency_per_year: z.number().int().min(1).optional(),
       sender_occupation: z.string().optional(),
     }))
@@ -242,7 +242,7 @@ const revenueAnalyticsV2Router = router({
   scoreCrossSell: protectedProcedure
     .input(z.object({
       segment: z.enum(["labor", "education", "medical", "sme", "hnw"]),
-      amount_usd: z.number().positive(),
+      amount_usd: z.number().positive().max(10_000_000),
       frequency_per_year: z.number().int().min(1),
       months_active: z.number().int().min(0),
       has_nigerian_account: z.boolean(),
@@ -284,7 +284,7 @@ const crossSellRouter = router({
   checkAndTrigger: protectedProcedure
     .input(z.object({
       segment: z.enum(["labor", "education", "medical", "sme", "hnw"]).optional(),
-      amount_usd: z.number().positive().optional(),
+      amount_usd: z.number().positive().max(10_000_000).optional(),
       frequency_per_year: z.number().int().min(1).optional(),
       months_active: z.number().int().min(0).optional(),
       has_nigerian_account: z.boolean().optional(),

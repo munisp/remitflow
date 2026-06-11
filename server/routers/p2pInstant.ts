@@ -1029,7 +1029,7 @@ export const p2pInstantRouter = router({
       participants: z.array(z.object({
         aliasType: z.enum(["phone", "email"]),
         aliasValue: z.string().min(3).max(320),
-        shareAmount: z.number().positive().optional(), // Custom split; if omitted, equal split
+        shareAmount: z.number().positive().max(10_000_000).optional(), // Custom split; if omitted, equal split
       })).min(2).max(20),
       note: z.string().max(500).optional(),
     }))

@@ -168,7 +168,7 @@ const fraudEngineV2Router = router({
     }),
 
   updateAlertStatus: auditedAdminProcedure
-    .input(z.object({ alertId: z.number().int(), status: z.enum(["investigating", "resolved", "false_positive"]), notes: z.string().optional() }))
+    .input(z.object({ alertId: z.number().int(), status: z.enum(["investigating", "resolved", "false_positive"]), notes: z.string().max(2000).optional() }))
     .mutation(async ({ input }) => {
       return { success: true, verified: true, alertId: input.alertId, newStatus: input.status, updatedAt: new Date().toISOString() };
     }),
@@ -428,7 +428,7 @@ const amlBatchScreeningRouter = router({
     }),
 
   updateHitStatus: auditedAdminProcedure
-    .input(z.object({ hitId: z.number().int(), status: z.enum(["cleared", "confirmed_hit", "escalated"]), notes: z.string().optional() }))
+    .input(z.object({ hitId: z.number().int(), status: z.enum(["cleared", "confirmed_hit", "escalated"]), notes: z.string().max(2000).optional() }))
     .mutation(async ({ input }) => {
       return { success: true, verified: true, hitId: input.hitId, newStatus: input.status, updatedAt: new Date().toISOString() };
     }),

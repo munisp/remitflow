@@ -621,7 +621,7 @@ export const userOnboardingRouter = router({
     .input(z.object({
       phone: z.string().optional(),
       country: z.string().optional(),
-      address: z.string().optional(),
+      address: z.string().max(2000).optional(),
       dateOfBirth: z.string().optional(),
       idType: z.string().optional(),
       idNumber: z.string().optional(),

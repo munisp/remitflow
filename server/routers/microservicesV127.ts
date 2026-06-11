@@ -185,7 +185,7 @@ export const ledgerServiceRouter = router({
     amount: z.number().positive().max(10_000_000),
     currency: z.string().default("USD"),
     reference: z.string(),
-    description: z.string().optional(),
+    description: z.string().max(2000).optional(),
   })).mutation(async ({ input }) => {
     const db = await getDb();
     const [result] = await db.execute(sql`
@@ -400,7 +400,7 @@ export const rustTigerBeetleRouter = router({
     amount: z.number().positive().max(10_000_000),
     currency: z.string().default("USD"),
     reference: z.string(),
-    description: z.string().optional(),
+    description: z.string().max(2000).optional(),
   })).mutation(async ({ ctx, input }) => {
     try {
       const resp = await fetch(`${SVC_URLS.rustTigerBeetle}/transfers`, {
@@ -425,7 +425,7 @@ export const rustTigerBeetleRouter = router({
   // Reverse a transfer
   reverseTransfer: adminProcedure.input(z.object({
     transferId: z.number(),
-    reason: z.string(),
+    reason: z.string().max(2000),
   })).mutation(async ({ ctx, input }) => {
     try {
       const resp = await fetch(`${SVC_URLS.rustTigerBeetle}/transfers/${input.transferId}/reverse`, {
@@ -855,7 +855,7 @@ export const rustUpiAdapterRouter = router({
     vpa: z.string(),
     amount: z.number().positive().max(10_000_000),
     currency: z.string().default("INR"),
-    note: z.string().optional(),
+    note: z.string().max(2000).optional(),
   })).mutation(async ({ input, ctx }) => {
     const db = await getDb();
     const [result] = await db.execute(sql`
@@ -872,7 +872,7 @@ export const pythonPixAdapterRouter = router({
   health: publicProcedure.query(() => checkHealth(SVC_URLS.pythonPixAdapter)),
   generateQRCode: protectedProcedure.input(z.object({
     amount: z.number().positive().max(10_000_000),
-    description: z.string().optional(),
+    description: z.string().max(2000).optional(),
     pixKey: z.string(),
   })).mutation(async ({ input, ctx }) => {
     const db = await getDb();

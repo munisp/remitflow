@@ -96,7 +96,7 @@ export const transferCoreRouter = router({
 
   /** Cancel a pending transfer */
   cancel: protectedProcedure
-    .input(z.object({ referenceId: z.string(), reason: z.string().optional() }))
+    .input(z.object({ referenceId: z.string(), reason: z.string().max(2000).optional() }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) return { success: false, reason: "Database unavailable" };

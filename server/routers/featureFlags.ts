@@ -165,7 +165,7 @@ export const featureFlagsRouter = router({
       tenantId: z.number(),
       flagId: z.number(),
       enabled: z.boolean(),
-      reason: z.string().optional(),
+      reason: z.string().max(2000).optional(),
       expiresAt: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -228,7 +228,7 @@ export const featureFlagsRouter = router({
       id: z.number().optional(),
       key: z.string().min(2).max(100),
       name: z.string().min(2).max(255),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       scope: z.enum(["global", "tenant", "user"]).default("global"),
       defaultEnabled: z.boolean().default(true),
       rolloutPct: z.number().min(0).max(100).default(100),
@@ -567,7 +567,7 @@ export const tenantsRouter = router({
   update: adminProcedure
     .input(z.object({
       id: z.number(),
-      name: z.string().optional(),
+      name: z.string().max(2000).optional(),
       plan: z.enum(["starter", "growth", "enterprise", "white_label"]).optional(),
       status: z.enum(["active", "suspended", "trial", "churned"]).optional(),
       brandName: z.string().optional(),
@@ -596,7 +596,7 @@ export const tenantsRouter = router({
     }),
 
   suspend: adminProcedure
-    .input(z.object({ id: z.number(), reason: z.string().optional() }))
+    .input(z.object({ id: z.number(), reason: z.string().max(2000).optional() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });

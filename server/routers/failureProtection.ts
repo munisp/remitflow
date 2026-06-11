@@ -138,7 +138,7 @@ export const bnplProtectionRouter = router({
     .input(z.object({
       disputeId: z.string(),
       resolution: z.enum(["refund_buyer", "resume_payments", "partial_refund", "cancel_plan"]),
-      refundAmountNgn: z.number().positive().optional(),
+      refundAmountNgn: z.number().positive().max(10_000_000).optional(),
       notes: z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -236,7 +236,7 @@ export const agentProtectionRouter = router({
     .input(z.object({
       transactionRef: z.string().min(5),
       disputeType: z.enum(["wrong_amount", "no_cash_received", "overcharged", "agent_fraud"]),
-      expectedAmount: z.number().positive(),
+      expectedAmount: z.number().positive().max(10_000_000),
       receivedAmount: z.number().min(0),
       description: z.string().min(10).max(2000),
     }))
@@ -437,7 +437,7 @@ export const payrollProtectionRouter = router({
     .input(z.object({
       runItemId: z.number(),
       disputeType: z.enum(["wrong_amount", "not_received", "wrong_currency", "unauthorized_deduction"]),
-      expectedAmount: z.number().positive(),
+      expectedAmount: z.number().positive().max(10_000_000),
       receivedAmount: z.number().min(0),
       description: z.string().min(10).max(2000),
     }))
@@ -456,7 +456,7 @@ export const payrollProtectionRouter = router({
     .input(z.object({
       disputeId: z.string(),
       resolution: z.enum(["pay_difference", "full_repay", "dismiss", "adjust_next_run"]),
-      adjustmentAmount: z.number().positive().optional(),
+      adjustmentAmount: z.number().positive().max(10_000_000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();

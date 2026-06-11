@@ -344,7 +344,7 @@ const amlBatchEngineRouter = router({
     return { queue: rows, total: rows.length };
   }),
   resolveScreening: auditedProcedure
-    .input(z.object({ screeningId: z.string(), resolution: z.enum(["clear", "escalate", "block"]), notes: z.string().optional() }))
+    .input(z.object({ screeningId: z.string(), resolution: z.enum(["clear", "escalate", "block"]), notes: z.string().max(2000).optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       await db.update(sanctionsChecks).set({ result: input.resolution === "clear" ? "clear" : "hit", reviewedAt: new Date() }).where(eq(sanctionsChecks.screeningId, input.screeningId)).returning();
@@ -365,7 +365,7 @@ const merchantKYBRouter = router({
       return { applications: rows, total: total?.count ?? 0 };
     }),
   approve: auditedProcedure
-    .input(z.object({ kycId: z.number().int(), notes: z.string().optional() }))
+    .input(z.object({ kycId: z.number().int(), notes: z.string().max(2000).optional() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
       const [_row] = await db.update(kycDocuments).set({ status: "approved", updatedAt: new Date() }).where(eq(kycDocuments.id, input.kycId)).returning();

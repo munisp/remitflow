@@ -439,7 +439,7 @@ export const enhancedKybRouter = router({
         shareholders: z
           .array(
             z.object({
-              name: z.string(),
+              name: z.string().max(2000),
               type: z.enum(["individual", "company", "trust", "fund"]),
               ownershipPercent: z.number().min(0).max(100),
               votingRights: z.number().min(0).max(100).optional(),
