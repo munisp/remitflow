@@ -35,6 +35,8 @@ import {
   chatCannedResponses,
   securityIncidents,
 } from "../../drizzle/schema";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+import { logger } from "../_core/logger";
 
 // ─── Support Tickets ─────────────────────────────────────────────────────────
 export const supportTicketsRouter = router({
@@ -422,6 +424,17 @@ export const stablecoinRouter = router({
       const [_updated] = await db.update(stablecoinWallets).set({ balance: (Number(wallet.balance) - input.amount).toFixed(6) }).where(eq(stablecoinWallets.id, input.walletId)).returning();
       if (!_updated) throw new TRPCError({ code: "NOT_FOUND", message: "Wallet update failed" });
       const txHash = `0x${randomBytes(32).toString('hex')}`;
+      // Kafka event for stablecoin transfer
+      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `stablecoin:${txHash}`, {
+        eventType: "stablecoin_transfer",
+        userId: ctx.user.id,
+        walletId: input.walletId,
+        amount: input.amount,
+        toAddress: input.toAddress,
+        txHash,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Stablecoin] Kafka event failed"));
+
       return { success: true, verified: true, txHash, amount: input.amount, toAddress: input.toAddress };
     }),
 });
@@ -638,6 +651,18 @@ export const chargebackRouter = router({
           dueDate,
         })
         .returning();
+
+      // Kafka event for chargeback case
+      publishEvent(KAFKA_TOPICS.DISPUTE_OPENED, `chargeback:${chargeback.id}`, {
+        eventType: "chargeback_opened",
+        userId: ctx.user.id,
+        chargebackId: chargeback.id,
+        transactionId: input.transactionId,
+        amount: input.amount,
+        reason: input.reason,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Chargeback] Kafka event failed"));
+
       return chargeback;
     }),
 
