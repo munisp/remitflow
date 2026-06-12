@@ -20,6 +20,9 @@ import { protectedProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
 import { createAuditLog } from "../audit.service";
 import { getKafkaProducer } from "../middleware/kafka";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { broadcastUserEvent } from "../sse.service";
+import { logger } from "../_core/logger";
 
 // ─── ISO 20022 pacs.008 Schema ────────────────────────────────────────────────
 const pacs008Schema = z.object({
@@ -79,6 +82,23 @@ export const swiftGatewayRouter = router({
       const creditorBicInfo = validateBicFormat(input.creditorBic);
       if (!debtorBicInfo.valid) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid debtor BIC" });
       if (!creditorBicInfo.valid) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid creditor BIC" });
+
+      // Pipeline: sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications
+      const swiftRef = `SWIFT-${Date.now()}-${ctx.user.id}`;
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.instructedAmount,
+        fromCurrency: input.currency,
+        toCurrency: input.currency,
+        recipientName: input.creditorName,
+        recipientAccount: input.creditorAccount,
+        rail: "swift",
+        corridorCode: input.creditorCountry,
+        featureLabel: "swift_pacs008",
+        transferId: swiftRef,
+        description: `SWIFT pacs.008: ${input.instructedAmount} ${input.currency} to ${input.creditorBic}`,
+        metadata: { debtorBic: input.debtorBic, creditorBic: input.creditorBic, chargeBearer: input.chargeBearer },
+      });
 
       // Generate SWIFT identifiers
       const uetr = generateUETR();
@@ -156,16 +176,28 @@ export const swiftGatewayRouter = router({
         description: JSON.stringify({ uetr, amount: input.instructedAmount, currency: input.currency, creditorBic: input.creditorBic }),
       });
 
+      // Push notification
+      broadcastUserEvent(ctx.user.id, {
+        type: "transfer_sent",
+        payload: {
+          title: "SWIFT Transfer Initiated",
+          message: `${input.instructedAmount} ${input.currency} to ${input.creditorName} (${input.creditorBic})`,
+          amount: input.instructedAmount,
+          currency: input.currency,
+        },
+      });
+
       return {
         success: true, verified: true,
         uetr,
         msgId,
         endToEndId,
         txId,
-        status: "ACCP", // Accepted
+        status: "ACCP",
         statusDescription: "Payment accepted for processing",
         estimatedSettlement: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
         pacs008Message,
+        fraudScore: pipelineResult.fraudScore,
       };
     }),
 

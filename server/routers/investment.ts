@@ -25,6 +25,11 @@ import {
   users,
 } from "../../drizzle/schema.js";
 import crypto from "crypto";
+import { executeTransferPipeline } from "../_core/transferPipeline.js";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { broadcastUserEvent } from "../sse.service.js";
+import { sendNotification } from "../notifications.service.js";
+import { logger } from "../_core/logger.js";
 
 
 async function getDbConn() {
@@ -201,6 +206,22 @@ export const ngxStockRouter = router({
         `);
       }
 
+      // Pipeline: sanctions, fraud ML, TigerBeetle, Kafka, audit, notifications
+      const orderRef = generateTxRef("NGX");
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: approxUsd,
+        fromCurrency: "NGN",
+        toCurrency: "NGN",
+        recipientName: stock.ticker ?? "NGX Stock",
+        rail: "internal",
+        corridorCode: "NG",
+        featureLabel: "ngx_stock_order",
+        transferId: orderRef,
+        description: `NGX ${input.orderType}: ${qty} units of ${stock.ticker} @ ₦${price}`,
+        metadata: { stockId: input.stockId, orderType: input.orderType, brokerName: input.brokerName },
+      });
+
       const [order] = await db
         .insert(ngxOrders)
         .values({
@@ -217,7 +238,7 @@ export const ngxStockRouter = router({
           notes: input.notes,
         })
         .returning();
-      return order;
+      return { ...order, verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
   getOrders: protectedProcedure
@@ -408,7 +429,23 @@ export const realEstateRouter = router({
         channel: "real_estate",
       }).returning();
 
-      return investment;
+      // Pipeline: sanctions, fraud ML, TigerBeetle, Kafka, notifications
+      const investRef = generateTxRef("RE-P");
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: totalUsd,
+        fromCurrency: "USD",
+        toCurrency: "USD",
+        recipientName: listing.title ?? "Real Estate Investment",
+        rail: "internal",
+        corridorCode: "NG",
+        featureLabel: "real_estate_invest",
+        transferId: investRef,
+        description: `Real estate: ${input.sharesCount} shares of ${listing.title}`,
+        metadata: { listingId: input.listingId, sharesCount: input.sharesCount, ownershipPct },
+      });
+
+      return { ...investment, verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
   getMyInvestments: protectedProcedure.query(async ({ ctx }) => {
@@ -591,7 +628,23 @@ export const startupRouter = router({
         }).returning();
       }
 
-      return investment;
+      // Pipeline: sanctions, fraud ML, TigerBeetle, Kafka, notifications
+      const commitRef = generateTxRef("SI-P");
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.amountUsd,
+        fromCurrency: "USD",
+        toCurrency: "USD",
+        recipientName: deal.companyName ?? "Startup Investment",
+        rail: "internal",
+        corridorCode: "NG",
+        featureLabel: "startup_invest",
+        transferId: commitRef,
+        description: `Startup: $${input.amountUsd} into ${deal.companyName} (${deal.instrumentType})`,
+        metadata: { dealId: input.dealId, instrumentType: deal.instrumentType, equityPct },
+      });
+
+      return { ...investment, verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
   getMyInvestments: protectedProcedure.query(async ({ ctx }) => {
@@ -835,6 +888,21 @@ export const paypalTopupRouter = router({
         .set({ status: "captured", paypalCaptureId: capture?.id, walletCredited: true })
         .where(eq(paypalTransactions.paypalOrderId, input.orderId));
 
+      // Kafka event for PayPal wallet topup
+      publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `paypal:${input.orderId}`, {
+        eventType: "paypal_topup_captured",
+        userId: ctx.user.id,
+        amountUsd: capturedAmount,
+        orderId: input.orderId,
+        captureId: capture?.id,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[PayPal] Kafka event failed"));
+
+      broadcastUserEvent(ctx.user.id, {
+        type: "transfer_received",
+        payload: { title: "Wallet Topped Up", message: `$${capturedAmount.toFixed(2)} added via PayPal`, amount: capturedAmount },
+      });
+
       return { success: true, verified: true, amountUsd: capturedAmount };
     }),
 
@@ -961,6 +1029,20 @@ export const flutterwaveTopupRouter = router({
         .update(flutterwaveTransactions)
         .set({ status: "successful", walletCredited: true })
         .where(eq(flutterwaveTransactions.txRef, input.txRef));
+
+      // Kafka event for Flutterwave wallet topup
+      publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `flw:${input.txRef}`, {
+        eventType: "flutterwave_topup_verified",
+        userId: ctx.user.id,
+        amountUsd: amount,
+        txRef: input.txRef,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Flutterwave] Kafka event failed"));
+
+      broadcastUserEvent(ctx.user.id, {
+        type: "transfer_received",
+        payload: { title: "Wallet Topped Up", message: `$${amount.toFixed(2)} added via Flutterwave`, amount },
+      });
 
       return { success: true, verified: true, amountUsd: amount };
     }),

@@ -39,7 +39,9 @@ import {
   milestoneEvidence, propertyEscrowDisputes, escrowPaymentSchedule,
   realEstateListings, wallets, users, transactions,
 } from "../../drizzle/schema.js";
-import { getKafkaProducer } from "../middleware/kafka.js";
+import { getKafkaProducer, publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { executeTransferPipeline } from "../_core/transferPipeline.js";
+import { broadcastUserEvent } from "../sse.service.js";
 import {
   redis, tigerBeetle, fluvio,
 } from "../middleware/middlewareIntegration.js";
@@ -454,7 +456,27 @@ const escrowPlanRouter = router({
       await createAuditLog({ userId: ctx.user.id, action: "ESCROW_DEPOSIT_PAID", metadata: { planId: plan.planId, amount: depositUsd } });
       await notifyOwner({ title: "Escrow Deposit Paid", content: `Buyer ${ctx.user.id} paid $${depositUsd.toFixed(2)} deposit for escrow plan ${plan.planId}` });
 
-      return { planId: plan.planId, depositPaid: depositUsd, status: "active", nextPaymentDate: nextPaymentDate.toISOString() };
+      // Pipeline: sanctions, fraud ML, Kafka, notifications
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: depositUsd,
+        fromCurrency: "USD",
+        toCurrency: "USD",
+        recipientName: "Property Escrow",
+        rail: "internal",
+        corridorCode: "NG",
+        featureLabel: "property_escrow_deposit",
+        transferId: `ESCROW-DEP-${plan.planId}`,
+        description: `Escrow deposit: $${depositUsd.toFixed(2)} for plan ${plan.planId}`,
+        metadata: { planId: plan.planId, depositPct: Number(plan.depositPct) },
+      });
+
+      broadcastUserEvent(ctx.user.id, {
+        type: "transfer_sent",
+        payload: { title: "Escrow Deposit Paid", message: `$${depositUsd.toFixed(2)} deposited for property escrow`, amount: depositUsd },
+      });
+
+      return { planId: plan.planId, depositPaid: depositUsd, status: "active", nextPaymentDate: nextPaymentDate.toISOString(), verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
   payInstallment: protectedProcedure

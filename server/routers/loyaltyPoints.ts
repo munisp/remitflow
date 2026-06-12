@@ -18,6 +18,8 @@ import { logger } from "../_core/logger";
 import { getDb, createAuditLog } from "../db";
 import { sql } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+import { broadcastUserEvent } from "../sse.service";
 
 type Tier = "bronze" | "silver" | "gold" | "platinum";
 
@@ -157,6 +159,23 @@ export const loyaltyPointsRouter = router({
         await createAuditLog({ userId: ctx.user.id, action: "LOYALTY_TIER_CHANGE", metadata: { from: currentTier, to: newTier } });
       }
       logger.info({ userId: ctx.user.id, points, tier: newTier }, "Points earned");
+      // Kafka event for points earning
+      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `loyalty:earn:${ctx.user.id}:${Date.now()}`, {
+        eventType: "loyalty_points_earned",
+        userId: ctx.user.id,
+        pointsEarned: points,
+        newBalance,
+        tier: newTier,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Loyalty] Kafka event failed"));
+
+      if (newTier !== currentTier) {
+        broadcastUserEvent(ctx.user.id, {
+          type: "transfer_received",
+          payload: { title: "Tier Promotion!", message: `Congratulations! You are now ${newTier} tier.` },
+        });
+      }
+
       return { pointsEarned: points, newBalance, tier: newTier, multiplier };
     }),
 
@@ -184,6 +203,22 @@ export const loyaltyPointsRouter = router({
         WHERE user_id = ${ctx.user.id}
       `);
       await createAuditLog({ userId: ctx.user.id, action: "LOYALTY_REDEEM", metadata: { points: input.points, discount: discountAmount } });
+
+      // Kafka event for points redemption
+      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `loyalty:redeem:${ctx.user.id}:${Date.now()}`, {
+        eventType: "loyalty_points_redeemed",
+        userId: ctx.user.id,
+        pointsRedeemed: input.points,
+        discountAmount,
+        newBalance,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Loyalty] Kafka event failed"));
+
+      broadcastUserEvent(ctx.user.id, {
+        type: "transfer_received",
+        payload: { title: "Points Redeemed", message: `${input.points} points redeemed for $${discountAmount.toFixed(2)} discount` },
+      });
+
       return { pointsRedeemed: input.points, discountAmount, newBalance };
     }),
 

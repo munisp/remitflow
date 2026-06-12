@@ -11,6 +11,8 @@ import { agentAccounts, users } from "../../drizzle/schema.js";
 import { eq } from "drizzle-orm";
 import { notifyOwner } from "../_core/notification.js";
 import { randomInt } from "crypto";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { logger } from "../_core/logger.js";
 
 const registerInput = z.object({
   businessName: z.string().min(2).max(120),
@@ -109,6 +111,16 @@ export const agentOnboardingRouter = router({
         title: `New Agent Application: ${input.businessName}`,
         content: `Agent Code: ${agentCode}\nTier: ${input.tier}\nLocation: ${input.location}, ${input.country}\nPhone: ${input.phone}\nEmail: ${input.email ?? "—"}\nCAC: ${input.cacNumber ?? "—"}\nBank: ${input.bankName ?? "—"} ${input.bankAccountNumber ?? ""}\n\nPlease review and approve/reject in the admin panel.`,
       }); // non-blocking
+
+      // Kafka event for agent onboarding
+      publishEvent(KAFKA_TOPICS.AUDIT_LOGS, `agent:register:${agentCode}`, {
+        eventType: "agent_registration_submitted",
+        userId: ctx.user.id,
+        agentCode,
+        businessName: input.businessName,
+        tier: input.tier,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[AgentOnboarding] Kafka event failed"));
 
       return {
         success: true,

@@ -19,6 +19,10 @@ import {
 import { and, desc, eq, gte, sql, count, sum } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { safeParseAmount } from "../lib/safeDecimal";
+import { executeTransferPipeline } from "../_core/transferPipeline.js";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { broadcastUserEvent } from "../sse.service.js";
+import { logger } from "../_core/logger.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -201,9 +205,25 @@ export const posAgentCashFlowRouter = router({
         .where(eq(agentAccounts.id, agent.id))
         .returning();
 
+      // Pipeline: sanctions, fraud ML, TigerBeetle, Kafka, notifications
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.amount,
+        fromCurrency: input.currency,
+        toCurrency: input.currency,
+        recipientName: input.customerName ?? input.customerPhone,
+        rail: "pos",
+        corridorCode: "NG",
+        featureLabel: "pos_cash_in",
+        transferId: ref,
+        description: `Cash-in via agent ${agent.agentCode}`,
+        metadata: { agentCode: agent.agentCode, customerPhone: input.customerPhone, commission },
+      });
+
       return {
         success: true,
         verified: true,
+        fraudScore: pipelineResult.fraudScore,
         commission: `${input.currency} ${commission.toFixed(2)}`,
         transaction: {
           id: String(tx?.id ?? ref),
@@ -311,9 +331,25 @@ export const posAgentCashFlowRouter = router({
         .where(eq(agentAccounts.id, agent.id))
         .returning();
 
+      // Pipeline: sanctions, fraud ML, TigerBeetle, Kafka, notifications
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.amount,
+        fromCurrency: input.currency,
+        toCurrency: input.currency,
+        recipientName: input.customerName ?? input.customerPhone,
+        rail: "pos",
+        corridorCode: "NG",
+        featureLabel: "pos_cash_out",
+        transferId: ref,
+        description: `Cash-out via agent ${agent.agentCode}`,
+        metadata: { agentCode: agent.agentCode, customerPhone: input.customerPhone, commission },
+      });
+
       return {
         success: true,
         verified: true,
+        fraudScore: pipelineResult.fraudScore,
         commission: `${input.currency} ${commission.toFixed(2)}`,
         transaction: {
           id: String(tx?.id ?? ref),

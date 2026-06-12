@@ -17,6 +17,7 @@ import { getDb } from "../db";
 import { eq, and, sql, desc, lt } from "drizzle-orm";
 import { users, kycLifecycle, kycDocuments, sanctionsChecks } from "../../drizzle/schema";
 import { createAuditLog } from "../db";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { logger } from "../_core/logger";
 
 // ─── PEP Database Integration ────────────────────────────────────────────────
@@ -461,6 +462,15 @@ export const kycSelfServiceRouter = router({
         action: "kyc.upgrade_requested",
         metadata: { fromTier: current.tier, toTier: input.targetTier },
       });
+
+      // Kafka event for KYC tier upgrade request
+      publishEvent(KAFKA_TOPICS.KYC_EVENTS, `kyc:upgrade:${ctx.user.id}`, {
+        eventType: "kyc_upgrade_requested",
+        userId: ctx.user.id,
+        fromTier: current.tier,
+        toTier: input.targetTier,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[KycEnhanced] Kafka event failed"));
 
       return {
         status: "upgrade_initiated",

@@ -6,6 +6,9 @@ import { paymentRequests, transactions } from "../../drizzle/schema.js";
 import { getDb, createTransaction } from "../db.js";
 import { protectedProcedure, publicProcedure, router, rateLimitedProcedure } from "../_core/trpc.js";
 import { sendEmail } from "../email.service.js";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { broadcastUserEvent } from "../sse.service.js";
+import { logger } from "../_core/logger.js";
 
 export const requestMoneyRouter = router({
   // Create a new payment request (Request Money)
@@ -99,6 +102,21 @@ export const requestMoneyRouter = router({
       await db.update(paymentRequests)
         .set({ status: "paid", payerUserId: ctx.user.id, paidAt: new Date(), updatedAt: new Date() })
         .where(eq(paymentRequests.id, req.id)).returning();
+      // Kafka event + notification for payment request fulfillment
+      publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `reqpay:${req.id}`, {
+        eventType: "payment_request_fulfilled",
+        payerId: ctx.user.id,
+        requesterId: req.requesterId,
+        amount: payAmount,
+        currency: req.currency,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[RequestMoney] Kafka event failed"));
+
+      broadcastUserEvent(req.requesterId, {
+        type: "transfer_received",
+        payload: { title: "Payment Request Fulfilled", message: `Someone paid your request of ${req.currency} ${payAmount}`, amount: payAmount },
+      });
+
       return { success: true, verified: true, transactionRef: txRef };
     }),
 

@@ -11,6 +11,9 @@ import { eq, and, desc } from "drizzle-orm";
 import { sendEmail } from "../email.service.js";
 import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { broadcastUserEvent } from "../sse.service.js";
+import { logger } from "../_core/logger.js";
 
 export const splitBillRouter = router({
   /** Create a split bill — one group, N participant shares */
@@ -93,6 +96,17 @@ export const splitBillRouter = router({
           }).catch(() => {/* email failure is non-fatal */});
         }
       }
+
+      // Kafka event for split bill creation
+      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `splitbill:${groupId}`, {
+        eventType: "split_bill_created",
+        userId: ctx.user.id,
+        groupId,
+        totalAmount: input.totalAmount,
+        currency: input.currency,
+        participantCount: input.participants.length,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[SplitBill] Kafka event failed"));
 
       return { groupId, participants: created };
     }),

@@ -14,6 +14,10 @@ import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { createAuditLog } from "../db";
 import { executeTransfer, calculateFee, getFxRate, validateCompliance } from "../lib/transferEngine";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+import { broadcastUserEvent } from "../sse.service";
+import { logger } from "../_core/logger";
 
 export const transferCoreRouter = router({
   /** Get a transfer quote (fee + FX rate) without executing */
@@ -64,7 +68,24 @@ export const transferCoreRouter = router({
       sourceOfFunds: z.string().min(1).max(100),
     }))
     .mutation(async ({ input, ctx }) => {
-      return executeTransfer({
+      // Pipeline: sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications
+      const transferRef = `CORE-${Date.now()}-${ctx.user.id}`;
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.amount,
+        fromCurrency: input.fromCurrency,
+        toCurrency: input.toCurrency,
+        recipientName: input.beneficiaryName,
+        recipientAccount: input.beneficiaryAccount,
+        rail: input.payoutMethod === "wallet" ? "internal" : "swift",
+        corridorCode: input.toCurrency.slice(0, 2),
+        featureLabel: "transfer_core",
+        transferId: transferRef,
+        description: `Transfer: ${input.amount} ${input.fromCurrency} to ${input.beneficiaryName} (${input.purpose})`,
+        metadata: { payoutMethod: input.payoutMethod, purpose: input.purpose, sourceOfFunds: input.sourceOfFunds },
+      });
+
+      const result = await executeTransfer({
         senderId: ctx.user.id,
         recipientId: input.recipientId,
         amount: input.amount,
@@ -77,6 +98,8 @@ export const transferCoreRouter = router({
         purpose: input.purpose,
         sourceOfFunds: input.sourceOfFunds,
       });
+
+      return { ...result, verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
   /** Track a transfer by reference ID */

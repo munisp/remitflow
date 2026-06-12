@@ -16,6 +16,7 @@ import { createAuditLog } from "../audit.service";
 import { notifyOwner } from "../_core/notification";
 import { canAccessDispute, grantTransactionAccess } from "../middleware/permify";
 import { logger } from '../_core/logger';
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 
 // ─── SMS helper (Africa's Talking real SDK or console fallback) ─────────────────────────────────
 async function sendDisputeSms(phone: string | null | undefined, message: string): Promise<void> {
@@ -121,6 +122,16 @@ const raiseDispute = protectedProcedure
     } catch {
       // Notification failure is non-blocking
     }
+
+    // Kafka event for dispute creation
+    publishEvent(KAFKA_TOPICS.TRANSACTIONS, `dispute:${disputeId}`, {
+      eventType: "transfer_dispute_opened",
+      userId: ctx.user.id,
+      disputeId,
+      transactionId: input.transactionId,
+      reason: input.reason,
+      timestamp: new Date().toISOString(),
+    }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[TransferDispute] Kafka event failed"));
 
     return { success: true, verified: true, disputeId, message: "Dispute submitted successfully. Our team will review within 2 business days." };
   });

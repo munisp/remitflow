@@ -6,6 +6,8 @@ import { getDb } from "../db";
 import { correspondentBanksV200 as correspondentBanks, correspondentSettlements } from "../../drizzle/schema";
 import { eq, desc } from "drizzle-orm";
 import { safeParseAmount } from "../lib/safeDecimal";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+import { logger } from "../_core/logger";
 
 const CORRESPONDENT_URL = process.env.CORRESPONDENT_MANAGER_URL ?? "http://go-correspondent-manager:8096";
 
@@ -84,6 +86,17 @@ export const correspondentBankRouter = router({
         status: "active",
         createdAt: new Date(),
       }).returning();
+      // Kafka event for correspondent bank creation
+      publishEvent(KAFKA_TOPICS.AUDIT_LOGS, `correspondent:add:${correspondentId}`, {
+        eventType: "correspondent_bank_added",
+        adminUserId: ctx.user.id,
+        correspondentId,
+        bankName: input.bankName,
+        swiftCode: input.swiftCode,
+        currency: input.currency,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[CorrespondentBank] Kafka event failed"));
+
       return { correspondentId, success: true, verified: true };
     }),
 
