@@ -3,9 +3,12 @@ import { createAuditLog } from "../audit.service";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
-import { diasporaProfiles, diasporaOfferClaims, transfers } from "../../drizzle/schema";
+import { diasporaProfiles, diasporaOfferClaims, transfers, users } from "../../drizzle/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { safeParseAmount } from "../lib/safeDecimal";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { logger } from "../_core/logger";
+import { KYC_TIER_LIMITS, type KycTier } from "../business-rules";
 
 const OUTBOUND_SWIFT_URL = process.env.OUTBOUND_SWIFT_URL ?? "http://go-outbound-swift:8090";
 
@@ -93,12 +96,49 @@ export const diasporaEURouter = router({
       recipientName: z.string().min(2).max(100),
       destinationCountry: euCountrySchema,
       reference: z.string().max(140).optional(),
+      totpCode: z.string().length(6).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       const transferId = `SEPA-${Date.now()}-${ctx.user.id}`;
       const isCanada = input.destinationCountry === "CA";
       const rail = isCanada ? "eft" : "sepa";
+      const foreignCurrency = isCanada ? "CAD" : "EUR";
+
+      // 2FA enforcement for high-value SEPA transfers (> €1,000)
+      if (input.amountEur > 1000) {
+        const [userRow] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+        if (userRow?.totpEnabled) {
+          if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: SEPA transfers over €1,000 require TOTP verification." });
+          const { verifyTOTP } = await import("../totp");
+          const valid = await verifyTOTP(input.totpCode, userRow.totpSecret ?? "");
+          if (!valid) throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code" });
+        }
+      }
+
+      // KYC tier limit enforcement
+      const [userForKyc] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+      const kycTier = (userForKyc?.kycTier ?? "tier0") as KycTier;
+      const limits = KYC_TIER_LIMITS[kycTier];
+      if (limits && input.amountEur > limits.perTx) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: `KYC Tier ${kycTier}: single transfer limit is €${limits.perTx}` });
+      }
+
+      // Execute unified transfer pipeline (sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications)
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.amountEur,
+        fromCurrency: foreignCurrency,
+        toCurrency: "NGN",
+        recipientName: input.recipientName,
+        recipientAccount: input.recipientIban,
+        rail,
+        corridorCode: input.destinationCountry,
+        featureLabel: "diaspora_eu",
+        transferId,
+        description: input.reference,
+        metadata: { recipientBic: input.recipientBic },
+      });
 
       await db.insert(transfers).values({
         userId: ctx.user.id,
@@ -107,7 +147,7 @@ export const diasporaEURouter = router({
         corridorCode: input.destinationCountry,
         amountNgn: (input.amountEur * 1750).toFixed(2),
         amountForeign: input.amountEur.toFixed(2),
-        foreignCurrency: isCanada ? "CAD" : "EUR",
+        foreignCurrency,
         recipientName: input.recipientName,
         recipientAccount: input.recipientIban,
         status: "pending",
@@ -120,6 +160,9 @@ export const diasporaEURouter = router({
         rail,
         estimatedSettlement: isCanada ? "1-3 business days" : "Instant",
         amountEur: input.amountEur,
+        verified: true,
+        fraudScore: pipelineResult.fraudScore,
+        tigerBeetleRecorded: pipelineResult.tigerBeetleRecorded,
       };
     }),
 

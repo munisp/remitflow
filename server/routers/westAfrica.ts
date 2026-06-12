@@ -3,9 +3,12 @@ import { createAuditLog } from "../audit.service";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
-import { westAfricaTransfers } from "../../drizzle/schema";
+import { westAfricaTransfers, users } from "../../drizzle/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { safeParseAmount } from "../lib/safeDecimal";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { logger } from "../_core/logger";
+import { KYC_TIER_LIMITS, type KycTier } from "../business-rules";
 
 const XOF_ADAPTER_URL = process.env.XOF_ADAPTER_URL ?? "http://go-xof-adapter:8095";
 
@@ -67,8 +70,35 @@ export const westAfricaRouter = router({
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
-      // Create local record first
       const transferId = `XOF-${Date.now()}-${ctx.user.id}`;
+
+      // KYC tier limit enforcement
+      const [userForKyc] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+      const kycTier = (userForKyc?.kycTier ?? "tier0") as KycTier;
+      const limits = KYC_TIER_LIMITS[kycTier];
+      const estimatedUsd = input.amountNgn / 1600;
+      if (limits && estimatedUsd > limits.perTx) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: `KYC Tier ${kycTier}: single transfer limit exceeded` });
+      }
+
+      // Execute unified transfer pipeline (sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications)
+      const corridorCurrency = input.corridorCode === "GH" ? "GHS" : "XOF";
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.amountNgn,
+        fromCurrency: "NGN",
+        toCurrency: corridorCurrency,
+        recipientName: input.recipientName,
+        recipientAccount: input.recipientMobileMoney,
+        rail: "mojaloop",
+        corridorCode: input.corridorCode,
+        featureLabel: "west_africa",
+        transferId,
+        description: `PAPSS/Mojaloop to ${input.corridorCode}`,
+        metadata: { mojaloopDfspId: input.mojaloopDfspId, purposeCode: input.purposeCode },
+      });
+
+      // Create local record
       await db.insert(westAfricaTransfers).values({
         transferId,
         userId: ctx.user.id,
@@ -99,7 +129,7 @@ export const westAfricaRouter = router({
         .set({ status: result.status ?? "processing", mojaloopTxnId: result.mojaloop_txn_id })
         .where(eq(westAfricaTransfers.transferId, transferId)).returning();
 
-      return { ...result, transferId };
+      return { ...result, transferId, verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
   getXofTransferHistory: protectedProcedure

@@ -21,6 +21,11 @@ import {
 // alias for cleaner code
 const bondSecondaryOrders = bondSecondaryMarketOrders;
 import { eq, and, desc, sql, lt, gte, inArray, ne } from "drizzle-orm";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+import { broadcastUserEvent } from "../sse.service";
+import { sendNotification } from "../notifications.service";
+import { logger } from "../_core/logger";
 
 // ─── Bond Pricing Engine (JS fallback — Rust engine called when available) ───
 
@@ -362,10 +367,28 @@ export const diasporaBondRouter = router({
         }).returning();
       }
 
+      // Pipeline: sanctions, fraud ML, velocity, TigerBeetle, Kafka, audit, notifications
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.amountUsd,
+        fromCurrency: "USD",
+        toCurrency: "USD",
+        recipientName: bond.issuerName ?? "Diaspora Bond Issuer",
+        rail: "internal",
+        corridorCode: "NG",
+        featureLabel: "diaspora_bond",
+        transferId: subscriptionRef,
+        description: `Bond subscription: ${bond.bondName} — ${units.toFixed(2)} units`,
+        metadata: { bondId: input.bondId, principalUsd: input.amountUsd, paymentSource: input.paymentSource },
+        skipVelocity: true,
+      });
+
       return {
         subscription: { ...subscription, status: input.paymentSource === "wallet" ? "active" : "pending_payment" },
         bond: { id: bond.id, name: bond.bondName, issuer: bond.issuerName },
         quote: { amountUsd: input.amountUsd, units, couponPerPeriod, platformFee, nextCouponDate: nextCoupon },
+        verified: true,
+        fraudScore: pipelineResult.fraudScore,
       };
     }),
 
@@ -734,12 +757,31 @@ export const diasporaBondRouter = router({
           .where(eq(bondSecondaryOrders.id, input.orderId));
       }
 
+      // Pipeline: sanctions, fraud, Kafka, audit, notifications for secondary market buy
+      const buyRef = `SEC-${order.order.orderRef}-${ctx.user.id}`;
+      const buyPipeline = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: totalWithFee,
+        fromCurrency: "USD",
+        toCurrency: "USD",
+        recipientName: `Bond Seller (User ${order.order.sellerUserId})`,
+        rail: "internal",
+        corridorCode: "NG",
+        featureLabel: "diaspora_bond_secondary",
+        transferId: buyRef,
+        description: `Secondary market buy: ${unitsToFill.toFixed(2)} units of bond ${order.order.bondId}`,
+        metadata: { orderId: input.orderId, askPrice: order.order.askPriceUsd },
+        skipVelocity: true,
+      });
+
       return {
         newSubscription: newSub,
         totalCost,
         platformFee,
         sellerProceeds,
         unitsAcquired: unitsToFill,
+        verified: true,
+        fraudScore: buyPipeline.fraudScore,
       };
     }),
 

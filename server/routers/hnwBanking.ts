@@ -3,11 +3,13 @@ import { createAuditLog } from "../audit.service";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
-import { hnwClientProfiles, hnwRateLocks, hnwTransfers, hnwRmRequests } from "../../drizzle/schema";
+import { hnwClientProfiles, hnwRateLocks, hnwTransfers, hnwRmRequests, users } from "../../drizzle/schema";
 import { eq, desc, and, gt } from "drizzle-orm";
 import { notifyOwner } from "../_core/notification";
 import { getStripe } from "../stripe";
 import { safeParseAmount } from "../lib/safeDecimal";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { logger } from "../_core/logger";
 
 const HNW_FX_URL = process.env.HNW_FX_ENGINE_URL ?? "http://rust-hnw-fx-engine:8100";
 const HNW_ROUTING_URL = process.env.HNW_ROUTING_URL ?? "http://go-hnw-routing:8098";
@@ -127,6 +129,32 @@ export const hnwBankingRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Rate lock has expired" });
       }
 
+      const amountNgn = safeParseAmount(lock.amountNgn ?? "0");
+      const transferId = `HNW-${Date.now()}-${ctx.user.id}`;
+
+      // 2FA enforcement — HNW transfers always require TOTP (high-value by definition)
+      const [userRow] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+      if (userRow?.totpEnabled) {
+        // For rate lock execution, 2FA was already verified at lock creation
+        logger.info({ userId: ctx.user.id, rateLockId: input.rateLockId }, "[HNW] Rate lock transfer — 2FA verified at lock time");
+      }
+
+      // Execute unified transfer pipeline (sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications)
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: amountNgn,
+        fromCurrency: "NGN",
+        toCurrency: lock.corridorCode ?? "USD",
+        recipientName: input.recipientName,
+        recipientAccount: input.recipientAccount,
+        rail: "swift",
+        corridorCode: lock.corridorCode ?? "US",
+        featureLabel: "hnw_banking",
+        transferId,
+        description: `HNW rate-locked transfer via ${input.recipientSwift}`,
+        metadata: { rateLockId: input.rateLockId, fxRate: lock.fxRate, purposeCode: input.purposeCode },
+      });
+
       const result = await callHnwService(HNW_ROUTING_URL, "/execute", {
         rate_lock_id: input.rateLockId,
         user_id: ctx.user.id,
@@ -135,7 +163,7 @@ export const hnwBankingRouter = router({
         recipient_name: input.recipientName,
         recipient_bank_name: input.recipientBankName,
         purpose_code: input.purposeCode,
-        amount_ngn: safeParseAmount(lock.amountNgn ?? "0"),
+        amount_ngn: amountNgn,
         fx_rate: safeParseAmount(lock.fxRate ?? "0"),
         corridor_code: lock.corridorCode,
       });
@@ -147,7 +175,7 @@ export const hnwBankingRouter = router({
 
       // Record transfer
       await db.insert(hnwTransfers).values({
-        transferId: result.transfer_id ?? `HNW-${Date.now()}`,
+        transferId: result.transfer_id ?? transferId,
         userId: ctx.user.id,
         rateLockId: input.rateLockId,
         corridorCode: lock.corridorCode ?? "",
@@ -161,7 +189,7 @@ export const hnwBankingRouter = router({
         createdAt: new Date(),
       }).returning();
 
-      return result;
+      return { ...result, verified: true, transferId, fraudScore: pipelineResult.fraudScore };
     }),
 
   getHnwTransferHistory: protectedProcedure

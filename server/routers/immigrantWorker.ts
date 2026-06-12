@@ -6,6 +6,8 @@ import { getDb } from "../db";
 import { immigrantWorkerKyc } from "../../drizzle/schema";
 import { eq } from "drizzle-orm";
 import { safeParseAmount } from "../lib/safeDecimal";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { logger } from "../_core/logger";
 
 const KYC_SERVICE_URL = process.env.IMMIGRANT_WORKER_KYC_URL ?? "http://rust-immigrant-worker-kyc:8099";
 const XOF_ADAPTER_URL = process.env.XOF_ADAPTER_URL ?? "http://go-xof-adapter:8095";
@@ -161,12 +163,31 @@ export const immigrantWorkerRouter = router({
         });
       }
 
+      const transferId = `WRK-${Date.now()}-${ctx.user.id}`;
+      const corridorCurrency = input.corridorCode === "GH" ? "GHS" : "XOF";
+
+      // Execute unified transfer pipeline (sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications)
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.amountNgn,
+        fromCurrency: "NGN",
+        toCurrency: corridorCurrency,
+        recipientName: input.recipientName,
+        recipientAccount: input.recipientMobileMoney,
+        rail: "mojaloop",
+        corridorCode: input.corridorCode,
+        featureLabel: "immigrant_worker",
+        transferId,
+        description: `Worker remittance to ${input.corridorCode}`,
+        metadata: { mojaloopDfspId: input.mojaloopDfspId, kycTier: limitCheck.kyc_tier },
+      });
+
       // Submit via XOF adapter
       const res = await fetch(`${XOF_ADAPTER_URL}/submit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          transfer_id: `WRK-${Date.now()}-${ctx.user.id}`,
+          transfer_id: transferId,
           corridor_code: input.corridorCode,
           amount_ngn: input.amountNgn,
           recipient_mobile_money: input.recipientMobileMoney,
@@ -201,6 +222,6 @@ export const immigrantWorkerRouter = router({
           .where(eq(immigrantWorkerKyc.userId, ctx.user.id)).returning();
       }
 
-      return result;
+      return { ...result, verified: true, transferId, fraudScore: pipelineResult.fraudScore };
     }),
 });

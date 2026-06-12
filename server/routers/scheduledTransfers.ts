@@ -10,6 +10,9 @@ import { scheduledTransfers, scheduledTransferRuns } from "../../drizzle/schema.
 import { eq, and, desc, gte } from "drizzle-orm";
 import { sendEmail } from "../email.service.js";
 import { TRPCError } from "@trpc/server";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { broadcastUserEvent } from "../sse.service.js";
+import { logger } from "../_core/logger.js";
 
 const frequencyEnum = z.enum(["once", "daily", "weekly", "biweekly", "monthly"]);
 
@@ -50,6 +53,30 @@ export const scheduledTransfersV117Router = router({
           promoCode: input.promoCode ?? null,
         })
         .returning();
+
+      // Kafka event for scheduled transfer creation
+      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `scheduled:${row.id}`, {
+        eventType: "scheduled_transfer_created",
+        userId: ctx.user.id,
+        amount: input.amount,
+        fromCurrency: input.fromCurrency,
+        toCurrency: input.toCurrency,
+        frequency: input.frequency,
+        startDate: input.startDate,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[ScheduledTransfers] Kafka event failed"));
+
+      // Push notification
+      broadcastUserEvent(ctx.user.id, {
+        type: "transfer_sent",
+        payload: {
+          title: "Scheduled Transfer Created",
+          message: `${input.fromCurrency} ${input.amount} → ${input.toCurrency} (${input.frequency}) starting ${new Date(input.startDate).toLocaleDateString()}`,
+          amount: input.amount,
+          fromCurrency: input.fromCurrency,
+          toCurrency: input.toCurrency,
+        },
+      });
 
       // Send confirmation email
       const user = ctx.user as { email?: string; name?: string };
