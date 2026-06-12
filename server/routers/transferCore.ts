@@ -82,6 +82,7 @@ export const transferCoreRouter = router({
         featureLabel: "transfer_core",
         transferId: transferRef,
         description: `Transfer: ${input.amount} ${input.fromCurrency} to ${input.beneficiaryName} (${input.purpose})`,
+        skipVelocity: true, // transfer engine handles its own rate limiting
         metadata: { payoutMethod: input.payoutMethod, purpose: input.purpose, sourceOfFunds: input.sourceOfFunds },
       });
 

@@ -13,6 +13,9 @@ import { TRPCError } from "@trpc/server";
 import { sql, eq, desc, and, gte, lte, like, or, inArray } from "drizzle-orm";
 import { users } from "../../drizzle/schema";
 import crypto, { randomBytes } from "crypto";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+import { broadcastUserEvent } from "../sse.service";
+import { logger } from "../_core/logger";
 
 // ─── Helper: get user by openId ───────────────────────────────────────────────
 async function getDb() {
@@ -99,6 +102,22 @@ export const billsRouter = router({
         INSERT INTO bill_payments (user_id, biller_id, biller_name, category, account_number, amount_ngn, amount_usd, status, provider_ref)
         VALUES (${user.id}, ${input.billerId}, ${input.billerName}, ${input.category}, ${input.accountNumber}, ${input.amountNgn}, ${amountUsd}, 'completed', ${ref})
       `);
+      // Kafka event for bill payment
+      publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `bill:${ref}`, {
+        eventType: "bill_payment_completed",
+        userId: user.id,
+        billerId: input.billerId,
+        amountNgn: input.amountNgn,
+        category: input.category,
+        reference: ref,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[BillPay] Kafka event failed"));
+
+      broadcastUserEvent(user.id, {
+        type: "transfer_sent",
+        payload: { title: "Bill Paid", message: `₦${input.amountNgn.toLocaleString()} to ${input.billerName}`, amount: input.amountNgn },
+      });
+
       return { success: true, verified: true, reference: ref, message: `${input.billerName} payment of ₦${input.amountNgn.toLocaleString()} successful` };
     }),
 
@@ -171,6 +190,18 @@ export const airtimeRouter = router({
         INSERT INTO airtime_purchases (user_id, network, phone_number, purchase_type, data_plan, amount_ngn, amount_usd, status, provider_ref)
         VALUES (${user.id}, ${input.network}, ${input.phoneNumber}, ${input.purchaseType}, ${input.dataPlan ?? null}, ${input.amountNgn}, ${input.amountNgn / 1600}, 'completed', ${ref})
       `);
+      // Kafka event for airtime/data purchase
+      publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `airtime:${ref}`, {
+        eventType: "airtime_purchase_completed",
+        userId: user.id,
+        network: input.network,
+        phoneNumber: input.phoneNumber,
+        purchaseType: input.purchaseType,
+        amountNgn: input.amountNgn,
+        reference: ref,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Airtime] Kafka event failed"));
+
       return { success: true, verified: true, reference: ref, message: `${input.purchaseType === "airtime" ? "Airtime" : "Data"} of ₦${input.amountNgn.toLocaleString()} sent to ${input.phoneNumber}` };
     }),
 
@@ -277,6 +308,20 @@ export const cardsRouter = router({
         INSERT INTO card_transactions (card_id, user_id, merchant_name, amount, currency, transaction_type, status)
         VALUES (${input.cardId}, ${user.id}, 'Wallet Top-up', ${input.amountUsd}, 'USD', 'topup', 'completed')
       `);
+      // Kafka event for virtual card topup
+      publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `card-topup:${input.cardId}:${Date.now()}`, {
+        eventType: "virtual_card_topup",
+        userId: user.id,
+        cardId: input.cardId,
+        amountUsd: input.amountUsd,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[VirtualCard] Kafka event failed"));
+
+      broadcastUserEvent(user.id, {
+        type: "transfer_sent",
+        payload: { title: "Card Topped Up", message: `$${input.amountUsd} added to virtual card`, amount: input.amountUsd },
+      });
+
       return { success: true, verified: true, message: `$${input.amountUsd} added to card` };
     }),
 
@@ -403,6 +448,20 @@ export const bnplFullRouter = router({
         UPDATE bnpl_installments SET status = 'paid', paid_at = NOW()
         WHERE id = ${input.installmentId} AND user_id = ${user.id} AND status IN ('pending', 'overdue')
       `);
+      // Kafka event for BNPL installment payment
+      publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `bnpl:${input.installmentId}:${Date.now()}`, {
+        eventType: "bnpl_installment_paid",
+        userId: user.id,
+        installmentId: input.installmentId,
+        amountNgn: amount,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[BNPL] Kafka event failed"));
+
+      broadcastUserEvent(user.id, {
+        type: "transfer_sent",
+        payload: { title: "BNPL Installment Paid", message: `₦${amount.toLocaleString()} installment paid`, amount },
+      });
+
       return { success: true, verified: true, message: "Installment paid successfully", amountDebited: amount };
     }),
 });

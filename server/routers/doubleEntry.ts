@@ -17,6 +17,7 @@ import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
 import { getDb, createAuditLog } from "../db";
 import { sql } from "drizzle-orm";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 
 function generateEntryId(): string {
   return `le_${Date.now()}_${randomBytes(4).toString("hex")}`;
@@ -90,6 +91,16 @@ export const doubleEntryRouter = router({
       logger.info({
         transactionId: input.transactionId, entryCount: entries.length, totalDebits, totalCredits,
       }, "Balanced transaction recorded");
+
+      // Kafka event for ledger entry recording
+      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `ledger:${input.transactionId}`, {
+        eventType: "double_entry_recorded",
+        transactionId: input.transactionId,
+        entryCount: entries.length,
+        totalDebits,
+        totalCredits,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[DoubleEntry] Kafka event failed"));
 
       return { success: true, verified: true, transactionId: input.transactionId, entryCount: entries.length, totalDebits, totalCredits };
     }),

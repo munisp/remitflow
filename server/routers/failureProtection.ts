@@ -22,6 +22,8 @@ import {
 } from "../../drizzle/schema";
 import { logger } from "../_core/logger.js";
 import { randomBytes } from "crypto";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+import { broadcastUserEvent } from "../sse.service";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -367,6 +369,17 @@ export const transferProtectionRouter = router({
     }
 
     await createAuditLog({ userId: ctx.user.id, action: "STUCK_TRANSFER_AUTO_REFUND", metadata: { refunded } });
+
+    // Kafka event for batch auto-refund
+    if (refunded > 0) {
+      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `auto-refund:batch:${Date.now()}`, {
+        eventType: "stuck_transfers_auto_refunded",
+        adminUserId: ctx.user.id,
+        refundedCount: refunded,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[FailureProtection] Kafka event failed"));
+    }
+
     return { refunded };
   }),
 
