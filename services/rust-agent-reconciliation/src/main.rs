@@ -492,6 +492,15 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 
 #[tokio::main]
 async fn main() {
+    // Panic hook for logging panics without crashing silently
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
     let _db_pool = init_db().await;
     eprintln!("[DB] PostgreSQL connected for rust-agent-reconciliation");
 
@@ -553,6 +562,11 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(addr).await
         .expect("Failed to bind TCP listener");
-    axum::serve(listener, app).await
-        .expect("Server failed to start");
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Graceful shutdown initiated (SIGINT/SIGTERM)");
+        });
+    info!("rust-agent-reconciliation accepting connections");
+    server.await.expect("Server failed to start");
 }

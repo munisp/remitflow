@@ -18,6 +18,14 @@ use std::net::TcpListener;
 
 // Simplified HTTP server (no external deps for demo)
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
     eprintln!("[rust-pq-crypto] Starting with PostgreSQL persistence");
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "9010".to_string());
@@ -451,8 +459,16 @@ fn http_response(status: u16, body: &str) -> String {
     let status_text = match status {
         200 => "OK", 400 => "Bad Request", 404 => "Not Found", 500 => "Internal Server Error", _ => "OK"
     };
-    format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
-        status, status_text, body.len(), body)
+    let origin = std::env::var("CORS_ALLOWED_ORIGIN").unwrap_or_default();
+    let cors_header = if !origin.is_empty() {
+        format!("Access-Control-Allow-Origin: {}", origin)
+    } else if std::env::var("NODE_ENV").unwrap_or_default() != "production" {
+        "Access-Control-Allow-Origin: *".to_string()
+    } else {
+        String::new()
+    };
+    format!("HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n\r\n{}",
+        status, status_text, body.len(), cors_header, body)
 }
 
 fn extract_json_string(json: &str, key: &str) -> Option<String> {

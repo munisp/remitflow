@@ -19,6 +19,7 @@ import uuid
 import logging
 import math
 import re
+import signal
 import http.server
 import socketserver
 import urllib.parse
@@ -958,6 +959,12 @@ class ComplianceHandler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     with socketserver.ThreadingTCPServer(("0.0.0.0", PORT), ComplianceHandler) as server:
+        def _handle_shutdown(signum, frame):
+            logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+            server.shutdown()
+        signal.signal(signal.SIGTERM, _handle_shutdown)
+        signal.signal(signal.SIGINT, _handle_shutdown)
+
         logger.info(f"Compliance Engine starting on :{PORT}")
         try:
             server.serve_forever()

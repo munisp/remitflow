@@ -473,6 +473,14 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
     let _pool = init_db().await;
     let port = std::env::var("PORT").unwrap_or_else(|_| "8088".to_string());
     let addr = format!("0.0.0.0:{}", port);

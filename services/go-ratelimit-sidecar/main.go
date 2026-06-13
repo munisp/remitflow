@@ -37,6 +37,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"os/signal"
+	"syscall"
 )
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -68,7 +70,19 @@ func initRedis() {
 	redisOnce.Do(func() {
 		opt, err := redis.ParseURL(redisURL)
 		if err != nil {
-			log.Printf("[Redis] Failed to parse URL: %v — running in-memory fallback", err)
+			sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Printf("[Redis] Graceful shutdown initiated...")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[Redis] Shutdown error: %v", err)
+		}
+	}()
+
+	log.Printf("[Redis] Failed to parse URL: %v — running in-memory fallback", err)
 			return
 		}
 		rdb = redis.NewClient(opt)
@@ -192,32 +206,536 @@ func handleRateLimitCheck(w http.ResponseWriter, r *http.Request) {
 var validationSchemas = map[string][]FieldRule{
 	"transfer.create": {
 		{Field: "amount", Type: "number", Required: true, Min: 0.01, Max: 1000000},
-		{Field: "fromCurrency", Type: "string", Required: true, Pattern: `^[A-Z]{3}$`},
-		{Field: "toCurrency", Type: "string", Required: true, Pattern: `^[A-Z]{3}$`},
+		{Field: "fromCurrency", Type: "string", Required: true, Pattern: `^[A-Z]{3}// RemitFlow — Go Rate-Limit & Input Validation Sidecar
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP sidecar that provides:
+//   1. Sliding-window rate limiting (per user, per IP, per route)
+//   2. Input validation (schema-based, Zod-compatible error format)
+//   3. Idempotency key management (Redis-backed)
+//   4. Health & metrics endpoints
+//
+// Port: 8081 (configurable via PORT env var)
+// Redis: REDIS_URL env var (default: redis://localhost:6379)
+//
+// API:
+//   POST /ratelimit/check   — check + increment rate limit
+//   POST /validate          — validate input against a named schema
+//   POST /idempotency/check — check if idempotency key exists
+//   POST /idempotency/store — store idempotency result
+//   GET  /health            — health check
+//   GET  /metrics           — Prometheus-compatible metrics
+
+package main
+
+import (
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"os/signal"
+	"syscall"
+)
+
+// ── Configuration ─────────────────────────────────────────────────────────────
+
+
+var db *sql.DB
+
+var (
+	port     = getEnv("PORT", "8081")
+	redisURL = getEnv("REDIS_URL", "redis://localhost:6379")
+)
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ── Redis Client ──────────────────────────────────────────────────────────────
+
+var (
+	rdb         *redis.Client
+	redisOnce   sync.Once
+	redisAvail  atomic.Bool
+)
+
+func initRedis() {
+	redisOnce.Do(func() {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			},
+		{Field: "toCurrency", Type: "string", Required: true, Pattern: `^[A-Z]{3}// RemitFlow — Go Rate-Limit & Input Validation Sidecar
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP sidecar that provides:
+//   1. Sliding-window rate limiting (per user, per IP, per route)
+//   2. Input validation (schema-based, Zod-compatible error format)
+//   3. Idempotency key management (Redis-backed)
+//   4. Health & metrics endpoints
+//
+// Port: 8081 (configurable via PORT env var)
+// Redis: REDIS_URL env var (default: redis://localhost:6379)
+//
+// API:
+//   POST /ratelimit/check   — check + increment rate limit
+//   POST /validate          — validate input against a named schema
+//   POST /idempotency/check — check if idempotency key exists
+//   POST /idempotency/store — store idempotency result
+//   GET  /health            — health check
+//   GET  /metrics           — Prometheus-compatible metrics
+
+package main
+
+import (
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"os/signal"
+	"syscall"
+)
+
+// ── Configuration ─────────────────────────────────────────────────────────────
+
+
+var db *sql.DB
+
+var (
+	port     = getEnv("PORT", "8081")
+	redisURL = getEnv("REDIS_URL", "redis://localhost:6379")
+)
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ── Redis Client ──────────────────────────────────────────────────────────────
+
+var (
+	rdb         *redis.Client
+	redisOnce   sync.Once
+	redisAvail  atomic.Bool
+)
+
+func initRedis() {
+	redisOnce.Do(func() {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			},
 		{Field: "beneficiaryId", Type: "number", Required: true, Min: 1},
 		{Field: "idempotencyKey", Type: "string", Required: false, MaxLen: 128},
 	},
 	"kyc.submit": {
 		{Field: "documentType", Type: "string", Required: true, Enum: []string{"passport", "national_id", "drivers_license", "residence_permit"}},
 		{Field: "documentNumber", Type: "string", Required: true, MinLen: 5, MaxLen: 50},
-		{Field: "dateOfBirth", Type: "string", Required: true, Pattern: `^\d{4}-\d{2}-\d{2}$`},
-		{Field: "nationality", Type: "string", Required: true, Pattern: `^[A-Z]{2}$`},
+		{Field: "dateOfBirth", Type: "string", Required: true, Pattern: `^\d{4}-\d{2}-\d{2}// RemitFlow — Go Rate-Limit & Input Validation Sidecar
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP sidecar that provides:
+//   1. Sliding-window rate limiting (per user, per IP, per route)
+//   2. Input validation (schema-based, Zod-compatible error format)
+//   3. Idempotency key management (Redis-backed)
+//   4. Health & metrics endpoints
+//
+// Port: 8081 (configurable via PORT env var)
+// Redis: REDIS_URL env var (default: redis://localhost:6379)
+//
+// API:
+//   POST /ratelimit/check   — check + increment rate limit
+//   POST /validate          — validate input against a named schema
+//   POST /idempotency/check — check if idempotency key exists
+//   POST /idempotency/store — store idempotency result
+//   GET  /health            — health check
+//   GET  /metrics           — Prometheus-compatible metrics
+
+package main
+
+import (
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"os/signal"
+	"syscall"
+)
+
+// ── Configuration ─────────────────────────────────────────────────────────────
+
+
+var db *sql.DB
+
+var (
+	port     = getEnv("PORT", "8081")
+	redisURL = getEnv("REDIS_URL", "redis://localhost:6379")
+)
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ── Redis Client ──────────────────────────────────────────────────────────────
+
+var (
+	rdb         *redis.Client
+	redisOnce   sync.Once
+	redisAvail  atomic.Bool
+)
+
+func initRedis() {
+	redisOnce.Do(func() {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			},
+		{Field: "nationality", Type: "string", Required: true, Pattern: `^[A-Z]{2}// RemitFlow — Go Rate-Limit & Input Validation Sidecar
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP sidecar that provides:
+//   1. Sliding-window rate limiting (per user, per IP, per route)
+//   2. Input validation (schema-based, Zod-compatible error format)
+//   3. Idempotency key management (Redis-backed)
+//   4. Health & metrics endpoints
+//
+// Port: 8081 (configurable via PORT env var)
+// Redis: REDIS_URL env var (default: redis://localhost:6379)
+//
+// API:
+//   POST /ratelimit/check   — check + increment rate limit
+//   POST /validate          — validate input against a named schema
+//   POST /idempotency/check — check if idempotency key exists
+//   POST /idempotency/store — store idempotency result
+//   GET  /health            — health check
+//   GET  /metrics           — Prometheus-compatible metrics
+
+package main
+
+import (
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"os/signal"
+	"syscall"
+)
+
+// ── Configuration ─────────────────────────────────────────────────────────────
+
+
+var db *sql.DB
+
+var (
+	port     = getEnv("PORT", "8081")
+	redisURL = getEnv("REDIS_URL", "redis://localhost:6379")
+)
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ── Redis Client ──────────────────────────────────────────────────────────────
+
+var (
+	rdb         *redis.Client
+	redisOnce   sync.Once
+	redisAvail  atomic.Bool
+)
+
+func initRedis() {
+	redisOnce.Do(func() {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			},
 	},
 	"beneficiary.create": {
 		{Field: "name", Type: "string", Required: true, MinLen: 2, MaxLen: 100},
 		{Field: "accountNumber", Type: "string", Required: true, MinLen: 5, MaxLen: 50},
 		{Field: "bankCode", Type: "string", Required: false, MaxLen: 20},
-		{Field: "country", Type: "string", Required: true, Pattern: `^[A-Z]{2}$`},
+		{Field: "country", Type: "string", Required: true, Pattern: `^[A-Z]{2}// RemitFlow — Go Rate-Limit & Input Validation Sidecar
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP sidecar that provides:
+//   1. Sliding-window rate limiting (per user, per IP, per route)
+//   2. Input validation (schema-based, Zod-compatible error format)
+//   3. Idempotency key management (Redis-backed)
+//   4. Health & metrics endpoints
+//
+// Port: 8081 (configurable via PORT env var)
+// Redis: REDIS_URL env var (default: redis://localhost:6379)
+//
+// API:
+//   POST /ratelimit/check   — check + increment rate limit
+//   POST /validate          — validate input against a named schema
+//   POST /idempotency/check — check if idempotency key exists
+//   POST /idempotency/store — store idempotency result
+//   GET  /health            — health check
+//   GET  /metrics           — Prometheus-compatible metrics
+
+package main
+
+import (
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"os/signal"
+	"syscall"
+)
+
+// ── Configuration ─────────────────────────────────────────────────────────────
+
+
+var db *sql.DB
+
+var (
+	port     = getEnv("PORT", "8081")
+	redisURL = getEnv("REDIS_URL", "redis://localhost:6379")
+)
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ── Redis Client ──────────────────────────────────────────────────────────────
+
+var (
+	rdb         *redis.Client
+	redisOnce   sync.Once
+	redisAvail  atomic.Bool
+)
+
+func initRedis() {
+	redisOnce.Do(func() {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			},
 	},
 	"wallet.withdraw": {
 		{Field: "amount", Type: "number", Required: true, Min: 0.01, Max: 500000},
-		{Field: "currency", Type: "string", Required: true, Pattern: `^[A-Z]{3}$`},
+		{Field: "currency", Type: "string", Required: true, Pattern: `^[A-Z]{3}// RemitFlow — Go Rate-Limit & Input Validation Sidecar
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP sidecar that provides:
+//   1. Sliding-window rate limiting (per user, per IP, per route)
+//   2. Input validation (schema-based, Zod-compatible error format)
+//   3. Idempotency key management (Redis-backed)
+//   4. Health & metrics endpoints
+//
+// Port: 8081 (configurable via PORT env var)
+// Redis: REDIS_URL env var (default: redis://localhost:6379)
+//
+// API:
+//   POST /ratelimit/check   — check + increment rate limit
+//   POST /validate          — validate input against a named schema
+//   POST /idempotency/check — check if idempotency key exists
+//   POST /idempotency/store — store idempotency result
+//   GET  /health            — health check
+//   GET  /metrics           — Prometheus-compatible metrics
+
+package main
+
+import (
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"os/signal"
+	"syscall"
+)
+
+// ── Configuration ─────────────────────────────────────────────────────────────
+
+
+var db *sql.DB
+
+var (
+	port     = getEnv("PORT", "8081")
+	redisURL = getEnv("REDIS_URL", "redis://localhost:6379")
+)
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ── Redis Client ──────────────────────────────────────────────────────────────
+
+var (
+	rdb         *redis.Client
+	redisOnce   sync.Once
+	redisAvail  atomic.Bool
+)
+
+func initRedis() {
+	redisOnce.Do(func() {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			},
 		{Field: "destinationAccount", Type: "string", Required: true, MinLen: 5},
 		{Field: "idempotencyKey", Type: "string", Required: true, MaxLen: 128},
 	},
 	"payment.initiate": {
 		{Field: "amount", Type: "number", Required: true, Min: 0.50},
-		{Field: "currency", Type: "string", Required: true, Pattern: `^[A-Z]{3}$`},
+		{Field: "currency", Type: "string", Required: true, Pattern: `^[A-Z]{3}// RemitFlow — Go Rate-Limit & Input Validation Sidecar
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP sidecar that provides:
+//   1. Sliding-window rate limiting (per user, per IP, per route)
+//   2. Input validation (schema-based, Zod-compatible error format)
+//   3. Idempotency key management (Redis-backed)
+//   4. Health & metrics endpoints
+//
+// Port: 8081 (configurable via PORT env var)
+// Redis: REDIS_URL env var (default: redis://localhost:6379)
+//
+// API:
+//   POST /ratelimit/check   — check + increment rate limit
+//   POST /validate          — validate input against a named schema
+//   POST /idempotency/check — check if idempotency key exists
+//   POST /idempotency/store — store idempotency result
+//   GET  /health            — health check
+//   GET  /metrics           — Prometheus-compatible metrics
+
+package main
+
+import (
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+	"os/signal"
+	"syscall"
+)
+
+// ── Configuration ─────────────────────────────────────────────────────────────
+
+
+var db *sql.DB
+
+var (
+	port     = getEnv("PORT", "8081")
+	redisURL = getEnv("REDIS_URL", "redis://localhost:6379")
+)
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// ── Redis Client ──────────────────────────────────────────────────────────────
+
+var (
+	rdb         *redis.Client
+	redisOnce   sync.Once
+	redisAvail  atomic.Bool
+)
+
+func initRedis() {
+	redisOnce.Do(func() {
+		opt, err := redis.ParseURL(redisURL)
+		if err != nil {
+			},
 		{Field: "description", Type: "string", Required: false, MaxLen: 255},
 		{Field: "idempotencyKey", Type: "string", Required: true, MaxLen: 128},
 	},
@@ -513,9 +1031,23 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+func getAllowedOrigin(r *http.Request) string {
+	if origin := os.Getenv("CORS_ALLOWED_ORIGIN"); origin != "" {
+		return origin
+	}
+	if os.Getenv("NODE_ENV") != "production" {
+		if reqOrigin := r.Header.Get("Origin"); reqOrigin != "" {
+			return reqOrigin
+		}
+	}
+	return ""
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if origin := getAllowedOrigin(r); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
@@ -636,6 +1168,19 @@ func loadFromDB() {
 	slog.Info("loaded persisted state from database", "records", len(rows))
 }
 
+// panicRecoveryMiddleware catches panics and returns 500 instead of crashing
+func panicRecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[PANIC] %v", err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	if err := initDB(); err != nil {
 		slog.Warn("database init failed, using in-memory fallback", "err", err)
@@ -667,4 +1212,5 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("[RemitFlow] Server error: %v", err)
 	}
+	log.Printf("[Redis] Server stopped")
 }

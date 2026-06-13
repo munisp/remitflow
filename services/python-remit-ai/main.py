@@ -34,6 +34,8 @@ from pydantic import BaseModel, Field
 import psycopg2
 import psycopg2.extras
 from contextlib import contextmanager
+import signal
+import atexit
 
 _DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
 _db_pool = None
@@ -106,6 +108,22 @@ logger = logging.getLogger("remit-ai")
 PORT = int(os.getenv("PORT", "8136"))
 
 app = FastAPI(title="RemitAI NLU Service", version="1.0.0")
+
+# Graceful shutdown handling
+_shutdown_flag = False
+
+def _handle_shutdown(signum, frame):
+    global _shutdown_flag
+    _shutdown_flag = True
+    logging.getLogger("python-remit-ai").info(f"Received signal {signum}, initiating graceful shutdown...")
+
+signal.signal(signal.SIGTERM, _handle_shutdown)
+signal.signal(signal.SIGINT, _handle_shutdown)
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    logging.getLogger("python-remit-ai").info("FastAPI shutdown event — cleaning up resources")
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ─── Intent Patterns ──────────────────────────────────────────────────────────

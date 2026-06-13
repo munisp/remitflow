@@ -17,6 +17,8 @@ import (
 	"database/sql"
 	"log/slog"
 	_ "github.com/lib/pq"
+	"os/signal"
+	"syscall"
 )
 
 var (
@@ -435,6 +437,19 @@ func dbLogEvent(eventType string, payload interface{}) error {
 }
 // ── End PostgreSQL Layer ─────────────────────────────────────────────────────
 
+// panicRecoveryMiddleware catches panics and returns 500 instead of crashing
+func panicRecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[PANIC] %v", err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	if err := initDB(); err != nil {
 		slog.Warn("PostgreSQL init failed, using in-memory fallback", "err", err)
@@ -447,8 +462,29 @@ func main() {
 	mux.HandleFunc("/transfer", handleTransfer)
 	mux.HandleFunc("/corridors", handleCorridors)
 	addr := fmt.Sprintf(":%s", port)
-	log.Printf("[go-xof-adapter] Starting on %s | Corridors: %d", addr, len(corridorRegistry))
-	if err := http.ListenAndServe(":"+port, authMiddleware(mux)); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      panicRecoveryMiddleware(authMiddleware(mux)),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("[go-xof-adapter] Graceful shutdown initiated...")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[go-xof-adapter] Shutdown error: %v", err)
+		}
+	}()
+
+	log.Printf("[go-xof-adapter] Listening on %s | Corridors: %d", addr, len(corridorRegistry))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("[go-xof-adapter] Server error: %v", err)
+	}
+	log.Println("[go-xof-adapter] Server stopped")
 }

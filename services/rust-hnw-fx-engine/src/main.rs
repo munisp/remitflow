@@ -279,6 +279,15 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // Panic hook for logging panics without crashing silently
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
     let _pool = init_db().await;
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8100".to_string())
@@ -323,6 +332,14 @@ async fn main() -> std::io::Result<()> {
     let routes = health_route.or(protected);
 
     println!("[rust-hnw-fx-engine] Starting on :{}", port);
-    warp::serve(routes).run(([0, 0, 0, 0], port)).await;
+    let (addr, server) = warp::serve(routes).bind_with_graceful_shutdown(
+        ([0, 0, 0, 0], port),
+        async {
+            tokio::signal::ctrl_c().await.ok();
+            eprintln!("[rust-hnw-fx-engine] Graceful shutdown initiated");
+        },
+    );
+    eprintln!("[rust-hnw-fx-engine] Listening on {}", addr);
+    server.await;
     Ok(())
 }

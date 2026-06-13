@@ -537,6 +537,22 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Graceful shutdown handling
+_shutdown_flag = False
+
+def _handle_shutdown(signum, frame):
+    global _shutdown_flag
+    _shutdown_flag = True
+    logging.getLogger("python-deepfake-detector").info(f"Received signal {signum}, initiating graceful shutdown...")
+
+signal.signal(signal.SIGTERM, _handle_shutdown)
+signal.signal(signal.SIGINT, _handle_shutdown)
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    logging.getLogger("python-deepfake-detector").info("FastAPI shutdown event — cleaning up resources")
+
+
 # Initialize PostgreSQL tables (middleware-ready)
 _db_ensure_tables("deepfake_detector")
 
@@ -665,6 +681,8 @@ if __name__ == "__main__":
 # ─── PostgreSQL Persistence (middleware-ready: swap to TigerBeetle/Kafka in production) ───
 import psycopg2
 import json as _json
+import signal
+import atexit
 
 def _get_db_conn():
     """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""

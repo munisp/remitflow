@@ -383,6 +383,14 @@ fn handle_request(req: RpcRequest) -> RpcResponse {
 }
 
 fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
     eprintln!("[P2P Engine Rust] Ready — stdin/stdout JSON-RPC");
     eprintln!("[P2P Engine Rust] Methods: ilp_stream, fraud_graph, qr_generate, escrow_transition");
 

@@ -20,6 +20,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"os/signal"
+	"syscall"
+	"context"
 )
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -521,23 +524,34 @@ func loadFromDB() {
 	slog.Info("loaded persisted state from database", "records", len(rows))
 }
 
-func main() {
-	if err := initDB(); err != nil {
-		slog.Warn("database init failed, using in-memory fallback", "err", err)
+// panicRecoveryMiddleware catches panics and returns 500 instead of crashing
+func panicRecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				srv := &http.Server{
+		Addr:         addr,
+		Handler:      panicRecoveryMiddleware(mux),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/rate-limit/check", rateLimitCheckHandler)
-	mux.HandleFunc("/attack/scan", attackScanHandler)
-	mux.HandleFunc("/fraud/check", fraudCheckHandler)
-	mux.HandleFunc("/ddos/status", ddosProtectionHandler)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Printf("[PANIC] Graceful shutdown initiated...")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[PANIC] Shutdown error: %v", err)
+		}
+	}()
 
-	addr := ":" + port
-	log.Printf("[go-security-hardening] Starting on %s", addr)
-	log.Printf("[go-security-hardening] Rate limit: %d req/min, burst: %d", maxRequestsMin, maxBurstSize)
-	log.Printf("[go-security-hardening] Attack patterns loaded: %d", len(knownAttackPatterns))
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	log.Printf("[PANIC] Listening on %s", addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("[PANIC] Server error: %v", err)
 	}
+	log.Printf("[PANIC] Server stopped")
 }

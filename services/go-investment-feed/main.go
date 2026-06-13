@@ -18,6 +18,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"os/signal"
+	"syscall"
+	"context"
 )
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -171,9 +174,23 @@ func simulatePriceUpdates() {
 
 // ─── HTTP Handlers ────────────────────────────────────────────────────────────
 
+func getAllowedOrigin(r *http.Request) string {
+	if origin := os.Getenv("CORS_ALLOWED_ORIGIN"); origin != "" {
+		return origin
+	}
+	if os.Getenv("NODE_ENV") != "production" {
+		if reqOrigin := r.Header.Get("Origin"); reqOrigin != "" {
+			return reqOrigin
+		}
+	}
+	return ""
+}
+
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if origin := getAllowedOrigin(r); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == "OPTIONS" {
@@ -386,7 +403,9 @@ func ssePricesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if origin := getAllowedOrigin(r); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -558,6 +577,19 @@ func loadFromDB() {
 	slog.Info("loaded persisted state from database", "records", len(rows))
 }
 
+// panicRecoveryMiddleware catches panics and returns 500 instead of crashing
+func panicRecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[PANIC] %v", err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	if err := initDB(); err != nil {
 		slog.Warn("database init failed, using in-memory fallback", "err", err)
@@ -580,9 +612,30 @@ func main() {
 	mux.HandleFunc("/summary", corsMiddleware(summaryHandler))
 	mux.HandleFunc("/sse/prices", ssePricesHandler)
 
-	log.Printf("🚀 Go Investment Price Feed running on :%s", port)
-	log.Printf("📊 Serving %d assets across 8 asset classes", len(livePrices))
-	if err := http.ListenAndServe(":"+port, authMiddleware(mux)); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      panicRecoveryMiddleware(authMiddleware(mux)),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("[go-investment-feed] Graceful shutdown initiated...")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[go-investment-feed] Shutdown error: %v", err)
+		}
+	}()
+
+	log.Printf("[go-investment-feed] Listening on :%s", port)
+	log.Printf("[go-investment-feed] Serving %d assets across 8 asset classes", len(livePrices))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("[go-investment-feed] Server error: %v", err)
+	}
+	log.Println("[go-investment-feed] Server stopped")
 }

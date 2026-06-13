@@ -28,6 +28,8 @@ import (
 	"database/sql"
 	"log/slog"
 	_ "github.com/lib/pq"
+	"os/signal"
+	"syscall"
 )
 
 const (
@@ -347,6 +349,19 @@ func dbLogEvent(eventType string, payload interface{}) error {
 }
 // ── End PostgreSQL Layer ─────────────────────────────────────────────────────
 
+// panicRecoveryMiddleware catches panics and returns 500 instead of crashing
+func panicRecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[PANIC] %v", err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	if err := initDB(); err != nil {
 		slog.Warn("PostgreSQL init failed, using in-memory fallback", "err", err)
@@ -380,9 +395,31 @@ func main() {
 
 	log.Printf("[CBN-Temporal] Worker registered on task queue: %s", TaskQueue)
 
+	healthPort := getEnv("HEALTH_PORT", "8097")
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"status":"healthy","service":"go-temporal-cbn","taskQueue":"%s"}`, TaskQueue)
+	})
+	healthMux.HandleFunc("/readiness", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"ready":true}`)
+	})
+	healthSrv := &http.Server{Addr: ":" + healthPort, Handler: healthMux, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
+	go func() {
+		log.Printf("[CBN-Temporal] Health server on :%s", healthPort)
+		if err := healthSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("[CBN-Temporal] Health server error: %v", err)
+		}
+	}()
+
 	if err := w.Run(worker.InterruptCh()); err != nil {
-		log.Fatalf("Worker error: %v", err)
+		log.Fatalf("[CBN-Temporal] Worker error: %v", err)
 	}
+	_ = healthSrv.Close()
+	log.Println("[CBN-Temporal] Worker stopped")
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

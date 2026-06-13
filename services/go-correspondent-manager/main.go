@@ -16,6 +16,8 @@ import (
 	"os"
 	"sync"
 	"time"
+	"os/signal"
+	"syscall"
 )
 
 
@@ -367,6 +369,19 @@ func loadFromDB() {
 	slog.Info("loaded persisted state from database", "records", len(rows))
 }
 
+// panicRecoveryMiddleware catches panics and returns 500 instead of crashing
+func panicRecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[PANIC] %v", err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
 	if err := initDB(); err != nil {
 		slog.Warn("database init failed, using in-memory fallback", "err", err)
@@ -378,8 +393,29 @@ func main() {
 	mux.HandleFunc("/correspondents", handleListCorrespondents)
 	mux.HandleFunc("/clearing-line", handleCreateClearingLine)
 	mux.HandleFunc("/derisking-alert", handleDerisikingAlert)
-	log.Printf("[go-correspondent-manager] Starting on :%s", port)
-	if err := http.ListenAndServe(":"+port, authMiddleware(mux)); err != nil {
-		log.Fatalf("[go-correspondent-manager] Server failed: %v", err)
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      panicRecoveryMiddleware(authMiddleware(mux)),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("[go-correspondent-manager] Graceful shutdown initiated...")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[go-correspondent-manager] Shutdown error: %v", err)
+		}
+	}()
+
+	log.Printf("[go-correspondent-manager] Listening on :%s", port)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("[go-correspondent-manager] Server error: %v", err)
+	}
+	log.Println("[go-correspondent-manager] Server stopped")
 }

@@ -317,6 +317,15 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 
 #[tokio::main]
 async fn main() {
+    // Panic hook for logging panics without crashing silently
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
     let _db_pool = init_db().await;
     eprintln!("[DB] PostgreSQL connected for rust-pg-service");
 
@@ -351,5 +360,11 @@ async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("[PostgreSQL] Query service listening on :{}", port);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("[rust-pg-service] Graceful shutdown initiated");
+        })
+        .await
+        .unwrap();
 }

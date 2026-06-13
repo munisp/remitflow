@@ -27,6 +27,9 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"os/signal"
+	"syscall"
+	"context"
 )
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -666,6 +669,18 @@ func main() {
 	r.POST("/export/statement", exportStatementHandler)
 	r.POST("/export/batch-status", exportBatchStatusHandler)
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Printf("[go-export-service] Graceful shutdown initiated...")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[go-export-service] Shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("[go-export-service] Starting on port %s", port)
 	srv := &http.Server{
 		Addr:         ":" + port,
@@ -677,6 +692,7 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
+	log.Printf("[go-export-service] Server stopped")
 }
 
 func getEnv(key, fallback string) string {

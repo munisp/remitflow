@@ -861,6 +861,22 @@ async def load_or_train_model():
 app = FastAPI(title="RemitFlow NLU Intent Classifier", version="1.0.0",
               description="Transformer-based intent classification for remittance payments")
 
+# Graceful shutdown handling
+_shutdown_flag = False
+
+def _handle_shutdown(signum, frame):
+    global _shutdown_flag
+    _shutdown_flag = True
+    logging.getLogger("python-nlu-intent").info(f"Received signal {signum}, initiating graceful shutdown...")
+
+signal.signal(signal.SIGTERM, _handle_shutdown)
+signal.signal(signal.SIGINT, _handle_shutdown)
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    logging.getLogger("python-nlu-intent").info("FastAPI shutdown event — cleaning up resources")
+
+
 # Initialize PostgreSQL tables (middleware-ready)
 _db_ensure_tables("nlu_intent")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -1059,6 +1075,8 @@ if __name__ == "__main__":
 # ─── PostgreSQL Persistence (middleware-ready: swap to TigerBeetle/Kafka in production) ───
 import psycopg2
 import json as _json
+import signal
+import atexit
 
 def _get_db_conn():
     """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""

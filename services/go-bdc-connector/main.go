@@ -29,6 +29,8 @@ import (
 	"github.com/go-redis/redis/v8"
 	_ "github.com/lib/pq"
 	"github.com/segmentio/kafka-go"
+	"os/signal"
+	"syscall"
 )
 
 const (
@@ -586,8 +588,29 @@ func main() {
 	}
 
 	addr := ":" + PORT
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      r,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("[BDCConnector] Graceful shutdown initiated...")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[BDCConnector] Shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("[BDCConnector] Listening on %s", addr)
-	if err := r.Run(addr); err != nil {
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[BDCConnector] Server error: %v", err)
 	}
+	log.Println("[BDCConnector] Server stopped")
 }

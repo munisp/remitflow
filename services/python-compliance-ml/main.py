@@ -37,6 +37,8 @@ from sklearn.pipeline import Pipeline
 import psycopg2
 import psycopg2.extras
 from contextlib import contextmanager
+import signal
+import atexit
 
 _DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
 _db_pool = None
@@ -111,6 +113,22 @@ app = FastAPI(
     description="ML-powered compliance risk scoring, SAR generation, and DPIA analysis",
     version="1.0.0",
 )
+
+# Graceful shutdown handling
+_shutdown_flag = False
+
+def _handle_shutdown(signum, frame):
+    global _shutdown_flag
+    _shutdown_flag = True
+    logging.getLogger("python-compliance-ml").info(f"Received signal {signum}, initiating graceful shutdown...")
+
+signal.signal(signal.SIGTERM, _handle_shutdown)
+signal.signal(signal.SIGINT, _handle_shutdown)
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    logging.getLogger("python-compliance-ml").info("FastAPI shutdown event — cleaning up resources")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

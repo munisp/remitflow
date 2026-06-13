@@ -316,6 +316,15 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // Panic hook for logging panics without crashing silently
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
     let _pool = init_db().await;
     tracing_subscriber::fmt().with_env_filter(env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string())).init();
     let port: u16 = env::var("PORT").unwrap_or_else(|_| "8082".to_string()).parse().unwrap_or(8082);
@@ -334,7 +343,12 @@ async fn main() -> std::io::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("[RemitFlow] Rust Audit Service on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("[rust-audit-service] Graceful shutdown initiated");
+        })
+        .await?;
     Ok(())
 }
 

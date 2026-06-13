@@ -427,6 +427,15 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // Panic hook for logging panics without crashing silently
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
     let _db_pool = init_db().await;
     eprintln!("[DB] PostgreSQL connected for rust-mbridge-adapter");
 
@@ -465,6 +474,11 @@ async fn main() -> std::io::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("[mBridge] Adapter ready on :{}", port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("[rust-mbridge-adapter] Graceful shutdown initiated");
+        })
+        .await?;
     Ok(())
 }
