@@ -315,6 +315,8 @@ async fn tigerbeetle_status() -> Json<Value> {
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 async fn init_db() -> PgPool {
     let db_url = std::env::var("DATABASE_URL")
@@ -454,6 +456,10 @@ async fn main() -> std::io::Result<()> {
     });
 
     let app = Router::new()
+        .route("/metrics", axum::routing::get(|| async {
+            let uptime = _PROCESS_START.get_or_init(Instant::now).elapsed().as_secs();
+            format!("# HELP pod_uptime_seconds Time since process started\n# TYPE pod_uptime_seconds gauge\npod_uptime_seconds{{service=\"rust-bmatch-engine\"}} {}\n# HELP pod_ready Whether pod is ready\n# TYPE pod_ready gauge\npod_ready{{service=\"rust-bmatch-engine\"}} 1\n", uptime)
+        }))
         .route("/health", get(health))
         .route("/rate/:pair", get(get_rate))
         .route("/rates", get(get_all_rates))
@@ -469,6 +475,8 @@ async fn main() -> std::io::Result<()> {
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
             tracing::info!("[rust-bmatch-engine] Graceful shutdown initiated");
+        eprintln!("{{\"event\":\"pod.shutdown.initiated\",\"service\":\"rust-bmatch-engine\",\"timestamp\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339());;
         })
         .await?;
     Ok(())

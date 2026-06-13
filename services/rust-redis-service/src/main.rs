@@ -283,6 +283,8 @@ async fn get_stats(
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 async fn init_db() -> PgPool {
     let db_url = std::env::var("DATABASE_URL")
@@ -396,6 +398,10 @@ async fn main() -> std::io::Result<()> {
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
 
     let app = Router::new()
+        .route("/metrics", axum::routing::get(|| async {
+            let uptime = _PROCESS_START.get_or_init(Instant::now).elapsed().as_secs();
+            format!("# HELP pod_uptime_seconds Time since process started\n# TYPE pod_uptime_seconds gauge\npod_uptime_seconds{{service=\"rust-redis-service\"}} {}\n# HELP pod_ready Whether pod is ready\n# TYPE pod_ready gauge\npod_ready{{service=\"rust-redis-service\"}} 1\n", uptime)
+        }))
         .route("/health", get(health))
         .route("/api/v1/cache/:key", get(get_key))
         .route("/api/v1/cache/:key", post(set_key))
@@ -419,6 +425,8 @@ async fn main() -> std::io::Result<()> {
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
             tracing::info!("[rust-redis-service] Graceful shutdown initiated");
+        eprintln!("{{\"event\":\"pod.shutdown.initiated\",\"service\":\"rust-redis-service\",\"timestamp\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339());;
         })
         .await
         .unwrap();

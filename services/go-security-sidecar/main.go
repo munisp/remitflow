@@ -56,6 +56,8 @@ import (
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 
+var _processStartTime = time.Now()
+
 var db *sql.DB
 
 type Config struct {
@@ -643,6 +645,7 @@ func main() {
 
 	go func() {
 		log.Printf("[Sidecar] Listening on %s → upstream %s", cfg.ListenAddr, cfg.UpstreamURL)
+	fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-security-sidecar", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[Sidecar] Server error: %v", err)
 		}
@@ -656,4 +659,5 @@ func main() {
 		log.Printf("[Sidecar] Shutdown error: %v", err)
 	}
 	log.Println("[Sidecar] Shutdown complete")
+
 }

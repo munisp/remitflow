@@ -362,9 +362,15 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
-	// CORS
+	// CORS — use env-based origin in production
 	r.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		origin := os.Getenv("CORS_ALLOWED_ORIGIN")
+		if origin == "" && os.Getenv("NODE_ENV") != "production" {
+			origin = c.GetHeader("Origin")
+		}
+		if origin != "" {
+			c.Header("Access-Control-Allow-Origin", origin)
+		}
 		c.Header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if c.Request.Method == "OPTIONS" {

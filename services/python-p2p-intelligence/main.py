@@ -355,6 +355,24 @@ def _handle_shutdown(signum, frame):
 signal.signal(signal.SIGTERM, _handle_shutdown)
 signal.signal(signal.SIGINT, _handle_shutdown)
 
+# ── Pod Lifecycle Observability ─────────────────────────────────────────
+import time as _time_mod
+_PROCESS_START_TIME = _time_mod.time()
+_LIFECYCLE_LOGGER = logging.getLogger("pod-lifecycle")
+
+def _emit_lifecycle_event(event_type: str, **kwargs):
+    """Emit structured JSON lifecycle event for OpenSearch/Fluentd ingestion."""
+    import json as _json
+    payload = {
+        "event": event_type,
+        "service": "python-p2p-intelligence",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        **kwargs
+    }
+    _LIFECYCLE_LOGGER.info(_json.dumps(payload))
+
+
 if __name__ == "__main__":
     server = HTTPServer(("0.0.0.0", PORT), P2PIntelligenceHandler)
     print(f"[P2P Intelligence Python] Running on port {PORT}")

@@ -459,6 +459,8 @@ async fn init_db() -> PgPool {
         .connect(&db_url)
         .await
         .unwrap_or_else(|e| { eprintln!("DB connection failed (will use in-memory): {}", e); std::process::exit(1); });
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     sqlx::query("CREATE TABLE IF NOT EXISTS agent_reconciliation_state (id TEXT PRIMARY KEY, data JSONB NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())")
         .execute(&pool).await.unwrap_or_default();
     sqlx::query("CREATE TABLE IF NOT EXISTS agent_reconciliation_events (id BIGSERIAL PRIMARY KEY, event_type TEXT NOT NULL, payload JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW())")
@@ -548,6 +550,10 @@ async fn main() {
         .allow_headers(Any);
 
     let app = Router::new()
+        .route("/metrics", axum::routing::get(|| async {
+            let uptime = _PROCESS_START.get_or_init(Instant::now).elapsed().as_secs();
+            format!("# HELP pod_uptime_seconds Time since process started\n# TYPE pod_uptime_seconds gauge\npod_uptime_seconds{{service=\"rust-agent-reconciliation\"}} {}\n# HELP pod_ready Whether pod is ready\n# TYPE pod_ready gauge\npod_ready{{service=\"rust-agent-reconciliation\"}} 1\n", uptime)
+        }))
         .route("/health", get(health))
         .route("/readiness", get(readiness))
         .route("/reconcile/agent", post(reconcile_agent))

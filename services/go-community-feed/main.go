@@ -40,6 +40,8 @@ import (
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 
+var _processStartTime = time.Now()
+
 var db *sql.DB
 
 type ActivityEvent struct {
@@ -537,7 +539,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("[CommunityFeed] Graceful shutdown initiated...")
+		fmt.Fprintf(os.Stderr, "{\"event\":\"pod.shutdown.initiated\",\"service\":\"%s\",\"timestamp\":\"%s\",\"pid\":%d}\n", "go-community-feed", time.Now().Format(time.RFC3339), os.Getpid())
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
@@ -546,8 +548,10 @@ func main() {
 	}()
 
 	log.Printf("[CommunityFeed] Listening on %s", ":" + port)
+	fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-community-feed", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[CommunityFeed] Server error: %v", err)
 	}
 	log.Println("[CommunityFeed] Server stopped")
+
 }

@@ -35,6 +35,8 @@ import (
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 
+var _processStartTime = time.Now()
+
 var db *sql.DB
 
 type Transaction struct {
@@ -673,7 +675,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Printf("[go-export-service] Graceful shutdown initiated...")
+		fmt.Fprintf(os.Stderr, "{\"event\":\"pod.shutdown.initiated\",\"service\":\"%s\",\"timestamp\":\"%s\",\"pid\":%d}\n", "go-export-service", time.Now().Format(time.RFC3339), os.Getpid())
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
@@ -697,6 +699,7 @@ func main() {
 
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
+
 		return v
 	}
 	return fallback

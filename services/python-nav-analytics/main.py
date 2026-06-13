@@ -118,6 +118,22 @@ app = FastAPI(
     version="1.0.0",
 )
 
+@app.get("/metrics")
+async def _prometheus_metrics():
+    uptime = _time_mod.time() - _PROCESS_START_TIME
+    return Response(
+        content=(
+            f"# HELP pod_uptime_seconds Time since process started\n"
+            f"# TYPE pod_uptime_seconds gauge\n"
+            f'pod_uptime_seconds{{service="python-nav-analytics"}} {uptime:.1f}\n'
+            f"# HELP pod_ready Whether pod is ready\n"
+            f"# TYPE pod_ready gauge\n"
+            f'pod_ready{{service="python-nav-analytics"}} 1\n'
+        ),
+        media_type="text/plain; version=0.0.4",
+    )
+
+
 # Graceful shutdown handling
 _shutdown_flag = False
 
@@ -125,9 +141,28 @@ def _handle_shutdown(signum, frame):
     global _shutdown_flag
     _shutdown_flag = True
     logging.getLogger("python-nav-analytics").info(f"Received signal {signum}, initiating graceful shutdown...")
+    _emit_lifecycle_event("pod.shutdown.initiated", signal=signum)
 
 signal.signal(signal.SIGTERM, _handle_shutdown)
 signal.signal(signal.SIGINT, _handle_shutdown)
+
+# ── Pod Lifecycle Observability ─────────────────────────────────────────
+import time as _time_mod
+_PROCESS_START_TIME = _time_mod.time()
+_LIFECYCLE_LOGGER = logging.getLogger("pod-lifecycle")
+
+def _emit_lifecycle_event(event_type: str, **kwargs):
+    """Emit structured JSON lifecycle event for OpenSearch/Fluentd ingestion."""
+    import json as _json
+    payload = {
+        "event": event_type,
+        "service": "python-nav-analytics",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        **kwargs
+    }
+    _LIFECYCLE_LOGGER.info(_json.dumps(payload))
+
 
 @app.on_event("shutdown")
 async def _on_shutdown():

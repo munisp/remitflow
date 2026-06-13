@@ -579,6 +579,10 @@ async fn main() -> std::io::Result<()> {
 
     let app = Router::new()
         .route("/check", post(handle_check))
+        .route("/metrics", axum::routing::get(|| async {
+            let uptime = _PROCESS_START.get_or_init(Instant::now).elapsed().as_secs();
+            format!("# HELP pod_uptime_seconds Time since process started\n# TYPE pod_uptime_seconds gauge\npod_uptime_seconds{{service=\"rust-liveness-proxy\"}} {}\n# HELP pod_ready Whether pod is ready\n# TYPE pod_ready gauge\npod_ready{{service=\"rust-liveness-proxy\"}} 1\n", uptime)
+        }))
         .route("/health", get(handle_health))
         .route("/metrics", get(handle_metrics))
         .layer(CorsLayer::permissive())
@@ -592,6 +596,8 @@ async fn main() -> std::io::Result<()> {
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
             tracing::info!("[rust-liveness-proxy] Graceful shutdown initiated");
+        eprintln!("{{\"event\":\"pod.shutdown.initiated\",\"service\":\"rust-liveness-proxy\",\"timestamp\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339());;
         })
         .await?;
     Ok(())
@@ -602,6 +608,8 @@ async fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
     #[test]
     fn circuit_breaker_opens_after_threshold() {

@@ -22,6 +22,8 @@ import (
 )
 
 
+var _processStartTime = time.Now()
+
 var db *sql.DB
 
 var (
@@ -461,7 +463,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("[go-hnw-routing] Graceful shutdown initiated...")
+		fmt.Fprintf(os.Stderr, "{\"event\":\"pod.shutdown.initiated\",\"service\":\"%s\",\"timestamp\":\"%s\",\"pid\":%d}\n", "go-hnw-routing", time.Now().Format(time.RFC3339), os.Getpid())
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
@@ -470,8 +472,10 @@ func main() {
 	}()
 
 	log.Printf("[go-hnw-routing] Listening on :%s", port)
+	fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-hnw-routing", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[go-hnw-routing] Server error: %v", err)
 	}
 	log.Println("[go-hnw-routing] Server stopped")
+
 }

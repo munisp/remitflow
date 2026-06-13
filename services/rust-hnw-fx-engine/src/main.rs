@@ -188,6 +188,8 @@ async fn handle_health() -> Result<impl warp::Reply, warp::Rejection> {
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 async fn init_db() -> PgPool {
     let db_url = std::env::var("DATABASE_URL")
@@ -337,9 +339,14 @@ async fn main() -> std::io::Result<()> {
         async {
             tokio::signal::ctrl_c().await.ok();
             eprintln!("[rust-hnw-fx-engine] Graceful shutdown initiated");
+        eprintln!("{{\"event\":\"pod.shutdown.initiated\",\"service\":\"rust-hnw-fx-engine\",\"timestamp\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339());;
         },
     );
     eprintln!("[rust-hnw-fx-engine] Listening on {}", addr);
+    let startup_ms = _PROCESS_START.get_or_init(Instant::now).elapsed().as_millis();
+    eprintln!("{{\"event\":\"pod.startup.complete\",\"service\":\"rust-hnw-fx-engine\",\"startup_ms\":{},\"timestamp\":\"{}\"}}",
+        startup_ms, chrono::Utc::now().to_rfc3339());;
     server.await;
     Ok(())
 }

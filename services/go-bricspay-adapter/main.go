@@ -49,6 +49,8 @@ import (
 // ── Config ────────────────────────────────────────────────────────────────────
 
 
+var _processStartTime = time.Now()
+
 var db *sql.DB
 
 type Config struct {
@@ -645,4 +647,5 @@ func main() {
 	defer cancel()
 	srv.Shutdown(ctx)
 	log.Println("[BRICSPay] Adapter stopped")
+
 }

@@ -336,6 +336,10 @@ async fn main() -> std::io::Result<()> {
         .route("/audit/events/:id", get(get_audit_event))
         .route("/audit/verify/:id", get(verify_audit_event))
         .route("/audit/stats", get(get_stats))
+        .route("/metrics", axum::routing::get(|| async {
+            let uptime = _PROCESS_START.get_or_init(Instant::now).elapsed().as_secs();
+            format!("# HELP pod_uptime_seconds Time since process started\n# TYPE pod_uptime_seconds gauge\npod_uptime_seconds{{service=\"rust-audit-service\"}} {}\n# HELP pod_ready Whether pod is ready\n# TYPE pod_ready gauge\npod_ready{{service=\"rust-audit-service\"}} 1\n", uptime)
+        }))
         .route("/health", get(health_check))
         .route("/metrics", get(metrics))
         .layer(CorsLayer::permissive())
@@ -347,6 +351,8 @@ async fn main() -> std::io::Result<()> {
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
             tracing::info!("[rust-audit-service] Graceful shutdown initiated");
+        eprintln!("{{\"event\":\"pod.shutdown.initiated\",\"service\":\"rust-audit-service\",\"timestamp\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339());;
         })
         .await?;
     Ok(())
@@ -357,6 +363,8 @@ mod tests {
     use super::*;
     use axum::{body::Body, http::{Request, StatusCode}};
     use tower::util::ServiceExt;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
     fn build_app() -> Router {
         let state = Arc::new(AppState::new());

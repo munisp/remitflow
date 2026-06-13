@@ -32,6 +32,9 @@ fn main() {
     let state = Arc::new(AppState::new());
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).expect("Failed to bind");
     println!("[PQ-Crypto] Listening on :{}", port);
+    let startup_ms = _PROCESS_START.get_or_init(Instant::now).elapsed().as_millis();
+    eprintln!("{{\"event\":\"pod.startup.complete\",\"service\":\"rust-pq-crypto\",\"startup_ms\":{},\"timestamp\":\"{}\"}}",
+        startup_ms, chrono::Utc::now().to_rfc3339());;
 
     for stream in listener.incoming() {
         let state = Arc::clone(&state);
@@ -360,6 +363,8 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 mod db {
     use std::env;
     use std::sync::OnceLock;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     
     static DB_URL: OnceLock<String> = OnceLock::new();
     

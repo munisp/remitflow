@@ -19,6 +19,8 @@ import (
 )
 
 
+var _processStartTime = time.Now()
+
 var db *sql.DB
 
 type ServiceHealth struct {
@@ -374,5 +376,6 @@ func main() {
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("Server failed", "error", err)
 		os.Exit(1)
+
 	}
 }

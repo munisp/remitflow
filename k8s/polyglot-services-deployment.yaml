@@ -1,14 +1,3 @@
-# RemitFlow — Polyglot Services Kubernetes Deployment
-# All Go, Rust, Python microservices with liveness/readiness probes,
-# graceful shutdown, and restart policies.
-#
-# Apply: kubectl apply -f k8s/polyglot-services-deployment.yaml
-
----
-# ═══════════════════════════════════════════════════════════════════════════════
-# Go Services
-# ═══════════════════════════════════════════════════════════════════════════════
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,6 +7,8 @@ metadata:
     app: go-transfer-engine
     language: go
     tier: critical
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -33,52 +24,55 @@ spec:
       labels:
         app: go-transfer-engine
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8089'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: go-transfer-engine
-          image: remitflow/go-transfer-engine:latest
-          ports:
-            - containerPort: 8089
-          env:
-            - name: PORT
-              value: "8089"
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: remitflow-secrets
-                  key: DATABASE_URL
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "256Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8089
-            initialDelaySeconds: 10
-            periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8089
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 3
-            failureThreshold: 3
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8089
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 12
-
+      - name: go-transfer-engine
+        image: remitflow/go-transfer-engine:latest
+        ports:
+        - containerPort: 8089
+        env:
+        - name: PORT
+          value: '8089'
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: remitflow-secrets
+              key: DATABASE_URL
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8089
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8089
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8089
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          failureThreshold: 12
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -89,6 +83,8 @@ metadata:
     app: go-p2p-sanctions
     language: go
     tier: critical
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -99,38 +95,41 @@ spec:
       labels:
         app: go-p2p-sanctions
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8110'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: go-p2p-sanctions
-          image: remitflow/go-p2p-sanctions:latest
-          ports:
-            - containerPort: 8110
-          env:
-            - name: PORT
-              value: "8110"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "256Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8110
-            initialDelaySeconds: 10
-            periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /readiness
-              port: 8110
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
+      - name: go-p2p-sanctions
+        image: remitflow/go-p2p-sanctions:latest
+        ports:
+        - containerPort: 8110
+        env:
+        - name: PORT
+          value: '8110'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8110
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readiness
+            port: 8110
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -141,6 +140,8 @@ metadata:
     app: go-fx-aggregator
     language: go
     tier: critical
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -151,38 +152,41 @@ spec:
       labels:
         app: go-fx-aggregator
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8090'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: go-fx-aggregator
-          image: remitflow/go-fx-aggregator:latest
-          ports:
-            - containerPort: 8090
-          env:
-            - name: PORT
-              value: "8090"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "256Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8090
-            initialDelaySeconds: 10
-            periodSeconds: 15
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8090
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
+      - name: go-fx-aggregator
+        image: remitflow/go-fx-aggregator:latest
+        ports:
+        - containerPort: 8090
+        env:
+        - name: PORT
+          value: '8090'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8090
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8090
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -193,6 +197,8 @@ metadata:
     app: go-ratelimit
     language: go
     tier: critical
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -203,37 +209,40 @@ spec:
       labels:
         app: go-ratelimit
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8081'
     spec:
       terminationGracePeriodSeconds: 15
       containers:
-        - name: go-ratelimit
-          image: remitflow/go-ratelimit:latest
-          ports:
-            - containerPort: 8081
-          env:
-            - name: PORT
-              value: "8081"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "64Mi"
-            limits:
-              cpu: "500m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8081
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8081
-            initialDelaySeconds: 3
-            periodSeconds: 5
-
+      - name: go-ratelimit
+        image: remitflow/go-ratelimit:latest
+        ports:
+        - containerPort: 8081
+        env:
+        - name: PORT
+          value: '8081'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 3
+          periodSeconds: 5
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -243,6 +252,8 @@ metadata:
   labels:
     app: go-failure-monitor
     language: go
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -253,37 +264,40 @@ spec:
       labels:
         app: go-failure-monitor
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8097'
     spec:
       terminationGracePeriodSeconds: 60
       containers:
-        - name: go-failure-monitor
-          image: remitflow/go-failure-monitor:latest
-          ports:
-            - containerPort: 8097
-          env:
-            - name: PORT
-              value: "8097"
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "200m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8097
-            initialDelaySeconds: 15
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /readiness
-              port: 8097
-            initialDelaySeconds: 10
-            periodSeconds: 15
-
+      - name: go-failure-monitor
+        image: remitflow/go-failure-monitor:latest
+        ports:
+        - containerPort: 8097
+        env:
+        - name: PORT
+          value: '8097'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8097
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readiness
+            port: 8097
+          initialDelaySeconds: 10
+          periodSeconds: 15
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -293,6 +307,8 @@ metadata:
   labels:
     app: go-escrow-monitor
     language: go
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -303,37 +319,40 @@ spec:
       labels:
         app: go-escrow-monitor
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8095'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: go-escrow-monitor
-          image: remitflow/go-escrow-monitor:latest
-          ports:
-            - containerPort: 8095
-          env:
-            - name: PORT
-              value: "8095"
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "200m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8095
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /readiness
-              port: 8095
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
+      - name: go-escrow-monitor
+        image: remitflow/go-escrow-monitor:latest
+        ports:
+        - containerPort: 8095
+        env:
+        - name: PORT
+          value: '8095'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8095
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readiness
+            port: 8095
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -344,6 +363,8 @@ metadata:
     app: go-papss-service
     language: go
     tier: critical
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -354,37 +375,40 @@ spec:
       labels:
         app: go-papss-service
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8106'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: go-papss-service
-          image: remitflow/go-papss-service:latest
-          ports:
-            - containerPort: 8106
-          env:
-            - name: PORT
-              value: "8106"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "256Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8106
-            initialDelaySeconds: 10
-            periodSeconds: 15
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8106
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
+      - name: go-papss-service
+        image: remitflow/go-papss-service:latest
+        ports:
+        - containerPort: 8106
+        env:
+        - name: PORT
+          value: '8106'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8106
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8106
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -394,6 +418,8 @@ metadata:
   labels:
     app: go-bdc-connector
     language: go
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -404,37 +430,40 @@ spec:
       labels:
         app: go-bdc-connector
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8087'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: go-bdc-connector
-          image: remitflow/go-bdc-connector:latest
-          ports:
-            - containerPort: 8087
-          env:
-            - name: PORT
-              value: "8087"
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "200m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8087
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8087
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
+      - name: go-bdc-connector
+        image: remitflow/go-bdc-connector:latest
+        ports:
+        - containerPort: 8087
+        env:
+        - name: PORT
+          value: '8087'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8087
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8087
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -444,6 +473,8 @@ metadata:
   labels:
     app: go-bricspay-adapter
     language: go
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -454,37 +485,40 @@ spec:
       labels:
         app: go-bricspay-adapter
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8102'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: go-bricspay-adapter
-          image: remitflow/go-bricspay-adapter:latest
-          ports:
-            - containerPort: 8102
-          env:
-            - name: PORT
-              value: "8102"
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "200m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8102
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8102
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
+      - name: go-bricspay-adapter
+        image: remitflow/go-bricspay-adapter:latest
+        ports:
+        - containerPort: 8102
+        env:
+        - name: PORT
+          value: '8102'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8102
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8102
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -494,6 +528,8 @@ metadata:
   labels:
     app: go-ghipss-adapter
     language: go
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -504,37 +540,40 @@ spec:
       labels:
         app: go-ghipss-adapter
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8104'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: go-ghipss-adapter
-          image: remitflow/go-ghipss-adapter:latest
-          ports:
-            - containerPort: 8104
-          env:
-            - name: PORT
-              value: "8104"
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "200m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8104
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /readiness
-              port: 8104
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
+      - name: go-ghipss-adapter
+        image: remitflow/go-ghipss-adapter:latest
+        ports:
+        - containerPort: 8104
+        env:
+        - name: PORT
+          value: '8104'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8104
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readiness
+            port: 8104
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -544,6 +583,8 @@ metadata:
   labels:
     app: go-health-aggregator
     language: go
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -554,37 +595,40 @@ spec:
       labels:
         app: go-health-aggregator
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8200'
     spec:
       terminationGracePeriodSeconds: 15
       containers:
-        - name: go-health-aggregator
-          image: remitflow/go-health-aggregator:latest
-          ports:
-            - containerPort: 8200
-          env:
-            - name: PORT
-              value: "8200"
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "200m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8200
-            initialDelaySeconds: 5
-            periodSeconds: 15
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8200
-            initialDelaySeconds: 3
-            periodSeconds: 10
-
+      - name: go-health-aggregator
+        image: remitflow/go-health-aggregator:latest
+        ports:
+        - containerPort: 8200
+        env:
+        - name: PORT
+          value: '8200'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8200
+          initialDelaySeconds: 5
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8200
+          initialDelaySeconds: 3
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -595,6 +639,8 @@ metadata:
     app: go-fednow-gateway
     language: go
     tier: critical
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -605,37 +651,40 @@ spec:
       labels:
         app: go-fednow-gateway
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '9003'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: go-fednow-gateway
-          image: remitflow/go-fednow-gateway:latest
-          ports:
-            - containerPort: 9003
-          env:
-            - name: PORT
-              value: "9003"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "256Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 9003
-            initialDelaySeconds: 10
-            periodSeconds: 15
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 9003
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
+      - name: go-fednow-gateway
+        image: remitflow/go-fednow-gateway:latest
+        ports:
+        - containerPort: 9003
+        env:
+        - name: PORT
+          value: '9003'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9003
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9003
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -645,6 +694,8 @@ metadata:
   labels:
     app: go-programmable-money
     language: go
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -655,42 +706,41 @@ spec:
       labels:
         app: go-programmable-money
         language: go
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8132'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: go-programmable-money
-          image: remitflow/go-programmable-money:latest
-          ports:
-            - containerPort: 8132
-          env:
-            - name: PORT
-              value: "8132"
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "64Mi"
-            limits:
-              cpu: "200m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8132
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8132
-            initialDelaySeconds: 5
-            periodSeconds: 10
-
+      - name: go-programmable-money
+        image: remitflow/go-programmable-money:latest
+        ports:
+        - containerPort: 8132
+        env:
+        - name: PORT
+          value: '8132'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8132
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8132
+          initialDelaySeconds: 5
+          periodSeconds: 10
 ---
-# ═══════════════════════════════════════════════════════════════════════════════
-# Rust Services
-# ═══════════════════════════════════════════════════════════════════════════════
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -700,6 +750,8 @@ metadata:
     app: rust-escrow-ledger
     language: rust
     tier: critical
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -710,37 +762,40 @@ spec:
       labels:
         app: rust-escrow-ledger
         language: rust
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8096'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: rust-escrow-ledger
-          image: remitflow/rust-escrow-ledger:latest
-          ports:
-            - containerPort: 8096
-          env:
-            - name: PORT
-              value: "8096"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "64Mi"
-            limits:
-              cpu: "500m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8096
-            initialDelaySeconds: 5
-            periodSeconds: 15
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /readiness
-              port: 8096
-            initialDelaySeconds: 3
-            periodSeconds: 10
-
+      - name: rust-escrow-ledger
+        image: remitflow/rust-escrow-ledger:latest
+        ports:
+        - containerPort: 8096
+        env:
+        - name: PORT
+          value: '8096'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8096
+          initialDelaySeconds: 5
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readiness
+            port: 8096
+          initialDelaySeconds: 3
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -751,6 +806,8 @@ metadata:
     app: rust-fee-engine
     language: rust
     tier: critical
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -761,37 +818,40 @@ spec:
       labels:
         app: rust-fee-engine
         language: rust
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8101'
     spec:
       terminationGracePeriodSeconds: 15
       containers:
-        - name: rust-fee-engine
-          image: remitflow/rust-fee-engine:latest
-          ports:
-            - containerPort: 8101
-          env:
-            - name: PORT
-              value: "8101"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "32Mi"
-            limits:
-              cpu: "500m"
-              memory: "64Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8101
-            initialDelaySeconds: 3
-            periodSeconds: 10
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8101
-            initialDelaySeconds: 2
-            periodSeconds: 5
-
+      - name: rust-fee-engine
+        image: remitflow/rust-fee-engine:latest
+        ports:
+        - containerPort: 8101
+        env:
+        - name: PORT
+          value: '8101'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 32Mi
+          limits:
+            cpu: 500m
+            memory: 64Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8101
+          initialDelaySeconds: 3
+          periodSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8101
+          initialDelaySeconds: 2
+          periodSeconds: 5
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -801,6 +861,8 @@ metadata:
   labels:
     app: rust-pq-crypto
     language: rust
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -811,37 +873,40 @@ spec:
       labels:
         app: rust-pq-crypto
         language: rust
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '9010'
     spec:
       terminationGracePeriodSeconds: 15
       containers:
-        - name: rust-pq-crypto
-          image: remitflow/rust-pq-crypto:latest
-          ports:
-            - containerPort: 9010
-          env:
-            - name: PORT
-              value: "9010"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "64Mi"
-            limits:
-              cpu: "500m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 9010
-            initialDelaySeconds: 5
-            periodSeconds: 15
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 9010
-            initialDelaySeconds: 3
-            periodSeconds: 10
-
+      - name: rust-pq-crypto
+        image: remitflow/rust-pq-crypto:latest
+        ports:
+        - containerPort: 9010
+        env:
+        - name: PORT
+          value: '9010'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9010
+          initialDelaySeconds: 5
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9010
+          initialDelaySeconds: 3
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -851,6 +916,8 @@ metadata:
   labels:
     app: rust-agent-reconciliation
     language: rust
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -861,37 +928,40 @@ spec:
       labels:
         app: rust-agent-reconciliation
         language: rust
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8098'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: rust-agent-reconciliation
-          image: remitflow/rust-agent-reconciliation:latest
-          ports:
-            - containerPort: 8098
-          env:
-            - name: PORT
-              value: "8098"
-          resources:
-            requests:
-              cpu: "50m"
-              memory: "32Mi"
-            limits:
-              cpu: "200m"
-              memory: "64Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8098
-            initialDelaySeconds: 5
-            periodSeconds: 15
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /readiness
-              port: 8098
-            initialDelaySeconds: 3
-            periodSeconds: 10
-
+      - name: rust-agent-reconciliation
+        image: remitflow/rust-agent-reconciliation:latest
+        ports:
+        - containerPort: 8098
+        env:
+        - name: PORT
+          value: '8098'
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 64Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8098
+          initialDelaySeconds: 5
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /readiness
+            port: 8098
+          initialDelaySeconds: 3
+          periodSeconds: 10
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -902,6 +972,8 @@ metadata:
     app: rust-tigerbeetle-service
     language: rust
     tier: critical
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -912,42 +984,41 @@ spec:
       labels:
         app: rust-tigerbeetle-service
         language: rust
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8096'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: rust-tigerbeetle-service
-          image: remitflow/rust-tigerbeetle-service:latest
-          ports:
-            - containerPort: 8096
-          env:
-            - name: PORT
-              value: "8096"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "64Mi"
-            limits:
-              cpu: "500m"
-              memory: "128Mi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8096
-            initialDelaySeconds: 5
-            periodSeconds: 15
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8096
-            initialDelaySeconds: 3
-            periodSeconds: 10
-
+      - name: rust-tigerbeetle-service
+        image: remitflow/rust-tigerbeetle-service:latest
+        ports:
+        - containerPort: 8096
+        env:
+        - name: PORT
+          value: '8096'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8096
+          initialDelaySeconds: 5
+          periodSeconds: 15
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8096
+          initialDelaySeconds: 3
+          periodSeconds: 10
 ---
-# ═══════════════════════════════════════════════════════════════════════════════
-# Python ML Services
-# ═══════════════════════════════════════════════════════════════════════════════
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -956,6 +1027,8 @@ metadata:
   labels:
     app: python-fx-forecasting
     language: python
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -966,45 +1039,48 @@ spec:
       labels:
         app: python-fx-forecasting
         language: python
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8111'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: python-fx-forecasting
-          image: remitflow/python-fx-forecasting:latest
-          ports:
-            - containerPort: 8111
-          env:
-            - name: PORT
-              value: "8111"
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "512Mi"
-            limits:
-              cpu: "1000m"
-              memory: "2Gi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8111
-            initialDelaySeconds: 30
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8111
-            initialDelaySeconds: 20
-            periodSeconds: 15
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8111
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 18
-
+      - name: python-fx-forecasting
+        image: remitflow/python-fx-forecasting:latest
+        ports:
+        - containerPort: 8111
+        env:
+        - name: PORT
+          value: '8111'
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8111
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8111
+          initialDelaySeconds: 20
+          periodSeconds: 15
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8111
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 18
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1015,6 +1091,8 @@ metadata:
     app: python-gnn-fraud
     language: python
     tier: critical
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 2
   selector:
@@ -1025,45 +1103,48 @@ spec:
       labels:
         app: python-gnn-fraud
         language: python
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8094'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: python-gnn-fraud
-          image: remitflow/python-gnn-fraud:latest
-          ports:
-            - containerPort: 8094
-          env:
-            - name: PORT
-              value: "8094"
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "512Mi"
-            limits:
-              cpu: "1000m"
-              memory: "2Gi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8094
-            initialDelaySeconds: 30
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8094
-            initialDelaySeconds: 20
-            periodSeconds: 15
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8094
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            failureThreshold: 18
-
+      - name: python-gnn-fraud
+        image: remitflow/python-gnn-fraud:latest
+        ports:
+        - containerPort: 8094
+        env:
+        - name: PORT
+          value: '8094'
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8094
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8094
+          initialDelaySeconds: 20
+          periodSeconds: 15
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8094
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          failureThreshold: 18
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1073,6 +1154,8 @@ metadata:
   labels:
     app: python-deepfake-detector
     language: python
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -1083,37 +1166,40 @@ spec:
       labels:
         app: python-deepfake-detector
         language: python
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8097'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: python-deepfake-detector
-          image: remitflow/python-deepfake-detector:latest
-          ports:
-            - containerPort: 8097
-          env:
-            - name: PORT
-              value: "8097"
-          resources:
-            requests:
-              cpu: "200m"
-              memory: "512Mi"
-            limits:
-              cpu: "1000m"
-              memory: "2Gi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8097
-            initialDelaySeconds: 30
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8097
-            initialDelaySeconds: 20
-            periodSeconds: 15
-
+      - name: python-deepfake-detector
+        image: remitflow/python-deepfake-detector:latest
+        ports:
+        - containerPort: 8097
+        env:
+        - name: PORT
+          value: '8097'
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8097
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8097
+          initialDelaySeconds: 20
+          periodSeconds: 15
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1123,6 +1209,8 @@ metadata:
   labels:
     app: python-anomaly-detector
     language: python
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -1133,37 +1221,40 @@ spec:
       labels:
         app: python-anomaly-detector
         language: python
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8082'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: python-anomaly-detector
-          image: remitflow/python-anomaly-detector:latest
-          ports:
-            - containerPort: 8082
-          env:
-            - name: PORT
-              value: "8082"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "500m"
-              memory: "1Gi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8082
-            initialDelaySeconds: 15
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8082
-            initialDelaySeconds: 10
-            periodSeconds: 15
-
+      - name: python-anomaly-detector
+        image: remitflow/python-anomaly-detector:latest
+        ports:
+        - containerPort: 8082
+        env:
+        - name: PORT
+          value: '8082'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8082
+          initialDelaySeconds: 10
+          periodSeconds: 15
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1173,6 +1264,8 @@ metadata:
   labels:
     app: python-investment-risk
     language: python
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -1183,37 +1276,40 @@ spec:
       labels:
         app: python-investment-risk
         language: python
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8086'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: python-investment-risk
-          image: remitflow/python-investment-risk:latest
-          ports:
-            - containerPort: 8086
-          env:
-            - name: PORT
-              value: "8086"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "500m"
-              memory: "1Gi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8086
-            initialDelaySeconds: 15
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8086
-            initialDelaySeconds: 10
-            periodSeconds: 15
-
+      - name: python-investment-risk
+        image: remitflow/python-investment-risk:latest
+        ports:
+        - containerPort: 8086
+        env:
+        - name: PORT
+          value: '8086'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8086
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8086
+          initialDelaySeconds: 10
+          periodSeconds: 15
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -1223,6 +1319,8 @@ metadata:
   labels:
     app: python-property-risk
     language: python
+    observability: enabled
+    metrics: prometheus
 spec:
   replicas: 1
   selector:
@@ -1233,33 +1331,37 @@ spec:
       labels:
         app: python-property-risk
         language: python
+      annotations:
+        prometheus.io/scrape: 'true'
+        prometheus.io/path: /metrics
+        prometheus.io/port: '8088'
     spec:
       terminationGracePeriodSeconds: 30
       containers:
-        - name: python-property-risk
-          image: remitflow/python-property-risk:latest
-          ports:
-            - containerPort: 8088
-          env:
-            - name: PORT
-              value: "8088"
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "256Mi"
-            limits:
-              cpu: "500m"
-              memory: "1Gi"
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8088
-            initialDelaySeconds: 15
-            periodSeconds: 30
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8088
-            initialDelaySeconds: 10
-            periodSeconds: 15
+      - name: python-property-risk
+        image: remitflow/python-property-risk:latest
+        ports:
+        - containerPort: 8088
+        env:
+        - name: PORT
+          value: '8088'
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8088
+          initialDelaySeconds: 15
+          periodSeconds: 30
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8088
+          initialDelaySeconds: 10
+          periodSeconds: 15

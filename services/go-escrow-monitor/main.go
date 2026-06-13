@@ -32,6 +32,8 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // Configuration loaded from environment variables
+var _processStartTime = time.Now()
+
 type EscrowConfig struct {
 	Port                string
 	CureNoticeDays      int
@@ -571,7 +573,9 @@ func main() {
 	}()
 
 	log.Printf("[START] Property Escrow Deadline Monitor listening on :%s (scan every %d min)", cfg.Port, cfg.ScanIntervalMinutes)
+	fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-escrow-monitor", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
+
 	}
 }

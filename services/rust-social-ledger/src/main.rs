@@ -62,6 +62,8 @@ type ContribStore = Arc<Mutex<Vec<Contribution>>>;
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 async fn init_db() -> PgPool {
     let db_url = std::env::var("DATABASE_URL")
@@ -172,6 +174,12 @@ async fn main() -> std::io::Result<()> {
     let circles_contrib = circles.clone();
     let contribs_add = contribs.clone();
 
+    let metrics_route = warp::path("metrics").map(|| {
+        let uptime = _PROCESS_START.get_or_init(Instant::now).elapsed().as_secs();
+        warp::reply::with_header(
+            format!("# HELP pod_uptime_seconds Time since process started\n# TYPE pod_uptime_seconds gauge\npod_uptime_seconds{{service=\"rust-social-ledger\"}} {}\n# HELP pod_ready Whether pod is ready\n# TYPE pod_ready gauge\npod_ready{{service=\"rust-social-ledger\"}} 1\n", uptime),
+            "content-type", "text/plain; version=0.0.4")
+    });
     let health = warp::path("health").map(|| {
         warp::reply::json(&serde_json::json!({"status": "ok", "service": "rust-social-ledger"}))
     });
@@ -238,16 +246,21 @@ async fn main() -> std::io::Result<()> {
             warp::reply::json(&payout)
         });
 
-    let routes = health.or(create).or(get).or(contribute).or(payout);
+    let routes = metrics_route.or(health).or(create).or(get).or(contribute).or(payout);
     eprintln!("rust-social-ledger starting on port {}", port);
     let (addr, server) = warp::serve(routes).bind_with_graceful_shutdown(
         ([0, 0, 0, 0], port),
         async {
             tokio::signal::ctrl_c().await.ok();
             eprintln!("[rust-social-ledger] Graceful shutdown initiated");
+        eprintln!("{{\"event\":\"pod.shutdown.initiated\",\"service\":\"rust-social-ledger\",\"timestamp\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339());;
         },
     );
     eprintln!("[rust-social-ledger] Listening on {}", addr);
+    let startup_ms = _PROCESS_START.get_or_init(Instant::now).elapsed().as_millis();
+    eprintln!("{{\"event\":\"pod.startup.complete\",\"service\":\"rust-social-ledger\",\"startup_ms\":{},\"timestamp\":\"{}\"}}",
+        startup_ms, chrono::Utc::now().to_rfc3339());;
     server.await;
     Ok(())
 }

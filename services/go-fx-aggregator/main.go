@@ -22,6 +22,8 @@ import (
 
 // Provider represents an FX rate data source
 
+var _processStartTime = time.Now()
+
 var db *sql.DB
 
 type Provider struct {
@@ -519,5 +521,6 @@ func main() {
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		slog.Error("Server failed", "error", err)
 		os.Exit(1)
+
 	}
 }

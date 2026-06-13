@@ -382,6 +382,8 @@ async fn dca_projection(req: web::Json<DcaRequest>) -> impl Responder {
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 async fn init_db() -> PgPool {
     let db_url = std::env::var("DATABASE_URL")

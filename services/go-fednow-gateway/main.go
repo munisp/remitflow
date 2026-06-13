@@ -25,6 +25,8 @@ import (
 // Handles pacs.008 (Credit Transfer), pacs.002 (Status Report), camt.056 (Return Request)
 
 
+var _processStartTime = time.Now()
+
 var db *sql.DB
 
 type FedNowTransfer struct {
@@ -612,4 +614,5 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
+
 }

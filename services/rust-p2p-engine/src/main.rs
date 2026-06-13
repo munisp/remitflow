@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ILP Streaming Payments — micro-payments streamed per-second

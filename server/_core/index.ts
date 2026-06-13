@@ -25,6 +25,7 @@ import { attachServicesHealthWS, stopServicesHealthWS } from "../ws-services-hea
 import { requireValidEnv } from "./startup-validation";
 import { logger } from "./logger";
 import { safeParseAmount } from "../lib/safeDecimal";
+import { podLifecycleMiddleware, recordStartupComplete, recordShutdownStart, recordShutdownComplete, recordPanicRecovery } from "../middleware/podLifecycleObservability";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -59,6 +60,9 @@ async function startServer() {
 
   // KYC provider webhooks (Onfido, Sumsub, Veriff) — raw body needed for HMAC verification
   registerKycProviderWebhooks(app);
+
+  // Pod lifecycle observability — Prometheus /metrics, shutdown coordination, in-flight tracking
+  app.use(podLifecycleMiddleware);
 
   // Request ID tracing — adds X-Request-ID header to every request
   app.use(requestIdMiddleware);
@@ -1237,6 +1241,8 @@ async function startServer() {
 
   server.listen(port, async () => {
     logger.info(`Server running on http://localhost:${port}/`);
+    // Record pod startup complete for observability (metrics + Kafka + OpenSearch)
+    recordStartupComplete({ dbConnected: true, cacheWarmed: false, sidecarCount: 3 });
     // Start background cron scheduler (recurring payments, FX alerts, fraud escalation)
     startScheduler();
     // Auto-start polyglot microservices in development (no-op in production)
@@ -1270,6 +1276,13 @@ async function gracefulShutdown(signal: string) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   logger.info(`[Shutdown] Received ${signal}. Graceful shutdown initiated...`);
+
+  // Record shutdown in observability stack (OTel metrics + Kafka + OpenSearch)
+  await recordShutdownStart({
+    reason: signal === "SIGTERM" ? "SIGTERM" : signal === "SIGINT" ? "SIGINT" : "HEALTH_CHECK_FAILURE",
+    connectionsToClose: 0,
+    inFlightRequests: 0,
+  });
 
   // Give in-flight requests up to 30 seconds to complete
   const shutdownTimeout = setTimeout(() => {
@@ -1314,6 +1327,7 @@ async function gracefulShutdown(signal: string) {
   }
 
   clearTimeout(shutdownTimeout);
+  recordShutdownComplete(true);
   logger.info("[Shutdown] Clean exit");
   process.exit(0);
 }
@@ -1322,6 +1336,7 @@ process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT",  () => gracefulShutdown("SIGINT"));
 process.on("uncaughtException", (err) => {
   logger.error({ err: err }, "[UncaughtException]");
+  recordPanicRecovery({ service: "remitflow-api", errorMessage: err.message, stackTrace: err.stack, language: "typescript" });
   gracefulShutdown("uncaughtException");
 });
 process.on("unhandledRejection", (reason) => {

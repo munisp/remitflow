@@ -22,6 +22,8 @@ import (
 // ─── CBN eFASS Report ────────────────────────────────────────────────────────
 
 
+var _processStartTime = time.Now()
+
 var db *sql.DB
 
 type CBNReport struct {
@@ -282,6 +284,16 @@ func main() {
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "regulatory-reports"})
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		uptime := time.Since(_processStartTime).Seconds()
+		fmt.Fprintf(w, "# HELP pod_uptime_seconds Time since process started\n")
+		fmt.Fprintf(w, "# TYPE pod_uptime_seconds gauge\n")
+		fmt.Fprintf(w, "pod_uptime_seconds{service=\"%s\"} %.1f\n", "go-regulatory-reports", uptime)
+		fmt.Fprintf(w, "# HELP pod_ready Whether pod is ready\n")
+		fmt.Fprintf(w, "# TYPE pod_ready gauge\n")
+		fmt.Fprintf(w, "pod_ready{service=\"%s\"} 1\n", "go-regulatory-reports")
+	})
 	})
 
 	mux.HandleFunc("/generate", func(w http.ResponseWriter, r *http.Request) {
@@ -377,6 +389,7 @@ func main() {
 
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
+
 		return v
 	}
 	return def

@@ -114,6 +114,8 @@ fn get_corridor_health(from: &str, to: &str) -> CorridorHealth {
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 async fn init_db() -> PgPool {
     let db_url = std::env::var("DATABASE_URL")
@@ -220,6 +222,12 @@ async fn main() -> std::io::Result<()> {
     let orders_c = orders.clone();
     let orders_l = orders.clone();
 
+    let metrics_route = warp::path("metrics").map(|| {
+        let uptime = _PROCESS_START.get_or_init(Instant::now).elapsed().as_secs();
+        warp::reply::with_header(
+            format!("# HELP pod_uptime_seconds Time since process started\n# TYPE pod_uptime_seconds gauge\npod_uptime_seconds{{service=\"rust-fx-advanced\"}} {}\n# HELP pod_ready Whether pod is ready\n# TYPE pod_ready gauge\npod_ready{{service=\"rust-fx-advanced\"}} 1\n", uptime),
+            "content-type", "text/plain; version=0.0.4")
+    });
     let health = warp::path("health").map(|| {
         warp::reply::json(&serde_json::json!({"status": "ok", "service": "rust-fx-advanced"}))
     });
@@ -274,16 +282,21 @@ async fn main() -> std::io::Result<()> {
             warp::reply::json(&get_corridor_health(&from, &to))
         });
 
-    let routes = health.or(create_order).or(list_orders).or(multi_leg).or(compare).or(corridor);
+    let routes = metrics_route.or(health).or(create_order).or(list_orders).or(multi_leg).or(compare).or(corridor);
     eprintln!("rust-fx-advanced starting on port {}", port);
     let (addr, server) = warp::serve(routes).bind_with_graceful_shutdown(
         ([0, 0, 0, 0], port),
         async {
             tokio::signal::ctrl_c().await.ok();
             eprintln!("[rust-fx-advanced] Graceful shutdown initiated");
+        eprintln!("{{\"event\":\"pod.shutdown.initiated\",\"service\":\"rust-fx-advanced\",\"timestamp\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339());;
         },
     );
     eprintln!("[rust-fx-advanced] Listening on {}", addr);
+    let startup_ms = _PROCESS_START.get_or_init(Instant::now).elapsed().as_millis();
+    eprintln!("{{\"event\":\"pod.startup.complete\",\"service\":\"rust-fx-advanced\",\"startup_ms\":{},\"timestamp\":\"{}\"}}",
+        startup_ms, chrono::Utc::now().to_rfc3339());;
     server.await;
     Ok(())
 }

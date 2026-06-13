@@ -14,6 +14,8 @@ use uuid::Uuid;
 mod db {
     use std::env;
     use std::sync::OnceLock;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     
     static DB_URL: OnceLock<String> = OnceLock::new();
     

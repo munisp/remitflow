@@ -357,6 +357,8 @@ mod tests {
     use super::*;
     use actix_web::{test, App};
     use base64::Engine;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
     #[actix_web::test]
     async fn test_validate_jpeg_magic_bytes() {

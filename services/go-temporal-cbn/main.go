@@ -32,6 +32,8 @@ import (
 	"syscall"
 )
 
+var _processStartTime = time.Now()
+
 const (
 	TaskQueue = "cbn-compliance"
 )
@@ -445,3 +447,4 @@ func (r *jsonBodyReader) Read(p []byte) (n int, err error) {
 }
 
 func (r *jsonBodyReader) Close() error { return nil }
+

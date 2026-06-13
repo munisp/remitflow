@@ -20,6 +20,8 @@ import (
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
+var _processStartTime = time.Now()
+
 var (
 	port              = getEnv("P2P_SANCTIONS_PORT", "8110")
 	redisURL          = getEnv("REDIS_URL", "redis://localhost:6379")
@@ -487,7 +489,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("[go-p2p-sanctions] Graceful shutdown initiated...")
+		fmt.Fprintf(os.Stderr, "{\"event\":\"pod.shutdown.initiated\",\"service\":\"%s\",\"timestamp\":\"%s\",\"pid\":%d}\n", "go-p2p-sanctions", time.Now().Format(time.RFC3339), os.Getpid())
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
@@ -496,8 +498,10 @@ func main() {
 	}()
 
 	log.Printf("[go-p2p-sanctions] Listening on :%s", port)
+	fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-p2p-sanctions", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[go-p2p-sanctions] Server error: %v", err)
 	}
 	log.Println("[go-p2p-sanctions] Server stopped")
+
 }

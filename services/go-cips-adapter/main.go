@@ -35,6 +35,8 @@ import (
 )
 
 
+var _processStartTime = time.Now()
+
 var db *sql.DB
 
 
@@ -211,6 +213,7 @@ func main() {
 
 	go func() {
 		log.Printf("[CIPS] Adapter listening on :%s", port)
+	fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-cips-adapter", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("[CIPS] Server error: %v", err)
 		}
@@ -241,4 +244,5 @@ func main() {
 		log.Fatalf("[CIPS] Forced shutdown: %v", err)
 	}
 	log.Println("[CIPS] Server stopped")
+
 }
