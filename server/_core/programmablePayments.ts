@@ -141,12 +141,7 @@ export const programmablePaymentsRouter = router({
       payments.set(id, payment);
       logger.info({ paymentId: id, type: input.scheduleType }, "Programmable payment created");
 
-      return {
-        id: payment.id,
-        status: payment.status,
-        temporalWorkflowId: payment.temporalWorkflowId,
-        nextExecutionAt: payment.nextExecutionAt,
-      };
+      return payment;
     }),
 
   // List user's programmable payments

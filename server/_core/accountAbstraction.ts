@@ -198,7 +198,9 @@ export const accountAbstractionRouter = router({
       return {
         userOpId: op.userOpId,
         txHash: op.txHash,
-        gasSponsored: gasCost,
+        status: op.status,
+        gasSponsored: true,
+        gasCost,
         paymasterUsed: true,
       };
     }),

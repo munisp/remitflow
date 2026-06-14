@@ -161,12 +161,12 @@ export const platformFeaturesRouter = router({
         runId, employerId: ctx.user.id, name: input.name,
         stablecoin: input.stablecoin,
         employees: input.employees.map(e => ({ ...e, status: "pending" })),
-        totalAmount, status: "scheduled",
+        totalAmount, status: "draft",
         scheduledAt: input.scheduledAt || new Date().toISOString(),
         createdAt: new Date().toISOString(),
       };
       payrollRuns.set(runId, run);
-      return { runId, totalAmount, employeeCount: input.employees.length, status: "scheduled" };
+      return { runId, totalAmount, employeeCount: input.employees.length, status: "draft" };
     }),
 
   payroll_executeRun: protectedProcedure
@@ -199,6 +199,7 @@ export const platformFeaturesRouter = router({
           { currency: "DAI", type: "stablecoin", balance: 2000, equivalent_usd: 2000 },
         ],
         totalNetWorth: 24000,
+        totalValueUsd: 24000,
         displayCurrency: "USD",
       };
     }),
@@ -341,6 +342,7 @@ export const platformFeaturesRouter = router({
 
   devApi_docs: protectedProcedure
     .query(async () => ({
+      version: "1.0.0",
       baseUrl: "https://api.remitflow.io/v1",
       authentication: "Bearer token (API key in Authorization header)",
       endpoints: [
@@ -393,12 +395,15 @@ export const platformFeaturesRouter = router({
   insurance_coverage: protectedProcedure
     .query(async ({ ctx }) => ({
       userId: ctx.user.id,
+      totalCoverage: 100_000,
       maxCoverage: 100_000,
       currentBalance: 17_000,
       coveredAmount: 17_000,
       coveragePercent: 100,
-      provider: "Nexus Mutual + Lloyd's",
-      policyId: "RF-INS-2026",
+      policies: [
+        { provider: "Nexus Mutual", type: "smart_contract", coverage: 50_000, policyId: "NM-RF-2026", status: "active" },
+        { provider: "Lloyd's of London", type: "custody", coverage: 50_000, policyId: "LL-RF-2026", status: "active" },
+      ],
       coveredEvents: [
         "Smart contract exploit",
         "Custody provider hack",
@@ -438,7 +443,7 @@ export const platformFeaturesRouter = router({
         createdAt: now.toISOString(),
       };
       proposals.set(proposalId, proposal);
-      return { proposalId, title: input.title, endDate: end.toISOString() };
+      return { proposalId, title: input.title, status: "active", endDate: end.toISOString() };
     }),
 
   dao_vote: protectedProcedure

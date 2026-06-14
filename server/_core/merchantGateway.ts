@@ -153,7 +153,7 @@ export const merchantGatewayRouter = router({
         stablecoin: input.stablecoin,
         description: input.description,
         metadata: input.metadata || {},
-        status: "created",
+        status: "pending",
         checkoutUrl: `https://pay.remitflow.io/checkout/${intentId}`,
         depositAddress,
         expiresAt: new Date(Date.now() + input.expiresInMinutes * 60_000).toISOString(),

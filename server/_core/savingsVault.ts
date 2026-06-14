@@ -110,8 +110,9 @@ export const savingsVaultRouter = router({
       const isEarly = now < new Date(deposit.maturityDate);
 
       let payout = deposit.principal + deposit.interestEarned;
+      let penalty = 0;
       if (isEarly) {
-        const penalty = deposit.principal * (deposit.earlyWithdrawalPenalty / 100);
+        penalty = deposit.principal * (deposit.earlyWithdrawalPenalty / 100);
         payout = deposit.principal - penalty;
         deposit.status = "early_withdrawal";
         deposit.interestEarned = -penalty;
@@ -120,7 +121,16 @@ export const savingsVaultRouter = router({
       }
 
       deposit.withdrawnAt = now.toISOString();
-      return { depositId: deposit.depositId, status: deposit.status, payout: Math.round(payout * 100) / 100, early: isEarly };
+      const netAmount = Math.round(payout * 100) / 100;
+      return {
+        depositId: deposit.depositId,
+        status: deposit.status,
+        principal: deposit.principal,
+        penalty: Math.round(penalty * 100) / 100,
+        netAmount,
+        payout: netAmount,
+        early: isEarly,
+      };
     }),
 
   // Get user deposits

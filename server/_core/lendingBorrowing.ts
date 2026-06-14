@@ -60,6 +60,7 @@ export const lendingBorrowingRouter = router({
     .query(async () => {
       return Object.entries(MARKETS).map(([coin, config]) => ({
         coin,
+        stablecoin: coin,
         supplyApy: config.supplyApy,
         borrowApy: config.borrowApy,
         ltv: config.ltv,
