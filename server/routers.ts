@@ -173,6 +173,7 @@ import { scheduledTransfersV117Router } from "./routers/scheduledTransfers.js";
 import { smsConfirmRouter } from "./routers/smsConfirm.js";
 import { posAgentCashFlowRouter, transfersListRouter } from "./routers/posAgentCashFlow.js";
 import { cryptoCustodyRouter } from "./routers/cryptoCustody.js";
+import { stablecoinEnhancedRouter } from "./routers/stablecoinEnhanced.js";
 import {
   supportTicketsRouter,
   directDebitRouter,
@@ -6937,5 +6938,7 @@ Case: #${input.caseId}`,
   quickWins: quickWinsRouter,
   // ── P2P Instant Payments (Zelle-style cross-border) ──
   p2p: p2pInstantRouter,
+  // v310 — Stablecoin On-Ramp/Off-Ramp, Yield, DCA, Multi-Chain, P2P, Virtual Card, Bill Pay, Alerts
+  stablecoinPlatform: stablecoinEnhancedRouter,
 });
 export type AppRouter = typeof appRouter;
