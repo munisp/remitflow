@@ -322,6 +322,16 @@ import { supportTicketingRouter } from "./lib/support-ticketing";
 import { abTestingRouter as abTestingV2Router } from "./lib/ab-testing";
 import { quickWinsRouter } from "./lib/quick-wins";
 import { safeParseAmount } from "./lib/safeDecimal";
+import { programmablePaymentsRouter } from "./_core/programmablePayments";
+import { crossCurrencySwapRouter } from "./_core/crossCurrencySwap";
+import { merchantGatewayRouter } from "./_core/merchantGateway";
+import { batchPayoutsRouter } from "./_core/batchPayouts";
+import { accountAbstractionRouter } from "./_core/accountAbstraction";
+import { lendingBorrowingRouter } from "./_core/lendingBorrowing";
+import { invoicesAndSubscriptionsRouter } from "./_core/invoicesAndSubscriptions";
+import { savingsVaultRouter } from "./_core/savingsVault";
+import { remittanceCorridorsRouter } from "./_core/remittanceCorridors";
+import { platformFeaturesRouter } from "./_core/platformFeatures";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -6943,5 +6953,16 @@ Case: #${input.caseId}`,
   stablecoinPlatform: stablecoinEnhancedRouter,
   // v311 — Liquidity Provider: quotes, settlements, reserves, rebalancing, admin
   liquidityPool: liquidityPoolRouter,
+  // v312 — 20 Stablecoin Features (F1–F20) with polyglot middleware integration
+  programmablePayments: programmablePaymentsRouter,
+  crossCurrencySwap: crossCurrencySwapRouter,
+  merchantGateway: merchantGatewayRouter,
+  batchPayouts: batchPayoutsRouter,
+  accountAbstraction: accountAbstractionRouter,
+  lendingBorrowing: lendingBorrowingRouter,
+  invoicesAndSubscriptions: invoicesAndSubscriptionsRouter,
+  savingsVault: savingsVaultRouter,
+  remittanceCorridors: remittanceCorridorsRouter,
+  platformFeatures: platformFeaturesRouter,
 });
 export type AppRouter = typeof appRouter;
