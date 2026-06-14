@@ -174,6 +174,7 @@ import { smsConfirmRouter } from "./routers/smsConfirm.js";
 import { posAgentCashFlowRouter, transfersListRouter } from "./routers/posAgentCashFlow.js";
 import { cryptoCustodyRouter } from "./routers/cryptoCustody.js";
 import { stablecoinEnhancedRouter } from "./routers/stablecoinEnhanced.js";
+import { liquidityPoolRouter } from "./routers/liquidityPool.js";
 import {
   supportTicketsRouter,
   directDebitRouter,
@@ -6940,5 +6941,7 @@ Case: #${input.caseId}`,
   p2p: p2pInstantRouter,
   // v310 — Stablecoin On-Ramp/Off-Ramp, Yield, DCA, Multi-Chain, P2P, Virtual Card, Bill Pay, Alerts
   stablecoinPlatform: stablecoinEnhancedRouter,
+  // v311 — Liquidity Provider: quotes, settlements, reserves, rebalancing, admin
+  liquidityPool: liquidityPoolRouter,
 });
 export type AppRouter = typeof appRouter;
