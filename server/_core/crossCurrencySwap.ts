@@ -121,6 +121,9 @@ export const crossCurrencySwapRouter = router({
       amount: z.number().positive().max(10_000_000),
     }))
     .query(async ({ input }) => {
+      if (input.fromCoin === input.toCoin && input.fromChain === input.toChain) {
+        throw new Error("Cannot swap same coin on same chain");
+      }
       const quote = calculateSwap(input.fromCoin, input.toCoin, input.fromChain, input.toChain, input.amount);
       quotes.set(quote.quoteId, quote);
       return quote;
