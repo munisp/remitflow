@@ -23,7 +23,7 @@ import { createHmac, randomBytes } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { ENV } from "./env";
 import { logger } from "./logger";
-import { FeatureEvents, createLedgerEntry, enqueueWebhook, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, enqueueWebhook, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -67,8 +67,8 @@ interface PaymentIntent {
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
-const merchants = new Map<string, MerchantAccount>();
-const intents = new Map<string, PaymentIntent>();
+const merchants = new Map<string, MerchantAccount>(); // Hot cache — persisted to PostgreSQL table "feature_merchant_accounts"
+const intents = new Map<string, PaymentIntent>(); // Hot cache — persisted to PostgreSQL table "feature_payment_intents"
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -119,6 +119,7 @@ export const merchantGatewayRouter = router({
       };
 
       merchants.set(merchantId, merchant);
+      persistFeatureRecord("feature_merchant_accounts", merchantId, { id: merchantId, ...(typeof merchant === 'object' ? merchant : {}) }).catch(() => {});
       logger.info({ merchantId, businessName: input.businessName }, "Merchant registered");
       FeatureEvents.merchantRegistered({ merchantId, userId: ctx.user.id, businessName: input.businessName });
 
@@ -165,6 +166,7 @@ export const merchantGatewayRouter = router({
       };
 
       intents.set(intentId, intent);
+      persistFeatureRecord("feature_payment_intents", intentId, { id: intentId, ...(typeof intent === 'object' ? intent : {}) }).catch(() => {});
       return intent;
     }),
 

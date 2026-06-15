@@ -13,6 +13,53 @@
  */
 
 import { logger } from "./logger";
+import { getCircuitBreaker, emitFeatureEvent } from "./featurePersistence";
+
+const insuranceBreaker = getCircuitBreaker("insurance-api");
+const NEXUS_MUTUAL_URL = process.env.NEXUS_MUTUAL_URL || "https://api.nexusmutual.io/v2";
+const NEXUS_MUTUAL_KEY = process.env.NEXUS_MUTUAL_API_KEY || "";
+
+export async function getNexusMutualQuote(contractAddress: string, coverAmount: number, period: number): Promise<{
+  premium: number; currency: string; period: number; available: boolean;
+}> {
+  if (!NEXUS_MUTUAL_KEY || !insuranceBreaker.canRequest()) {
+    return { premium: coverAmount * 0.026 * (period / 365), currency: "ETH", period, available: true };
+  }
+
+  try {
+    const res = await fetch(`${NEXUS_MUTUAL_URL}/quote`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${NEXUS_MUTUAL_KEY}` },
+      body: JSON.stringify({ contractAddress, coverAmount, period, coverAsset: "ETH" }),
+      signal: AbortSignal.timeout(10000),
+    });
+    insuranceBreaker.recordSuccess();
+    if (res.ok) {
+      const data = await res.json() as { premium: number; currency: string };
+      emitFeatureEvent("feature.insurance", contractAddress, { event: "quote.received", premium: data.premium });
+      return { premium: data.premium, currency: data.currency, period, available: true };
+    }
+    return { premium: coverAmount * 0.026 * (period / 365), currency: "ETH", period, available: true };
+  } catch {
+    insuranceBreaker.recordFailure();
+    return { premium: coverAmount * 0.026 * (period / 365), currency: "ETH", period, available: true };
+  }
+}
+
+export async function fileClaim(policyId: string, amount: number, description: string): Promise<Claim> {
+  const claim: Claim = {
+    claimId: `CLM-${Date.now().toString(36)}`,
+    policyId,
+    incidentDate: new Date().toISOString(),
+    filedDate: new Date().toISOString(),
+    amount,
+    description,
+    status: "filed",
+    evidence: [],
+  };
+  emitFeatureEvent("feature.insurance", claim.claimId, { event: "claim.filed", policyId, amount });
+  return claim;
+}
 
 // ── Types ───────────────────────────────────────────────────────────────────
 

@@ -17,7 +17,7 @@
 import { z } from "zod";
 import { randomBytes, createHash, createHmac } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 import { logger } from "./logger";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -86,10 +86,10 @@ interface OfflineTransaction {
 
 // ── Storage ──────────────────────────────────────────────────────────────────
 
-const terminals = new Map<string, NFCTerminal>();
-const nfcTransactions = new Map<string, NFCTransaction>();
-const nfcTags = new Map<string, NFCTag>();
-const offlineQueue = new Map<string, OfflineTransaction>();
+const terminals = new Map<string, NFCTerminal>(); // Hot cache — persisted to PostgreSQL table "feature_nfc_terminals"
+const nfcTransactions = new Map<string, NFCTransaction>(); // Hot cache — persisted to PostgreSQL table "feature_nfc_transactions"
+const nfcTags = new Map<string, NFCTag>(); // Hot cache — persisted to PostgreSQL table "feature_nfc_tags"
+const offlineQueue = new Map<string, OfflineTransaction>(); // Hot cache — persisted to PostgreSQL table "feature_nfc_offline_queue"
 const usedNonces = new Set<string>();
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -160,6 +160,7 @@ export const nfcPaymentsRouter = router({
         createdAt: new Date().toISOString(),
       };
       terminals.set(terminalId, terminal);
+      persistFeatureRecord("feature_nfc_terminals", terminalId, { id: terminalId, ...(typeof terminal === 'object' ? terminal : {}) }).catch(() => {});
       FeatureEvents.nfcTerminalRegistered({ terminalId, merchantId: input.merchantId, type: input.terminalType });
       logger.info({ terminalId, type: input.terminalType }, "NFC terminal registered");
       return terminal;
@@ -202,6 +203,7 @@ export const nfcPaymentsRouter = router({
         createdAt: new Date().toISOString(),
       };
       nfcTransactions.set(txId, tx);
+      persistFeatureRecord("feature_nfc_transactions", txId, { id: txId, ...(typeof tx === 'object' ? tx : {}) }).catch(() => {});
 
       if (!input.offlineMode) {
         createLedgerEntry({
@@ -243,6 +245,7 @@ export const nfcPaymentsRouter = router({
         offlineQueued: false, createdAt: new Date().toISOString(),
       };
       nfcTransactions.set(txId, tx);
+      persistFeatureRecord("feature_nfc_transactions", txId, { id: txId, ...(typeof tx === 'object' ? tx : {}) }).catch(() => {});
 
       createLedgerEntry({
         debitAccountId: `user-${ctx.user.id}`,
@@ -280,6 +283,7 @@ export const nfcPaymentsRouter = router({
         status: "active", createdAt: new Date().toISOString(),
       };
       nfcTags.set(tagId, tag);
+      persistFeatureRecord("feature_nfc_tags", tagId, { id: tagId, ...(typeof tag === 'object' ? tag : {}) }).catch(() => {});
       FeatureEvents.nfcTagProvisioned({ tagId, userId: ctx.user.id.toString(), tagType: input.tagType });
       logger.info({ tagId, tagType: input.tagType }, "NFC tag provisioned");
       return tag;
@@ -314,6 +318,7 @@ export const nfcPaymentsRouter = router({
         offlineQueued: false, createdAt: new Date().toISOString(),
       };
       nfcTransactions.set(txId, tx);
+      persistFeatureRecord("feature_nfc_transactions", txId, { id: txId, ...(typeof tx === 'object' ? tx : {}) }).catch(() => {});
 
       createLedgerEntry({
         debitAccountId: `user-${ctx.user.id}`,
@@ -389,6 +394,7 @@ export const nfcPaymentsRouter = router({
           createdAt: offlineTx.timestamp,
         };
         nfcTransactions.set(txId, tx);
+      persistFeatureRecord("feature_nfc_transactions", txId, { id: txId, ...(typeof tx === 'object' ? tx : {}) }).catch(() => {});
         txs.push(tx);
         totalAmount += offlineTx.amount;
       }
@@ -400,6 +406,7 @@ export const nfcPaymentsRouter = router({
         syncedAt: new Date().toISOString(),
       };
       offlineQueue.set(offlineId, batch);
+      persistFeatureRecord("feature_nfc_offline_queue", offlineId, { id: offlineId, ...(typeof batch === 'object' ? batch : {}) }).catch(() => {});
 
       if (totalAmount > 0) {
         createLedgerEntry({

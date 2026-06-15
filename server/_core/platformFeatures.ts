@@ -20,7 +20,7 @@ import { z } from "zod";
 import { randomBytes, createHash } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
 // ── F11: Stablecoin Payroll ─────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@ interface PayrollRun {
   createdAt: string;
 }
 
-const payrollRuns = new Map<string, PayrollRun>();
+const payrollRuns = new Map<string, PayrollRun>(); // Hot cache — persisted to PostgreSQL table "feature_payroll_runs"
 
 // ── F14: Limit Orders ───────────────────────────────────────────────────────
 
@@ -56,7 +56,7 @@ interface LimitOrder {
   createdAt: string;
 }
 
-const limitOrders = new Map<string, LimitOrder>();
+const limitOrders = new Map<string, LimitOrder>(); // Hot cache — persisted to PostgreSQL table "feature_limit_orders"
 
 // ── F15: Gift Cards ─────────────────────────────────────────────────────────
 
@@ -86,7 +86,7 @@ interface ApiKey {
   lastUsedAt?: string;
 }
 
-const apiKeys = new Map<string, ApiKey>();
+const apiKeys = new Map<string, ApiKey>(); // Hot cache — persisted to PostgreSQL table "feature_api_keys"
 
 // ── F17: Referrals ──────────────────────────────────────────────────────────
 
@@ -100,7 +100,7 @@ interface Referral {
   createdAt: string;
 }
 
-const referralStore = new Map<string, Referral>();
+const referralStore = new Map<string, Referral>(); // Hot cache — persisted to PostgreSQL table "feature_referrals"
 
 // ── F19: DAO Governance ─────────────────────────────────────────────────────
 
@@ -119,7 +119,7 @@ interface Proposal {
   createdAt: string;
 }
 
-const proposals = new Map<string, Proposal>();
+const proposals = new Map<string, Proposal>(); // Hot cache — persisted to PostgreSQL table "feature_proposals"
 
 // ── F20: NFT Receipts ───────────────────────────────────────────────────────
 
@@ -137,7 +137,7 @@ interface NftReceipt {
   txHash: string;
 }
 
-const nftReceipts = new Map<string, NftReceipt>();
+const nftReceipts = new Map<string, NftReceipt>(); // Hot cache — persisted to PostgreSQL table "feature_nft_receipts"
 
 // ── Combined Router ─────────────────────────────────────────────────────────
 
@@ -167,6 +167,7 @@ export const platformFeaturesRouter = router({
         createdAt: new Date().toISOString(),
       };
       payrollRuns.set(runId, run);
+      persistFeatureRecord("feature_payroll_runs", runId, { id: runId, ...(typeof run === 'object' ? run : {}) }).catch(() => {});
       return { runId, totalAmount, employeeCount: input.employees.length, status: "draft" };
     }),
 
@@ -261,6 +262,7 @@ export const platformFeaturesRouter = router({
         createdAt: new Date().toISOString(),
       };
       limitOrders.set(orderId, order);
+      persistFeatureRecord("feature_limit_orders", orderId, { id: orderId, ...(typeof order === 'object' ? order : {}) }).catch(() => {});
       return order;
     }),
 
@@ -322,6 +324,7 @@ export const platformFeaturesRouter = router({
         status: "active", createdAt: new Date().toISOString(),
       };
       apiKeys.set(keyId, key);
+      persistFeatureRecord("feature_api_keys", keyId, { id: keyId, ...(typeof key === 'object' ? key : {}) }).catch(() => {});
       return { keyId, apiKey: apiKeyValue, permissions: input.permissions };
     }),
 
@@ -378,6 +381,7 @@ export const platformFeaturesRouter = router({
         status: "pending", createdAt: new Date().toISOString(),
       };
       referralStore.set(ref.referralId, ref);
+      persistFeatureRecord("feature_referrals", ref.referralId, { id: ref.referralId, ...(typeof ref === 'object' ? ref : {}) }).catch(() => {});
       return { code, totalReferrals: 0, bonusPerReferral: 5.00, shareLink: `https://remitflow.io/join?ref=${code}` };
     }),
 
@@ -444,6 +448,7 @@ export const platformFeaturesRouter = router({
         createdAt: now.toISOString(),
       };
       proposals.set(proposalId, proposal);
+      persistFeatureRecord("feature_proposals", proposalId, { id: proposalId, ...(typeof proposal === 'object' ? proposal : {}) }).catch(() => {});
       return { proposalId, title: input.title, status: "active", endDate: end.toISOString() };
     }),
 
@@ -500,6 +505,7 @@ export const platformFeaturesRouter = router({
         txHash: `0x${randomBytes(32).toString("hex")}`,
       };
       nftReceipts.set(tokenId, receipt);
+      persistFeatureRecord("feature_nft_receipts", tokenId, { id: tokenId, ...(typeof receipt === 'object' ? receipt : {}) }).catch(() => {});
       return receipt;
     }),
 

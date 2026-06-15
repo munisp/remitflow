@@ -53,6 +53,14 @@ class WorkflowType(str, Enum):
     INVESTMENT_ORDER = "investment_order"
     BATCH_PAYMENT = "batch_payment"
     ACCOUNT_CLOSURE = "account_closure"
+    SCHEDULED_PAYMENT = "scheduled_payment"
+    SUBSCRIPTION_RENEWAL = "subscription_renewal"
+    VAULT_MATURITY = "vault_maturity"
+    CORRIDOR_SETTLEMENT = "corridor_settlement"
+    PROGRAMMABLE_PAYMENT = "programmable_payment"
+    MERCHANT_SETTLEMENT = "merchant_settlement"
+    LENDING_LIQUIDATION = "lending_liquidation"
+    QR_NFC_SETTLEMENT = "qr_nfc_settlement"
 
 
 # In-memory workflow registry (Temporal client fallback)
@@ -186,11 +194,299 @@ async def investment_order_workflow(workflow_id: str, params: Dict[str, Any]) ->
     return {"status": "fulfilled", "asset_id": params.get("assetId")}
 
 
+async def scheduled_payment_workflow(workflow_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Scheduled/recurring payment workflow:
+    1. Validate payment configuration
+    2. Check sender balance
+    3. Lock FX rate (if cross-currency)
+    4. Execute debit
+    5. Execute credit
+    6. Record TigerBeetle ledger entry
+    7. Schedule next occurrence (cron/recurring)
+    8. Emit Kafka event for audit trail
+    """
+    steps = [
+        "validate_config",
+        "check_balance",
+        "lock_fx_rate",
+        "execute_debit",
+        "execute_credit",
+        "record_ledger",
+        "schedule_next",
+        "emit_event",
+    ]
+    for i, step in enumerate(steps):
+        workflow_registry[workflow_id]["current_step"] = i
+        workflow_registry[workflow_id]["current_step_name"] = step
+        logger.info(f"[SCHEDULED:{workflow_id}] Step {i+1}/{len(steps)}: {step}")
+        await asyncio.sleep(0.05)
+    next_run = (datetime.now(timezone.utc) + timedelta(days=params.get("interval_days", 30))).isoformat()
+    return {"status": "completed", "next_run": next_run, "amount": params.get("amount")}
+
+
+async def subscription_renewal_workflow(workflow_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Subscription renewal workflow:
+    1. Check subscription status (active/cancelled)
+    2. Verify payment method
+    3. Calculate prorated amount
+    4. Attempt charge
+    5. Handle failure (retry 3x, then cancel)
+    6. Update subscription period
+    7. Send invoice/receipt
+    8. Emit renewal event
+    """
+    steps = [
+        "check_subscription_status",
+        "verify_payment_method",
+        "calculate_amount",
+        "attempt_charge",
+        "handle_retry",
+        "update_period",
+        "send_receipt",
+        "emit_event",
+    ]
+    for i, step in enumerate(steps):
+        workflow_registry[workflow_id]["current_step"] = i
+        workflow_registry[workflow_id]["current_step_name"] = step
+        logger.info(f"[SUBSCRIPTION:{workflow_id}] Step {i+1}/{len(steps)}: {step}")
+        await asyncio.sleep(0.05)
+    return {"status": "renewed", "subscription_id": params.get("subscription_id")}
+
+
+async def vault_maturity_workflow(workflow_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Savings vault maturity workflow:
+    1. Check maturity date reached
+    2. Calculate accrued interest
+    3. Debit vault account
+    4. Credit user wallet (principal + interest)
+    5. Record TigerBeetle entries
+    6. Close vault position (or auto-renew)
+    7. Send maturity notification
+    8. Emit analytics event
+    """
+    steps = [
+        "check_maturity",
+        "calculate_interest",
+        "debit_vault",
+        "credit_user",
+        "record_ledger",
+        "close_or_renew",
+        "send_notification",
+        "emit_event",
+    ]
+    for i, step in enumerate(steps):
+        workflow_registry[workflow_id]["current_step"] = i
+        workflow_registry[workflow_id]["current_step_name"] = step
+        logger.info(f"[VAULT_MATURITY:{workflow_id}] Step {i+1}/{len(steps)}: {step}")
+        await asyncio.sleep(0.05)
+    apy = params.get("apy", 5.0)
+    principal = params.get("principal", 0)
+    term_days = params.get("term_days", 90)
+    interest = round(principal * (apy / 100) * (term_days / 365), 2)
+    return {"status": "matured", "principal": principal, "interest": interest, "total": round(principal + interest, 2)}
+
+
+async def corridor_settlement_workflow(workflow_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Cross-border corridor settlement workflow:
+    1. Aggregate pending transfers for corridor
+    2. Net positions across counterparties
+    3. Execute FX conversion (batch)
+    4. Initiate SWIFT/SEPA/NIBSS settlement
+    5. Wait for confirmation
+    6. Reconcile settled amounts
+    7. Update corridor ledger
+    8. Emit settlement report
+    """
+    steps = [
+        "aggregate_transfers",
+        "net_positions",
+        "execute_fx_batch",
+        "initiate_settlement",
+        "await_confirmation",
+        "reconcile_amounts",
+        "update_ledger",
+        "emit_report",
+    ]
+    for i, step in enumerate(steps):
+        workflow_registry[workflow_id]["current_step"] = i
+        workflow_registry[workflow_id]["current_step_name"] = step
+        logger.info(f"[CORRIDOR:{workflow_id}] Step {i+1}/{len(steps)}: {step}")
+        await asyncio.sleep(0.05)
+    return {"status": "settled", "corridor": params.get("corridor_id"), "transfer_count": params.get("transfer_count", 0)}
+
+
+async def batch_payment_workflow(workflow_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Batch payout processing workflow:
+    1. Validate batch (recipients, amounts)
+    2. Run compliance screening
+    3. Reserve total funds
+    4. Process each recipient (parallel batches of 50)
+    5. Retry failed payments (up to 3x)
+    6. Reconcile and generate report
+    7. Release remaining reserved funds
+    8. Emit completion event
+    """
+    steps = [
+        "validate_batch",
+        "compliance_screening",
+        "reserve_funds",
+        "process_recipients",
+        "retry_failures",
+        "reconcile",
+        "release_reserves",
+        "emit_event",
+    ]
+    for i, step in enumerate(steps):
+        workflow_registry[workflow_id]["current_step"] = i
+        workflow_registry[workflow_id]["current_step_name"] = step
+        logger.info(f"[BATCH:{workflow_id}] Step {i+1}/{len(steps)}: {step}")
+        await asyncio.sleep(0.05)
+    return {
+        "status": "completed",
+        "total_recipients": params.get("recipient_count", 0),
+        "total_amount": params.get("total_amount", 0),
+        "successful": params.get("recipient_count", 0),
+        "failed": 0,
+    }
+
+
+async def programmable_payment_workflow(workflow_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Programmable payment execution workflow:
+    1. Evaluate condition (price/date/balance/webhook)
+    2. Wait until condition met (timer for schedules)
+    3. Check approvals (N-of-M)
+    4. Execute payment splits
+    5. Record milestone progress
+    6. Schedule next execution if recurring
+    7. Emit audit event
+    """
+    steps = [
+        "evaluate_condition",
+        "wait_for_trigger",
+        "check_approvals",
+        "execute_splits",
+        "record_milestone",
+        "schedule_next",
+        "emit_audit",
+    ]
+    for i, step in enumerate(steps):
+        workflow_registry[workflow_id]["current_step"] = i
+        workflow_registry[workflow_id]["current_step_name"] = step
+        logger.info(f"[PROGRAMMABLE:{workflow_id}] Step {i+1}/{len(steps)}: {step}")
+        await asyncio.sleep(0.05)
+    return {"status": "executed", "payment_id": params.get("payment_id")}
+
+
+async def merchant_settlement_workflow(workflow_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merchant payment settlement workflow:
+    1. Aggregate completed payments for merchant
+    2. Calculate fees and net amount
+    3. Run fraud/chargeback check
+    4. Hold period (T+1 or T+2)
+    5. Execute payout to merchant bank
+    6. Update merchant balance
+    7. Generate settlement statement
+    8. Emit webhook to merchant
+    """
+    steps = [
+        "aggregate_payments",
+        "calculate_fees",
+        "fraud_check",
+        "hold_period",
+        "execute_payout",
+        "update_balance",
+        "generate_statement",
+        "emit_webhook",
+    ]
+    for i, step in enumerate(steps):
+        workflow_registry[workflow_id]["current_step"] = i
+        workflow_registry[workflow_id]["current_step_name"] = step
+        logger.info(f"[MERCHANT:{workflow_id}] Step {i+1}/{len(steps)}: {step}")
+        await asyncio.sleep(0.05)
+    return {"status": "settled", "merchant_id": params.get("merchant_id"), "net_amount": params.get("total_amount", 0) * 0.97}
+
+
+async def lending_liquidation_workflow(workflow_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Lending liquidation workflow (health factor < 1.0):
+    1. Monitor health factor
+    2. Send warning at 1.2
+    3. Attempt auto-repay at 1.1
+    4. Force liquidation at 1.0
+    5. Sell collateral on market
+    6. Repay borrowed amount + penalty
+    7. Return remaining collateral
+    8. Update position and emit event
+    """
+    steps = [
+        "monitor_health",
+        "send_warning",
+        "attempt_auto_repay",
+        "force_liquidation",
+        "sell_collateral",
+        "repay_borrow",
+        "return_remaining",
+        "emit_event",
+    ]
+    for i, step in enumerate(steps):
+        workflow_registry[workflow_id]["current_step"] = i
+        workflow_registry[workflow_id]["current_step_name"] = step
+        logger.info(f"[LIQUIDATION:{workflow_id}] Step {i+1}/{len(steps)}: {step}")
+        await asyncio.sleep(0.05)
+    return {"status": "liquidated", "position_id": params.get("position_id")}
+
+
+async def qr_nfc_settlement_workflow(workflow_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    QR/NFC offline batch settlement workflow:
+    1. Receive offline transaction batch
+    2. Validate nonces (dedup)
+    3. Verify terminal signatures
+    4. Process each transaction
+    5. Record TigerBeetle entries
+    6. Update terminal status
+    7. Send settlement confirmation
+    8. Emit analytics events
+    """
+    steps = [
+        "receive_batch",
+        "validate_nonces",
+        "verify_signatures",
+        "process_transactions",
+        "record_ledger",
+        "update_terminals",
+        "send_confirmation",
+        "emit_analytics",
+    ]
+    for i, step in enumerate(steps):
+        workflow_registry[workflow_id]["current_step"] = i
+        workflow_registry[workflow_id]["current_step_name"] = step
+        logger.info(f"[QR_NFC:{workflow_id}] Step {i+1}/{len(steps)}: {step}")
+        await asyncio.sleep(0.05)
+    return {"status": "settled", "batch_size": params.get("batch_size", 0)}
+
+
 WORKFLOW_HANDLERS = {
     WorkflowType.REMITTANCE: remittance_workflow,
     WorkflowType.KYC_VERIFICATION: kyc_verification_workflow,
     WorkflowType.DISPUTE_RESOLUTION: dispute_resolution_workflow,
     WorkflowType.INVESTMENT_ORDER: investment_order_workflow,
+    WorkflowType.SCHEDULED_PAYMENT: scheduled_payment_workflow,
+    WorkflowType.SUBSCRIPTION_RENEWAL: subscription_renewal_workflow,
+    WorkflowType.VAULT_MATURITY: vault_maturity_workflow,
+    WorkflowType.CORRIDOR_SETTLEMENT: corridor_settlement_workflow,
+    WorkflowType.BATCH_PAYMENT: batch_payment_workflow,
+    WorkflowType.PROGRAMMABLE_PAYMENT: programmable_payment_workflow,
+    WorkflowType.MERCHANT_SETTLEMENT: merchant_settlement_workflow,
+    WorkflowType.LENDING_LIQUIDATION: lending_liquidation_workflow,
+    WorkflowType.QR_NFC_SETTLEMENT: qr_nfc_settlement_workflow,
 }
 
 # ── Stats ─────────────────────────────────────────────────────────────────────

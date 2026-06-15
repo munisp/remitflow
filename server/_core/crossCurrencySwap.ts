@@ -19,7 +19,7 @@ import { z } from "zod";
 import { randomBytes } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -106,8 +106,8 @@ function calculateSwap(
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
-const quotes = new Map<string, SwapQuote>();
-const swaps = new Map<string, SwapExecution>();
+const quotes = new Map<string, SwapQuote>(); // Hot cache — persisted to PostgreSQL table "feature_swap_quotes"
+const swaps = new Map<string, SwapExecution>(); // Hot cache — persisted to PostgreSQL table "feature_swap_executions"
 
 // ── Router ──────────────────────────────────────────────────────────────────
 
@@ -127,6 +127,7 @@ export const crossCurrencySwapRouter = router({
       }
       const quote = calculateSwap(input.fromCoin, input.toCoin, input.fromChain, input.toChain, input.amount);
       quotes.set(quote.quoteId, quote);
+      persistFeatureRecord("feature_swap_quotes", quote.quoteId, { id: quote.quoteId, ...(typeof quote === 'object' ? quote : {}) }).catch(() => {});
       return quote;
     }),
 
@@ -159,6 +160,7 @@ export const crossCurrencySwapRouter = router({
       };
 
       swaps.set(swapId, execution);
+      persistFeatureRecord("feature_swap_executions", swapId, { id: swapId, ...(typeof execution === 'object' ? execution : {}) }).catch(() => {});
       quotes.delete(input.quoteId);
       logger.info({ swapId, from: quote.fromCoin, to: quote.toCoin, amount: quote.inputAmount }, "Swap executed");
 

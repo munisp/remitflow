@@ -14,6 +14,7 @@
 
 import { createSign, randomBytes } from "crypto";
 import { logger } from "./logger";
+import { getCircuitBreaker, emitFeatureEvent } from "./featurePersistence";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 

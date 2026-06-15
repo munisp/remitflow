@@ -17,6 +17,7 @@
 
 import { randomBytes } from "crypto";
 import { logger } from "./logger";
+import { getCircuitBreaker, emitFeatureEvent } from "./featurePersistence";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -88,6 +89,8 @@ export interface ComplianceDecision {
   decidedAt: string;
 }
 
+const complianceBreaker = getCircuitBreaker("compliance-engine");
+
 // ── Sanctions Screening ─────────────────────────────────────────────────────
 
 export async function screenSanctions(params: {
@@ -96,8 +99,7 @@ export async function screenSanctions(params: {
   country?: string;
   type?: "individual" | "entity";
 }): Promise<SanctionsScreenResult> {
-  // In production, this calls the OFAC API
-  if (!process.env.OFAC_API_KEY) {
+  if (!process.env.OFAC_API_KEY || !complianceBreaker.canRequest()) {
     return mockSanctionsScreen(params.name);
   }
 

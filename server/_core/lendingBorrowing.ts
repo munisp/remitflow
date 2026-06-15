@@ -19,7 +19,7 @@ import { z } from "zod";
 import { randomBytes } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -51,7 +51,7 @@ interface LendingPosition {
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
-const positions = new Map<string, LendingPosition>();
+const positions = new Map<string, LendingPosition>(); // Hot cache — persisted to PostgreSQL table "feature_lending_positions"
 
 // ── Router ──────────────────────────────────────────────────────────────────
 
@@ -97,6 +97,7 @@ export const lendingBorrowingRouter = router({
       };
 
       positions.set(positionId, position);
+      persistFeatureRecord("feature_lending_positions", positionId, { id: positionId, ...(typeof position === 'object' ? position : {}) }).catch(() => {});
       logger.info({ positionId, coin: input.stablecoin, amount: input.amount }, "Supply position opened");
       FeatureEvents.supplyDeposited({ positionId, userId: ctx.user.id, coin: input.stablecoin, amount: input.amount });
       createLedgerEntry({ debitAccountId: `user-${ctx.user.id}-${input.stablecoin}`, creditAccountId: `lending-pool-${input.stablecoin}`, amount: input.amount, currency: input.stablecoin, reference: `supply-${positionId}`, code: 300 }).catch(() => {});
@@ -142,6 +143,7 @@ export const lendingBorrowingRouter = router({
       };
 
       positions.set(positionId, position);
+      persistFeatureRecord("feature_lending_positions", positionId, { id: positionId, ...(typeof position === 'object' ? position : {}) }).catch(() => {});
       logger.info({ positionId, borrow: input.borrowAmount, collateral: input.collateralAmount, hf: healthFactor }, "Borrow position opened");
       FeatureEvents.loanBorrowed({ positionId, userId: ctx.user.id, coin: input.borrowCoin, borrowAmount: input.borrowAmount });
       createLedgerEntry({ debitAccountId: `lending-pool-${input.borrowCoin}`, creditAccountId: `user-${ctx.user.id}-${input.borrowCoin}`, amount: input.borrowAmount, currency: input.borrowCoin, reference: `borrow-${positionId}`, code: 301 }).catch(() => {});

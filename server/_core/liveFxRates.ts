@@ -12,6 +12,10 @@
  */
 
 import { logger } from "./logger";
+import { getCircuitBreaker, emitFeatureEvent } from "./featurePersistence";
+
+const coinGeckoBreaker = getCircuitBreaker("coingecko");
+const fxApiBreaker = getCircuitBreaker("exchangerate-api");
 
 // ── Types ───────────────────────────────────────────────────────────────────
 

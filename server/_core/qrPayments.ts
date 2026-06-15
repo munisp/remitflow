@@ -17,7 +17,7 @@
 import { z } from "zod";
 import { randomBytes, createHash, createHmac } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 import { logger } from "./logger";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -67,9 +67,9 @@ interface QRMerchantProfile {
 
 // ── Storage ──────────────────────────────────────────────────────────────────
 
-const qrCodes = new Map<string, QRCode>();
-const qrScans = new Map<string, QRScan>();
-const merchantProfiles = new Map<string, QRMerchantProfile>();
+const qrCodes = new Map<string, QRCode>(); // Hot cache — persisted to PostgreSQL table "feature_qr_codes"
+const qrScans = new Map<string, QRScan>(); // Hot cache — persisted to PostgreSQL table "feature_qr_scans"
+const merchantProfiles = new Map<string, QRMerchantProfile>(); // Hot cache — persisted to PostgreSQL table "feature_merchant_qr_profiles"
 
 // ── QR Payload Generators ────────────────────────────────────────────────────
 
@@ -202,6 +202,7 @@ export const qrPaymentsRouter = router({
         createdAt: new Date().toISOString(),
       };
       qrCodes.set(qrId, qr);
+      persistFeatureRecord("feature_qr_codes", qrId, { id: qrId, ...(typeof qr === 'object' ? qr : {}) }).catch(() => {});
 
       FeatureEvents.qrCodeCreated({ qrId, userId: ctx.user.id.toString(), type: "static", currency: input.currency });
       logger.info({ qrId, type: "static" }, "Static QR created");
@@ -263,6 +264,7 @@ export const qrPaymentsRouter = router({
         createdAt: new Date().toISOString(),
       };
       qrCodes.set(qrId, qr);
+      persistFeatureRecord("feature_qr_codes", qrId, { id: qrId, ...(typeof qr === 'object' ? qr : {}) }).catch(() => {});
 
       createLedgerEntry({
         debitAccountId: `qr-reserve-${ctx.user.id}`,
@@ -324,6 +326,7 @@ export const qrPaymentsRouter = router({
         scannedAt: new Date().toISOString(),
       };
       qrScans.set(scanId, scan);
+      persistFeatureRecord("feature_qr_scans", scanId, { id: scanId, ...(typeof scan === 'object' ? scan : {}) }).catch(() => {});
 
       if (qr.amount) {
         const paymentId = `qrpay-${randomBytes(8).toString("hex")}`;
@@ -412,6 +415,7 @@ export const qrPaymentsRouter = router({
         createdAt: new Date().toISOString(),
       };
       merchantProfiles.set(profileId, profile);
+      persistFeatureRecord("feature_merchant_qr_profiles", profileId, { id: profileId, ...(typeof profile === 'object' ? profile : {}) }).catch(() => {});
       FeatureEvents.merchantQRRegistered({ profileId, merchantId: input.merchantId, userId: ctx.user.id.toString() });
       return profile;
     }),

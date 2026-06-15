@@ -19,7 +19,7 @@ import { z } from "zod";
 import { randomBytes, createHash } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -72,8 +72,8 @@ const FACTORY = "0x9406Cc6185a346906296840746125a0E44976454"; // Safe 4337 Modul
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
-const wallets = new Map<string, SmartWallet>();
-const userOps = new Map<string, UserOperation>();
+const wallets = new Map<string, SmartWallet>(); // Hot cache — persisted to PostgreSQL table "feature_smart_wallets"
+const userOps = new Map<string, UserOperation>(); // Hot cache — persisted to PostgreSQL table "feature_user_operations"
 
 // ── Router ──────────────────────────────────────────────────────────────────
 
@@ -106,6 +106,7 @@ export const accountAbstractionRouter = router({
       };
 
       wallets.set(walletId, wallet);
+      persistFeatureRecord("feature_smart_wallets", walletId, { id: walletId, ...(typeof wallet === 'object' ? wallet : {}) }).catch(() => {});
       logger.info({ walletId, address, chain: input.chain }, "Smart wallet created");
 
       return {
@@ -194,6 +195,7 @@ export const accountAbstractionRouter = router({
       };
 
       userOps.set(userOpId, op);
+      persistFeatureRecord("feature_user_operations", userOpId, { id: userOpId, ...(typeof op === 'object' ? op : {}) }).catch(() => {});
       wallet.totalGasSponsored += gasCost;
 
       return {

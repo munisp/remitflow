@@ -12,7 +12,7 @@ import { z } from "zod";
 import { randomBytes } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -58,8 +58,8 @@ interface Subscription {
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
-const invoices = new Map<string, Invoice>();
-const subscriptions = new Map<string, Subscription>();
+const invoices = new Map<string, Invoice>(); // Hot cache — persisted to PostgreSQL table "feature_invoices"
+const subscriptions = new Map<string, Subscription>(); // Hot cache — persisted to PostgreSQL table "feature_subscriptions"
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -119,6 +119,7 @@ export const invoicesAndSubscriptionsRouter = router({
       };
 
       invoices.set(invoiceId, invoice);
+      persistFeatureRecord("feature_invoices", invoiceId, { id: invoiceId, ...(typeof invoice === 'object' ? invoice : {}) }).catch(() => {});
       return invoice;
     }),
 
@@ -190,6 +191,7 @@ export const invoicesAndSubscriptionsRouter = router({
       };
 
       subscriptions.set(subId, sub);
+      persistFeatureRecord("feature_subscriptions", subId, { id: subId, ...(typeof sub === 'object' ? sub : {}) }).catch(() => {});
       return sub;
     }),
 

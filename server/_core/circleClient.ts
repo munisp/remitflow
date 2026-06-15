@@ -16,6 +16,7 @@
 
 import { randomBytes } from "crypto";
 import { logger } from "./logger";
+import { getCircuitBreaker, emitFeatureEvent } from "./featurePersistence";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -95,6 +96,10 @@ export interface CircleDepositAddress {
 
 // ── HTTP Client ─────────────────────────────────────────────────────────────
 
+const circleBreaker = getCircuitBreaker("circle-api");
+const MAX_RETRIES = 3;
+const RETRY_DELAYS = [1000, 2000, 4000];
+
 async function circleRequest<T>(
   method: string,
   path: string,
@@ -105,27 +110,54 @@ async function circleRequest<T>(
     return mockCircleResponse(path) as T;
   }
 
+  if (!circleBreaker.canRequest()) {
+    logger.warn({ path }, "Circle circuit breaker open — returning mock");
+    return mockCircleResponse(path) as T;
+  }
+
   const url = `${CIRCLE_BASE_URL}${path}`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "Authorization": `Bearer ${CIRCLE_API_KEY}`,
   };
 
-  const response = await fetch(url, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(15000),
-  });
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(15000),
+      });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    logger.error({ status: response.status, path, error: errorText }, "Circle API error");
-    throw new Error(`Circle API ${response.status}: ${errorText}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        if (response.status >= 500 && attempt < MAX_RETRIES) {
+          logger.warn({ status: response.status, path, attempt }, "Circle API 5xx — retrying");
+          await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt] || 4000));
+          continue;
+        }
+        circleBreaker.recordFailure();
+        logger.error({ status: response.status, path, error: errorText }, "Circle API error");
+        throw new Error(`Circle API ${response.status}: ${errorText}`);
+      }
+
+      circleBreaker.recordSuccess();
+      emitFeatureEvent("feature.circle", path, { event: "circle.request", method, path, status: response.status });
+      const json = (await response.json()) as { data: T };
+      return json.data;
+    } catch (err) {
+      if (attempt < MAX_RETRIES && (err as Error).name === "TimeoutError") {
+        logger.warn({ path, attempt }, "Circle API timeout — retrying");
+        await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt] || 4000));
+        continue;
+      }
+      circleBreaker.recordFailure();
+      throw err;
+    }
   }
 
-  const json = (await response.json()) as { data: T };
-  return json.data;
+  throw new Error("Circle API: max retries exceeded");
 }
 
 // ── Mock Responses (when API key not set) ───────────────────────────────────

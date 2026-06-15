@@ -12,7 +12,7 @@ import { z } from "zod";
 import { randomBytes } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -44,7 +44,7 @@ interface SavingsDeposit {
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
-const deposits = new Map<string, SavingsDeposit>();
+const deposits = new Map<string, SavingsDeposit>(); // Hot cache — persisted to PostgreSQL table "feature_savings_deposits"
 
 // ── Router ──────────────────────────────────────────────────────────────────
 
@@ -94,6 +94,7 @@ export const savingsVaultRouter = router({
       };
 
       deposits.set(depositId, deposit);
+      persistFeatureRecord("feature_savings_deposits", depositId, { id: depositId, ...(typeof deposit === 'object' ? deposit : {}) }).catch(() => {});
       logger.info({ depositId, amount: input.amount, term: input.termDays, apy: tier.apy }, "Savings deposit created");
       FeatureEvents.savingsDeposited({ depositId, userId: ctx.user.id, amount: input.amount, term: input.termDays });
       createLedgerEntry({ debitAccountId: `user-${ctx.user.id}-${input.stablecoin}`, creditAccountId: `savings-vault-${input.stablecoin}`, amount: input.amount, currency: input.stablecoin, reference: `deposit-${depositId}`, code: 400 }).catch(() => {});

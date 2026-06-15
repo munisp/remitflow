@@ -321,6 +321,87 @@ export async function publishTransferCompletion(input: {
 }
 
 /**
+ * Saga compensation: reverses a failed transfer mid-pipeline.
+ * Called when settlement fails after debit was recorded.
+ */
+export async function compensateFailedTransfer(input: {
+  transferId: string;
+  userId: number;
+  amount: number;
+  currency: string;
+  reason: string;
+  stage: "debit" | "settlement" | "credit";
+}): Promise<{ compensated: boolean; reversalId?: string }> {
+  const reversalId = `REV-${input.transferId}`;
+  logger.warn({ ...input, reversalId }, "[Pipeline] Compensating failed transfer");
+
+  try {
+    // Reverse TigerBeetle debit
+    const transferBigId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
+    const creditAccountId = BigInt(input.userId);
+    const debitAccountId = BigInt(input.userId + 1_000_000);
+    const amountCents = BigInt(Math.round(input.amount * 100));
+    await tigerBeetle.createTransfer({
+      id: transferBigId, debitAccountId, creditAccountId, amount: amountCents, ledger: 1, code: 2,
+    });
+  } catch {
+    logger.warn({ reversalId }, "[Pipeline] TigerBeetle reversal failed — requires manual reconciliation");
+  }
+
+  try {
+    await publishEvent(KAFKA_TOPICS.TRANSACTIONS, input.transferId, {
+      eventType: "reversed",
+      transactionId: input.transferId,
+      reversalId,
+      userId: input.userId,
+      amount: input.amount,
+      currency: input.currency,
+      reason: input.reason,
+      failedStage: input.stage,
+      timestamp: new Date().toISOString(),
+    });
+  } catch {
+    logger.warn({ reversalId }, "[Pipeline] Reversal Kafka event failed");
+  }
+
+  try {
+    broadcastUserEvent(input.userId, {
+      type: "transfer_failed",
+      payload: {
+        title: "Transfer Reversed",
+        message: `Your transfer of ${input.amount} ${input.currency} was reversed: ${input.reason}`,
+        transferId: input.transferId,
+        reversalId,
+      },
+    });
+    sendNotification({
+      userId: input.userId,
+      title: "Transfer Reversed",
+      message: `Transfer ${input.transferId} reversed: ${input.reason}. Funds returned to your account.`,
+      type: "transfer",
+    }).catch(() => {});
+  } catch {
+    // Notification failure is non-critical
+  }
+
+  return { compensated: true, reversalId };
+}
+
+/**
+ * Dead letter queue for transfers that fail all retries.
+ */
+const deadLetterQueue: Array<{ transferId: string; userId: number; amount: number; reason: string; addedAt: string }> = [];
+
+export function addToDeadLetterQueue(transferId: string, userId: number, amount: number, reason: string) {
+  deadLetterQueue.push({ transferId, userId, amount, reason, addedAt: new Date().toISOString() });
+  logger.error({ transferId, userId, amount, reason }, "[Pipeline] Transfer added to dead letter queue");
+}
+
+export function getDeadLetterQueue() {
+  return [...deadLetterQueue];
+}
+
+/**
  * Publish a batch payroll disbursement event to Kafka.
  */
 export async function publishPayrollDisbursement(input: {

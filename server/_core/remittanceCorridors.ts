@@ -12,7 +12,7 @@ import { z } from "zod";
 import { randomBytes } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
 // ── Live FX Rate Fetcher with Cache ──────────────────────────────────────────
 
@@ -160,7 +160,7 @@ interface CorridorTransfer {
   createdAt: string;
 }
 
-const transfers = new Map<string, CorridorTransfer>();
+const transfers = new Map<string, CorridorTransfer>(); // Hot cache — persisted to PostgreSQL table "feature_corridor_transfers"
 
 // ── Router ──────────────────────────────────────────────────────────────────
 
@@ -248,6 +248,7 @@ export const remittanceCorridorsRouter = router({
       };
 
       transfers.set(transferId, transfer);
+      persistFeatureRecord("feature_corridor_transfers", transferId, { id: transferId, ...(typeof transfer === 'object' ? transfer : {}) }).catch(() => {});
       logger.info({ transferId, corridor: corridor.id, amount: input.amount }, "Corridor remittance sent");
       FeatureEvents.corridorTransferSent({ transferId, corridorId: corridor.id, userId: ctx.user.id, amount: input.amount });
       createLedgerEntry({ debitAccountId: `user-${ctx.user.id}-${corridor.source.currency}`, creditAccountId: `corridor-${corridor.id}`, amount: input.amount, currency: corridor.source.currency, reference: `corridor-${transferId}`, code: 500 }).catch(() => {});

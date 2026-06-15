@@ -18,7 +18,7 @@ import { z } from "zod";
 import { randomBytes } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, loadFeatureRecords, updateFeatureRecord } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -97,7 +97,22 @@ interface ProgrammablePayment {
   nextExecutionAt?: string;
 }
 
+const TABLE = "feature_programmable_payments";
 const payments = new Map<string, ProgrammablePayment>();
+
+async function dbPersist(payment: ProgrammablePayment) {
+  payments.set(payment.id, payment);
+  persistFeatureRecord(TABLE, payment.id, {
+    id: payment.id, userId: payment.userId, type: payment.scheduleType,
+    amount: payment.amount, stablecoin: payment.stablecoin, status: payment.status,
+    scheduleType: payment.scheduleType, createdAt: payment.createdAt,
+  }).catch(() => {});
+}
+
+async function dbUpdate(payment: ProgrammablePayment) {
+  payments.set(payment.id, payment);
+  updateFeatureRecord(TABLE, payment.id, { status: payment.status }).catch(() => {});
+}
 
 // ── Router ──────────────────────────────────────────────────────────────────
 
@@ -139,7 +154,7 @@ export const programmablePaymentsRouter = router({
         nextExecutionAt: input.executeAt,
       };
 
-      payments.set(id, payment);
+      await dbPersist(payment);
       logger.info({ paymentId: id, type: input.scheduleType }, "Programmable payment created");
 
       return payment;
@@ -191,6 +206,7 @@ export const programmablePaymentsRouter = router({
         payment.status = "scheduled";
       }
       payment.updatedAt = new Date().toISOString();
+      await dbUpdate(payment);
 
       return { status: payment.status, approvalCount: payment.approvals.length, required: payment.requireApprovals };
     }),
@@ -211,6 +227,7 @@ export const programmablePaymentsRouter = router({
 
       const allCompleted = payment.milestones.every(m => m.completed);
       if (allCompleted) payment.status = "completed";
+      await dbUpdate(payment);
 
       return { milestone, allCompleted };
     }),
@@ -223,6 +240,7 @@ export const programmablePaymentsRouter = router({
       if (!payment || payment.userId !== ctx.user.id) throw new Error("Payment not found");
       payment.status = "cancelled";
       payment.updatedAt = new Date().toISOString();
+      await dbUpdate(payment);
       return { id: payment.id, status: "cancelled" };
     }),
 
@@ -234,6 +252,7 @@ export const programmablePaymentsRouter = router({
       if (!payment || payment.userId !== ctx.user.id) throw new Error("Payment not found");
       payment.status = "paused";
       payment.updatedAt = new Date().toISOString();
+      await dbUpdate(payment);
       return { id: payment.id, status: "paused" };
     }),
 
@@ -245,6 +264,7 @@ export const programmablePaymentsRouter = router({
       if (!payment || payment.userId !== ctx.user.id) throw new Error("Payment not found");
       payment.status = "scheduled";
       payment.updatedAt = new Date().toISOString();
+      await dbUpdate(payment);
       return { id: payment.id, status: "scheduled" };
     }),
 });

@@ -176,6 +176,119 @@ function camelToSnake(str: string): string {
   return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
 }
 
+function snakeToCamel(str: string): string {
+  return str.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
+}
+
+/**
+ * Load all records from a feature table, optionally filtered by user_id.
+ * Returns an array of camelCased objects.
+ */
+export async function loadFeatureRecords(
+  tableName: string,
+  filter?: { userId?: number; where?: string },
+): Promise<Record<string, unknown>[]> {
+  const db = await getDb();
+  if (!db) return [];
+
+  try {
+    let query = `SELECT * FROM "${tableName}"`;
+    if (filter?.userId) {
+      query += ` WHERE user_id = ${filter.userId}`;
+    }
+    if (filter?.where) {
+      query += filter.userId ? ` AND ${filter.where}` : ` WHERE ${filter.where}`;
+    }
+    query += ` ORDER BY created_at DESC`;
+
+    const rows = await (db as any).execute(sql.raw(query));
+    if (!rows || !Array.isArray(rows)) return [];
+    return rows.map((row: Record<string, unknown>) => {
+      const camelRow: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(row)) {
+        camelRow[snakeToCamel(key)] = value;
+      }
+      return camelRow;
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Load a single record by ID from a feature table.
+ */
+export async function loadFeatureRecord(
+  tableName: string,
+  id: string,
+): Promise<Record<string, unknown> | null> {
+  const db = await getDb();
+  if (!db) return null;
+
+  try {
+    const rows = await (db as any).execute(sql.raw(
+      `SELECT * FROM "${tableName}" WHERE id = '${id}' LIMIT 1`
+    ));
+    if (!rows || !Array.isArray(rows) || rows.length === 0) return null;
+    const row = rows[0] as Record<string, unknown>;
+    const camelRow: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(row)) {
+      camelRow[snakeToCamel(key)] = value;
+    }
+    return camelRow;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Delete a record from a feature table by ID.
+ */
+export async function deleteFeatureRecord(
+  tableName: string,
+  id: string,
+): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  try {
+    await (db as any).execute(sql.raw(
+      `DELETE FROM "${tableName}" WHERE id = '${id}'`
+    ));
+  } catch {
+    // Graceful degradation
+  }
+}
+
+/**
+ * Update specific columns on a feature record.
+ */
+export async function updateFeatureRecord(
+  tableName: string,
+  id: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  try {
+    const updates = Object.entries(data)
+      .map(([key, val]) => {
+        const col = camelToSnake(key);
+        if (val === null || val === undefined) return `"${col}" = NULL`;
+        if (typeof val === "number") return `"${col}" = ${val}`;
+        if (typeof val === "boolean") return `"${col}" = ${val}`;
+        return `"${col}" = '${String(val).replace(/'/g, "''")}'`;
+      })
+      .join(", ");
+    await (db as any).execute(sql.raw(
+      `UPDATE "${tableName}" SET ${updates} WHERE id = '${id}'`
+    ));
+  } catch {
+    // Graceful degradation
+  }
+}
+
 // ── Feature-Specific Event Emitters ──────────────────────────────────────────
 
 export const FeatureEvents = {
@@ -431,6 +544,159 @@ export async function ensureFeatureTables(): Promise<void> {
         stablecoin VARCHAR(8) NOT NULL,
         status VARCHAR(20) DEFAULT 'active',
         schedule_type VARCHAR(20),
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_payroll_runs (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        name VARCHAR(200),
+        stablecoin VARCHAR(8) NOT NULL,
+        total_amount NUMERIC(18,6) DEFAULT 0,
+        recipient_count INTEGER DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'draft',
+        data JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW(),
+        executed_at TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_limit_orders (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        from_currency VARCHAR(8) NOT NULL,
+        to_currency VARCHAR(8) NOT NULL,
+        target_rate NUMERIC(18,6) NOT NULL,
+        amount NUMERIC(18,6) NOT NULL,
+        status VARCHAR(20) DEFAULT 'active',
+        data JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW(),
+        filled_at TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_api_keys (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        name VARCHAR(200) NOT NULL,
+        key_hash VARCHAR(128),
+        scopes JSONB DEFAULT '[]',
+        status VARCHAR(20) DEFAULT 'active',
+        last_used_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_proposals (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        title VARCHAR(500) NOT NULL,
+        description TEXT,
+        category VARCHAR(50),
+        status VARCHAR(20) DEFAULT 'active',
+        options JSONB DEFAULT '[]',
+        votes JSONB DEFAULT '[]',
+        data JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW(),
+        ends_at TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_referrals (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        referral_code VARCHAR(20) NOT NULL,
+        referred_user_id INTEGER,
+        bonus_amount NUMERIC(18,6) DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_qr_codes (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        type VARCHAR(20) NOT NULL,
+        payload TEXT NOT NULL,
+        amount NUMERIC(18,6),
+        currency VARCHAR(8) DEFAULT 'NGN',
+        merchant_id VARCHAR(64),
+        merchant_name VARCHAR(200),
+        description VARCHAR(500),
+        expires_at TIMESTAMP,
+        max_scans INTEGER,
+        scan_count INTEGER DEFAULT 0,
+        status VARCHAR(20) DEFAULT 'active',
+        metadata JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_qr_scans (
+        id VARCHAR(64) PRIMARY KEY,
+        qr_id VARCHAR(64) NOT NULL,
+        scanner_id VARCHAR(64) NOT NULL,
+        scanner_ip VARCHAR(64),
+        scanner_device VARCHAR(200),
+        result_action VARCHAR(30) NOT NULL,
+        payment_id VARCHAR(64),
+        scanned_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_nfc_terminals (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        merchant_id VARCHAR(64),
+        terminal_name VARCHAR(200),
+        terminal_type VARCHAR(20) NOT NULL,
+        status VARCHAR(20) DEFAULT 'active',
+        supported_protocols JSONB DEFAULT '[]',
+        max_transaction_amount NUMERIC(18,6) DEFAULT 0,
+        currency VARCHAR(8) DEFAULT 'NGN',
+        firmware_version VARCHAR(20),
+        last_heartbeat TIMESTAMP,
+        heartbeat_count INTEGER DEFAULT 0,
+        location JSONB,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_nfc_transactions (
+        id VARCHAR(64) PRIMARY KEY,
+        terminal_id VARCHAR(64),
+        payer_id VARCHAR(64) NOT NULL,
+        payee_id VARCHAR(64) NOT NULL,
+        amount NUMERIC(18,6) NOT NULL,
+        currency VARCHAR(8) DEFAULT 'NGN',
+        method VARCHAR(20) NOT NULL,
+        card_type VARCHAR(30),
+        card_last_four VARCHAR(4),
+        nonce VARCHAR(128) NOT NULL,
+        status VARCHAR(20) DEFAULT 'pending',
+        auth_code VARCHAR(12),
+        offline_queued BOOLEAN DEFAULT false,
+        settlement_id VARCHAR(64),
+        created_at TIMESTAMP DEFAULT NOW(),
+        settled_at TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_nfc_tags (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        tag_type VARCHAR(30),
+        ndef_payload TEXT,
+        linked_account_id VARCHAR(64),
+        max_amount NUMERIC(18,6) DEFAULT 0,
+        currency VARCHAR(8) DEFAULT 'NGN',
+        daily_limit NUMERIC(18,6) DEFAULT 0,
+        daily_used NUMERIC(18,6) DEFAULT 0,
+        daily_reset_at TIMESTAMP,
+        status VARCHAR(20) DEFAULT 'active',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_merchant_qr_profiles (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        merchant_id VARCHAR(64),
+        business_name VARCHAR(200),
+        business_category VARCHAR(50),
+        default_currency VARCHAR(8) DEFAULT 'NGN',
+        accepted_coins JSONB DEFAULT '[]',
+        till_number VARCHAR(50),
         created_at TIMESTAMP DEFAULT NOW()
       );
 

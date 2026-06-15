@@ -18,7 +18,7 @@ import { z } from "zod";
 import { randomBytes } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
-import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -53,7 +53,7 @@ interface BatchRecipient {
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
-const batches = new Map<string, BatchPayout>();
+const batches = new Map<string, BatchPayout>(); // Hot cache — persisted to PostgreSQL table "feature_batch_payouts"
 
 // ── Router ──────────────────────────────────────────────────────────────────
 
@@ -105,6 +105,7 @@ export const batchPayoutsRouter = router({
       };
 
       batches.set(batchId, batch);
+      persistFeatureRecord("feature_batch_payouts", batchId, { id: batchId, ...(typeof batch === 'object' ? batch : {}) }).catch(() => {});
       logger.info({ batchId, recipients: recipients.length, total: totalAmount }, "Batch payout created");
       FeatureEvents.batchCreated({ batchId, userId: ctx.user.id, recipientCount: recipients.length, totalAmount });
 
