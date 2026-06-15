@@ -260,6 +260,26 @@ export const FeatureEvents = {
     emitFeatureEvent("feature.governance", data.proposalId as string, { event: "proposal.voted", ...data }),
   nftMinted: (data: Record<string, unknown>) =>
     emitFeatureEvent("feature.nft-receipts", data.tokenId as string, { event: "nft.minted", ...data }),
+
+  // QR Payments
+  qrCodeCreated: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.qr-payments", data.qrId as string, { event: "qr.created", ...data }),
+  qrCodeScanned: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.qr-payments", data.scanId as string, { event: "qr.scanned", ...data }),
+  merchantQRRegistered: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.qr-payments", data.profileId as string, { event: "merchant_qr.registered", ...data }),
+
+  // NFC Payments
+  nfcTerminalRegistered: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.nfc-payments", data.terminalId as string, { event: "nfc.terminal_registered", ...data }),
+  nfcPaymentProcessed: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.nfc-payments", data.txId as string, { event: "nfc.payment_processed", ...data }),
+  nfcTagProvisioned: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.nfc-payments", data.tagId as string, { event: "nfc.tag_provisioned", ...data }),
+  nfcOfflineSynced: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.nfc-payments", data.offlineId as string, { event: "nfc.offline_synced", ...data }),
+  nfcRefundProcessed: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.nfc-payments", data.txId as string, { event: "nfc.refund_processed", ...data }),
 };
 
 // ── Database Migration for Feature Tables ────────────────────────────────────

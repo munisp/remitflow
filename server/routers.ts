@@ -332,6 +332,8 @@ import { invoicesAndSubscriptionsRouter } from "./_core/invoicesAndSubscriptions
 import { savingsVaultRouter } from "./_core/savingsVault";
 import { remittanceCorridorsRouter } from "./_core/remittanceCorridors";
 import { platformFeaturesRouter } from "./_core/platformFeatures";
+import { qrPaymentsRouter } from "./_core/qrPayments";
+import { nfcPaymentsRouter } from "./_core/nfcPayments";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -6964,5 +6966,8 @@ Case: #${input.caseId}`,
   savingsVault: savingsVaultRouter,
   remittanceCorridors: remittanceCorridorsRouter,
   platformFeatures: platformFeaturesRouter,
+  // QR & NFC Payment Systems
+  qrPayments: qrPaymentsRouter,
+  nfcPayments: nfcPaymentsRouter,
 });
 export type AppRouter = typeof appRouter;
