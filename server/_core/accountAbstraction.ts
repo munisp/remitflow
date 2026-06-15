@@ -17,8 +17,9 @@
 
 import { z } from "zod";
 import { randomBytes, createHash } from "crypto";
-import { protectedProcedure, router } from "./trpc";
+import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -78,7 +79,7 @@ const userOps = new Map<string, UserOperation>();
 
 export const accountAbstractionRouter = router({
   // Create smart wallet
-  createWallet: protectedProcedure
+  createWallet: strictRateLimitedProcedure
     .input(z.object({
       chain: z.enum(["ethereum", "polygon", "arbitrum", "optimism", "base"]).default("polygon"),
       guardians: z.array(z.string()).min(3).max(7).optional(),
@@ -117,7 +118,7 @@ export const accountAbstractionRouter = router({
     }),
 
   // Create session key
-  createSessionKey: protectedProcedure
+  createSessionKey: rateLimitedProcedure
     .input(z.object({
       walletId: z.string(),
       allowedTokens: z.array(z.string()).min(1),
@@ -151,7 +152,7 @@ export const accountAbstractionRouter = router({
     }),
 
   // Revoke session key
-  revokeSessionKey: protectedProcedure
+  revokeSessionKey: rateLimitedProcedure
     .input(z.object({ walletId: z.string(), keyId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const wallet = wallets.get(input.walletId);
@@ -164,7 +165,7 @@ export const accountAbstractionRouter = router({
     }),
 
   // Send gasless transaction
-  sendGasless: protectedProcedure
+  sendGasless: rateLimitedProcedure
     .input(z.object({
       walletId: z.string(),
       to: z.string(),
@@ -206,7 +207,7 @@ export const accountAbstractionRouter = router({
     }),
 
   // Initiate social recovery
-  initiateRecovery: protectedProcedure
+  initiateRecovery: strictRateLimitedProcedure
     .input(z.object({
       walletId: z.string(),
       newOwner: z.string(),
@@ -246,7 +247,6 @@ export const accountAbstractionRouter = router({
   // List wallets
   listWallets: protectedProcedure
     .query(async ({ ctx }) => {
-      return Array.from(wallets.values())
-        .filter(w => w.userId === ctx.user.id);
+      return Array.from(wallets.values()).filter(w => w.userId === ctx.user.id);
     }),
 });

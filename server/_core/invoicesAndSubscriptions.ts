@@ -10,8 +10,9 @@
 
 import { z } from "zod";
 import { randomBytes } from "crypto";
-import { protectedProcedure, router } from "./trpc";
+import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -79,7 +80,7 @@ function nextPeriodEnd(start: string, interval: string): string {
 export const invoicesAndSubscriptionsRouter = router({
   // === F7: Invoices & Payment Links ===
 
-  createInvoice: protectedProcedure
+  createInvoice: rateLimitedProcedure
     .input(z.object({
       amount: z.number().positive(),
       currency: z.string().default("USD"),
@@ -123,17 +124,20 @@ export const invoicesAndSubscriptionsRouter = router({
 
   getInvoice: protectedProcedure
     .input(z.object({ invoiceId: z.string() }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
       const invoice = invoices.get(input.invoiceId);
       if (!invoice) throw new Error("Invoice not found");
+      if (invoice.userId !== ctx.user.id) throw new Error("Not authorized to view this invoice");
       return invoice;
     }),
 
-  payInvoice: protectedProcedure
+  payInvoice: rateLimitedProcedure
     .input(z.object({ invoiceId: z.string(), coin: z.enum(["USDT", "USDC", "DAI"]) }))
     .mutation(async ({ input }) => {
       const invoice = invoices.get(input.invoiceId);
       if (!invoice) throw new Error("Invoice not found");
+      if (invoice.status === "paid") throw new Error("Invoice already paid");
+      if (invoice.status === "cancelled") throw new Error("Invoice is cancelled");
       invoice.status = "paid";
       invoice.paidAt = new Date().toISOString();
       invoice.txHash = `0x${randomBytes(32).toString("hex")}`;
@@ -153,7 +157,7 @@ export const invoicesAndSubscriptionsRouter = router({
 
   // === F8: Recurring Subscriptions ===
 
-  createSubscription: protectedProcedure
+  createSubscription: rateLimitedProcedure
     .input(z.object({
       planName: z.string(),
       amount: z.number().positive(),
@@ -189,11 +193,13 @@ export const invoicesAndSubscriptionsRouter = router({
       return sub;
     }),
 
-  cancelSubscription: protectedProcedure
+  cancelSubscription: strictRateLimitedProcedure
     .input(z.object({ subscriptionId: z.string() }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const sub = subscriptions.get(input.subscriptionId);
       if (!sub) throw new Error("Subscription not found");
+      if (sub.merchantId !== `merch-${ctx.user.id}` && sub.subscriberUserId !== ctx.user.id)
+        throw new Error("Not authorized to cancel this subscription");
       sub.status = "cancelled";
       sub.cancelledAt = new Date().toISOString();
       return { subscriptionId: sub.subscriptionId, status: "cancelled" };

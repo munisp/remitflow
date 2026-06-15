@@ -16,8 +16,9 @@
 
 import { z } from "zod";
 import { randomBytes } from "crypto";
-import { protectedProcedure, router } from "./trpc";
+import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -102,7 +103,7 @@ const payments = new Map<string, ProgrammablePayment>();
 
 export const programmablePaymentsRouter = router({
   // Create a programmable payment
-  create: protectedProcedure
+  create: rateLimitedProcedure
     .input(ProgrammablePaymentSchema)
     .mutation(async ({ input, ctx }) => {
       const id = `pp-${randomBytes(8).toString("hex")}`;
@@ -173,7 +174,7 @@ export const programmablePaymentsRouter = router({
     }),
 
   // Approve a payment (for multi-approval workflows)
-  approve: protectedProcedure
+  approve: strictRateLimitedProcedure
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const payment = payments.get(input.id);
@@ -195,7 +196,7 @@ export const programmablePaymentsRouter = router({
     }),
 
   // Complete a milestone
-  completeMilestone: protectedProcedure
+  completeMilestone: rateLimitedProcedure
     .input(z.object({ id: z.string(), milestoneIndex: z.number().int().min(0) }))
     .mutation(async ({ input, ctx }) => {
       const payment = payments.get(input.id);
@@ -215,7 +216,7 @@ export const programmablePaymentsRouter = router({
     }),
 
   // Cancel a payment
-  cancel: protectedProcedure
+  cancel: strictRateLimitedProcedure
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const payment = payments.get(input.id);
@@ -226,7 +227,7 @@ export const programmablePaymentsRouter = router({
     }),
 
   // Pause a recurring payment
-  pause: protectedProcedure
+  pause: rateLimitedProcedure
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const payment = payments.get(input.id);
@@ -237,7 +238,7 @@ export const programmablePaymentsRouter = router({
     }),
 
   // Resume a paused payment
-  resume: protectedProcedure
+  resume: rateLimitedProcedure
     .input(z.object({ id: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const payment = payments.get(input.id);

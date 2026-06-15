@@ -10,8 +10,51 @@
 
 import { z } from "zod";
 import { randomBytes } from "crypto";
-import { protectedProcedure, router } from "./trpc";
+import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
+
+// ── Live FX Rate Fetcher with Cache ──────────────────────────────────────────
+
+const FALLBACK_RATES: Record<string, number> = {
+  USD: 1600, GBP: 2025, EUR: 1740, ZAR: 87, GHS: 130, KES: 12.3, NGN: 1,
+};
+
+interface CachedRate { rate: number; fetchedAt: number; }
+const rateCache = new Map<string, CachedRate>();
+const RATE_CACHE_TTL_MS = 30_000; // 30 seconds
+
+async function getFxRate(sourceCurrency: string, destCurrency: string): Promise<number> {
+  if (sourceCurrency === destCurrency) return 1;
+
+  const cacheKey = `${sourceCurrency}_${destCurrency}`;
+  const cached = rateCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < RATE_CACHE_TTL_MS) return cached.rate;
+
+  try {
+    const res = await fetch(
+      `https://api.exchangerate-api.com/v4/latest/${sourceCurrency}`,
+      { signal: AbortSignal.timeout(3000) },
+    );
+    if (res.ok) {
+      const data = await res.json() as { rates: Record<string, number> };
+      const rate = data.rates[destCurrency];
+      if (rate) {
+        rateCache.set(cacheKey, { rate, fetchedAt: Date.now() });
+        return rate;
+      }
+    }
+  } catch {
+    logger.debug({ sourceCurrency, destCurrency }, "Live FX fetch failed — using fallback");
+  }
+
+  // Fallback: cross through NGN base rates
+  const sourceToNgn = FALLBACK_RATES[sourceCurrency] ?? 1;
+  const destToNgn = FALLBACK_RATES[destCurrency] ?? 1;
+  const fallbackRate = sourceToNgn / destToNgn;
+  rateCache.set(cacheKey, { rate: fallbackRate, fetchedAt: Date.now() });
+  return fallbackRate;
+}
 
 // ── Corridor Definitions ────────────────────────────────────────────────────
 
@@ -150,7 +193,7 @@ export const remittanceCorridorsRouter = router({
       if (input.amount > corridor.maxAmount) throw new Error(`Maximum: ${corridor.maxAmount} ${corridor.source.currency}`);
 
       const fee = input.amount * (corridor.feePercent / 100) + corridor.fixedFee;
-      const fxRate = corridor.source.currency === "USD" ? 1600 : corridor.source.currency === "GBP" ? 2025 : 1740;
+      const fxRate = await getFxRate(corridor.source.currency, corridor.destination.currency);
       const destAmount = (input.amount - fee) * fxRate * (1 - corridor.fxSpread / 100);
 
       return {
@@ -169,7 +212,7 @@ export const remittanceCorridorsRouter = router({
     }),
 
   // Send remittance
-  send: protectedProcedure
+  send: strictRateLimitedProcedure
     .input(z.object({
       corridorId: z.string(),
       amount: z.number().positive(),
@@ -184,7 +227,7 @@ export const remittanceCorridorsRouter = router({
       if (!corridor) throw new Error("Corridor not found");
 
       const fee = input.amount * (corridor.feePercent / 100) + corridor.fixedFee;
-      const fxRate = corridor.source.currency === "USD" ? 1600 : corridor.source.currency === "GBP" ? 2025 : 1740;
+      const fxRate = await getFxRate(corridor.source.currency, corridor.destination.currency);
       const destAmount = (input.amount - fee) * fxRate * (1 - corridor.fxSpread / 100);
 
       const transferId = `rem-${randomBytes(8).toString("hex")}`;
@@ -206,6 +249,8 @@ export const remittanceCorridorsRouter = router({
 
       transfers.set(transferId, transfer);
       logger.info({ transferId, corridor: corridor.id, amount: input.amount }, "Corridor remittance sent");
+      FeatureEvents.corridorTransferSent({ transferId, corridorId: corridor.id, userId: ctx.user.id, amount: input.amount });
+      createLedgerEntry({ debitAccountId: `user-${ctx.user.id}-${corridor.source.currency}`, creditAccountId: `corridor-${corridor.id}`, amount: input.amount, currency: corridor.source.currency, reference: `corridor-${transferId}`, code: 500 }).catch(() => {});
 
       return transfer;
     }),

@@ -18,8 +18,9 @@
 
 import { z } from "zod";
 import { randomBytes, createHash } from "crypto";
-import { protectedProcedure, router } from "./trpc";
+import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
 
 // ── F11: Stablecoin Payroll ─────────────────────────────────────────────────
 
@@ -142,7 +143,7 @@ const nftReceipts = new Map<string, NftReceipt>();
 
 export const platformFeaturesRouter = router({
   // ═══ F11: Payroll ═══
-  payroll_createRun: protectedProcedure
+  payroll_createRun: rateLimitedProcedure
     .input(z.object({
       name: z.string(),
       stablecoin: z.enum(["USDT", "USDC", "DAI"]).default("USDC"),
@@ -169,7 +170,7 @@ export const platformFeaturesRouter = router({
       return { runId, totalAmount, employeeCount: input.employees.length, status: "draft" };
     }),
 
-  payroll_executeRun: protectedProcedure
+  payroll_executeRun: strictRateLimitedProcedure
     .input(z.object({ runId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const run = payrollRuns.get(input.runId);
@@ -240,7 +241,7 @@ export const platformFeaturesRouter = router({
     }),
 
   // ═══ F14: Limit Orders ═══
-  limitOrder_create: protectedProcedure
+  limitOrder_create: rateLimitedProcedure
     .input(z.object({
       type: z.enum(["buy", "sell"]),
       stablecoin: z.enum(["USDT", "USDC", "DAI"]),
@@ -263,7 +264,7 @@ export const platformFeaturesRouter = router({
       return order;
     }),
 
-  limitOrder_cancel: protectedProcedure
+  limitOrder_cancel: rateLimitedProcedure
     .input(z.object({ orderId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const order = limitOrders.get(input.orderId);
@@ -281,7 +282,7 @@ export const platformFeaturesRouter = router({
   giftCards_getBrands: protectedProcedure
     .query(async () => GIFT_CARD_BRANDS),
 
-  giftCards_purchase: protectedProcedure
+  giftCards_purchase: rateLimitedProcedure
     .input(z.object({
       brand: z.string(),
       denomination: z.number().positive(),
@@ -301,7 +302,7 @@ export const platformFeaturesRouter = router({
     }),
 
   // ═══ F16: Developer API/SDK ═══
-  devApi_createKey: protectedProcedure
+  devApi_createKey: strictRateLimitedProcedure
     .input(z.object({
       name: z.string().min(1).max(100),
       permissions: z.array(z.enum([
@@ -324,7 +325,7 @@ export const platformFeaturesRouter = router({
       return { keyId, apiKey: apiKeyValue, permissions: input.permissions };
     }),
 
-  devApi_revokeKey: protectedProcedure
+  devApi_revokeKey: strictRateLimitedProcedure
     .input(z.object({ keyId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const key = apiKeys.get(input.keyId);
@@ -419,7 +420,7 @@ export const platformFeaturesRouter = router({
     })),
 
   // ═══ F19: DAO Governance ═══
-  dao_createProposal: protectedProcedure
+  dao_createProposal: rateLimitedProcedure
     .input(z.object({
       title: z.string().min(5).max(200),
       description: z.string().min(20).max(5000),
@@ -446,7 +447,7 @@ export const platformFeaturesRouter = router({
       return { proposalId, title: input.title, status: "active", endDate: end.toISOString() };
     }),
 
-  dao_vote: protectedProcedure
+  dao_vote: rateLimitedProcedure
     .input(z.object({ proposalId: z.string(), optionIndex: z.number().int().min(0) }))
     .mutation(async ({ input, ctx }) => {
       const proposal = proposals.get(input.proposalId);
@@ -454,6 +455,10 @@ export const platformFeaturesRouter = router({
       if (proposal.status !== "active") throw new Error("Voting closed");
       if (input.optionIndex >= proposal.options.length) throw new Error("Invalid option");
       if (proposal.votes.has(ctx.user.id)) throw new Error("Already voted");
+      // Self-vote guard: warn in dev, block in production
+      if (proposal.creatorId === ctx.user.id && process.env.NODE_ENV === "production") {
+        throw new Error("Cannot vote on own proposal");
+      }
 
       proposal.votes.set(ctx.user.id, input.optionIndex);
       return { proposalId: proposal.proposalId, votedFor: proposal.options[input.optionIndex], totalVotes: proposal.votes.size };
@@ -472,7 +477,7 @@ export const platformFeaturesRouter = router({
     }),
 
   // ═══ F20: NFT Receipts ═══
-  nft_mint: protectedProcedure
+  nft_mint: rateLimitedProcedure
     .input(z.object({
       transactionId: z.string(),
       amount: z.number().positive(),

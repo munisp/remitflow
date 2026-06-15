@@ -17,8 +17,9 @@
 
 import { z } from "zod";
 import { randomBytes } from "crypto";
-import { protectedProcedure, router } from "./trpc";
+import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ export const lendingBorrowingRouter = router({
     }),
 
   // Supply stablecoins
-  supply: protectedProcedure
+  supply: rateLimitedProcedure
     .input(z.object({
       stablecoin: z.enum(["USDT", "USDC", "DAI", "BUSD", "PYUSD"]),
       amount: z.number().positive().max(10_000_000),
@@ -97,12 +98,14 @@ export const lendingBorrowingRouter = router({
 
       positions.set(positionId, position);
       logger.info({ positionId, coin: input.stablecoin, amount: input.amount }, "Supply position opened");
+      FeatureEvents.supplyDeposited({ positionId, userId: ctx.user.id, coin: input.stablecoin, amount: input.amount });
+      createLedgerEntry({ debitAccountId: `user-${ctx.user.id}-${input.stablecoin}`, creditAccountId: `lending-pool-${input.stablecoin}`, amount: input.amount, currency: input.stablecoin, reference: `supply-${positionId}`, code: 300 }).catch(() => {});
 
       return position;
     }),
 
   // Borrow against collateral
-  borrow: protectedProcedure
+  borrow: strictRateLimitedProcedure
     .input(z.object({
       borrowCoin: z.enum(["USDT", "USDC", "DAI", "BUSD", "PYUSD"]),
       borrowAmount: z.number().positive(),
@@ -140,12 +143,14 @@ export const lendingBorrowingRouter = router({
 
       positions.set(positionId, position);
       logger.info({ positionId, borrow: input.borrowAmount, collateral: input.collateralAmount, hf: healthFactor }, "Borrow position opened");
+      FeatureEvents.loanBorrowed({ positionId, userId: ctx.user.id, coin: input.borrowCoin, borrowAmount: input.borrowAmount });
+      createLedgerEntry({ debitAccountId: `lending-pool-${input.borrowCoin}`, creditAccountId: `user-${ctx.user.id}-${input.borrowCoin}`, amount: input.borrowAmount, currency: input.borrowCoin, reference: `borrow-${positionId}`, code: 301 }).catch(() => {});
 
       return position;
     }),
 
   // Repay loan
-  repay: protectedProcedure
+  repay: rateLimitedProcedure
     .input(z.object({ positionId: z.string(), amount: z.number().positive() }))
     .mutation(async ({ input, ctx }) => {
       const position = positions.get(input.positionId);
@@ -168,7 +173,7 @@ export const lendingBorrowingRouter = router({
     }),
 
   // Withdraw supply
-  withdraw: protectedProcedure
+  withdraw: rateLimitedProcedure
     .input(z.object({ positionId: z.string(), amount: z.number().positive().optional() }))
     .mutation(async ({ input, ctx }) => {
       const position = positions.get(input.positionId);

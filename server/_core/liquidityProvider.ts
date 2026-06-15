@@ -303,7 +303,8 @@ export class YellowCardProvider implements LiquidityProvider {
 
   constructor() {
     this.apiUrl = process.env.YELLOWCARD_API_URL ?? "https://sandbox.yellowcard.engineering/v1";
-    this.apiKey = process.env.YELLOWCARD_API_KEY ?? "yc-sandbox-key";
+    this.apiKey = process.env.YELLOWCARD_API_KEY ?? "";
+    if (!this.apiKey) logger.warn("YELLOWCARD_API_KEY not set — LP will use simulated quotes");
   }
 
   async getQuote(params: { direction: "buy" | "sell"; stablecoin: string; amount: number; fiatCurrency: string }): Promise<LPQuote> {
@@ -445,7 +446,8 @@ export class CircleProvider implements LiquidityProvider {
 
   constructor() {
     this.apiUrl = process.env.CIRCLE_API_URL ?? "https://api-sandbox.circle.com/v1";
-    this.apiKey = process.env.CIRCLE_API_KEY ?? "circle-sandbox-key";
+    this.apiKey = process.env.CIRCLE_API_KEY ?? "";
+    if (!this.apiKey) logger.warn("CIRCLE_API_KEY not set — LP will use simulated quotes");
   }
 
   async getQuote(params: { direction: "buy" | "sell"; stablecoin: string; amount: number; fiatCurrency: string }): Promise<LPQuote> {

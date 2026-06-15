@@ -10,8 +10,9 @@
 
 import { z } from "zod";
 import { randomBytes } from "crypto";
-import { protectedProcedure, router } from "./trpc";
+import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ export const savingsVaultRouter = router({
     }),
 
   // Create deposit
-  deposit: protectedProcedure
+  deposit: strictRateLimitedProcedure
     .input(z.object({
       stablecoin: z.enum(["USDT", "USDC", "DAI", "BUSD", "PYUSD"]),
       amount: z.number().positive(),
@@ -94,12 +95,14 @@ export const savingsVaultRouter = router({
 
       deposits.set(depositId, deposit);
       logger.info({ depositId, amount: input.amount, term: input.termDays, apy: tier.apy }, "Savings deposit created");
+      FeatureEvents.savingsDeposited({ depositId, userId: ctx.user.id, amount: input.amount, term: input.termDays });
+      createLedgerEntry({ debitAccountId: `user-${ctx.user.id}-${input.stablecoin}`, creditAccountId: `savings-vault-${input.stablecoin}`, amount: input.amount, currency: input.stablecoin, reference: `deposit-${depositId}`, code: 400 }).catch(() => {});
 
       return deposit;
     }),
 
   // Withdraw (at maturity or early with penalty)
-  withdraw: protectedProcedure
+  withdraw: strictRateLimitedProcedure
     .input(z.object({ depositId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const deposit = deposits.get(input.depositId);

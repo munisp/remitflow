@@ -20,8 +20,10 @@
 
 import { z } from "zod";
 import { createHmac, randomBytes } from "crypto";
-import { protectedProcedure, router } from "./trpc";
+import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
+import { ENV } from "./env";
 import { logger } from "./logger";
+import { FeatureEvents, createLedgerEntry, enqueueWebhook, sanitizeHtml } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -86,7 +88,7 @@ function signWebhookPayload(payload: string, secret: string): string {
 
 export const merchantGatewayRouter = router({
   // Register as merchant
-  register: protectedProcedure
+  register: strictRateLimitedProcedure
     .input(z.object({
       businessName: z.string().min(1).max(200),
       acceptedCoins: z.array(z.enum(["USDT", "USDC", "DAI", "BUSD", "PYUSD"])).min(1),
@@ -100,7 +102,7 @@ export const merchantGatewayRouter = router({
       const merchant: MerchantAccount = {
         merchantId,
         userId: ctx.user.id,
-        businessName: input.businessName,
+        businessName: sanitizeHtml(input.businessName),
         apiKey: generateApiKey(),
         apiSecret: generateSecret(),
         webhookUrl: input.webhookUrl,
@@ -118,6 +120,7 @@ export const merchantGatewayRouter = router({
 
       merchants.set(merchantId, merchant);
       logger.info({ merchantId, businessName: input.businessName }, "Merchant registered");
+      FeatureEvents.merchantRegistered({ merchantId, userId: ctx.user.id, businessName: input.businessName });
 
       return {
         merchantId: merchant.merchantId,
@@ -128,7 +131,7 @@ export const merchantGatewayRouter = router({
     }),
 
   // Create payment intent
-  createPaymentIntent: protectedProcedure
+  createPaymentIntent: rateLimitedProcedure
     .input(z.object({
       merchantId: z.string(),
       amount: z.number().positive(),
@@ -138,9 +141,10 @@ export const merchantGatewayRouter = router({
       metadata: z.record(z.string(), z.string()).optional(),
       expiresInMinutes: z.number().int().min(5).max(1440).default(30),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const merchant = merchants.get(input.merchantId);
       if (!merchant) throw new Error("Merchant not found");
+      if (merchant.userId !== ctx.user.id) throw new Error("Not authorized for this merchant");
 
       const intentId = `pi_${randomBytes(16).toString("hex")}`;
       const depositAddress = `0x${randomBytes(20).toString("hex")}`;
@@ -167,13 +171,15 @@ export const merchantGatewayRouter = router({
   // Get payment intent status
   getPaymentIntent: protectedProcedure
     .input(z.object({ intentId: z.string() }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
       const intent = intents.get(input.intentId);
       if (!intent) throw new Error("Payment intent not found");
+      const merchant = merchants.get(intent.merchantId);
+      if (merchant && merchant.userId !== ctx.user.id) throw new Error("Not authorized");
       return intent;
     }),
 
-  // Simulate payment (dev/testing)
+  // Simulate payment (dev/testing — disabled in production)
   simulatePayment: protectedProcedure
     .input(z.object({
       intentId: z.string(),
@@ -181,6 +187,7 @@ export const merchantGatewayRouter = router({
       amount: z.number().positive(),
     }))
     .mutation(async ({ input }) => {
+      if (ENV.isProduction) throw new Error("simulatePayment is disabled in production");
       const intent = intents.get(input.intentId);
       if (!intent) throw new Error("Payment intent not found");
 
@@ -195,30 +202,45 @@ export const merchantGatewayRouter = router({
         merchant.totalVolume += input.amount;
         merchant.totalPayments += 1;
 
-        // Send webhook
+        // Send webhook with retry
         if (merchant.webhookUrl) {
           const payload = JSON.stringify({
             event: "payment.completed",
             data: { intentId: intent.intentId, amount: input.amount, coin: input.coin, txHash: intent.txHash },
           });
           const signature = signWebhookPayload(payload, merchant.webhookSecret);
-          logger.info({ merchantId: merchant.merchantId, webhook: merchant.webhookUrl, signature }, "Webhook dispatched");
+          enqueueWebhook(merchant.webhookUrl, payload, signature).catch(() => {});
+          logger.info({ merchantId: merchant.merchantId, webhook: merchant.webhookUrl }, "Webhook enqueued");
         }
       }
+
+      // Ledger entry for payment
+      createLedgerEntry({
+        debitAccountId: `customer-${intent.intentId}`,
+        creditAccountId: `merchant-${intent.merchantId}`,
+        amount: input.amount,
+        currency: input.coin,
+        reference: `payment-${intent.intentId}`,
+        code: 100,
+      }).catch(() => {});
+
+      FeatureEvents.paymentCompleted({ intentId: intent.intentId, amount: input.amount, coin: input.coin });
 
       return intent;
     }),
 
   // Refund
-  refund: protectedProcedure
+  refund: strictRateLimitedProcedure
     .input(z.object({
       intentId: z.string(),
       amount: z.number().positive().optional(),
       reason: z.string().max(500),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
       const intent = intents.get(input.intentId);
       if (!intent) throw new Error("Payment intent not found");
+      const merchant = merchants.get(intent.merchantId);
+      if (!merchant || merchant.userId !== ctx.user.id) throw new Error("Not authorized for this refund");
       if (intent.status !== "completed") throw new Error("Can only refund completed payments");
 
       intent.status = "refunded";
@@ -257,7 +279,7 @@ export const merchantGatewayRouter = router({
     }),
 
   // Rotate API keys
-  rotateKeys: protectedProcedure
+  rotateKeys: strictRateLimitedProcedure
     .input(z.object({ merchantId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const merchant = merchants.get(input.merchantId);

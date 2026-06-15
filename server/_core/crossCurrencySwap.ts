@@ -17,8 +17,9 @@
 
 import { z } from "zod";
 import { randomBytes } from "crypto";
-import { protectedProcedure, router } from "./trpc";
+import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -130,7 +131,7 @@ export const crossCurrencySwapRouter = router({
     }),
 
   // Execute swap
-  executeSwap: protectedProcedure
+  executeSwap: strictRateLimitedProcedure
     .input(z.object({
       quoteId: z.string(),
     }))
@@ -160,6 +161,16 @@ export const crossCurrencySwapRouter = router({
       swaps.set(swapId, execution);
       quotes.delete(input.quoteId);
       logger.info({ swapId, from: quote.fromCoin, to: quote.toCoin, amount: quote.inputAmount }, "Swap executed");
+
+      createLedgerEntry({
+        debitAccountId: `user-${ctx.user.id}-${quote.fromCoin}`,
+        creditAccountId: `user-${ctx.user.id}-${quote.toCoin}`,
+        amount: quote.inputAmount,
+        currency: quote.fromCoin,
+        reference: `swap-${swapId}`,
+        code: 200,
+      }).catch(() => {});
+      FeatureEvents.swapExecuted({ swapId, userId: ctx.user.id, fromCoin: quote.fromCoin, toCoin: quote.toCoin, amount: quote.inputAmount });
 
       return execution;
     }),

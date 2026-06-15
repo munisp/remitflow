@@ -16,8 +16,9 @@
 
 import { z } from "zod";
 import { randomBytes } from "crypto";
-import { protectedProcedure, router } from "./trpc";
+import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
+import { FeatureEvents, createLedgerEntry, sanitizeHtml } from "./featurePersistence";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -58,7 +59,7 @@ const batches = new Map<string, BatchPayout>();
 
 export const batchPayoutsRouter = router({
   // Create batch from recipients list
-  create: protectedProcedure
+  create: rateLimitedProcedure
     .input(z.object({
       name: z.string().min(1).max(200),
       stablecoin: z.enum(["USDT", "USDC", "DAI", "BUSD", "PYUSD"]),
@@ -105,6 +106,7 @@ export const batchPayoutsRouter = router({
 
       batches.set(batchId, batch);
       logger.info({ batchId, recipients: recipients.length, total: totalAmount }, "Batch payout created");
+      FeatureEvents.batchCreated({ batchId, userId: ctx.user.id, recipientCount: recipients.length, totalAmount });
 
       return {
         batchId,
@@ -118,7 +120,7 @@ export const batchPayoutsRouter = router({
     }),
 
   // Execute batch
-  execute: protectedProcedure
+  execute: strictRateLimitedProcedure
     .input(z.object({ batchId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const batch = batches.get(input.batchId);
@@ -160,7 +162,7 @@ export const batchPayoutsRouter = router({
     }),
 
   // Retry failed recipients
-  retryFailed: protectedProcedure
+  retryFailed: rateLimitedProcedure
     .input(z.object({ batchId: z.string() }))
     .mutation(async ({ input, ctx }) => {
       const batch = batches.get(input.batchId);

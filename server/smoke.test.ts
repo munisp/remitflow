@@ -186,15 +186,23 @@ describe("Beneficiary CRUD", () => {
   });
 
   it("beneficiaries.add creates a new beneficiary", async () => {
+    // Ensure we're under the 50-beneficiary limit by removing a test entry if needed
+    const existing = await caller.beneficiaries.list();
+    if (Array.isArray(existing) && existing.length >= 50) {
+      const smokeEntry = existing.find((b: any) => b.name?.startsWith("Smoke Test"));
+      if (smokeEntry && (smokeEntry as any).id) {
+        try { await caller.beneficiaries.delete({ id: (smokeEntry as any).id }); } catch { /* ok */ }
+      }
+    }
+
     const result = await caller.beneficiaries.add({
       name: "Smoke Test Recipient",
-      accountNumber: "0123456789",
+      accountNumber: `01${Date.now().toString().slice(-8)}`,
       bankName: "GTBank",
       country: "Nigeria",
       currency: "NGN",
     });
     expect(result).toBeDefined();
-    // add returns the created beneficiary or a success object
     expect(result).not.toBeNull();
   });
 
@@ -317,11 +325,18 @@ describe("Input Validation", () => {
   });
 
   it("beneficiaries.add accepts valid beneficiary (no strict name validation)", async () => {
-    // The add procedure uses z.string() without .min(1) so empty string is accepted
-    // We verify a valid add works correctly
+    // Ensure we're under the 50-beneficiary limit
+    const existing = await caller.beneficiaries.list();
+    if (Array.isArray(existing) && existing.length >= 50) {
+      const entry = existing.find((b: any) => b.name === "Valid Name" || b.name?.startsWith("Smoke Test"));
+      if (entry && (entry as any).id) {
+        try { await caller.beneficiaries.delete({ id: (entry as any).id }); } catch { /* ok */ }
+      }
+    }
+
     const result = await caller.beneficiaries.add({
       name: "Valid Name",
-      accountNumber: "9876543210",
+      accountNumber: `98${Date.now().toString().slice(-8)}`,
       country: "Ghana",
       currency: "GHS",
     });
