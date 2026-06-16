@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import { RefreshCw, CreditCard, CheckCircle, AlertTriangle, Clock } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const EVENT_COLORS: Record<string, string> = {
   "checkout.session.completed": "text-green-500",
@@ -19,6 +20,7 @@ const EVENT_COLORS: Record<string, string> = {
 };
 
 export default function StripeRetryAdmin() {
+  const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState("");
 
   const { data: webhooks, refetch } = trpc.v98.stripeAdmin.listWebhooks.useQuery({
@@ -123,7 +125,7 @@ export default function StripeRetryAdmin() {
                   </tr>
                 </thead>
                 <tbody>
-                  {webhooks.events.map((ev) => (
+                  {webhooks.events.map((ev: any) => (
                     <tr key={ev.id} className="border-b hover:bg-muted/30 transition-colors">
                       <td className="py-2 pr-3 font-mono text-xs max-w-[120px] truncate">{ev.stripeEventId}</td>
                       <td className="pr-3">

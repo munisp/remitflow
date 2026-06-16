@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import React, { useState, useEffect } from 'react';
 import DashboardLayout from '@/components/DashboardLayout';
@@ -59,6 +60,7 @@ import {
 import { format } from 'date-fns';
 
 const VelocityCheckDashboard: React.FC = () => {
+  const { t } = useTranslation();
   const [userIdFilter, setUserIdFilter] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [page, setPage] = useState(1);
@@ -77,7 +79,7 @@ const VelocityCheckDashboard: React.FC = () => {
   });
 
   // Alerts Query
-  const { data: alerts, isLoading: alertsLoading } = trpc.velocityCheckAdmin.listOverrides.useQuery(undefined, {
+  const { data: alerts, isLoading: alertsLoading } = trpc.velocityCheckAdmin.listOverrides.useQuery({}, {
     refetchInterval: 10000,
   });
 

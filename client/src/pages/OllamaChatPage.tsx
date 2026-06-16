@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Loader2, Send, Bot, User, Cpu, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 interface Message {
   role: "user" | "assistant" | "system";
@@ -25,6 +26,7 @@ const SYSTEM_PRESETS = [
 ];
 
 export default function OllamaChatPage() {
+  const { t } = useTranslation();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [systemPrompt, setSystemPrompt] = useState(SYSTEM_PRESETS[0].value);

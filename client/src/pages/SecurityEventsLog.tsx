@@ -10,6 +10,7 @@ import { toast } from "sonner";
 
 import React from "react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 const SEVERITY_ICONS: Record<string, React.ReactElement> = {
   info: <Info className="w-4 h-4 text-blue-500" />,
   warning: <AlertTriangle className="w-4 h-4 text-yellow-500" />,
@@ -38,11 +39,12 @@ const EVENT_TYPE_LABELS: Record<string, string> = {
 };
 
 export default function SecurityEventsLog() {
+  const { t } = useTranslation();
   const [severity, setSeverity] = useState<string>("all");
   const [eventType, setEventType] = useState<string>("");
   const [limit, setLimit] = useState(50);
 
-  const { data: events, isLoading, refetch } = trpc.securityEvents.list.useQuery({
+  const { data: events, isLoading, refetch, isError } = trpc.securityEvents.list.useQuery({
     severity: severity as any,
     eventType: eventType || undefined,
     limit,
@@ -53,7 +55,7 @@ export default function SecurityEventsLog() {
   function exportCSV() {
     if (!events?.length) return;
     const header = "id,userId,eventType,severity,ipAddress,location,createdAt";
-    const rows = events.map(e => `${e.id},${e.userId ?? ""},${e.eventType},${e.severity},"${e.ipAddress ?? ""}","${e.location ?? ""}","${new Date(e.createdAt).toISOString()}"`);
+    const rows = events.map((e: any) => `${e.id},${e.userId ?? ""},${e.eventType},${e.severity},"${e.ipAddress ?? ""}","${e.location ?? ""}","${new Date(e.createdAt).toISOString()}"`);
     const csv = [header, ...rows].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
@@ -127,7 +129,7 @@ export default function SecurityEventsLog() {
         <Card><CardContent className="py-16 text-center text-muted-foreground"><Shield className="w-12 h-12 mx-auto mb-3 opacity-30" /><p>No security events found</p></CardContent></Card>
       ) : (
         <div className="space-y-2">
-          {events.map(event => (
+          {events.map((event: any) => (
             <div key={event.id} className={`flex items-start gap-3 p-3 rounded-lg border ${SEVERITY_COLORS[event.severity] ?? "bg-muted"}`}>
               <div className="mt-0.5">{SEVERITY_ICONS[event.severity] ?? <Info className="w-4 h-4" />}</div>
               <div className="flex-1 min-w-0">

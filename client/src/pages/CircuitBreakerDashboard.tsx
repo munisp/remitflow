@@ -3,6 +3,7 @@
  * Real-time view of all payment rail circuit breakers.
  * Data comes from the server-side CircuitBreaker instances via tRPC.
  */
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -64,6 +65,7 @@ const LABELS: Record<string, string> = {
 };
 
 export default function CircuitBreakerDashboard() {
+  const { t } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(true);
 
   // Real circuit breaker stats from server-side CircuitBreaker instances

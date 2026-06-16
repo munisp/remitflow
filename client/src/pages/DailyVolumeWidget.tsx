@@ -9,6 +9,7 @@ import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend, LineChart, Line,
 } from "recharts";
 import { TrendingUp, TrendingDown, DollarSign, Activity, Users, Award } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const PERIOD_OPTIONS = [
   { label: "Last 7 days", value: 7 },
@@ -44,12 +45,13 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 };
 
 export default function DailyVolumeWidget() {
+  const { t } = useTranslation();
   const [days, setDays] = useState(30);
   const [chartType, setChartType] = useState<"area" | "bar" | "line">("area");
 
-  const { data, isLoading } = trpc.volumeWidget.daily.useQuery({ days });
+  const { data, isLoading, isError } = trpc.volumeWidget.daily.useQuery({ days });
 
-  const chartData = data?.data.map(d => ({
+  const chartData = data?.data.map((d: any) => ({
     date: d.date,
     "Volume ($)": d.volumeUsd,
     "Fees ($)": d.feesUsd,
@@ -61,8 +63,8 @@ export default function DailyVolumeWidget() {
   // Calculate trend (compare last 7 days vs previous 7 days)
   const recentData = data?.data.slice(-7) ?? [];
   const prevData = data?.data.slice(-14, -7) ?? [];
-  const recentVolume = recentData.reduce((s, d) => s + d.volumeUsd, 0);
-  const prevVolume = prevData.reduce((s, d) => s + d.volumeUsd, 0);
+  const recentVolume = recentData.reduce((s: any, d: any) => s + d.volumeUsd, 0);
+  const prevVolume = prevData.reduce((s: any, d: any) => s + d.volumeUsd, 0);
   const trend = prevVolume > 0 ? ((recentVolume - prevVolume) / prevVolume) * 100 : 0;
 
   return (
@@ -231,7 +233,7 @@ export default function DailyVolumeWidget() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(data?.data ?? []).slice().reverse().slice(0, 14).map(d => (
+                  {(data?.data ?? []).slice().reverse().slice(0, 14).map((d: any) => (
                     <tr key={d.date} className="border-b hover:bg-muted/20">
                       <td className="p-3 font-medium">{formatDate(d.date)}</td>
                       <td className="p-3 text-right">{d.transactions.toLocaleString()}</td>

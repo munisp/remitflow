@@ -5,6 +5,9 @@ import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
 import { correspondentBanksV200 as correspondentBanks, correspondentSettlements } from "../../drizzle/schema";
 import { eq, desc } from "drizzle-orm";
+import { safeParseAmount } from "../lib/safeDecimal";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+import { logger } from "../_core/logger";
 
 const CORRESPONDENT_URL = process.env.CORRESPONDENT_MANAGER_URL ?? "http://go-correspondent-manager:8096";
 
@@ -22,7 +25,7 @@ async function callCorrespondentService(path: string, body?: object) {
   return res.json();
 }
 
-function requireAdmin(role: string) {
+function requireAdmin(role: string | null) {
   if (role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
 }
 
@@ -41,14 +44,14 @@ export const correspondentBankRouter = router({
       // Return DB balances as fallback
       const db = await getDb();
       const banks = await db.select().from(correspondentBanks);
-      return banks.map(b => ({
+      return banks.map((b: any) => ({
         correspondent_id: b.correspondentId,
         bank_name: b.bankName,
         currency: b.currency,
-        nostro_balance_usd: parseFloat(b.nostroBalanceUsd ?? "0"),
-        vostro_balance_usd: parseFloat(b.vostroBalanceUsd ?? "0"),
-        clearing_line_usd: parseFloat(b.clearingLineUsd ?? "0"),
-        utilization_pct: parseFloat(b.utilizationPct ?? "0"),
+        nostro_balance_usd: safeParseAmount(b.nostroBalanceUsd ?? "0"),
+        vostro_balance_usd: safeParseAmount(b.vostroBalanceUsd ?? "0"),
+        clearing_line_usd: safeParseAmount(b.clearingLineUsd ?? "0"),
+        utilization_pct: safeParseAmount(b.utilizationPct ?? "0"),
         source: "database",
       }));
     }
@@ -68,7 +71,7 @@ export const correspondentBankRouter = router({
       requireAdmin(ctx.user.role);
       const db = await getDb();
       const correspondentId = `CORR-${input.swiftCode}-${Date.now()}`;
-      await db.insert(correspondentBanks).values({
+      const [_row] = await db.insert(correspondentBanks).values({
         correspondentId,
         bankName: input.bankName,
         swiftCode: input.swiftCode,
@@ -82,8 +85,19 @@ export const correspondentBankRouter = router({
         settlementRail: input.settlementRail,
         status: "active",
         createdAt: new Date(),
-      });
-      return { correspondentId, success: true };
+      }).returning();
+      // Kafka event for correspondent bank creation
+      publishEvent(KAFKA_TOPICS.AUDIT_LOGS, `correspondent:add:${correspondentId}`, {
+        eventType: "correspondent_bank_added",
+        adminUserId: ctx.user.id,
+        correspondentId,
+        bankName: input.bankName,
+        swiftCode: input.swiftCode,
+        currency: input.currency,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[CorrespondentBank] Kafka event failed"));
+
+      return { correspondentId, success: true, verified: true };
     }),
 
   updateCorrespondentStatus: protectedProcedure
@@ -94,17 +108,18 @@ export const correspondentBankRouter = router({
     .mutation(async ({ input, ctx }) => {
       requireAdmin(ctx.user.role);
       const db = await getDb();
-      await db.update(correspondentBanks)
+      const [_row] = await db.update(correspondentBanks)
         .set({ status: input.status })
-        .where(eq(correspondentBanks.correspondentId, input.correspondentId));
-      return { success: true };
+        .where(eq(correspondentBanks.correspondentId, input.correspondentId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   triggerRebalance: protectedProcedure
     .input(z.object({
       correspondentId: z.string(),
       currency: z.string().length(3),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       direction: z.enum(["nostro_top_up", "vostro_drawdown"]),
     }))
     .mutation(async ({ input, ctx }) => {
@@ -135,18 +150,18 @@ export const correspondentBankRouter = router({
     requireAdmin(ctx.user.role);
     const db = await getDb();
     const banks = await db.select().from(correspondentBanks);
-    const totalClearingLine = banks.reduce((s, b) => s + parseFloat(b.clearingLineUsd ?? "0"), 0);
-    const totalNostro = banks.reduce((s, b) => s + parseFloat(b.nostroBalanceUsd ?? "0"), 0);
+    const totalClearingLine = banks.reduce((s: any, b: any) => s + safeParseAmount(b.clearingLineUsd ?? "0"), 0);
+    const totalNostro = banks.reduce((s: any, b: any) => s + safeParseAmount(b.nostroBalanceUsd ?? "0"), 0);
     const avgFeeBps = banks.length > 0
-      ? banks.reduce((s, b) => s + parseFloat(b.feeBps ?? "50"), 0) / banks.length
+      ? banks.reduce((s: any, b: any) => s + safeParseAmount(b.feeBps ?? "50"), 0) / banks.length
       : 0;
     return {
       totalCorrespondents: banks.length,
-      activeCorrespondents: banks.filter(b => b.status === "active").length,
+      activeCorrespondents: banks.filter((b: any) => b.status === "active").length,
       totalClearingLineUsd: totalClearingLine,
       totalNostroBalanceUsd: totalNostro,
       avgFeeBps: avgFeeBps.toFixed(1),
-      byCountry: banks.reduce((acc: Record<string, number>, b) => {
+      byCountry: banks.reduce((acc: Record<string, number>, b: any) => {
         acc[b.countryCode ?? "XX"] = (acc[b.countryCode ?? "XX"] ?? 0) + 1;
         return acc;
       }, {}),

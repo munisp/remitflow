@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
 import { Shield, Search, Plus, AlertTriangle, XCircle, CheckCircle, Eye } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_CONFIG: Record<string, { color: string; icon: any; label: string }> = {
   clear: { color: "text-green-400 bg-green-500/10 border-green-500/30", icon: CheckCircle, label: "Clear" },
@@ -20,6 +21,7 @@ const STATUS_CONFIG: Record<string, { color: string; icon: any; label: string }>
 };
 
 export default function ComplianceWatchlistPage() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const utils = trpc.useUtils();
   const [search, setSearch] = useState("");

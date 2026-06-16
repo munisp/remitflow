@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import { Download, Printer, ArrowLeft, CheckCircle2, Clock, XCircle, RefreshCw } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 function StatusIcon({ status }: { status: string }) {
   if (status === "completed") return <CheckCircle2 className="h-5 w-5 text-green-500" />;
@@ -30,12 +31,13 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default function TransactionReceipt() {
+  const { t } = useTranslation();
   const params = useParams<{ id: string }>();
   const [, navigate] = useLocation();
   const receiptRef = useRef<HTMLDivElement>(null);
   const txId = Number(params.id);
 
-  const { data: txn, isLoading } = trpc.transactions.getById.useQuery(
+  const { data: txn, isLoading, isError } = trpc.transactions.getById.useQuery(
     { id: txId },
     { enabled: !!txId && !isNaN(txId) }
   );

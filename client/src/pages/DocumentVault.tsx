@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { FolderLock, Upload, AlertTriangle, CheckCircle, Trash2, FileText, Shield } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const DOC_TYPES = [
   "passport", "national_id", "drivers_license", "utility_bill",
@@ -19,6 +20,7 @@ const DOC_TYPES = [
 type DocType = typeof DOC_TYPES[number];
 
 export default function DocumentVault() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({

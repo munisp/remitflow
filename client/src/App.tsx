@@ -1,7 +1,7 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Route, Switch } from "wouter";
-import ErrorBoundary from "./components/ErrorBoundary";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { lazy, Suspense } from "react";
 import { PWAInstallPrompt, PWAOfflineBanner, PWAUpdateBanner } from "./components/PWAInstallPrompt";
@@ -217,6 +217,7 @@ const LakehousePage = lazy(() => import("./pages/LakehousePage"));
 const CocoIndexPage = lazy(() => import("./pages/CocoIndexPage"));
 const SimilarTransactionsPage = lazy(() => import("./pages/SimilarTransactionsPage"));
 const AIMetricsDashboard = lazy(() => import("./pages/AIMetricsDashboard"));
+const GPUTrainingEngine = lazy(() => import("./pages/GPUTrainingEngine"));
 // v89 — Production Hardening & Data Pipelines
 const WebhookRetryPage = lazy(() => import("./pages/WebhookRetryPage"));
 const TenantConfigPage = lazy(() => import("./pages/TenantConfigPage"));
@@ -550,6 +551,7 @@ function Router() {
         {/* v88 — AI Metrics & Similarity */}
         <Route path="/similar-transactions" component={SimilarTransactionsPage} />
         <Route path="/ai-metrics" component={AIMetricsDashboard} />
+        <Route path="/gpu-training" component={GPUTrainingEngine} />
         {/* v89 — Production Hardening & Data Pipelines */}
         <Route path="/webhook-retry" component={WebhookRetryPage} />
         <Route path="/tenant-config" component={TenantConfigPage} />
@@ -719,6 +721,26 @@ function Router() {
         <Route path="/diaspora-mortgage" component={lazy(() => import('./pages/DiasporaMortgage'))} />
         <Route path="/credit-scoring" component={lazy(() => import('./pages/BusinessCreditScoring'))} />
         <Route path="/esg-reporting" component={lazy(() => import('./pages/ESGReporting'))} />
+        <Route path="/bill-payment" component={lazy(() => import('./pages/BillPayment'))} />
+        <Route path="/qr-pay" component={lazy(() => import('./pages/QRPay'))} />
+        <Route path="/transaction-history" component={lazy(() => import('./pages/TransactionHistory'))} />
+        <Route path="/hnw-private-banking" component={lazy(() => import('./pages/HNWPrivateBanking'))} />
+        <Route path="/trisa-compliance" component={lazy(() => import('./pages/TrisaCompliance'))} />
+        <Route path="/business-kpi" component={lazy(() => import('./pages/BusinessKPIDashboard'))} />
+        <Route path="/smart-notifications" component={lazy(() => import('./pages/SmartNotifications'))} />
+        <Route path="/recipient-tracking" component={lazy(() => import('./pages/RecipientTracking'))} />
+        <Route path="/advanced-fx" component={lazy(() => import('./pages/AdvancedFX'))} />
+        <Route path="/agent-intelligence" component={lazy(() => import('./pages/AgentIntelligenceDashboard'))} />
+        <Route path="/sme-dashboard" component={lazy(() => import('./pages/SMEDashboard'))} />
+        <Route path="/remit-ai" component={lazy(() => import('./pages/RemitAIChat'))} />
+        <Route path="/micro-insurance" component={lazy(() => import('./pages/MicroInsurance'))} />
+        <Route path="/savings-circles" component={lazy(() => import('./pages/SavingsCircles'))} />
+        <Route path="/baas-portal" component={lazy(() => import('./pages/BaaSPortal'))} />
+        <Route path="/programmable-money" component={lazy(() => import('./pages/ProgrammableMoney'))} />
+        <Route path="/regulatory-reports" component={lazy(() => import('./pages/RegulatoryReports'))} />
+        <Route path="/support-tickets" component={lazy(() => import('./pages/SupportTickets'))} />
+        <Route path="/ab-testing" component={lazy(() => import('./pages/ABTestingDashboard'))} />
+        <Route path="/referral-dashboard" component={lazy(() => import('./pages/ReferralDashboard'))} />
         <Route component={NotFound} />
         </Switch>
     </Suspense>
@@ -728,7 +750,7 @@ function Router() {
 function App() {
   return (
     <ErrorBoundary>
-      <ThemeProvider defaultTheme="light">
+      <ThemeProvider defaultTheme="light" switchable={true}>
         <TooltipProvider>
           <PWAOfflineBanner />
           <PWAUpdateBanner />

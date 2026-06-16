@@ -10,10 +10,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { TrendingUp, TrendingDown, Plus, Shield, DollarSign, BarChart3, Clock } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = ["USD", "NGN", "GBP", "EUR", "KES", "GHS", "ZAR", "TZS", "UGX"];
 
 export default function FXHedging() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ fromCurrency: "USD", toCurrency: "NGN", amount: "", settlementDays: "30" });

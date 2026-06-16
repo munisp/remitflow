@@ -35,10 +35,11 @@ from pydantic import BaseModel
 import duckdb
 
 # ─── Configuration ────────────────────────────────────────────────────────────
-LAKEHOUSE_PATH = os.getenv("LAKEHOUSE_PATH", "/tmp/remitflow-lakehouse")
+LAKEHOUSE_PATH = os.getenv("LAKEHOUSE_PATH", "/data/remitflow-lakehouse")
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
 S3_BUCKET = os.getenv("S3_BUCKET", "remitflow-lakehouse")
 INTERNAL_API_KEY = os.getenv("LAKEHOUSE_INTERNAL_API_KEY", "lakehouse-key-001")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow@postgres:5432/remitflow")
 
 logging.basicConfig(level=logging.INFO, format="[Lakehouse] %(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -188,10 +189,91 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.on_event("startup")
 async def startup():
     init_lakehouse()
-    _seed_demo_data()
+    await _sync_from_postgres()
+
+async def _sync_from_postgres():
+    """Sync data from PostgreSQL OLTP into DuckDB for OLAP analytics."""
+    try:
+        import asyncpg
+        pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3, command_timeout=30)
+    except Exception as e:
+        logger.warning(f"PostgreSQL not available: {e} — using demo data")
+        _seed_demo_data()
+        return
+
+    conn = get_db()
+    try:
+        async with pool.acquire() as pg:
+            # Sync transactions
+            rows = await pg.fetch("""
+                SELECT id::text, user_id, amount::float8, currency as from_currency,
+                       to_currency, fee::float8, exchange_rate::float8, status,
+                       reference as external_ref, destination_country as recipient_country,
+                       created_at
+                FROM transactions
+                ORDER BY created_at DESC
+                LIMIT 50000
+            """)
+            if rows:
+                conn.execute("DELETE FROM transactions")
+                for r in rows:
+                    rail = "swift"
+                    created = r["created_at"] or datetime.now(timezone.utc)
+                    settled = created + timedelta(minutes=5)
+                    conn.execute("""
+                        INSERT OR REPLACE INTO transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, [
+                        r["id"], r["user_id"], rail, r["from_currency"] or "USD",
+                        r["to_currency"] or "USD", float(r["amount"] or 0),
+                        float(r["fee"] or 0), float(r["exchange_rate"] or 1.0),
+                        r["status"] or "PENDING", None, r["recipient_country"],
+                        r["external_ref"], created, settled,
+                        created.date() if hasattr(created, "date") else None,
+                    ])
+                logger.info(f"Synced {len(rows)} transactions from PostgreSQL")
+            else:
+                logger.info("No transactions in PostgreSQL — using demo data")
+                conn.close()
+                _seed_demo_data()
+                return
+
+            # Sync FX rates
+            fx_rows = await pg.fetch("""
+                SELECT id::text, "fromCurrency" as from_currency, "toCurrency" as to_currency,
+                       rates::text, "updatedAt" as recorded_at
+                FROM "fxRateCache"
+                ORDER BY "updatedAt" DESC
+                LIMIT 10000
+            """)
+            if fx_rows:
+                for r in fx_rows:
+                    try:
+                        rates = json.loads(r["rates"]) if r["rates"] else {}
+                        to_c = r["to_currency"] or "USD"
+                        rate = rates.get(to_c, 1.0) if isinstance(rates, dict) else 1.0
+                        conn.execute("""
+                            INSERT OR REPLACE INTO fx_rates_ts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, [
+                            r["id"], r["from_currency"], to_c,
+                            float(rate), float(rate) * 0.999, float(rate) * 1.001,
+                            0.002, "postgres", r["recorded_at"],
+                        ])
+                    except Exception:
+                        continue
+                logger.info(f"Synced {len(fx_rows)} FX rate entries from PostgreSQL")
+
+    except Exception as e:
+        logger.warning(f"PostgreSQL sync error: {e} — using demo data")
+        conn.close()
+        _seed_demo_data()
+        return
+    finally:
+        conn.close()
+        await pool.close()
+
 
 def _seed_demo_data():
-    """Seed demo transactions for analytics"""
+    """Seed demo transactions for analytics when PostgreSQL is unavailable."""
     conn = get_db()
     count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
     if count > 0:
@@ -199,29 +281,29 @@ def _seed_demo_data():
         return
 
     import random
-    rails = ["mojaloop", "cips", "upi", "pix"]
-    currencies = [("USD", "CNY"), ("USD", "INR"), ("USD", "BRL"), ("EUR", "NGN"), ("GBP", "KES")]
-    statuses = ["COMPLETED", "COMPLETED", "COMPLETED", "PENDING", "FAILED"]
+    rails = ["mojaloop", "cips", "upi", "pix", "swift", "sepa"]
+    currencies = [("USD", "CNY"), ("USD", "INR"), ("USD", "BRL"), ("EUR", "NGN"), ("GBP", "KES"), ("USD", "NGN")]
+    statuses = ["COMPLETED", "COMPLETED", "COMPLETED", "COMPLETED", "PENDING", "FAILED"]
 
-    for i in range(500):
+    for i in range(2000):
         from_c, to_c = random.choice(currencies)
         rail = random.choice(rails)
-        amount = round(random.uniform(50, 5000), 2)
-        fee = round(amount * 0.005, 2)
-        days_ago = random.randint(0, 90)
+        amount = round(random.uniform(50, 15000), 2)
+        fee = round(amount * random.uniform(0.002, 0.01), 2)
+        days_ago = random.randint(0, 365)
         created = datetime.now(timezone.utc) - timedelta(days=days_ago)
         conn.execute("""
             INSERT INTO transactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [
-            f"TXN{i:06d}", random.randint(1, 50), rail, from_c, to_c,
-            amount, fee, random.uniform(0.8, 8.0), random.choice(statuses),
-            f"Recipient {i}", random.choice(["CN", "IN", "BR", "NG", "KE"]),
-            f"EXT{i:08d}", created, created + timedelta(minutes=random.randint(1, 60)),
+            f"TXN{i:06d}", random.randint(1, 200), rail, from_c, to_c,
+            amount, fee, random.uniform(0.8, 1650.0), random.choice(statuses),
+            f"Recipient {i}", random.choice(["CN", "IN", "BR", "NG", "KE", "GH", "ZA", "US", "GB"]),
+            f"EXT{i:08d}", created, created + timedelta(minutes=random.randint(1, 120)),
             created.date()
         ])
 
     conn.close()
-    logger.info("Seeded 500 demo transactions")
+    logger.info("Seeded 2000 demo transactions")
 
 @app.get("/health")
 async def health():

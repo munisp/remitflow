@@ -12,7 +12,7 @@ import { useTranslation } from 'react-i18next';
 export default function AccountHealth() {
   const { t } = useTranslation();
   const [, setLocation] = useLocation();
-  const { data: health, isLoading } = trpc.accountHealth.score.useQuery();
+  const { data: health, isLoading, isError } = trpc.accountHealth.score.useQuery();
 
   const score = health?.score ?? 0;
   const grade = health?.grade ?? "D";

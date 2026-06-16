@@ -265,7 +265,7 @@ export default function AdminUsers() {
                     </TableCell>
                   </TableRow>
                 ) : (
-                  data?.users.map((u) => (
+                  data?.users.map((u: any) => (
                     <TableRow key={u.id}>
                       <TableCell className="font-mono text-xs text-muted-foreground">#{u.id}</TableCell>
                       <TableCell className="font-medium">{u.name}</TableCell>

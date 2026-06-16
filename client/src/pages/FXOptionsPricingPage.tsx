@@ -8,8 +8,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { TrendingUp, TrendingDown, Calculator, DollarSign } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function FXOptionsPricingPage() {
+  const { t } = useTranslation();
   const [params, setParams] = useState({
     baseCurrency: "USD",
     quoteCurrency: "NGN",
@@ -21,7 +23,7 @@ export default function FXOptionsPricingPage() {
   });
   const [submitted, setSubmitted] = useState(false);
 
-  const { data, isLoading } = trpc.v101.fxOptions.price.useQuery(params, { enabled: submitted });
+  const { data, isLoading, isError } = trpc.v101.fxOptions.price.useQuery(params, { enabled: submitted });
 
   const currencies = ["USD", "GBP", "EUR", "NGN", "KES", "GHS", "ZAR", "TZS", "UGX", "XOF"];
 

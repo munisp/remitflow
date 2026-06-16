@@ -1,0 +1,209 @@
+name: Canary Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      canary_percentage:
+        description: "Traffic percentage for canary (1-50)"
+        required: true
+        default: "5"
+        type: string
+      promote_timeout:
+        description: "Minutes to wait before auto-promote (0=manual)"
+        required: true
+        default: "30"
+        type: string
+      rollback_threshold:
+        description: "Error rate % threshold to trigger rollback"
+        required: true
+        default: "5"
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ─── Build Canary Image ──────────────────────────────────────────────────────
+  build-canary:
+    name: Build Canary Image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=canary-
+
+      - name: Build and push canary image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── Deploy Canary (5% traffic) ─────────────────────────────────────────────
+  deploy-canary:
+    name: Deploy Canary (${{ inputs.canary_percentage }}% traffic)
+    runs-on: ubuntu-latest
+    needs: [build-canary]
+    environment: canary
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy canary instance
+        run: |
+          echo "Deploying canary with ${{ inputs.canary_percentage }}% traffic"
+          echo "Image: ${{ needs.build-canary.outputs.image_tag }}"
+          # Example: kubectl set image deployment/remitflow-canary ...
+          # Example: Update APISIX upstream weight
+
+          # Create canary routing rule (APISIX example)
+          cat << 'EOF' > canary-route.json
+          {
+            "uri": "/*",
+            "upstream": {
+              "type": "roundrobin",
+              "nodes": {
+                "remitflow-stable:3000": ${{ 100 - inputs.canary_percentage }},
+                "remitflow-canary:3000": ${{ inputs.canary_percentage }}
+              }
+            },
+            "plugins": {
+              "traffic-split": {
+                "rules": [
+                  {
+                    "match": [
+                      {
+                        "vars": [["http_x-canary", "==", "true"]]
+                      }
+                    ],
+                    "weighted_upstreams": [
+                      {
+                        "upstream": {
+                          "name": "canary",
+                          "type": "roundrobin",
+                          "nodes": { "remitflow-canary:3000": 1 }
+                        },
+                        "weight": 100
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+          EOF
+          echo "Canary route config generated"
+
+      - name: Record deployment start
+        run: |
+          echo "CANARY_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+          echo "Canary deployed at $(date -u)"
+
+  # ─── Monitor Canary Health ───────────────────────────────────────────────────
+  monitor-canary:
+    name: Monitor Canary Health
+    runs-on: ubuntu-latest
+    needs: [deploy-canary]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Monitor error rates
+        run: |
+          PROMOTE_TIMEOUT=${{ inputs.promote_timeout }}
+          ROLLBACK_THRESHOLD=${{ inputs.rollback_threshold }}
+          INTERVAL=30  # Check every 30 seconds
+          ELAPSED=0
+          MAX_SECONDS=$((PROMOTE_TIMEOUT * 60))
+
+          echo "Monitoring canary for ${PROMOTE_TIMEOUT} minutes"
+          echo "Rollback threshold: ${ROLLBACK_THRESHOLD}% error rate"
+          echo "---"
+
+          while [ $ELAPSED -lt $MAX_SECONDS ]; do
+            # Query Prometheus for canary error rate
+            # In production, replace with real Prometheus query
+            CANARY_ERRORS=$(curl -s "${PROMETHEUS_URL:-http://prometheus:9090}/api/v1/query?query=rate(http_requests_total{instance='canary',code=~'5..'}[5m])" 2>/dev/null | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null || echo "0")
+            CANARY_TOTAL=$(curl -s "${PROMETHEUS_URL:-http://prometheus:9090}/api/v1/query?query=rate(http_requests_total{instance='canary'}[5m])" 2>/dev/null | jq -r '.data.result[0].value[1] // "1"' 2>/dev/null || echo "1")
+
+            # Calculate error rate (handle division by zero)
+            if [ "$CANARY_TOTAL" = "0" ] || [ "$CANARY_TOTAL" = "1" ]; then
+              ERROR_RATE="0"
+            else
+              ERROR_RATE=$(echo "scale=2; ($CANARY_ERRORS / $CANARY_TOTAL) * 100" | bc 2>/dev/null || echo "0")
+            fi
+
+            echo "[$(date -u +%H:%M:%S)] Canary error rate: ${ERROR_RATE}% (threshold: ${ROLLBACK_THRESHOLD}%)"
+
+            # Check if error rate exceeds threshold
+            EXCEEDS=$(echo "$ERROR_RATE > $ROLLBACK_THRESHOLD" | bc 2>/dev/null || echo "0")
+            if [ "$EXCEEDS" = "1" ]; then
+              echo "::error::Canary error rate ${ERROR_RATE}% exceeds threshold ${ROLLBACK_THRESHOLD}%!"
+              echo "CANARY_STATUS=rollback" >> $GITHUB_ENV
+              exit 1
+            fi
+
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "Canary passed monitoring period. Ready to promote."
+          echo "CANARY_STATUS=healthy" >> $GITHUB_ENV
+
+  # ─── Promote or Rollback ─────────────────────────────────────────────────────
+  promote:
+    name: Promote Canary to Production
+    runs-on: ubuntu-latest
+    needs: [monitor-canary]
+    if: success()
+    environment: production
+    steps:
+      - name: Promote canary to stable
+        run: |
+          echo "Promoting canary to 100% traffic"
+          # Example: kubectl set image deployment/remitflow remitflow=$CANARY_IMAGE
+          # Example: Update APISIX upstream to 100% canary
+          echo "Production deployment complete"
+
+      - name: Clean up canary routing
+        run: |
+          echo "Removing canary traffic split rules"
+          # Remove the traffic-split plugin from APISIX
+          echo "Canary cleanup complete"
+
+  rollback:
+    name: Rollback Canary
+    runs-on: ubuntu-latest
+    needs: [monitor-canary]
+    if: failure()
+    steps:
+      - name: Rollback to stable
+        run: |
+          echo "::warning::Rolling back canary deployment"
+          # Remove canary from routing
+          # Scale down canary replicas
+          echo "Rollback complete — all traffic on stable"
+
+      - name: Notify team
+        run: |
+          echo "Canary deployment rolled back due to elevated error rates"
+          # Send Slack/Discord notification
+          # Create GitHub issue for investigation

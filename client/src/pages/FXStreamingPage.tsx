@@ -8,10 +8,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { TrendingUp, TrendingDown, RefreshCw, Bell } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = ["NGN", "GHS", "KES", "ZAR", "UGX", "TZS", "XOF", "MAD", "EGP", "ETB", "EUR", "GBP", "CAD", "AUD"];
 
 export default function FXStreamingPage() {
+  const { t } = useTranslation();
   const [base, setBase] = useState("USD");
   const [alertCurrency, setAlertCurrency] = useState("NGN");
   const [alertRate, setAlertRate] = useState("");

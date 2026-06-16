@@ -9,6 +9,7 @@ name = "crypto_guard"
 path = "src/main.rs"
 
 [dependencies]
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "json"] }
 # HTTP server
 actix-web = "4"
 # Serialization
@@ -24,6 +25,8 @@ hex = "0.4"
 base64 = "0.22"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+# PostgreSQL
+tokio-postgres = "0.7"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

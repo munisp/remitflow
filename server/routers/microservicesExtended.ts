@@ -1,19 +1,41 @@
 import { randomBytes } from "crypto";
 /**
  * RemitFlow Extended Microservices Registry v113
- * Wires all orphan Go/Rust/Python microservices into tRPC procedures
- * Services: CIPS (Go:8090), UPI (Rust:8091), PIX (Python:8092),
- *           Kafka (Go:8093), Temporal (Go:8094), Permify (Go:8095),
- *           APISIX (Go:8096), Fluvio (Rust:8097), TigerBeetle (Rust:8098),
- *           Redis (Rust:8099), Keycloak (Python:8100), OpenSearch (Python:8101),
- *           Lakehouse (Python:8102), AML Engine (Python:8103),
- *           Fraud ML (Python:8104), Transfer Engine (Go:8105),
- *           PDF Receipt (Rust:8106), Search Indexer (Go:8107),
- *           Rate Limiter (Rust:8108), Mojaloop Connector (Go:8109)
+ * Wires all orphan Go/Rust/Python microservices into tRPC procedures.
+ * Circuit breaker pattern: services that fail 3x in 60s are short-circuited.
+ * No simulation fallbacks — errors propagate clearly to callers.
  */
 import { z } from "zod";
 import { router, protectedProcedure, publicProcedure, adminProcedure, rateLimitedProcedure } from "../_core/trpc"; // rateLimitedProcedure available
 import { TRPCError } from "@trpc/server";
+import { logger } from "../_core/logger";
+
+// ─── Circuit Breaker ──────────────────────────────────────────────────────────
+interface CircuitState { failures: number; lastFailure: number; open: boolean; }
+const circuits = new Map<string, CircuitState>();
+const CB_THRESHOLD = 3;
+const CB_RESET_MS = 60_000;
+
+function getCircuit(service: string): CircuitState {
+  let state = circuits.get(service);
+  if (!state) { state = { failures: 0, lastFailure: 0, open: false }; circuits.set(service, state); }
+  if (state.open && Date.now() - state.lastFailure > CB_RESET_MS) {
+    state.open = false; state.failures = 0;
+  }
+  return state;
+}
+
+function recordFailure(service: string): void {
+  const state = getCircuit(service);
+  state.failures++;
+  state.lastFailure = Date.now();
+  if (state.failures >= CB_THRESHOLD) { state.open = true; logger.warn({ service, failures: state.failures }, "Circuit breaker OPEN"); }
+}
+
+function recordSuccess(service: string): void {
+  const state = getCircuit(service);
+  state.failures = 0; state.open = false;
+}
 
 // ─── Extended Service URLs ────────────────────────────────────────────────────
 const EXT_SERVICES = {
@@ -48,8 +70,14 @@ const EXT_SERVICES = {
   rateLimiter:       process.env.RATE_LIMITER_URL        || "http://localhost:8108",
 };
 
-// ─── HTTP Helper ──────────────────────────────────────────────────────────────
+// ─── HTTP Helper with Circuit Breaker ─────────────────────────────────────────
 async function callExtService<T>(url: string, body?: object, timeoutMs = 5000): Promise<T> {
+  const serviceName = new URL(url).host;
+  const circuit = getCircuit(serviceName);
+  if (circuit.open) {
+    logger.warn({ service: serviceName, url }, "Circuit breaker is OPEN — request rejected");
+    throw new TRPCError({ code: "SERVICE_UNAVAILABLE" as "INTERNAL_SERVER_ERROR", message: `Service ${serviceName} circuit breaker is open — too many recent failures. Will retry after ${Math.ceil((CB_RESET_MS - (Date.now() - circuit.lastFailure)) / 1000)}s.` });
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -60,12 +88,19 @@ async function callExtService<T>(url: string, body?: object, timeoutMs = 5000): 
       signal: controller.signal,
     });
     clearTimeout(timer);
-    if (!res.ok) throw new Error(`Service error ${res.status}: ${await res.text()}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      recordFailure(serviceName);
+      throw new Error(`Service error ${res.status}: ${errText}`);
+    }
+    recordSuccess(serviceName);
     return await res.json() as T;
   } catch (err: any) {
     clearTimeout(timer);
+    recordFailure(serviceName);
+    logger.error({ service: serviceName, url, error: err.message }, "External service call failed");
     if (err.name === "AbortError") throw new TRPCError({ code: "TIMEOUT", message: `Service timed out: ${url}` });
-    // Return graceful fallback instead of crashing
+    if (err instanceof TRPCError) throw err;
     throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Service unavailable: ${err.message}` });
   }
 }
@@ -84,7 +119,7 @@ async function checkHealth(url: string): Promise<{ status: "healthy" | "unavaila
 export const cipsRouter = router({
   initiateTransfer: protectedProcedure
     .input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("CNY"),
       debtorAccount: z.string(),
       creditorAccount: z.string(),
@@ -99,17 +134,8 @@ export const cipsRouter = router({
           messageId: `CIPS-${Date.now()}-${randomBytes(3).toString('hex').toUpperCase()}`,
           creationDateTime: new Date().toISOString(),
         });
-      } catch {
-        // Graceful fallback with simulated response
-        return {
-          transactionId: `CIPS-SIM-${Date.now()}`,
-          status: "PENDING",
-          rail: "CIPS",
-          amount: input.amount,
-          currency: input.currency,
-          estimatedSettlement: new Date(Date.now() + 3600000).toISOString(),
-          message: "CIPS adapter unavailable — using simulation mode",
-        };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `CIPS transfer failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   getStatus: protectedProcedure
@@ -117,8 +143,8 @@ export const cipsRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.cipsAdapter}/status/${input.transactionId}`);
-      } catch {
-        return { transactionId: input.transactionId, status: "UNKNOWN", message: "CIPS adapter unavailable" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `CIPS status check failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.cipsAdapter)),
@@ -130,7 +156,7 @@ export const upiRouter = router({
     .input(z.object({
       payerVpa: z.string(),
       payeeVpa: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("INR"),
       remarks: z.string().optional(),
       merchantCode: z.string().optional(),
@@ -142,16 +168,8 @@ export const upiRouter = router({
           txnId: `UPI${Date.now()}`,
           txnDate: new Date().toISOString().split("T")[0],
         });
-      } catch {
-        return {
-          txnId: `UPI-SIM-${Date.now()}`,
-          status: "PENDING",
-          rail: "UPI",
-          amount: input.amount,
-          currency: "INR",
-          vpa: input.payeeVpa,
-          message: "UPI adapter unavailable — using simulation mode",
-        };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `UPI payment failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   lookupVpa: protectedProcedure
@@ -159,8 +177,8 @@ export const upiRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.upiAdapter}/vpa/lookup?vpa=${encodeURIComponent(input.vpa)}`);
-      } catch {
-        return { vpa: input.vpa, name: "VPA Holder", bankName: "Unknown Bank", valid: true, message: "Simulated" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `UPI VPA lookup failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.upiAdapter)),
@@ -172,9 +190,9 @@ export const pixRouter = router({
     .input(z.object({
       pixKey: z.string(),
       pixKeyType: z.enum(["CPF", "CNPJ", "EMAIL", "PHONE", "EVP"]),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("BRL"),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
     }))
     .mutation(async ({ input }) => {
       try {
@@ -182,16 +200,8 @@ export const pixRouter = router({
           ...input,
           endToEndId: `E${Date.now()}${randomBytes(3).toString('hex').toUpperCase()}`,
         });
-      } catch {
-        return {
-          endToEndId: `PIX-SIM-${Date.now()}`,
-          status: "PENDING",
-          rail: "PIX",
-          amount: input.amount,
-          currency: "BRL",
-          pixKey: input.pixKey,
-          message: "PIX adapter unavailable — using simulation mode",
-        };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `PIX payment failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   lookupKey: protectedProcedure
@@ -199,8 +209,8 @@ export const pixRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.pixAdapter}/key/lookup`, input);
-      } catch {
-        return { pixKey: input.pixKey, name: "PIX Key Holder", institution: "Banco do Brasil", valid: true, message: "Simulated" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `PIX key lookup failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.pixAdapter)),
@@ -211,15 +221,15 @@ export const kafkaAdminRouter = router({
   getTopics: adminProcedure.query(async () => {
     try {
       return await callExtService<{ topics: string[] }>(`${EXT_SERVICES.kafkaService}/topics`);
-    } catch {
-      return { topics: ["remitflow.transfers", "remitflow.kyc", "remitflow.fraud", "remitflow.notifications", "remitflow.audit"], message: "Kafka unavailable — showing default topics" };
+    } catch (err) {
+      throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Kafka topics fetch failed: ${err instanceof Error ? err.message : String(err)}` });
     }
   }),
   getConsumerGroups: adminProcedure.query(async () => {
     try {
       return await callExtService(`${EXT_SERVICES.kafkaService}/consumer-groups`);
-    } catch {
-      return { groups: [{ id: "remitflow-core", lag: 0, status: "stable" }], message: "Kafka unavailable" };
+    } catch (err) {
+      throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Kafka consumer groups fetch failed: ${err instanceof Error ? err.message : String(err)}` });
     }
   }),
   publishEvent: adminProcedure
@@ -227,8 +237,8 @@ export const kafkaAdminRouter = router({
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.kafkaService}/publish`, input);
-      } catch {
-        return { success: true, offset: 0, partition: 0, message: "Kafka unavailable — event queued locally" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Kafka publish failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.kafkaService)),
@@ -241,14 +251,8 @@ export const temporalAdminRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.temporalWorker}/workflows?status=${input.status}&limit=${input.limit}`);
-      } catch {
-        return {
-          workflows: [
-            { id: "transfer-saga-001", type: "TransferSaga", status: "COMPLETED", startTime: new Date(Date.now() - 60000).toISOString() },
-            { id: "kyc-pipeline-002", type: "KYCPipeline", status: "RUNNING", startTime: new Date(Date.now() - 30000).toISOString() },
-          ],
-          message: "Temporal unavailable — showing simulated data",
-        };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Temporal workflows fetch failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   triggerWorkflow: adminProcedure
@@ -256,8 +260,8 @@ export const temporalAdminRouter = router({
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.temporalWorker}/trigger`, input);
-      } catch {
-        return { workflowId: `wf-${Date.now()}`, status: "QUEUED", message: "Temporal unavailable — workflow queued" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Temporal workflow trigger failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.temporalWorker)),
@@ -270,8 +274,9 @@ export const permifyRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.permifyService}/check`, input);
-      } catch {
-        return { allowed: true, message: "Permify unavailable — defaulting to allow" };
+      } catch (err) {
+        logger.error({ error: err instanceof Error ? err.message : String(err) }, "Permify check failed — denying by default");
+        return { allowed: false, message: "Authorization service unavailable — access denied for safety" };
       }
     }),
   getPermissions: protectedProcedure
@@ -279,8 +284,8 @@ export const permifyRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.permifyService}/permissions?subject=${input.subject}`);
-      } catch {
-        return { permissions: ["read:transactions", "write:transfers", "read:profile"], message: "Permify unavailable" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Permify permissions fetch failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.permifyService)),
@@ -293,17 +298,17 @@ export const tigerBeetleRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.tigerBeetle}/accounts/${input.accountId}`);
-      } catch {
-        return { accountId: input.accountId, balance: 0, creditsPending: 0, debitsPosted: 0, message: "TigerBeetle unavailable" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `TigerBeetle account fetch failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   createTransfer: protectedProcedure
-    .input(z.object({ debitAccountId: z.string(), creditAccountId: z.string(), amount: z.number(), ledger: z.number().default(1), code: z.number().default(1) }))
+    .input(z.object({ debitAccountId: z.string(), creditAccountId: z.string(), amount: z.number().positive().max(10_000_000), ledger: z.number().default(1), code: z.number().default(1) }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.tigerBeetle}/transfers`, input);
-      } catch {
-        return { transferId: `TB-${Date.now()}`, status: "COMMITTED", message: "TigerBeetle unavailable — simulated" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `TigerBeetle transfer failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.tigerBeetle)),
@@ -316,8 +321,8 @@ export const openSearchRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.openSearchService}/search`, input);
-      } catch {
-        return { hits: [], total: 0, took: 0, message: "OpenSearch unavailable" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `OpenSearch query failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   indexDocument: adminProcedure
@@ -325,8 +330,8 @@ export const openSearchRouter = router({
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.openSearchService}/index`, input);
-      } catch {
-        return { success: true, id: input.id, message: "OpenSearch unavailable — document queued" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `OpenSearch index failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.openSearchService)),
@@ -339,8 +344,8 @@ export const lakehouseRouter = router({
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.lakehouseService}/query`, input);
-      } catch {
-        return { rows: [], columns: [], rowCount: 0, executionTimeMs: 0, message: "Lakehouse unavailable" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Lakehouse query failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   getTransactionAnalytics: adminProcedure
@@ -348,16 +353,8 @@ export const lakehouseRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.lakehouseService}/analytics/transactions`, input);
-      } catch {
-        // Return simulated analytics data
-        const rails = ["CIPS", "UPI", "PIX", "SWIFT", "SEPA", "MOJALOOP"];
-        return {
-          totalVolume: 4850000,
-          totalTransactions: 12847,
-          byRail: rails.map((r, i) => ({ rail: r, volume: Math.floor((Date.now() % 1000000) + i * 50000), count: Math.floor((Date.now() % 3000) + i * 100) })),
-          dailyTrend: Array.from({ length: 30 }, (_, i) => ({ date: new Date(Date.now() - (29-i)*86400000).toISOString().split("T")[0], volume: Math.floor(((i * 137 + 50000) % 200000)), count: Math.floor(((i * 17 + 100) % 500)) })),
-          message: "Lakehouse unavailable — showing simulated data",
-        };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Lakehouse analytics failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.lakehouseService)),
@@ -366,19 +363,20 @@ export const lakehouseRouter = router({
 // ─── AML Engine Router (Python) ───────────────────────────────────────────────
 export const amlEngineRouter = router({
   screenTransaction: protectedProcedure
-    .input(z.object({ transactionId: z.string(), amount: z.number(), senderName: z.string(), receiverName: z.string(), corridor: z.string() }))
+    .input(z.object({ transactionId: z.string(), amount: z.number().positive().max(10_000_000), senderName: z.string(), receiverName: z.string(), corridor: z.string() }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.amlEngine}/screen`, input);
-      } catch {
-        return { riskScore: 0.1, decision: "PASS", flags: [], message: "AML engine unavailable — defaulting to PASS" };
+      } catch (err) {
+        logger.error({ error: err instanceof Error ? err.message : String(err) }, "AML screening failed — flagging for manual review");
+        return { riskScore: 1.0, decision: "REVIEW", flags: ["AML_SERVICE_UNAVAILABLE"], message: "AML engine unavailable — flagged for manual review" };
       }
     }),
   getSanctionsList: adminProcedure.query(async () => {
     try {
       return await callExtService(`${EXT_SERVICES.amlEngine}/sanctions/list`);
-    } catch {
-      return { entries: [], lastUpdated: new Date().toISOString(), message: "AML engine unavailable" };
+    } catch (err) {
+      throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `AML sanctions list fetch failed: ${err instanceof Error ? err.message : String(err)}` });
     }
   }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.amlEngine)),
@@ -387,12 +385,13 @@ export const amlEngineRouter = router({
 // ─── Fraud ML Router (Python) ─────────────────────────────────────────────────
 export const fraudMlRouter = router({
   scoreTransaction: protectedProcedure
-    .input(z.object({ userId: z.number(), amount: z.number(), destinationCountry: z.string(), deviceFingerprint: z.string().optional() }))
+    .input(z.object({ userId: z.number(), amount: z.number().positive().max(10_000_000), destinationCountry: z.string(), deviceFingerprint: z.string().optional() }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.fraudMl}/score`, input);
-      } catch {
-        return { score: 0.05, riskLevel: "LOW", features: {}, recommendation: "APPROVE", message: "Fraud ML unavailable — defaulting to APPROVE" };
+      } catch (err) {
+        logger.error({ error: err instanceof Error ? err.message : String(err) }, "Fraud ML scoring failed — flagging for manual review");
+        return { score: 0.95, riskLevel: "HIGH", features: {}, recommendation: "REVIEW", message: "Fraud ML unavailable — flagged for manual review" };
       }
     }),
   getModelMetrics: adminProcedure.query(async () => {
@@ -408,7 +407,7 @@ export const fraudMlRouter = router({
 // ─── Transfer Engine Router (Go) ──────────────────────────────────────────────
 export const transferEngineRouter = router({
   processTransfer: protectedProcedure
-    .input(z.object({ transferId: z.string(), rail: z.string(), amount: z.number(), currency: z.string(), metadata: z.record(z.string(), z.unknown()).optional() }))
+    .input(z.object({ transferId: z.string(), rail: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string(), metadata: z.record(z.string(), z.unknown()).optional() }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.transferEngine}/process`, input);
@@ -471,15 +470,16 @@ export const rateLimiterRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.rateLimiter}/check`, input);
-      } catch {
-        return { allowed: true, remaining: input.limit, resetAt: Date.now() + input.windowSeconds * 1000, message: "Rate limiter unavailable — defaulting to allow" };
+      } catch (err) {
+        logger.warn({ error: err instanceof Error ? err.message : String(err) }, "Rate limiter unavailable — denying for safety");
+        return { allowed: false, remaining: 0, resetAt: Date.now() + input.windowSeconds * 1000, message: "Rate limiter unavailable — request denied for safety" };
       }
     }),
   getRules: adminProcedure.query(async () => {
     try {
       return await callExtService(`${EXT_SERVICES.rateLimiter}/rules`);
-    } catch {
-      return { rules: [{ key: "transfer", limit: 10, windowSeconds: 60 }, { key: "login", limit: 5, windowSeconds: 300 }], message: "Rate limiter unavailable" };
+    } catch (err) {
+      throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Rate limiter rules fetch failed: ${err instanceof Error ? err.message : String(err)}` });
     }
   }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.rateLimiter)),
@@ -492,17 +492,17 @@ export const keycloakRouter = router({
     .query(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.keycloakBridge}/users/${input.userId}/roles`);
-      } catch {
-        return { roles: ["user"], groups: [], message: "Keycloak unavailable" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Keycloak roles fetch failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   syncUser: adminProcedure
-    .input(z.object({ userId: z.number(), email: z.string(), name: z.string() }))
+    .input(z.object({ userId: z.number(), email: z.string(), name: z.string().max(2000) }))
     .mutation(async ({ input }) => {
       try {
         return await callExtService(`${EXT_SERVICES.keycloakBridge}/sync`, input);
-      } catch {
-        return { synced: true, keycloakId: `kc-${input.userId}`, message: "Keycloak unavailable — sync queued" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Keycloak user sync failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.keycloakBridge)),
@@ -520,15 +520,15 @@ export const mojaloopConnectorRouter = router({
           ilpPacket: "AQAAAAAAAADIEHByaXZhdGUucGF5ZWVmc3A",
           condition: "f5sqb7tBTWPd5Y8BDFdMm9BJR_MNI4isf8p8n9Kj6eY",
         });
-      } catch {
-        return { transferId: `ML-SIM-${Date.now()}`, transferState: "COMMITTED", message: "Mojaloop connector unavailable — simulated" };
+      } catch (err) {
+        throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Mojaloop transfer failed: ${err instanceof Error ? err.message : String(err)}` });
       }
     }),
   getFsps: publicProcedure.query(async () => {
     try {
       return await callExtService(`${EXT_SERVICES.mojaloopConnector}/participants`);
-    } catch {
-      return { fsps: [{ fspId: "remitflow", name: "RemitFlow", currency: "USD" }, { fspId: "mtn-gh", name: "MTN Ghana", currency: "GHS" }], message: "Mojaloop connector unavailable" };
+    } catch (err) {
+      throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Mojaloop FSPs fetch failed: ${err instanceof Error ? err.message : String(err)}` });
     }
   }),
   health: publicProcedure.query(() => checkHealth(EXT_SERVICES.mojaloopConnector)),

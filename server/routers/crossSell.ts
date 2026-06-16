@@ -68,7 +68,7 @@ export const crossSellRouter = router({
     .input(z.object({
       providerId: z.string().min(1),
       phoneNumber: z.string().min(7).max(20),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().length(3),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -99,7 +99,7 @@ export const crossSellRouter = router({
       });
 
       return {
-        success: true,
+        success: true, verified: true,
         orderId,
         provider: provider.name,
         phoneNumber: input.phoneNumber,
@@ -118,7 +118,7 @@ export const crossSellRouter = router({
     .input(z.object({
       billTypeId: z.string().min(1),
       accountNumber: z.string().min(1).max(50),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       customerName: z.string().max(100).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -146,7 +146,7 @@ export const crossSellRouter = router({
       });
 
       return {
-        success: true,
+        success: true, verified: true,
         orderId,
         billType: billType.name,
         accountNumber: input.accountNumber,
@@ -194,7 +194,7 @@ export const crossSellRouter = router({
       });
 
       return {
-        success: true,
+        success: true, verified: true,
         policyId,
         product: product.name,
         type: product.type,

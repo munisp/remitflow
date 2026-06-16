@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Shield, Lock, Unlock, Mail, CheckCircle, AlertTriangle, ArrowLeft } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 function getTokenFromUrl(): string | null {
   const params = new URLSearchParams(window.location.search);
@@ -19,6 +20,7 @@ function getTokenFromUrl(): string | null {
 }
 
 export default function SelfUnlock() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const [token] = useState<string | null>(() => getTokenFromUrl());
   const [userId, setUserId] = useState<string>("");

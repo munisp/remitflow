@@ -12,10 +12,12 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import { Settings, Plus, Edit, Trash2, Play, DollarSign, Percent, Layers } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = ["*", "USD", "GBP", "EUR", "NGN", "KES", "GHS", "ZAR"];
 
 export default function FeeRulesCRUDV2Page() {
+  const { t } = useTranslation();
   const [showCreate, setShowCreate] = useState(false);
   const [simFrom, setSimFrom] = useState("USD");
   const [simTo, setSimTo] = useState("NGN");
@@ -162,7 +164,7 @@ export default function FeeRulesCRUDV2Page() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(rules ?? []).map((rule) => {
+                  {(rules ?? []).map((rule: any) => {
                     const FeeIcon = feeTypeIcon[rule.feeType as keyof typeof feeTypeIcon] ?? DollarSign;
                     return (
                       <tr key={rule.id} className={`border-b last:border-0 hover:bg-muted/30 ${!rule.active ? "opacity-50" : ""}`}>

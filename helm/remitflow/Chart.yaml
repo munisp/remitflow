@@ -1,0 +1,28 @@
+apiVersion: v2
+name: remitflow
+description: RemitFlow — Africa-focused cross-border remittance platform
+type: application
+version: 2.0.0
+appVersion: "2.0.0"
+keywords:
+  - fintech
+  - remittance
+  - payments
+  - africa
+  - cross-border
+maintainers:
+  - name: RemitFlow Engineering
+    email: engineering@remitflow.io
+dependencies:
+  - name: postgresql
+    version: "15.x.x"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
+  - name: redis
+    version: "19.x.x"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: redis.enabled
+  - name: kafka
+    version: "28.x.x"
+    repository: "https://charts.bitnami.com/bitnami"
+    condition: kafka.enabled

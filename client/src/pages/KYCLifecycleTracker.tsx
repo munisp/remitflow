@@ -60,10 +60,12 @@ import {
   CheckSquare,
 } from 'lucide-react';
 import { format } from 'date-fns';
+import { useTranslation } from 'react-i18next';
 
 type KYCStatus = 'submitted' | 'under_review' | 'approved' | 'rejected' | 'expired';
 
 export default function KYCLifecycleTracker() {
+  const { t } = useTranslation();
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [levelFilter, setLevelFilter] = useState<string>('all');
@@ -286,7 +288,7 @@ export default function KYCLifecycleTracker() {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    kycList?.lifecycles.map((kyc) => (
+                    kycList?.lifecycles.map((kyc: any) => (
                       <TableRow key={kyc.userId} className="border-[#3d3452] hover:bg-[#2d2640]">
                         <TableCell>
                           <div className="flex flex-col">
@@ -305,7 +307,7 @@ export default function KYCLifecycleTracker() {
                         <TableCell>{getStatusBadge(kyc.status)}</TableCell>
                         <TableCell>
                           <div className="flex gap-1">
-                            {kyc.documents.map((doc, i) => (
+                            {kyc.documents.map((doc: any, i: any) => (
                               <FileText key={i} className="h-4 w-4 text-gray-500 hover:text-purple-400 cursor-pointer" />
                             ))}
                           </div>
@@ -471,7 +473,7 @@ export default function KYCLifecycleTracker() {
               ) : timeline?.length === 0 ? (
                 <div className="text-center py-10 text-gray-500">No history available.</div>
               ) : (
-                timeline?.map((event, index) => (
+                timeline?.map((event: any, index: any) => (
                   <div key={index} className="relative pl-8 pb-6 border-l border-[#3d3452] last:border-0 last:pb-0">
                     <div className="absolute left-[-9px] top-0 h-4 w-4 rounded-full bg-[#241e33] border-2 border-purple-500 flex items-center justify-center">
                       <div className="h-1.5 w-1.5 rounded-full bg-purple-500" />

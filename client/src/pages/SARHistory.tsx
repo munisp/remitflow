@@ -3,6 +3,7 @@
  * SAR (Suspicious Activity Report) History Page
  * Lists all submitted SARs with metadata and PDF export capability.
  */
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
@@ -27,6 +28,7 @@ const SEVERITY_COLORS: Record<string, string> = {
 const PAGE_SIZE = 20;
 
 export default function SARHistory() {
+  const { t } = useTranslation();
   const [page, setPage] = useState(0);
   const [search, setSearch] = useState("");
 

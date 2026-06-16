@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
+import { useTranslation } from 'react-i18next';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -174,8 +175,9 @@ function PricingCalculator() {
 // ─── Main Landing Page ─────────────────────────────────────────────────────────
 
 export default function LandingPage() {
+  const { t } = useTranslation();
   const [scrolled, setScrolled] = useState(false);
-  const { data: authData } = trpc.auth.me.useQuery();
+  const { data: authData, isLoading, isError } = trpc.auth.me.useQuery();
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 20);

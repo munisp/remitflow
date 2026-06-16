@@ -275,12 +275,12 @@ const POLICIES: Record<string, PolicyFn[]> = {
 
   // ── Beneficiary: Update (BEC protection) ────────────────────────────────────
   "beneficiary.update": [
-    (ctx) => {
+    async (ctx) => {
       if (ctx.resource?.ownerId && ctx.resource.ownerId !== ctx.user!.id) {
         return { allowed: false, reason: "Cannot modify another user's beneficiary" };
       }
       if (ctx.resource?.id) {
-        const swapped = flagBeneficiarySwap(ctx.user!.id, Number(ctx.resource.id));
+        const swapped = await flagBeneficiarySwap(ctx.user!.id, Number(ctx.resource.id));
         if (swapped) {
           return {
             allowed: true,

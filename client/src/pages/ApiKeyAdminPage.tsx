@@ -9,8 +9,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { Plus, Trash2, RotateCcw, Copy, Eye, EyeOff } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function ApiKeyAdminPage() {
+  const { t } = useTranslation();
   const [createOpen, setCreateOpen] = useState(false);
   const [rotateId, setRotateId] = useState<number | null>(null);
   const [newKeyName, setNewKeyName] = useState("");

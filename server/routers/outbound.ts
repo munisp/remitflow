@@ -9,6 +9,7 @@
  *   - Live FX rate endpoint proxy
  */
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc.js";
 import {
   createAuditLog,
@@ -19,7 +20,14 @@ import {
   createCrossSellOffer,
   respondToCrossSellOffer,
   markCrossSellOfferShown,
+  getDb,
 } from "../db.js";
+import { safeParseAmount } from "../lib/safeDecimal";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { logger } from "../_core/logger";
+import { users } from "../../drizzle/schema";
+import { eq } from "drizzle-orm";
+import { KYC_TIER_LIMITS, type KycTier } from "../business-rules";
 
 const SWIFT_URL = process.env.OUTBOUND_SWIFT_URL ?? "http://localhost:8081";
 const FLOAT_URL = process.env.FLOAT_INCOME_URL ?? "http://localhost:8082";
@@ -93,7 +101,7 @@ async function callService(url: string, method: "GET" | "POST", body?: unknown) 
 const swiftRouter = router({
   getQuote: protectedProcedure
     .input(z.object({
-      amount_ngn: z.number().positive(),
+      amount_ngn: z.number().positive().max(10_000_000),
       destination_currency: z.string().length(3),
       purpose_code: z.string(),
       sender_segment: z.enum(["labor", "education", "medical", "sme", "hnw"]).optional(),
@@ -102,7 +110,7 @@ const swiftRouter = router({
 
   submitTransfer: protectedProcedure
     .input(z.object({
-      amount_ngn: z.number().positive(),
+      amount_ngn: z.number().positive().max(10_000_000),
       destination_currency: z.string().length(3),
       purpose_code: z.string(),
       sender_segment: z.enum(["labor", "education", "medical", "sme", "hnw"]).optional(),
@@ -110,12 +118,57 @@ const swiftRouter = router({
       beneficiary_account: z.string().min(4),
       beneficiary_bank_swift: z.string().min(8).max(11),
       beneficiary_country: z.string().length(2),
+      totpCode: z.string().length(6).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      const estimatedUsd = input.amount_ngn / 1600;
+      const transferId = `SWIFT-${Date.now()}-${ctx.user.id}`;
+
+      // 2FA enforcement for high-value SWIFT transfers (> $1,000 equivalent)
+      if (estimatedUsd > 1000) {
+        const db = await getDb();
+        if (db) {
+          const [userRow] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+          if (userRow?.totpEnabled) {
+            if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: SWIFT transfers over $1,000 require TOTP verification." });
+            const { verifyTOTP } = await import("../totp");
+            const valid = await verifyTOTP(input.totpCode, userRow.totpSecret ?? "");
+            if (!valid) throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code" });
+          }
+        }
+      }
+
+      // KYC tier limit enforcement
+      const db = await getDb();
+      if (db) {
+        const [userForKyc] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+        const kycTier = (userForKyc?.kycTier ?? "tier0") as KycTier;
+        const limits = KYC_TIER_LIMITS[kycTier];
+        if (limits && estimatedUsd > limits.perTx) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: `KYC Tier ${kycTier}: single transfer limit is $${limits.perTx}` });
+        }
+      }
+
+      // Execute unified transfer pipeline (sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications)
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: estimatedUsd,
+        fromCurrency: "NGN",
+        toCurrency: input.destination_currency,
+        recipientName: input.beneficiary_name,
+        recipientAccount: input.beneficiary_account,
+        rail: "swift",
+        corridorCode: input.beneficiary_country,
+        featureLabel: "outbound_swift",
+        transferId,
+        description: `CBN purpose: ${input.purpose_code}`,
+        metadata: { purposeCode: input.purpose_code, segment: input.sender_segment, swiftCode: input.beneficiary_bank_swift },
+      });
+
       // Fetch current annual usage from DB
       const year = new Date().getFullYear();
       const usageRow = await getAnnualUsage(ctx.user.id, input.purpose_code, year);
-      const usedUsd = usageRow ? parseFloat(usageRow.usedUsd as string) : 0;
+      const usedUsd = usageRow ? safeParseAmount(usageRow.usedUsd as string) : 0;
 
       // Call Go service with X-Used-Annual-USD header for limit enforcement
       const res = await fetch(`${SWIFT_URL}/submit`, {
@@ -130,17 +183,15 @@ const swiftRouter = router({
 
       if (!res.ok) {
         const err = await res.json() as Record<string, unknown>;
-        throw new Error(err.error as string ?? `Service error ${res.status}`);
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: (err.error as string) ?? `SWIFT service error ${res.status}` });
       }
 
       const result = await res.json() as Record<string, unknown>;
 
-      // Increment annual usage in DB (estimate: amount_ngn / 1600 for USD)
-      const estimatedUsd = input.amount_ngn / 1600;
+      // Increment annual usage in DB
       await incrementAnnualUsage(ctx.user.id, input.purpose_code, estimatedUsd);
 
-      await createAuditLog({ userId: ctx.user.id, action: "outbound.submitTransfer", description: `purpose=${input.purpose_code} amount_ngn=${input.amount_ngn}`, metadata: { used_usd_before: usedUsd, estimated_usd: estimatedUsd } });
-      return result;
+      return { ...result as object, verified: true, transferId, fraudScore: pipelineResult.fraudScore, tigerBeetleRecorded: pipelineResult.tigerBeetleRecorded };
     }),
 
   getFeeSchedule: publicProcedure
@@ -148,7 +199,7 @@ const swiftRouter = router({
 
   checkCompliance: protectedProcedure
     .input(z.object({
-      amount_ngn: z.number().positive(),
+      amount_ngn: z.number().positive().max(10_000_000),
       purpose_code: z.string(),
       sender_segment: z.enum(["labor", "education", "medical", "sme", "hnw"]).optional(),
     }))
@@ -170,7 +221,7 @@ const swiftRouter = router({
       const year = new Date().getFullYear();
       const code = input.purpose_code.toUpperCase();
       const usageRow = await getAnnualUsage(ctx.user.id, code, year);
-      const usedUsd = usageRow ? parseFloat(usageRow.usedUsd as string) : 0;
+      const usedUsd = usageRow ? safeParseAmount(usageRow.usedUsd as string) : 0;
       const capUsd = CBN_ANNUAL_LIMITS_USD[code] ?? 0;
       const remainingUsd = Math.max(0, capUsd - usedUsd);
       const utilizationPct = capUsd > 0 ? Math.round((usedUsd / capUsd) * 100) : 0;
@@ -192,7 +243,7 @@ const swiftRouter = router({
       const usageRows = await getAllAnnualUsageForUser(ctx.user.id, year);
       const usageMap: Record<string, number> = {};
       for (const row of usageRows) {
-        usageMap[row.purposeCode] = parseFloat(row.usedUsd as string);
+        usageMap[row.purposeCode] = safeParseAmount(row.usedUsd as string);
       }
       return Object.entries(CBN_ANNUAL_LIMITS_USD).map(([code, cap]) => {
         const used = usageMap[code] ?? 0;
@@ -220,7 +271,7 @@ const floatIncomeRouter = router({
     .query(async ({ input }) => callService(`${FLOAT_URL}/project`, "POST", input)),
 
   dailyAccrual: protectedProcedure
-    .input(z.object({ float_balance_ngn: z.number().positive() }))
+    .input(z.object({ float_balance_ngn: z.number().positive().max(10_000_000) }))
     .query(async ({ input }) => callService(`${FLOAT_URL}/daily-accrual`, "POST", input)),
 
   healthCheck: publicProcedure
@@ -230,9 +281,9 @@ const floatIncomeRouter = router({
 const revenueAnalyticsV2Router = router({
   classifySegment: protectedProcedure
     .input(z.object({
-      amount_usd: z.number().positive(),
+      amount_usd: z.number().positive().max(10_000_000),
       purpose_code: z.string(),
-      purpose_description: z.string().optional(),
+      purpose_description: z.string().max(2000).optional(),
       frequency_per_year: z.number().int().min(1).optional(),
       sender_occupation: z.string().optional(),
     }))
@@ -241,7 +292,7 @@ const revenueAnalyticsV2Router = router({
   scoreCrossSell: protectedProcedure
     .input(z.object({
       segment: z.enum(["labor", "education", "medical", "sme", "hnw"]),
-      amount_usd: z.number().positive(),
+      amount_usd: z.number().positive().max(10_000_000),
       frequency_per_year: z.number().int().min(1),
       months_active: z.number().int().min(0),
       has_nigerian_account: z.boolean(),
@@ -283,7 +334,7 @@ const crossSellRouter = router({
   checkAndTrigger: protectedProcedure
     .input(z.object({
       segment: z.enum(["labor", "education", "medical", "sme", "hnw"]).optional(),
-      amount_usd: z.number().positive().optional(),
+      amount_usd: z.number().positive().max(10_000_000).optional(),
       frequency_per_year: z.number().int().min(1).optional(),
       months_active: z.number().int().min(0).optional(),
       has_nigerian_account: z.boolean().optional(),

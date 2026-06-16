@@ -17,8 +17,10 @@ import {  Building2, Palette, Users, Globe, BarChart3, Settings, ArrowLeft,
   Copy, ExternalLink, Trash2, Crown, UserMinus, RefreshCw,
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function TenantDashboard() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const [, params] = useRoute("/tenant/:slug/dashboard");
   const slug = (params as any)?.slug ?? "";

@@ -13,11 +13,7 @@ import { useTranslation } from 'react-i18next';
 
 const OWNERSHIP_TYPES = ["sole_owner", "joint_owner", "company_owned", "trust_owned", "leasehold"];
 const DOC_TYPES = ["property_deed", "land_certificate", "mortgage_statement", "utility_bill", "council_tax", "lease_agreement"];
-const SAMPLE_SUBMISSIONS = [
-  { id: 1, address: "14 Victoria Street, London SW1H 0NB", value: 850000, ownershipType: "sole_owner", docType: "property_deed", status: "verified", submittedAt: "2026-01-10T09:00:00Z" },
-  { id: 2, address: "Plot 45, Banana Island, Lagos", value: 2500000, ownershipType: "joint_owner", docType: "land_certificate", status: "under_review", submittedAt: "2026-03-15T14:30:00Z" },
-  { id: 3, address: "Unit 7, Westlands, Nairobi", value: 320000, ownershipType: "sole_owner", docType: "utility_bill", status: "rejected", submittedAt: "2026-02-20T11:00:00Z" },
-];
+type PropertySubmission = { id: number; address: string; value: number; ownershipType: string; docType: string; status: string; submittedAt: string };
 
 const statusConfig: Record<string, { color: string; icon: any; label: string }> = {
   verified: { color: "bg-green-500/10 text-green-400", icon: CheckCircle, label: "Verified" },
@@ -39,7 +35,16 @@ export default function PropertyKYC() {
     onError: (e: any) => toast.error(e.message),
   });
   const tier = (kycData as any)?.currentTier ?? 1;
-  const verifiedCount = SAMPLE_SUBMISSIONS.filter(s => s.status === "verified").length;
+  const submissions: PropertySubmission[] = ((kycData as any)?.documents ?? []).map((d: any, i: number) => ({
+    id: d.id ?? i + 1,
+    address: d.address ?? d.documentType ?? "Property",
+    value: d.value ?? 0,
+    ownershipType: d.ownershipType ?? "sole_owner",
+    docType: d.documentType ?? "property_deed",
+    status: d.status ?? "pending",
+    submittedAt: d.createdAt ?? d.submittedAt ?? new Date().toISOString(),
+  }));
+  const verifiedCount = submissions.filter(s => s.status === "verified" || s.status === "approved").length;
 
   return (
     <DashboardLayout>
@@ -59,7 +64,7 @@ export default function PropertyKYC() {
             <CheckCircle className={"h-8 w-8 " + (tier >= 3 ? "text-green-400" : "text-yellow-400")} />
             <div className="flex-1">
               <div className="font-medium">KYC Tier {tier} — {tier >= 3 ? "Property transfers unlocked" : "Tier 3 required for property transfers"}</div>
-              <div className="text-xs text-muted-foreground">{verifiedCount} of {SAMPLE_SUBMISSIONS.length} properties verified</div>
+              <div className="text-xs text-muted-foreground">{verifiedCount} of {submissions.length} properties verified</div>
             </div>
             <Badge className={tier >= 3 ? "bg-green-500/10 text-green-400" : "bg-yellow-500/10 text-yellow-400"}>{tier >= 3 ? "Active" : "Upgrade Required"}</Badge>
           </CardContent>
@@ -68,9 +73,9 @@ export default function PropertyKYC() {
         {/* Stats */}
         <div className="grid grid-cols-3 gap-3">
           {[
-            { label: "Verified", value: SAMPLE_SUBMISSIONS.filter(s => s.status === "verified").length, color: "text-green-400" },
-            { label: "Under Review", value: SAMPLE_SUBMISSIONS.filter(s => s.status === "under_review").length, color: "text-yellow-400" },
-            { label: "Rejected", value: SAMPLE_SUBMISSIONS.filter(s => s.status === "rejected").length, color: "text-red-400" },
+            { label: "Verified", value: submissions.filter(s => s.status === "verified").length, color: "text-green-400" },
+            { label: "Under Review", value: submissions.filter(s => s.status === "under_review").length, color: "text-yellow-400" },
+            { label: "Rejected", value: submissions.filter(s => s.status === "rejected").length, color: "text-red-400" },
           ].map(s => (
             <Card key={s.label}><CardContent className="p-4 text-center">
               <div className={`text-2xl font-bold ${s.color}`}>{s.value}</div>
@@ -83,7 +88,7 @@ export default function PropertyKYC() {
         <Card>
           <CardHeader className="pb-2"><CardTitle className="text-base flex items-center gap-2"><Building2 className="h-4 w-4" />Property Submissions</CardTitle></CardHeader>
           <CardContent className="space-y-3">
-            {SAMPLE_SUBMISSIONS.map(sub => {
+            {submissions.map(sub => {
               const cfg = statusConfig[sub.status] ?? statusConfig.pending;
               const Icon = cfg.icon;
               return (

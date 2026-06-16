@@ -10,8 +10,10 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Leaf, TreePine, Globe, TrendingDown, Plus, Award } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function CarbonOffsetPage() {
+  const { t } = useTranslation();
   const [purchaseDialog, setPurchaseDialog] = useState(false);
   const [projectType, setProjectType] = useState<"reforestation"|"solar"|"wind"|"cookstoves">("reforestation");
   const [co2Kg, setCo2Kg] = useState("10");

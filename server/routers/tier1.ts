@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { checkPolicy } from "../security.pbac";
 import { getDb, createAuditLog } from "../db";
 import {
@@ -28,6 +28,7 @@ import {
   diasporaBonds,
   payrollCompanies,
 } from "../../drizzle/schema";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helper: call Go contractor engine ───────────────────────────────────────
 
@@ -129,7 +130,7 @@ export const contractorRouter = router({
         .set({ ...updates, updatedAt: new Date() })
         .where(and(eq(contractors.id, id), eq(contractors.ownerId, ctx.user.id)))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -139,9 +140,9 @@ export const contractorRouter = router({
       contractorId: z.number(),
       description:  z.string().min(5),
       lineItems:    z.array(z.object({
-        description: z.string(),
+        description: z.string().max(2000),
         quantity:    z.number().positive(),
-        unitPrice:   z.number().positive(),
+        unitPrice:   z.number().positive().max(10_000_000),
         total:       z.number().positive(),
       })),
       currency:     z.string().length(3).default("USD"),
@@ -228,7 +229,7 @@ export const contractorRouter = router({
         .select()
         .from(contractorInvoices)
         .where(and(eq(contractorInvoices.id, input.invoiceId), eq(contractorInvoices.ownerId, ctx.user.id)));
-      if (!invoice) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!invoice) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (invoice.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: `Invoice is ${invoice.status}, cannot approve` });
 
       const paymentRef = `PAY-${Date.now()}`;
@@ -250,7 +251,7 @@ export const contractorRouter = router({
         .set({ status: "rejected", rejectionReason: input.reason, updatedAt: new Date() })
         .where(and(eq(contractorInvoices.id, input.invoiceId), eq(contractorInvoices.ownerId, ctx.user.id)))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 });
@@ -268,7 +269,7 @@ export const expenseRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return db
         .select()
         .from(expensePolicies)
@@ -291,7 +292,7 @@ export const expenseRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [policy] = await db
         .insert(expensePolicies)
@@ -312,11 +313,11 @@ export const expenseRouter = router({
     .input(z.object({
       companyId:   z.number(),
       title:       z.string().min(3),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       items:       z.array(z.object({
         category:       z.enum(["travel", "accommodation", "meals", "equipment", "software", "marketing", "training", "other"]),
         description:    z.string().min(3),
-        amountUsd:      z.number().positive(),
+        amountUsd:      z.number().positive().max(10_000_000),
         currency:       z.string().length(3).default("USD"),
         expenseDate:    z.string(), // ISO date
         receiptUrl:     z.string().url().optional(),
@@ -407,7 +408,7 @@ export const expenseRouter = router({
         .select()
         .from(expenseReports)
         .where(and(eq(expenseReports.id, input.reportId), eq(expenseReports.submittedBy, ctx.user.id)));
-      if (!report) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const items = await db
         .select()
         .from(expenseItems)
@@ -426,7 +427,7 @@ export const expenseRouter = router({
         .set({ status: "approved", approvedBy: ctx.user.id, updatedAt: new Date() })
         .where(eq(expenseReports.id, input.reportId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -439,7 +440,7 @@ export const expenseRouter = router({
         .select()
         .from(expenseReports)
         .where(eq(expenseReports.id, input.reportId));
-      if (!report) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (report.status !== "approved") throw new TRPCError({ code: "BAD_REQUEST", message: "Report must be approved before reimbursement" });
 
       const paymentRef = `REIMB-${Date.now()}`;
@@ -522,12 +523,11 @@ export const merchantKybRouter = router({
   }),
 
   // Admin: list all KYB applications
-  adminList: protectedProcedure
+  adminList: adminProcedure
     .input(z.object({
       status: z.enum(["pending", "under_review", "approved", "rejected", "suspended"]).optional(),
     }))
     .query(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const conditions = [];
       if (input.status) conditions.push(eq(merchantKybReviews.status, input.status));
@@ -539,16 +539,15 @@ export const merchantKybRouter = router({
     }),
 
   // Admin: review KYB application
-  adminReview: protectedProcedure
+  adminReview: adminProcedure
     .input(z.object({
       reviewId:        z.number(),
       decision:        z.enum(["approved", "rejected", "under_review"]),
       riskRating:      z.enum(["low", "medium", "high", "critical"]).optional(),
       rejectionReason: z.string().optional(),
-      notes:           z.string().optional(),
+      notes:           z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const [updated] = await db
         .update(merchantKybReviews)
@@ -562,7 +561,7 @@ export const merchantKybRouter = router({
         })
         .where(eq(merchantKybReviews.id, input.reviewId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 });
@@ -590,7 +589,7 @@ export const bondSecondaryBuyerRouter = router({
   getPricing: protectedProcedure
     .input(z.object({
       bondId:         z.number(),
-      marketPriceUsd: z.number().positive(),
+      marketPriceUsd: z.number().positive().max(10_000_000),
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
@@ -598,7 +597,7 @@ export const bondSecondaryBuyerRouter = router({
         .select()
         .from(diasporaBonds)
         .where(eq(diasporaBonds.id, input.bondId));
-      if (!bond) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!bond) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const maturity = new Date(bond.maturityDate);
       const now = new Date();
@@ -610,8 +609,8 @@ export const bondSecondaryBuyerRouter = router({
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            face_value_usd:    parseFloat(bond.faceValue),
-            coupon_rate_pct:   parseFloat(bond.couponRate) * 100,
+            face_value_usd:    safeParseAmount(bond.faceValue),
+            coupon_rate_pct:   safeParseAmount(bond.couponRate) * 100,
             market_price_usd:  input.marketPriceUsd,
             years_to_maturity: yearsToMaturity,
             payments_per_year: 2,
@@ -621,8 +620,8 @@ export const bondSecondaryBuyerRouter = router({
       } catch { /* fallback */ }
 
       // TypeScript fallback YTM calculation
-      const fv = parseFloat(bond.faceValue);
-      const c = fv * parseFloat(bond.couponRate) / 2;
+      const fv = safeParseAmount(bond.faceValue);
+      const c = fv * safeParseAmount(bond.couponRate) / 2;
       const n = Math.round(yearsToMaturity * 2);
       const p = input.marketPriceUsd;
       // Approximation: YTM ≈ (C + (FV-P)/n) / ((FV+P)/2)
@@ -662,7 +661,7 @@ export const bondSecondaryBuyerRouter = router({
       }
 
       // Find best matching order
-      const eligible = openOrders.filter(o => parseFloat(o.askPrice) <= input.maxPriceUsd);
+      const eligible = openOrders.filter((o: any) => safeParseAmount(o.askPrice) <= input.maxPriceUsd);
       if (eligible.length === 0) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -672,7 +671,7 @@ export const bondSecondaryBuyerRouter = router({
 
       const bestOrder = eligible[0];
       const fillUnits = Math.min(input.units, bestOrder.units);
-      const matchedPrice = parseFloat(bestOrder.askPrice);
+      const matchedPrice = safeParseAmount(bestOrder.askPrice);
       const totalValue = fillUnits * matchedPrice;
 
       // Update the sell order
@@ -697,7 +696,7 @@ export const bondSecondaryBuyerRouter = router({
           bondId:          input.bondId,
           subscriptionRef,
           units:           fillUnits,
-          faceValue:       (fillUnits * parseFloat(bestOrder.askPrice)).toFixed(2),
+          faceValue:       (fillUnits * safeParseAmount(bestOrder.askPrice)).toFixed(2),
           purchasePrice:   matchedPrice.toFixed(2),
           totalPaid:       totalValue.toFixed(2),
           currency:        bestOrder.currency ?? "USD",

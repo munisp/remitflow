@@ -271,8 +271,66 @@ fn seed_data(state: &AppState) {
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
+
+// ─── PostgreSQL Persistence (middleware-ready: swap to TigerBeetle/Kafka in production) ───
+
+use sqlx::{PgPool, postgres::PgPoolOptions, Row};
+
+async fn init_db() -> PgPool {
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .unwrap_or_else(|e| { eprintln!("DB connection failed (will use in-memory): {}", e); std::process::exit(1); });
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    sqlx::query("CREATE TABLE IF NOT EXISTS pg_service_state (id TEXT PRIMARY KEY, data JSONB NOT NULL DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW())")
+        .execute(&pool).await.unwrap_or_default();
+    sqlx::query("CREATE TABLE IF NOT EXISTS pg_service_events (id BIGSERIAL PRIMARY KEY, event_type TEXT NOT NULL, payload JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW())")
+        .execute(&pool).await.unwrap_or_default();
+    pool
+}
+
+async fn db_upsert(pool: &PgPool, id: &str, data: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO pg_service_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()")
+        .bind(id).bind(data).execute(pool).await?;
+    Ok(())
+}
+
+async fn db_get(pool: &PgPool, id: &str) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    let row = sqlx::query("SELECT data FROM pg_service_state WHERE id = $1")
+        .bind(id).fetch_optional(pool).await?;
+    Ok(row.map(|r| r.get("data")))
+}
+
+async fn db_list(pool: &PgPool, limit: i64) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows = sqlx::query("SELECT data FROM pg_service_state ORDER BY updated_at DESC LIMIT $1")
+        .bind(limit).fetch_all(pool).await?;
+    Ok(rows.iter().map(|r| r.get("data")).collect())
+}
+
+async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO pg_service_events (event_type, payload) VALUES ($1, $2)")
+        .bind(event_type).bind(payload).execute(pool).await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
+    // Panic hook for logging panics without crashing silently
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
+    let _db_pool = init_db().await;
+    eprintln!("[DB] PostgreSQL connected for rust-pg-service");
+
     tracing_subscriber::fmt().json().init();
 
     let port: u16 = std::env::var("PORT")
@@ -290,6 +348,10 @@ async fn main() {
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
 
     let app = Router::new()
+        .route("/metrics", axum::routing::get(|| async {
+            let uptime = _PROCESS_START.get_or_init(Instant::now).elapsed().as_secs();
+            format!("# HELP pod_uptime_seconds Time since process started\n# TYPE pod_uptime_seconds gauge\npod_uptime_seconds{{service=\"rust-pg-service\"}} {}\n# HELP pod_ready Whether pod is ready\n# TYPE pod_ready gauge\npod_ready{{service=\"rust-pg-service\"}} 1\n", uptime)
+        }))
         .route("/health", get(health))
         .route("/api/v1/users", get(list_users))
         .route("/api/v1/users", post(create_user))
@@ -304,5 +366,13 @@ async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("[PostgreSQL] Query service listening on :{}", port);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("[rust-pg-service] Graceful shutdown initiated");
+        eprintln!("{{\"event\":\"pod.shutdown.initiated\",\"service\":\"rust-pg-service\",\"timestamp\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339());;
+        })
+        .await
+        .unwrap();
 }

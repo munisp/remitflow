@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Zap, Tv, Wifi, Shield, Droplets, CheckCircle, Clock, AlertCircle, Search } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const CATEGORY_ICONS: Record<string, React.ReactNode> = {
   electricity: <Zap className="h-5 w-5 text-yellow-500" />,
@@ -29,6 +30,7 @@ const CATEGORIES = [
 ];
 
 export default function Bills() {
+  const { t } = useTranslation();
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedBiller, setSelectedBiller] = useState<any>(null);

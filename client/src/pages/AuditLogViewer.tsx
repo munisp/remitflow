@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { Shield, RefreshCw, Download } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const ACTION_COLORS: Record<string, string> = {
   login: "bg-blue-900/40 text-blue-300",
@@ -21,12 +22,13 @@ const ACTION_COLORS: Record<string, string> = {
 };
 
 export default function AuditLogViewer() {
+  const { t } = useTranslation();
   const [action, setAction] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [page, setPage] = useState(1);
 
-  const { data, isLoading, refetch } = trpc.auditLog.list.useQuery({
+  const { data, isLoading, refetch, isError } = trpc.auditLog.list.useQuery({
     action: action || undefined,
     fromDate: fromDate || undefined,
     toDate: toDate || undefined,

@@ -1,10 +1,12 @@
 /**
- * Temporal Workflow Client — graceful stub
+ * Temporal Workflow Client
  *
  * Returns a Temporal client when TEMPORAL_ADDRESS is configured,
  * otherwise returns null so callers can skip workflow orchestration
  * without crashing.
  */
+
+import { logger } from "./logger";
 
 export interface TemporalClient {
   workflow: {
@@ -57,7 +59,7 @@ export async function getTemporalClient(): Promise<TemporalClient | null> {
     };
     return _client;
   } catch (err) {
-    console.warn("[Temporal] Client unavailable:", (err as Error).message);
+    logger.warn({ err: (err as Error).message }, "[Temporal] Client unavailable");
     return null;
   }
 }

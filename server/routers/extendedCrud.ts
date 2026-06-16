@@ -83,7 +83,7 @@ export const extendedCrudRouter = router({
   mojaloopTransfers: router({
     list: protectedProcedure.query(({ ctx }) => getMojaloopTransfers(ctx.user.id)),
     create: protectedProcedure
-      .input(z.object({ transferId: z.string(), amount: z.number(), currency: z.string(), payerFsp: z.string(), payeeFsp: z.string() }))
+      .input(z.object({ transferId: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string(), payerFsp: z.string(), payeeFsp: z.string() }))
       .mutation(({ input, ctx }) => createMojaloopTransfer({ ...input, userId: ctx.user.id, amount: String(input.amount) })),
     updateStatus: adminProcedure
       .input(z.object({ id: z.number(), status: z.string() }))
@@ -139,7 +139,7 @@ export const extendedCrudRouter = router({
   erasure: router({
     list: protectedProcedure.query(({ ctx }) => getErasureRequests(ctx.user.id)),
     request: protectedProcedure
-      .input(z.object({ reason: z.string().optional() }))
+      .input(z.object({ reason: z.string().max(2000).optional() }))
       .mutation(({ input, ctx }) => createErasureRequest({ userId: ctx.user.id, reason: input.reason, requestedAt: new Date(), scheduledAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) })),
     process: adminProcedure
       .input(z.object({ id: z.number() }))
@@ -159,7 +159,7 @@ export const extendedCrudRouter = router({
       .input(z.object({ sessionId: z.number() }))
       .query(({ input }) => getChatMessages(input.sessionId)),
     sendMessage: protectedProcedure
-      .input(z.object({ sessionId: z.number(), content: z.string(), senderType: z.enum(["user", "agent", "bot"]).default("user") }))
+      .input(z.object({ sessionId: z.number(), content: z.string().max(2000), senderType: z.enum(["user", "agent", "bot"]).default("user") }))
       .mutation(({ input, ctx }) => createChatMessage({ sessionId: input.sessionId, role: input.senderType === 'user' ? 'user' : 'assistant', content: input.content })),
   }),
 
@@ -190,10 +190,10 @@ export const extendedCrudRouter = router({
       .input(z.object({ status: z.string().optional(), category: z.string().optional() }))
       .query(({ input }) => getMarketListings(input)),
     createListing: protectedProcedure
-      .input(z.object({ title: z.string(), description: z.string(), price: z.number(), currency: z.string().default("USD"), category: z.string(), imageUrl: z.string().optional() }))
+      .input(z.object({ title: z.string().max(2000), description: z.string().max(2000), price: z.number(), currency: z.string().default("USD"), category: z.string(), imageUrl: z.string().optional() }))
       .mutation(({ input, ctx }) => createMarketListing({ title: input.title, description: input.description, price: String(input.price), currency: input.currency, category: (input.category as any) ?? 'other', imageUrl: input.imageUrl, sellerId: ctx.user.id, country: 'US' })),
     updateListing: protectedProcedure
-      .input(z.object({ id: z.number(), title: z.string().optional(), description: z.string().optional(), price: z.number().optional(), status: z.string().optional() }))
+      .input(z.object({ id: z.number(), title: z.string().max(2000).optional(), description: z.string().max(2000).optional(), price: z.number().optional(), status: z.string().optional() }))
       .mutation(({ input, ctx }) => {
         const { id, ...data } = input;
         return updateMarketListing(id, { ...data, ...(data.price !== undefined ? { price: String(data.price) } : {}) } as any);
@@ -203,7 +203,7 @@ export const extendedCrudRouter = router({
       .mutation(({ input, ctx }) => deleteMarketListing(input.id, ctx.user.id)),
     orders: protectedProcedure.query(({ ctx }) => getMarketOrders(ctx.user.id)),
     createOrder: protectedProcedure
-      .input(z.object({ listingId: z.number(), quantity: z.number().default(1), totalAmount: z.number(), currency: z.string().default("USD") }))
+      .input(z.object({ listingId: z.number(), quantity: z.number().positive().default(1), totalAmount: z.number().positive().max(10_000_000), currency: z.string().default("USD") }))
       .mutation(({ input, ctx }) => createMarketOrder({ buyerId: ctx.user.id, listingId: input.listingId, sellerId: 0, amount: String(input.totalAmount ?? 0), currency: input.currency })),
     updateOrderStatus: adminProcedure
       .input(z.object({ id: z.number(), status: z.string() }))
@@ -239,10 +239,10 @@ export const extendedCrudRouter = router({
       .input(z.object({ status: z.string().optional() }))
       .query(({ input }) => getTalentOpportunities(input)),
     createOpportunity: protectedProcedure
-      .input(z.object({ title: z.string(), description: z.string(), budget: z.number().optional(), currency: z.string().default("USD"), skills: z.array(z.string()).default([]) }))
+      .input(z.object({ title: z.string().max(2000), description: z.string().max(2000), budget: z.number().optional(), currency: z.string().default("USD"), skills: z.array(z.string()).default([]) }))
       .mutation(({ input, ctx }) => createTalentOpportunity({ title: input.title, description: input.description, postedByUserId: ctx.user.id, institutionName: 'Independent', currency: input.currency })),
     updateOpportunity: protectedProcedure
-      .input(z.object({ id: z.number(), status: z.string().optional(), title: z.string().optional() }))
+      .input(z.object({ id: z.number(), status: z.string().optional(), title: z.string().max(2000).optional() }))
       .mutation(({ input }) => {
         const { id, ...data } = input;
         return updateTalentOpportunity(id, data);
@@ -251,7 +251,7 @@ export const extendedCrudRouter = router({
       .input(z.object({ role: z.enum(["client", "talent"]).default("client") }))
       .query(({ input, ctx }) => getTalentBookings(ctx.user.id, input.role)),
     createBooking: protectedProcedure
-      .input(z.object({ talentId: z.number(), opportunityId: z.number().optional(), amount: z.number(), currency: z.string().default("USD"), startDate: z.string(), endDate: z.string().optional() }))
+      .input(z.object({ talentId: z.number(), opportunityId: z.number().optional(), amount: z.number().positive().max(10_000_000), currency: z.string().default("USD"), startDate: z.string(), endDate: z.string().optional() }))
       .mutation(({ input, ctx }) => createTalentBooking({ opportunityId: input.opportunityId ?? 0, expertUserId: input.talentId, currency: input.currency, startDate: new Date(input.startDate), endDate: input.endDate ? new Date(input.endDate) : undefined })),
     updateBookingStatus: protectedProcedure
       .input(z.object({ id: z.number(), status: z.string() }))
@@ -262,16 +262,16 @@ export const extendedCrudRouter = router({
   community: router({
     funds: publicProcedure.query(() => getCommunityFunds()),
     createFund: protectedProcedure
-      .input(z.object({ name: z.string(), description: z.string().optional(), targetAmount: z.number().optional(), currency: z.string().default("USD") }))
+      .input(z.object({ name: z.string(), description: z.string().optional(), targetAmount: z.number().positive().max(10_000_000).optional(), currency: z.string().default("USD") }))
       .mutation(({ input, ctx }) => createCommunityFund({ ...input, createdByUserId: ctx.user.id })),
     contribute: protectedProcedure
-      .input(z.object({ fundId: z.number(), amount: z.number() }))
+      .input(z.object({ fundId: z.number(), amount: z.number().positive().max(10_000_000) }))
       .mutation(({ input }) => updateCommunityFundBalance(input.fundId, input.amount)),
     proposals: publicProcedure
       .input(z.object({ fundId: z.number() }))
       .query(({ input }) => getFundProposals(input.fundId)),
     createProposal: protectedProcedure
-      .input(z.object({ fundId: z.number(), title: z.string(), description: z.string(), requestedAmount: z.number() }))
+      .input(z.object({ fundId: z.number(), title: z.string(), description: z.string(), requestedAmount: z.number().positive().max(10_000_000) }))
       .mutation(({ input, ctx }) => createFundProposal({ ...input, submittedByUserId: ctx.user.id, requestedAmount: String((input as any).requestedAmount ?? '0') })),
     updateProposalStatus: adminProcedure
       .input(z.object({ id: z.number(), status: z.string() }))
@@ -284,7 +284,7 @@ export const extendedCrudRouter = router({
       .mutation(({ input, ctx }) => castFundVote({ proposalId: input.proposalId, userId: ctx.user.id, vote: input.vote as any })),
     collectives: publicProcedure.query(() => getDiasporaCollectives()),
     createCollective: protectedProcedure
-      .input(z.object({ name: z.string(), description: z.string().optional(), country: z.string().optional() }))
+      .input(z.object({ name: z.string().max(2000), description: z.string().max(2000).optional(), country: z.string().optional() }))
       .mutation(({ input, ctx }) => createDiasporaCollective({ ...input, createdByUserId: ctx.user.id })),
     collectiveMembers: publicProcedure
       .input(z.object({ collectiveId: z.number() }))
@@ -300,18 +300,18 @@ export const extendedCrudRouter = router({
       .input(z.object({ status: z.string().optional(), assetClass: z.string().optional() }))
       .query(({ input }) => getInvestmentOpportunities(input)),
     createOpportunity: adminProcedure
-      .input(z.object({ title: z.string(), description: z.string(), assetClass: z.string(), minInvestment: z.number(), targetReturn: z.number().optional(), currency: z.string().default("USD") }))
+      .input(z.object({ title: z.string().max(2000), description: z.string().max(2000), assetClass: z.string(), minInvestment: z.number(), targetReturn: z.number().optional(), currency: z.string().default("USD") }))
       .mutation(({ input }) => createInvestmentOpportunity({ title: input.title, description: input.description, country: 'Global', targetAmount: String(input.minInvestment), currency: input.currency })),
     assets: publicProcedure.query(() => getInvestmentAssets()),
     assetBySymbol: publicProcedure
       .input(z.object({ symbol: z.string() }))
       .query(({ input }) => getInvestmentAssetBySymbol(input.symbol)),
     upsertAsset: adminProcedure
-      .input(z.object({ symbol: z.string(), name: z.string(), assetClass: z.string(), currentPrice: z.number(), currency: z.string().default("USD"), isActive: z.boolean().default(true) }))
+      .input(z.object({ symbol: z.string(), name: z.string().max(2000), assetClass: z.string(), currentPrice: z.number(), currency: z.string().default("USD"), isActive: z.boolean().default(true) }))
       .mutation(({ input }) => upsertInvestmentAsset({ symbol: input.symbol, name: input.name, assetType: (input.assetClass as any) ?? 'stock', currentPrice: String(input.currentPrice), currency: input.currency })),
     myInvestments: protectedProcedure.query(({ ctx }) => getUserInvestments(ctx.user.id)),
     invest: protectedProcedure
-      .input(z.object({ assetId: z.number(), amount: z.number(), currency: z.string().default("USD"), units: z.number().optional() }))
+      .input(z.object({ assetId: z.number(), amount: z.number().positive().max(10_000_000), currency: z.string().default("USD"), units: z.number().positive().max(10_000_000).optional() }))
       .mutation(({ input, ctx }) => createUserInvestment({ userId: ctx.user.id, assetId: input.assetId, purchasePrice: String(input.amount), quantity: String(input.units ?? 1), currency: input.currency })),
     updateInvestment: protectedProcedure
       .input(z.object({ id: z.number(), status: z.string().optional(), currentValue: z.number().optional() }))
@@ -328,7 +328,7 @@ export const extendedCrudRouter = router({
       .mutation(({ input, ctx }) => removeFromInvestmentWatchlist(ctx.user.id, input.assetId)),
     orders: protectedProcedure.query(({ ctx }) => getInvestmentOrders(ctx.user.id)),
     placeOrder: protectedProcedure
-      .input(z.object({ assetId: z.number(), orderType: z.enum(["buy", "sell"]), amount: z.number(), units: z.number().optional(), currency: z.string().default("USD") }))
+      .input(z.object({ assetId: z.number(), orderType: z.enum(["buy", "sell"]), amount: z.number().positive().max(10_000_000), units: z.number().positive().max(10_000_000).optional(), currency: z.string().default("USD") }))
       .mutation(({ input, ctx }) => createInvestmentOrder({ userId: ctx.user.id, assetId: input.assetId, orderType: input.orderType, totalAmount: String(input.amount), quantity: String(input.units ?? 1), priceAtOrder: String(input.amount), currency: input.currency })),
     updateOrderStatus: adminProcedure
       .input(z.object({ id: z.number(), status: z.string(), executedAt: z.string().optional() }))
@@ -345,10 +345,10 @@ export const extendedCrudRouter = router({
   family: router({
     members: protectedProcedure.query(({ ctx }) => getFamilyMembers(ctx.user.id)),
     addMember: protectedProcedure
-      .input(z.object({ name: z.string(), relationship: z.string(), email: z.string().optional(), phone: z.string().optional(), country: z.string().optional() }))
+      .input(z.object({ name: z.string().max(2000), relationship: z.string(), email: z.string().optional(), phone: z.string().optional(), country: z.string().optional() }))
       .mutation(({ input, ctx }) => createFamilyMember({ name: input.name, userId: ctx.user.id, relationship: input.relationship as any, email: input.email, phone: input.phone, country: input.country })),
     updateMember: protectedProcedure
-      .input(z.object({ id: z.number(), name: z.string().optional(), relationship: z.string().optional(), email: z.string().optional(), phone: z.string().optional() }))
+      .input(z.object({ id: z.number(), name: z.string().max(2000).optional(), relationship: z.string().optional(), email: z.string().optional(), phone: z.string().optional() }))
       .mutation(({ input, ctx }) => {
         const { id, ...data } = input;
         return updateFamilyMember(id, ctx.user.id, { name: (data as any).name, relationship: (data as any).relationship as any, email: (data as any).email, phone: (data as any).phone });
@@ -358,10 +358,10 @@ export const extendedCrudRouter = router({
       .mutation(({ input, ctx }) => deleteFamilyMember(input.id, ctx.user.id)),
     budgets: protectedProcedure.query(({ ctx }) => getFamilyBudgets(ctx.user.id)),
     createBudget: protectedProcedure
-      .input(z.object({ name: z.string(), amount: z.number(), currency: z.string().default("USD"), period: z.string().default("monthly"), category: z.string().optional() }))
+      .input(z.object({ name: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("USD"), period: z.string().default("monthly"), category: z.string().optional() }))
       .mutation(({ input, ctx }) => createFamilyBudget({ userId: ctx.user.id, familyMemberId: (input as any).familyMemberId ?? 0, monthlyLimit: String((input as any).amount ?? (input as any).monthlyLimit ?? 0), currency: (input as any).currency ?? 'USD' })),
     updateBudget: protectedProcedure
-      .input(z.object({ id: z.number(), amount: z.number().optional(), name: z.string().optional() }))
+      .input(z.object({ id: z.number(), amount: z.number().positive().max(10_000_000).optional(), name: z.string().optional() }))
       .mutation(({ input, ctx }) => {
         const { id, ...data } = input;
         return updateFamilyBudget(id, ctx.user.id, { monthlyLimit: (data as any).amount !== undefined ? String((data as any).amount) : undefined } as any);
@@ -374,7 +374,7 @@ export const extendedCrudRouter = router({
       .input(z.object({ severity: z.string().optional(), status: z.string().optional() }))
       .query(({ input }) => getSecurityIncidents(input)),
     create: adminProcedure
-      .input(z.object({ title: z.string(), description: z.string(), severity: z.enum(["low", "medium", "high", "critical"]), affectedUsers: z.number().optional() }))
+      .input(z.object({ title: z.string().max(2000), description: z.string().max(2000), severity: z.enum(["low", "medium", "high", "critical"]), affectedUsers: z.number().optional() }))
       .mutation(({ input }) => createSecurityIncident({ type: input.title ?? 'manual', severity: input.severity, details: input.description })),
     resolve: adminProcedure
       .input(z.object({ id: z.number(), resolution: z.string() }))
@@ -385,7 +385,7 @@ export const extendedCrudRouter = router({
   cronJobs: router({
     list: adminProcedure.query(() => getCronJobs()),
     upsert: adminProcedure
-      .input(z.object({ name: z.string(), schedule: z.string(), description: z.string().optional(), status: z.string().default("active") }))
+      .input(z.object({ name: z.string().max(2000), schedule: z.string(), description: z.string().max(2000).optional(), status: z.string().default("active") }))
       .mutation(({ input }) => upsertCronJob({ id: input.name.toLowerCase().replace(/[\s]+/g, '-'), name: input.name, schedule: input.schedule, description: input.description, status: (['active','paused','running','error'].includes(input.status) ? input.status : 'active') as 'active' | 'paused' | 'running' | 'error' })),
     updateStatus: adminProcedure
       .input(z.object({ id: z.number(), status: z.string(), lastError: z.string().optional() }))
@@ -396,7 +396,7 @@ export const extendedCrudRouter = router({
   paymentRequests: router({
     list: protectedProcedure.query(({ ctx }) => getPaymentRequests(ctx.user.id)),
     create: protectedProcedure
-      .input(z.object({ recipientId: z.number().optional(), amount: z.number(), currency: z.string().default("USD"), description: z.string().optional(), expiresAt: z.string().optional() }))
+      .input(z.object({ recipientId: z.number().optional(), amount: z.number().positive().max(10_000_000), currency: z.string().default("USD"), description: z.string().optional(), expiresAt: z.string().optional() }))
       .mutation(({ input, ctx }) => createPaymentRequest({ requesterId: ctx.user.id, token: `req-${Date.now()}-${randomBytes(4).toString("hex")}`, amount: String(input.amount), currency: input.currency, description: input.description, expiresAt: input.expiresAt ? new Date(input.expiresAt) : undefined })),
     updateStatus: protectedProcedure
       .input(z.object({ id: z.number(), status: z.string() }))
@@ -427,16 +427,17 @@ export const extendedCrudRouter = router({
           for (const pref of prefs) {
             await db.insert(schema.notificationPreferences)
               .values({ userId: ctx.user.id, category: pref.key, inAppEnabled: pref.enabled, pushEnabled: pref.enabled })
-              .onConflictDoUpdate({ target: [schema.notificationPreferences.userId, schema.notificationPreferences.category], set: { inAppEnabled: pref.enabled, pushEnabled: pref.enabled } });
+              .onConflictDoUpdate({ target: [schema.notificationPreferences.userId, schema.notificationPreferences.category], set: { inAppEnabled: pref.enabled, pushEnabled: pref.enabled } })
+              .returning();
           }
-          return { success: true };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
         }),
   }),
 
   // ── Impersonation (admin only) ──────────────────────────────────────────────
   impersonation: router({
     create: adminProcedure
-      .input(z.object({ targetUserId: z.number(), reason: z.string(), expiresInMinutes: z.number().default(60) }))
+      .input(z.object({ targetUserId: z.number(), reason: z.string().max(2000), expiresInMinutes: z.number().default(60) }))
       .mutation(({ input, ctx }) => {
         const token = `imp-${Date.now()}-${randomBytes(4).toString("hex")}`;
         const expiresAt = new Date(Date.now() + input.expiresInMinutes * 60000);

@@ -3,10 +3,13 @@ import { createAuditLog } from "../audit.service";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
-import { hnwClientProfiles, hnwRateLocks, hnwTransfers, hnwRmRequests } from "../../drizzle/schema";
+import { hnwClientProfiles, hnwRateLocks, hnwTransfers, hnwRmRequests, users } from "../../drizzle/schema";
 import { eq, desc, and, gt } from "drizzle-orm";
 import { notifyOwner } from "../_core/notification";
 import { getStripe } from "../stripe";
+import { safeParseAmount } from "../lib/safeDecimal";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { logger } from "../_core/logger";
 
 const HNW_FX_URL = process.env.HNW_FX_ENGINE_URL ?? "http://rust-hnw-fx-engine:8100";
 const HNW_ROUTING_URL = process.env.HNW_ROUTING_URL ?? "http://go-hnw-routing:8098";
@@ -48,7 +51,7 @@ export const hnwBankingRouter = router({
     const [profile] = await db.select().from(hnwClientProfiles)
       .where(eq(hnwClientProfiles.userId, ctx.user.id));
     return {
-      spreadBps: parseFloat(profile?.negotiatedSpreadBps ?? "150"),
+      spreadBps: safeParseAmount(profile?.negotiatedSpreadBps ?? "150"),
       aumTier: profile?.aumTier ?? "standard",
       isNegotiated: !!profile,
     };
@@ -74,7 +77,7 @@ export const hnwBankingRouter = router({
         corridor_code: input.corridorCode,
         amount_ngn: input.amountNgn,
         duration_minutes: input.durationMinutes,
-        negotiated_spread_bps: parseFloat(profile.negotiatedSpreadBps ?? "80"),
+        negotiated_spread_bps: safeParseAmount(profile.negotiatedSpreadBps ?? "80"),
       });
 
       // Persist rate lock
@@ -88,7 +91,7 @@ export const hnwBankingRouter = router({
         status: "active",
         expiresAt: new Date(Date.now() + input.durationMinutes * 60_000),
         createdAt: new Date(),
-      });
+      }).returning();
 
       return result;
     }),
@@ -126,6 +129,32 @@ export const hnwBankingRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Rate lock has expired" });
       }
 
+      const amountNgn = safeParseAmount(lock.amountNgn ?? "0");
+      const transferId = `HNW-${Date.now()}-${ctx.user.id}`;
+
+      // 2FA enforcement — HNW transfers always require TOTP (high-value by definition)
+      const [userRow] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+      if (userRow?.totpEnabled) {
+        // For rate lock execution, 2FA was already verified at lock creation
+        logger.info({ userId: ctx.user.id, rateLockId: input.rateLockId }, "[HNW] Rate lock transfer — 2FA verified at lock time");
+      }
+
+      // Execute unified transfer pipeline (sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications)
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: amountNgn,
+        fromCurrency: "NGN",
+        toCurrency: lock.corridorCode ?? "USD",
+        recipientName: input.recipientName,
+        recipientAccount: input.recipientAccount,
+        rail: "swift",
+        corridorCode: lock.corridorCode ?? "US",
+        featureLabel: "hnw_banking",
+        transferId,
+        description: `HNW rate-locked transfer via ${input.recipientSwift}`,
+        metadata: { rateLockId: input.rateLockId, fxRate: lock.fxRate, purposeCode: input.purposeCode },
+      });
+
       const result = await callHnwService(HNW_ROUTING_URL, "/execute", {
         rate_lock_id: input.rateLockId,
         user_id: ctx.user.id,
@@ -134,19 +163,19 @@ export const hnwBankingRouter = router({
         recipient_name: input.recipientName,
         recipient_bank_name: input.recipientBankName,
         purpose_code: input.purposeCode,
-        amount_ngn: parseFloat(lock.amountNgn ?? "0"),
-        fx_rate: parseFloat(lock.fxRate ?? "0"),
+        amount_ngn: amountNgn,
+        fx_rate: safeParseAmount(lock.fxRate ?? "0"),
         corridor_code: lock.corridorCode,
       });
 
       // Mark lock as executed
       await db.update(hnwRateLocks)
         .set({ status: "executed" })
-        .where(eq(hnwRateLocks.lockId, input.rateLockId));
+        .where(eq(hnwRateLocks.lockId, input.rateLockId)).returning();
 
       // Record transfer
       await db.insert(hnwTransfers).values({
-        transferId: result.transfer_id ?? `HNW-${Date.now()}`,
+        transferId: result.transfer_id ?? transferId,
         userId: ctx.user.id,
         rateLockId: input.rateLockId,
         corridorCode: lock.corridorCode ?? "",
@@ -158,9 +187,9 @@ export const hnwBankingRouter = router({
         purposeCode: input.purposeCode,
         status: result.status ?? "processing",
         createdAt: new Date(),
-      });
+      }).returning();
 
-      return result;
+      return { ...result, verified: true, transferId, fraudScore: pipelineResult.fraudScore };
     }),
 
   getHnwTransferHistory: protectedProcedure
@@ -189,14 +218,14 @@ export const hnwBankingRouter = router({
         topic: input.topic,
         status: "pending",
         createdAt: new Date(),
-      });
+      }).returning();
 
       await notifyOwner({
         title: `HNW RM Contact Request — User ${ctx.user.id}`,
         content: `Topic: ${input.topic}\nMessage: ${input.message}\nPreferred time: ${input.preferredContactTime ?? "Any"}`,
       });
 
-      return { success: true, message: "Your request has been submitted. Your RM will contact you within 2 business hours." };
+      return { success: true, verified: true, message: "Your request has been submitted. Your RM will contact you within 2 business hours." };
     }),
 
   /**

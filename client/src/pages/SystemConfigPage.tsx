@@ -11,8 +11,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { Settings, Plus, Trash2, Eye, EyeOff, Search, Edit2 } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function SystemConfigPage() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const utils = trpc.useUtils();
   const [search, setSearch] = useState("");

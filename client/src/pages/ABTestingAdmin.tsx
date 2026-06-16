@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { FlaskConical, Plus, Play, Pause, BarChart2, CheckCircle, Clock, Layers } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const statusColor: Record<string, string> = {
   draft: "bg-gray-100 text-gray-700",
@@ -20,6 +21,7 @@ const statusColor: Record<string, string> = {
 };
 
 export default function ABTestingAdmin() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [open, setOpen] = useState(false);
   const [selectedExp, setSelectedExp] = useState<number | null>(null);
@@ -115,9 +117,9 @@ export default function ABTestingAdmin() {
         <div className="grid grid-cols-4 gap-4">
           {[
             { label: "Total", value: expData?.experiments.length ?? 0, icon: <Layers className="w-5 h-5 text-blue-500" /> },
-            { label: "Running", value: expData?.experiments.filter(e => e.status === "running").length ?? 0, icon: <Play className="w-5 h-5 text-green-500" /> },
-            { label: "Completed", value: expData?.experiments.filter(e => e.status === "completed").length ?? 0, icon: <CheckCircle className="w-5 h-5 text-purple-500" /> },
-            { label: "Draft", value: expData?.experiments.filter(e => e.status === "draft").length ?? 0, icon: <Clock className="w-5 h-5 text-gray-500" /> },
+            { label: "Running", value: expData?.experiments.filter((e: any) => e.status === "running").length ?? 0, icon: <Play className="w-5 h-5 text-green-500" /> },
+            { label: "Completed", value: expData?.experiments.filter((e: any) => e.status === "completed").length ?? 0, icon: <CheckCircle className="w-5 h-5 text-purple-500" /> },
+            { label: "Draft", value: expData?.experiments.filter((e: any) => e.status === "draft").length ?? 0, icon: <Clock className="w-5 h-5 text-gray-500" /> },
           ].map(s => (
             <Card key={s.label}>
               <CardContent className="pt-4 flex items-center gap-3">
@@ -137,7 +139,7 @@ export default function ABTestingAdmin() {
             <div className="col-span-2 text-center py-8 text-muted-foreground">Loading experiments...</div>
           ) : expData?.experiments.length === 0 ? (
             <div className="col-span-2 text-center py-8 text-muted-foreground">No experiments yet. Create your first A/B test.</div>
-          ) : expData?.experiments.map(exp => (
+          ) : expData?.experiments.map((exp: any) => (
             <Card key={exp.id} className={`cursor-pointer transition-shadow hover:shadow-md ${selectedExp === exp.id ? "ring-2 ring-primary" : ""}`} onClick={() => setSelectedExp(exp.id)}>
               <CardHeader className="pb-2">
                 <div className="flex items-start justify-between">

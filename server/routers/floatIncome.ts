@@ -14,10 +14,12 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { eq, sql, gte, and } from "drizzle-orm";
-import { protectedProcedure, router } from "../_core/trpc";
+import { protectedProcedure, adminProcedure, router } from "../_core/trpc";
 import { getDb } from "../db";
+import { safeParseAmount } from "../lib/safeDecimal.js";
 import { treasuryPositions } from "../../drizzle/schema";
 import { createAuditLog } from "../audit.service";
+
 
 // ─── Default float rates (central bank rates as of 2026) ─────────────────────
 const DEFAULT_FLOAT_RATES: Record<string, { rate: number; description: string }> = {
@@ -58,7 +60,7 @@ export const floatIncomeRouter = router({
     const positions = await db.select().from(treasuryPositions);
     const positionMap: Record<string, number> = {};
     for (const pos of positions) {
-      positionMap[pos.currency] = parseFloat(pos.balance as string);
+      positionMap[pos.currency] = safeParseAmount(pos.balance as string);
     }
 
     // Load custom rates from system_config (key: float_rate_USD, float_rate_GBP, etc.)
@@ -69,7 +71,7 @@ export const floatIncomeRouter = router({
       );
       for (const row of (rateRows as any[])) {
         const currency = (row.key as string).replace("float_rate_", "").toUpperCase();
-        rateOverrides[currency] = parseFloat(row.value);
+        rateOverrides[currency] = safeParseAmount(row.value);
       }
     } catch { /* system_config may not have float_rate keys */ }
 
@@ -79,7 +81,7 @@ export const floatIncomeRouter = router({
       const ytdRows = await db.execute(
         sql`SELECT COALESCE(SUM(yield_amount), 0) AS ytd FROM float_income_records WHERE date >= DATE_TRUNC('year', NOW())`
       );
-      totalYtdYield = parseFloat((ytdRows as any[])[0]?.ytd || "0");
+      totalYtdYield = safeParseAmount((ytdRows as any[])[0]?.ytd || "0");
     } catch { /* table may not exist yet */ }
 
     const currencies = Object.keys(DEFAULT_FLOAT_RATES);
@@ -150,14 +152,14 @@ export const floatIncomeRouter = router({
       // Derive from treasury_positions (current balances projected backwards)
       const positions = await db.select().from(treasuryPositions);
       const currencies = input.currency
-        ? positions.filter(p => p.currency === input.currency)
+        ? positions.filter((p: any) => p.currency === input.currency)
         : positions;
 
       const records = [];
       for (let d = 0; d < Math.min(input.days, 90); d++) {
         const date = new Date(Date.now() - d * 86400000).toISOString().split("T")[0];
         for (const pos of currencies) {
-          const balance = parseFloat(pos.balance as string);
+          const balance = safeParseAmount(pos.balance as string);
           const rate = DEFAULT_FLOAT_RATES[pos.currency]?.rate ?? 0.04;
           const yieldAmount = calculateDailyYield(balance, rate);
           records.push({
@@ -176,16 +178,13 @@ export const floatIncomeRouter = router({
    * Update yield rate for a currency (admin only)
    * Stores override in system_config as float_rate_{CURRENCY}.
    */
-  updateRate: protectedProcedure
+  updateRate: adminProcedure
     .input(z.object({
       currency: z.string().length(3),
       rate: z.number().min(0).max(0.5), // 0–50% annual rate
       reason: z.string().min(5).max(500),
     }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
-      }
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -202,18 +201,15 @@ export const floatIncomeRouter = router({
         targetType: "float_rate",
         description: JSON.stringify({ currency: input.currency, newRate: input.rate, reason: input.reason }),
       });
-      return { success: true, currency: input.currency, newRate: input.rate, updatedBy: ctx.user.id };
+      return { success: true, verified: true, currency: input.currency, newRate: input.rate, updatedBy: ctx.user.id };
     }),
 
   /**
    * Accrue daily yield for all currencies (called by cron job)
    * Reads real balances from treasury_positions, writes to float_income_records.
    */
-  accrueDaily: protectedProcedure
+  accrueDaily: adminProcedure
     .mutation(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
-      }
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -228,13 +224,13 @@ export const floatIncomeRouter = router({
         );
         for (const row of (rateRows as any[])) {
           const currency = (row.key as string).replace("float_rate_", "").toUpperCase();
-          rateOverrides[currency] = parseFloat(row.value);
+          rateOverrides[currency] = safeParseAmount(row.value);
         }
       } catch { /* ignore */ }
 
       const results = [];
       for (const pos of positions) {
-        const balance = parseFloat(pos.balance as string);
+        const balance = safeParseAmount(pos.balance as string);
         const rate = rateOverrides[pos.currency] ?? DEFAULT_FLOAT_RATES[pos.currency]?.rate ?? 0.04;
         const yieldAmount = calculateDailyYield(balance, rate);
 
@@ -256,6 +252,6 @@ export const floatIncomeRouter = router({
         description: JSON.stringify({ date: today, currencies: results.length }),
       });
 
-      return { success: true, date: today, accruals: results };
+      return { success: true, verified: true, date: today, accruals: results };
     }),
 });

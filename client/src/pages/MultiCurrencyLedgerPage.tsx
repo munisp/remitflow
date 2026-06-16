@@ -7,8 +7,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Label } from "@/components/ui/label";
 import { RefreshCw, BookOpen, TrendingUp, TrendingDown, DollarSign } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function MultiCurrencyLedgerPage() {
+  const { t } = useTranslation();
   const [currency, setCurrency] = useState("USD");
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 50;
@@ -19,6 +21,7 @@ export default function MultiCurrencyLedgerPage() {
     currency: currency || "USD",
     limit: PAGE_SIZE,
   });
+  const isError = entriesQuery.isError;
 
   const positions = Array.isArray(positionsQuery.data) ? positionsQuery.data : [];
   const volumes = Array.isArray(volumeQuery.data) ? volumeQuery.data : [];

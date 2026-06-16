@@ -8,8 +8,10 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Key, Plus, Trash2, Play, Activity, Copy, AlertTriangle } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function EmbeddedPayrollAPI() {
+  const { t } = useTranslation();
   const [issueOpen, setIssueOpen] = useState(false);
   const [triggerOpen, setTriggerOpen] = useState(false);
   const [partnerName, setPartnerName] = useState("");

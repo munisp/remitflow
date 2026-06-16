@@ -9,17 +9,23 @@ import { protectedProcedure ,
 } from "../_core/trpc";
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
+import { BoundedCache, registerCache } from "../lib/boundedCache";
 
-// Cache feature flag lookups for 60 seconds to avoid DB round-trips on every request
-const flagCache = new Map<string, { value: boolean; expires: number }>();
+// Cache feature flag lookups for 60 seconds — bounded LRU
+const flagCache = new BoundedCache<string, boolean>({
+  maxSize: 2000,
+  defaultTtlMs: 60_000,
+  name: "tenant-feature-flags",
+});
+registerCache(flagCache as unknown as BoundedCache<unknown, unknown>);
 
 async function isFlagEnabled(flagKey: string, tenantId: number | null): Promise<boolean> {
   const cacheKey = `${tenantId ?? "global"}:${flagKey}`;
   const cached = flagCache.get(cacheKey);
-  if (cached && cached.expires > Date.now()) return cached.value;
+  if (cached !== undefined) return cached;
 
   const db = await getDb();
-  if (!db) return true; // Fail open if DB is unavailable
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" }); // Fail open if DB is unavailable
 
   try {
     // Check tenant-specific override first
@@ -34,7 +40,7 @@ async function isFlagEnabled(flagKey: string, tenantId: number | null): Promise<
       if (tenantRows.length > 0) {
         const row = tenantRows[0];
         const enabled = Boolean(row.enabled);
-        flagCache.set(cacheKey, { value: enabled, expires: Date.now() + 60000 });
+        flagCache.set(cacheKey, enabled);
         return enabled;
       }
     }
@@ -46,7 +52,7 @@ async function isFlagEnabled(flagKey: string, tenantId: number | null): Promise<
     if (globalRows.length === 0) return true; // Unknown flag = enabled by default
     const row = globalRows[0];
     const enabled = Boolean(row.enabled);
-    flagCache.set(cacheKey, { value: enabled, expires: Date.now() + 60000 });
+    flagCache.set(cacheKey, enabled);
     return enabled;
   } catch {
     return true; // Fail open
@@ -80,3 +86,5 @@ export function invalidateFlagCache(flagKey?: string, tenantId?: number) {
     flagCache.clear();
   }
 }
+
+export { flagCache as tenantFlagCache };

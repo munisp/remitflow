@@ -8,10 +8,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { UserPlus, CheckCircle } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const NG_STATES = ["Abia","Adamawa","Akwa Ibom","Anambra","Bauchi","Bayelsa","Benue","Borno","Cross River","Delta","Ebonyi","Edo","Ekiti","Enugu","FCT","Gombe","Imo","Jigawa","Kaduna","Kano","Katsina","Kebbi","Kogi","Kwara","Lagos","Nasarawa","Niger","Ogun","Ondo","Osun","Oyo","Plateau","Rivers","Sokoto","Taraba","Yobe","Zamfara"];
 
 export default function RecipientOnboarding() {
+  const { t } = useTranslation();
   const { isAuthenticated } = useAuth();
   const [step, setStep] = useState(1);
   const [firstName, setFirstName] = useState("");
@@ -104,12 +106,12 @@ export default function RecipientOnboarding() {
               <span className="text-muted-foreground">Channel</span><span className="font-medium capitalize">{channel}</span>
               <span className="text-muted-foreground">BVN</span><span className="font-medium">{"*".repeat(7)+bvn.slice(-4)}</span>
             </div>
-            {crossSellQuery.data&&(
+            {crossSellQuery.data?(
               <div className="p-3 bg-muted rounded-lg text-sm">
                 <p className="font-medium">Recommended: {(crossSellQuery.data as any)?.recommended_product}</p>
                 <p className="text-muted-foreground text-xs mt-1">{(crossSellQuery.data as any)?.next_best_action}</p>
               </div>
-            )}
+            ):null}
             <div className="flex gap-3">
               <Button variant="outline" onClick={()=>setStep(2)}>Back</Button>
               <Button className="flex-1" disabled={addBeneficiaryMutation.isPending} onClick={() => addBeneficiaryMutation.mutate({ name: `${firstName} ${lastName}`, phone, country: state, currency: "NGN" })}>

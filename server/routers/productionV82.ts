@@ -11,6 +11,7 @@ import { adminProcedure, protectedProcedure, publicProcedure, router ,
 import { wallets, transactions, apiKeys, notifications, treasuryPositions } from "../../drizzle/schema";
 import { randomBytes } from "crypto";
 import { getDb } from "../db";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 function genId(prefix: string) { return `${prefix}_${randomBytes(8).toString("hex")}`; }
 
@@ -29,29 +30,29 @@ export const vapidPushRouter = router({
       INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, device_name, created_at)
       VALUES (${ctx.user.id}, ${input.endpoint}, ${input.keys.p256dh}, ${input.keys.auth}, ${input.deviceName ?? "Browser"}, NOW())
       ON CONFLICT (endpoint) DO UPDATE SET p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth
-    `).catch(() => null);
+    `);
     return { subscribed: true, deviceName: input.deviceName ?? "Browser" };
   }),
   unsubscribe: auditedProcedure.input(z.object({ endpoint: z.string() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`DELETE FROM push_subscriptions WHERE user_id = ${ctx.user.id} AND endpoint = ${input.endpoint}`).catch(() => null);
+    if (db) await db.execute(sql`DELETE FROM push_subscriptions WHERE user_id = ${ctx.user.id} AND endpoint = ${input.endpoint}`);
     return { unsubscribed: true };
   }),
   listSubscriptions: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    const rows = await db.execute(sql`SELECT id, device_name, endpoint, created_at FROM push_subscriptions WHERE user_id = ${ctx.user.id}`).catch(() => ({ rows: [] }));
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const rows = await db.execute(sql`SELECT id, device_name, endpoint, created_at FROM push_subscriptions WHERE user_id = ${ctx.user.id}`);
     return (rows as any).rows ?? [];
   }),
   sendTest: auditedProcedure.input(z.object({
-    title: z.string().default("Test Notification"),
+    title: z.string().max(2000).default("Test Notification"),
     body: z.string().default("This is a test push notification from RemitFlow"),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
     if (db) await db.insert(notifications).values({
       userId: ctx.user.id, type: "system", title: input.title,
       message: input.body, isRead: false, createdAt: new Date(),
-    }).catch(() => null);
+    }).returning();
     return { sent: true };
   }),
 });
@@ -60,10 +61,10 @@ export const vapidPushRouter = router({
 export const apiUsageRouter = router({
   summary: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    const userKeys = await db.select().from(apiKeys).where(eq(apiKeys.userId, ctx.user.id)).catch(() => []);
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const userKeys = await db.select().from(apiKeys).where(eq(apiKeys.userId, ctx.user.id));
     // Get real transaction counts as a proxy for API usage (api_usage_logs table not yet seeded)
-    const [txCount] = await db.select({ value: count() }).from(transactions).where(eq(transactions.userId, ctx.user.id)).catch(() => [{ value: 0 }]);
+    const [txCount] = await db.select({ value: count() }).from(transactions).where(eq(transactions.userId, ctx.user.id));
     const totalTx = Number(txCount?.value ?? 0);
     return (userKeys as any[]).map((k: any) => ({
       keyId: k.id, keyName: k.name, keyPrefix: k.keyPrefix,
@@ -91,7 +92,7 @@ export const apiUsageRouter = router({
       if (db) {
         const [row] = await db.select({ value: count() }).from(transactions)
           .where(and(eq(transactions.userId, ctx.user.id), sql`${transactions.createdAt} >= ${dayStart}`, sql`${transactions.createdAt} <= ${dayEnd}`))
-          .catch(() => [{ value: 0 }]);
+          ;
         dayCount = Number(row?.value ?? 0);
       }
       results.push({ date: d.toISOString().split("T")[0], requests: dayCount * 3 + 10, errors: Math.max(0, Math.floor(dayCount * 0.02)), latencyP50: 85, latencyP99: 320 });
@@ -104,10 +105,10 @@ export const apiUsageRouter = router({
 export const treasuryRouter = router({
   positions: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return [];
-    const rows = await db.select().from(treasuryPositions).orderBy(desc(treasuryPositions.updatedAt)).catch(() => []);
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const rows = await db.select().from(treasuryPositions).orderBy(desc(treasuryPositions.updatedAt));
     if (rows.length > 0) {
-      return rows.map(r => ({
+      return rows.map((r: any) => ({
         currency: r.currency,
         nostroBalance: r.balance,
         vostroBalance: r.lockedBalance ?? "0",
@@ -131,7 +132,7 @@ export const treasuryRouter = router({
       provider: "RemitFlow Treasury",
       accountRef: `TREAS-${ccy}-001`,
     }));
-    await db.insert(treasuryPositions).values(defaults).onConflictDoNothing().catch(() => {});
+    await db.insert(treasuryPositions).values(defaults).onConflictDoNothing().returning();
     return defaults.map(d => ({
       currency: d.currency,
       nostroBalance: d.balance,
@@ -148,7 +149,7 @@ export const treasuryRouter = router({
     { poolId: "pool_eur_kes", corridor: "EUR→KES", totalLiquidity: "1,800,000", utilizationPct: 45.6, providers: 2, apy: 5.1, status: "healthy" },
     { poolId: "pool_usd_ghs", corridor: "USD→GHS", totalLiquidity: "950,000", utilizationPct: 91.2, providers: 2, apy: 6.3, status: "critical" },
   ])),
-  rebalance: adminProcedure.input(z.object({ poolId: z.string(), targetAmount: z.number(), currency: z.string() })).mutation(async ({ input }) => ({
+  rebalance: adminProcedure.input(z.object({ poolId: z.string(), targetAmount: z.number().positive().max(10_000_000), currency: z.string() })).mutation(async ({ input }) => ({
     poolId: input.poolId, action: "rebalance_initiated", targetAmount: input.targetAmount,
     currency: input.currency, transactionRef: genId("rebal"),
     estimatedCompletion: new Date(Date.now() + 3600000).toISOString(),
@@ -194,11 +195,11 @@ export const slaMonitoringRouter = router({
 export const documentVaultRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT id, doc_type, filename, file_url, file_size, mime_type, expiry_date, is_verified, uploaded_at
       FROM document_vault WHERE user_id = ${ctx.user.id} ORDER BY uploaded_at DESC
-    `).catch(() => ({ rows: [] }));
+    `);
     return (rows as any).rows ?? [];
   }),
   upload: auditedProcedure.input(z.object({
@@ -209,22 +210,22 @@ export const documentVaultRouter = router({
     if (db) await db.execute(sql`
       INSERT INTO document_vault (user_id, doc_type, filename, file_url, file_size, mime_type, expiry_date, is_verified, uploaded_at)
       VALUES (${ctx.user.id}, ${input.docType}, ${input.filename}, ${input.fileUrl}, ${input.fileSize}, ${input.mimeType}, ${input.expiryDate ?? null}, false, NOW())
-    `).catch(() => null);
+    `);
     return { uploaded: true };
   }),
   delete: auditedProcedure.input(z.object({ docId: z.number() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`DELETE FROM document_vault WHERE id = ${input.docId} AND user_id = ${ctx.user.id}`).catch(() => null);
+    if (db) await db.execute(sql`DELETE FROM document_vault WHERE id = ${input.docId} AND user_id = ${ctx.user.id}`);
     return { deleted: true };
   }),
   expiryAlerts: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT id, doc_type, filename, expiry_date FROM document_vault
       WHERE user_id = ${ctx.user.id} AND expiry_date IS NOT NULL AND expiry_date <= NOW() + INTERVAL '90 days'
       ORDER BY expiry_date ASC
-    `).catch(() => ({ rows: [] }));
+    `);
     return (rows as any).rows ?? [];
   }),
 });
@@ -233,11 +234,11 @@ export const documentVaultRouter = router({
 export const chargebackRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT id, transaction_ref, amount, currency, reason, status, evidence_url, resolution, created_at
       FROM chargebacks WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC
-    `).catch(() => ({ rows: [] }));
+    `);
     if (!(rows as any).rows?.length) return [
       { id: 1, transactionRef: "TXN_20240115_001", amount: "250.00", currency: "USD", reason: "unauthorized_transaction", status: "under_review", resolution: null, createdAt: new Date(Date.now() - 86400000 * 3).toISOString() },
       { id: 2, transactionRef: "TXN_20240108_045", amount: "89.99", currency: "GBP", reason: "goods_not_received", status: "resolved", resolution: "refund_granted", createdAt: new Date(Date.now() - 86400000 * 15).toISOString() },
@@ -245,7 +246,7 @@ export const chargebackRouter = router({
     return (rows as any).rows ?? [];
   }),
   raise: auditedProcedure.input(z.object({
-    transactionRef: z.string(), amount: z.number().positive(), currency: z.string().length(3),
+    transactionRef: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().length(3),
     reason: z.enum(["unauthorized_transaction", "goods_not_received", "duplicate_charge", "wrong_amount", "subscription_cancelled", "other"]),
     description: z.string().min(20).max(1000), evidenceUrl: z.string().url().optional(),
   })).mutation(async ({ ctx, input }) => {
@@ -253,13 +254,13 @@ export const chargebackRouter = router({
     if (db) await db.execute(sql`
       INSERT INTO chargebacks (user_id, transaction_ref, amount, currency, reason, description, evidence_url, status, created_at)
       VALUES (${ctx.user.id}, ${input.transactionRef}, ${input.amount}, ${input.currency}, ${input.reason}, ${input.description}, ${input.evidenceUrl ?? null}, 'submitted', NOW())
-    `).catch(() => null);
+    `);
     return { chargebackRef: genId("CB"), status: "submitted", estimatedResolution: "5-10 business days" };
   }),
   adminList: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return [];
-    const rows = await db.execute(sql`SELECT c.*, u.name as user_name FROM chargebacks c JOIN users u ON c.user_id = u.id ORDER BY c.created_at DESC LIMIT 50`).catch(() => ({ rows: [] }));
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const rows = await db.execute(sql`SELECT c.*, u.name as user_name FROM chargebacks c JOIN users u ON c.user_id = u.id ORDER BY c.created_at DESC LIMIT 50`);
     return (rows as any).rows ?? [];
   }),
   adminResolve: adminProcedure.input(z.object({
@@ -268,7 +269,7 @@ export const chargebackRouter = router({
     notes: z.string().min(0).max(1000).trim(),
   })).mutation(async ({ input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`UPDATE chargebacks SET status = 'resolved', resolution = ${input.resolution}, merchant_response = ${input.notes}, updated_at = NOW() WHERE id = ${input.chargebackId}`).catch(() => null);
+    if (db) await db.execute(sql`UPDATE chargebacks SET status = 'resolved', resolution = ${input.resolution}, merchant_response = ${input.notes}, updated_at = NOW() WHERE id = ${input.chargebackId}`);
     return { resolved: true, resolution: input.resolution };
   }),
 });
@@ -292,7 +293,7 @@ export const developerSandboxRouter = router({
       title: `[SANDBOX] ${input.eventType}`,
       message: `Simulated: ${input.eventType}. Payload: ${JSON.stringify(input.payload ?? {})}`,
       isRead: false, createdAt: new Date(),
-    }).catch(() => null);
+    }).returning();
     return { eventId: genId("evt_test"), eventType: input.eventType, simulated: true, timestamp: new Date().toISOString() };
   }),
   resetTestData: auditedProcedure.mutation(async () => ({
@@ -317,23 +318,36 @@ export const developerSandboxRouter = router({
 export const smartRoutingRouter = router({
   getRoute: protectedProcedure.input(z.object({
     fromCurrency: z.string().length(3), toCurrency: z.string().length(3),
-    amount: z.number().positive(), priority: z.enum(["speed", "cost", "reliability"]).default("cost"),
+    amount: z.number().positive().max(10_000_000), priority: z.enum(["speed", "cost", "reliability"]).default("cost"),
   })).query(async ({ input }) => {
     const routes = [
-      { routeId: "route_direct", name: "Direct Transfer", gateway: "RemitFlow Core", fee: parseFloat((input.amount * 0.008).toFixed(2)), estimatedTime: "2-4 hours", reliability: 99.8, score: input.priority === "cost" ? 95 : 78 },
-      { routeId: "route_swift", name: "SWIFT Network", gateway: "Correspondent Bank", fee: parseFloat((input.amount * 0.025 + 15).toFixed(2)), estimatedTime: "1-3 business days", reliability: 99.5, score: input.priority === "cost" ? 45 : 60 },
-      { routeId: "route_mojaloop", name: "Mojaloop FSPIOP", gateway: "Mojaloop Hub", fee: parseFloat((input.amount * 0.005).toFixed(2)), estimatedTime: "30-60 minutes", reliability: 98.9, score: input.priority === "speed" ? 98 : 88 },
+      { routeId: "route_direct", name: "Direct Transfer", gateway: "RemitFlow Core", fee: safeParseAmount((input.amount * 0.008).toFixed(2)), estimatedTime: "2-4 hours", reliability: 99.8, score: input.priority === "cost" ? 95 : 78 },
+      { routeId: "route_swift", name: "SWIFT Network", gateway: "Correspondent Bank", fee: safeParseAmount((input.amount * 0.025 + 15).toFixed(2)), estimatedTime: "1-3 business days", reliability: 99.5, score: input.priority === "cost" ? 45 : 60 },
+      { routeId: "route_mojaloop", name: "Mojaloop FSPIOP", gateway: "Mojaloop Hub", fee: safeParseAmount((input.amount * 0.005).toFixed(2)), estimatedTime: "30-60 minutes", reliability: 98.9, score: input.priority === "speed" ? 98 : 88 },
     ];
     routes.sort((a, b) => b.score - a.score);
     return { recommended: routes[0], alternatives: routes.slice(1) };
   }),
-  corridorHealth: adminProcedure.query(async () => ([
-    { corridor: "USD→NGN", volume24h: 2847320, successRate: 99.2, avgTime: "2.1h", status: "healthy" },
-    { corridor: "GBP→NGN", volume24h: 1234567, successRate: 98.8, avgTime: "2.8h", status: "healthy" },
-    { corridor: "EUR→KES", volume24h: 456789, successRate: 99.5, avgTime: "1.9h", status: "healthy" },
-    { corridor: "USD→GHS", volume24h: 234567, successRate: 97.1, avgTime: "3.2h", status: "degraded" },
-    { corridor: "GBP→ZAR", volume24h: 189234, successRate: 99.7, avgTime: "1.5h", status: "healthy" },
-  ])),
+  corridorHealth: adminProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const since24h = new Date(Date.now() - 86400000);
+    const rows = await db.execute(sql`
+      SELECT from_currency || '→' || to_currency as corridor,
+        COUNT(*) as volume_24h,
+        ROUND(COUNT(*) FILTER (WHERE status = 'completed') * 100.0 / GREATEST(COUNT(*), 1), 1) as success_rate,
+        ROUND(EXTRACT(EPOCH FROM AVG(CASE WHEN completed_at IS NOT NULL THEN completed_at - created_at END)) / 3600, 1) as avg_hours
+      FROM transactions
+      WHERE created_at >= ${since24h.toISOString()} AND type = 'send'
+      GROUP BY from_currency, to_currency
+      ORDER BY COUNT(*) DESC LIMIT 10
+    `);
+    return ((rows as any).rows ?? []).map((r: any) => ({
+      corridor: r.corridor, volume24h: Number(r.volume_24h),
+      successRate: Number(r.success_rate ?? 100), avgTime: `${r.avg_hours ?? 0}h`,
+      status: Number(r.success_rate ?? 100) >= 99 ? "healthy" : Number(r.success_rate ?? 100) >= 95 ? "degraded" : "critical",
+    }));
+  }),
 });
 
 // ─── 9. Compliance Reporting ──────────────────────────────────────────────────
@@ -369,20 +383,32 @@ export const rateEngineRouter = router({
       { name: "Premium", monthlyVolume: "$5,001 - $25,000", feeRate: "0.6%", minFee: "$0.75", maxFee: "$150" },
       { name: "Business", monthlyVolume: "$25,001+", feeRate: "0.4%", minFee: "$0.50", maxFee: "Custom" },
     ],
-    corridorSpreads: [
-      { corridor: "USD→NGN", buyRate: 1538.46, sellRate: 1522.08, spread: 1.07 },
-      { corridor: "GBP→NGN", buyRate: 1940.12, sellRate: 1920.72, spread: 1.00 },
-      { corridor: "EUR→KES", buyRate: 143.21, sellRate: 141.78, spread: 1.00 },
-    ],
+    corridorSpreads: await (async () => {
+      const spreads = [{ from: "USD", to: "NGN", spreadPct: 1.07 }, { from: "GBP", to: "NGN", spreadPct: 1.00 }, { from: "EUR", to: "KES", spreadPct: 1.00 }];
+      try {
+        const fxRes = await fetch("https://open.er-api.com/v6/latest/USD");
+        if (fxRes.ok) {
+          const fxData = await fxRes.json() as { rates?: Record<string, number> };
+          const r = fxData.rates ?? {};
+          return spreads.map(s => {
+            const fromR = s.from === "USD" ? 1 : (r[s.from] ?? 1);
+            const toR = r[s.to] ?? 1;
+            const mid = toR / fromR;
+            return { corridor: `${s.from}→${s.to}`, buyRate: Math.round(mid * (1 + s.spreadPct / 200) * 100) / 100, sellRate: Math.round(mid * (1 - s.spreadPct / 200) * 100) / 100, spread: s.spreadPct };
+          });
+        }
+      } catch { /* fallback below */ }
+      return spreads.map(s => ({ corridor: `${s.from}→${s.to}`, buyRate: 0, sellRate: 0, spread: s.spreadPct }));
+    })(),
   })),
   calculateFee: publicProcedure.input(z.object({
-    amount: z.number().positive(), fromCurrency: z.string(), toCurrency: z.string(),
+    amount: z.number().positive().max(10_000_000), fromCurrency: z.string(), toCurrency: z.string(),
     userTier: z.string().default("Starter"),
   })).query(async ({ input }) => {
     const rates: Record<string, number> = { Starter: 0.012, Regular: 0.009, Premium: 0.006, Business: 0.004 };
     const rate = rates[input.userTier] ?? 0.012;
     const fee = Math.max(1.50, input.amount * rate);
-    return { amount: input.amount, fee: parseFloat(fee.toFixed(2)), feeRate: `${(rate * 100).toFixed(1)}%`, totalCost: parseFloat((input.amount + fee).toFixed(2)) };
+    return { amount: input.amount, fee: safeParseAmount(fee.toFixed(2)), feeRate: `${(rate * 100).toFixed(1)}%`, totalCost: safeParseAmount((input.amount + fee).toFixed(2)) };
   }),
 });
 
@@ -390,8 +416,8 @@ export const rateEngineRouter = router({
 export const offlineQueueRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    const rows = await db.execute(sql`SELECT id, operation_type, payload, status, retry_count, created_at FROM offline_queue WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 50`).catch(() => ({ rows: [] }));
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const rows = await db.execute(sql`SELECT id, operation_type, payload, status, retry_count, created_at FROM offline_queue WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 50`);
     return (rows as any).rows ?? [];
   }),
   enqueue: auditedProcedure.input(z.object({
@@ -399,12 +425,12 @@ export const offlineQueueRouter = router({
     payload: z.record(z.string(), z.unknown()), scheduledAt: z.string().optional(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO offline_queue (user_id, operation_type, payload, status, retry_count, created_at) VALUES (${ctx.user.id}, ${input.operationType}, ${JSON.stringify(input.payload)}, 'pending', 0, NOW())`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO offline_queue (user_id, operation_type, payload, status, retry_count, created_at) VALUES (${ctx.user.id}, ${input.operationType}, ${JSON.stringify(input.payload)}, 'pending', 0, NOW())`);
     return { queueId: genId("oq"), status: "queued" };
   }),
   cancel: auditedProcedure.input(z.object({ queueId: z.number() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`UPDATE offline_queue SET status = 'cancelled' WHERE id = ${input.queueId} AND user_id = ${ctx.user.id}`).catch(() => null);
+    if (db) await db.execute(sql`UPDATE offline_queue SET status = 'cancelled' WHERE id = ${input.queueId} AND user_id = ${ctx.user.id}`);
     return { cancelled: true };
   }),
 });
@@ -416,7 +442,7 @@ export const notificationCenterRouter = router({
     unreadOnly: z.boolean().default(false), limit: z.number().default(20), offset: z.number().default(0),
   })).query(async ({ ctx, input }) => {
     const db = await getDb();
-    if (!db) return { items: [], total: 0, unreadCount: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const conditions = [eq(notifications.userId, ctx.user.id)];
     if (input.type !== "all") conditions.push(eq(notifications.type, input.type as any));
     if (input.unreadOnly) conditions.push(eq(notifications.isRead, false));
@@ -424,28 +450,28 @@ export const notificationCenterRouter = router({
       db.select().from(notifications).where(and(...conditions)).orderBy(desc(notifications.createdAt)).limit(input.limit).offset(input.offset),
       db.select({ count: count() }).from(notifications).where(and(...conditions)),
       db.select({ count: count() }).from(notifications).where(and(eq(notifications.userId, ctx.user.id), eq(notifications.isRead, false))),
-    ]).catch(() => [[], [{ count: 0 }], [{ count: 0 }]]);
+    ]);
     return { items, total: (totalResult as any)[0]?.count ?? 0, unreadCount: (unreadResult as any)[0]?.count ?? 0 };
   }),
   markRead: auditedProcedure.input(z.object({ ids: z.array(z.number()).optional() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (!db) return { marked: true };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     if (input.ids?.length) {
-      await db.execute(sql`UPDATE notifications SET is_read = true WHERE user_id = ${ctx.user.id} AND id = ANY(${input.ids})`).catch(() => null);
+      await db.execute(sql`UPDATE notifications SET is_read = true WHERE user_id = ${ctx.user.id} AND id = ANY(${input.ids})`);
     } else {
-      await db.execute(sql`UPDATE notifications SET is_read = true WHERE user_id = ${ctx.user.id}`).catch(() => null);
+      await db.execute(sql`UPDATE notifications SET is_read = true WHERE user_id = ${ctx.user.id}`);
     }
     return { marked: true };
   }),
   delete: auditedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`DELETE FROM notifications WHERE id = ${input.id} AND user_id = ${ctx.user.id}`).catch(() => null);
+    if (db) await db.execute(sql`DELETE FROM notifications WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
     return { deleted: true };
   }),
   preferences: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    const rows = await db.execute(sql`SELECT channel, event_type, enabled FROM notification_preferences WHERE user_id = ${ctx.user.id}`).catch(() => ({ rows: [] }));
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const rows = await db.execute(sql`SELECT channel, event_type, enabled FROM notification_preferences WHERE user_id = ${ctx.user.id}`);
     if (!(rows as any).rows?.length) return [
       { channel: "push", eventType: "transfer.completed", enabled: true },
       { channel: "email", eventType: "kyc.approved", enabled: true },
@@ -455,7 +481,7 @@ export const notificationCenterRouter = router({
   }),
   updatePreference: auditedProcedure.input(z.object({ channel: z.string(), eventType: z.string(), enabled: z.boolean() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO notification_preferences (user_id, channel, event_type, enabled) VALUES (${ctx.user.id}, ${input.channel}, ${input.eventType}, ${input.enabled}) ON CONFLICT (user_id, channel, event_type) DO UPDATE SET enabled = EXCLUDED.enabled`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO notification_preferences (user_id, channel, event_type, enabled) VALUES (${ctx.user.id}, ${input.channel}, ${input.eventType}, ${input.enabled}) ON CONFLICT (user_id, channel, event_type) DO UPDATE SET enabled = EXCLUDED.enabled`);
     return { updated: true };
   }),
 });
@@ -464,23 +490,32 @@ export const notificationCenterRouter = router({
 export const fxHedgingRouter = router({
   forwardContracts: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    const rows = await db.execute(sql`SELECT id, from_currency, to_currency, amount, locked_rate, settlement_date, status FROM fx_forward_contracts WHERE user_id = ${ctx.user.id} ORDER BY settlement_date ASC`).catch(() => ({ rows: [] }));
-    if (!(rows as any).rows?.length) return [
-      { id: 1, fromCurrency: "USD", toCurrency: "NGN", amount: 5000, lockedRate: 1538.46, settlementDate: new Date(Date.now() + 86400000 * 30).toISOString(), status: "active" },
-      { id: 2, fromCurrency: "GBP", toCurrency: "NGN", amount: 2000, lockedRate: 1940.12, settlementDate: new Date(Date.now() + 86400000 * 60).toISOString(), status: "active" },
-    ];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const rows = await db.execute(sql`SELECT id, from_currency, to_currency, amount, locked_rate, settlement_date, status FROM fx_forward_contracts WHERE user_id = ${ctx.user.id} ORDER BY settlement_date ASC`);
     return (rows as any).rows ?? [];
   }),
   createForward: auditedProcedure.input(z.object({
     fromCurrency: z.string().length(3), toCurrency: z.string().length(3),
-    amount: z.number().positive(), settlementDays: z.number().min(1).max(365),
-  })).mutation(async ({ input }) => ({
-    contractId: genId("FWD"), lockedRate: 1538.46,
-    settlementDate: new Date(Date.now() + input.settlementDays * 86400000).toISOString(),
-    amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency,
-    marginRequired: (input.amount * 0.05).toFixed(2), status: "active",
-  })),
+    amount: z.number().positive().max(10_000_000), settlementDays: z.number().min(1).max(365),
+  })).mutation(async ({ input }) => {
+    let lockedRate = 1538.46;
+    try {
+      const fxRes = await fetch("https://open.er-api.com/v6/latest/USD");
+      if (fxRes.ok) {
+        const fxData = await fxRes.json() as { rates?: Record<string, number> };
+        const fromRate = fxData.rates?.[input.fromCurrency] ?? 1;
+        const toRate = fxData.rates?.[input.toCurrency] ?? 1;
+        lockedRate = toRate / fromRate;
+      }
+    } catch { /* use fallback rate */ }
+    const forwardPremium = 1 + (input.settlementDays / 365) * 0.02;
+    return {
+      contractId: genId("FWD"), lockedRate: Math.round(lockedRate * forwardPremium * 100) / 100,
+      settlementDate: new Date(Date.now() + input.settlementDays * 86400000).toISOString(),
+      amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency,
+      marginRequired: (input.amount * 0.05).toFixed(2), status: "active",
+    };
+  }),
 });
 
 // ─── 14. Payment Orchestration ────────────────────────────────────────────────
@@ -503,8 +538,8 @@ export const paymentOrchestrationRouter = router({
 export const biometricEnrollmentRouter = router({
   status: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return { enrolled: false, devices: [], supportedTypes: ["fingerprint", "face_id", "touch_id"] };
-    const rows = await db.execute(sql`SELECT device_id, device_name, biometric_type, enrolled_at, is_active FROM biometric_enrollments WHERE user_id = ${ctx.user.id}`).catch(() => ({ rows: [] }));
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const rows = await db.execute(sql`SELECT device_id, device_name, biometric_type, enrolled_at, is_active FROM biometric_enrollments WHERE user_id = ${ctx.user.id}`);
     const devices = (rows as any).rows ?? [];
     return { enrolled: devices.length > 0, devices, supportedTypes: ["fingerprint", "face_id", "touch_id"] };
   }),
@@ -513,12 +548,12 @@ export const biometricEnrollmentRouter = router({
     biometricType: z.enum(["fingerprint", "face_id", "touch_id"]), publicKey: z.string(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO biometric_enrollments (user_id, device_id, device_name, biometric_type, public_key, enrolled_at, is_active) VALUES (${ctx.user.id}, ${input.deviceId}, ${input.deviceName}, ${input.biometricType}, ${input.publicKey}, NOW(), true) ON CONFLICT (user_id, device_id) DO UPDATE SET is_active = true`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO biometric_enrollments (user_id, device_id, device_name, biometric_type, public_key, enrolled_at, is_active) VALUES (${ctx.user.id}, ${input.deviceId}, ${input.deviceName}, ${input.biometricType}, ${input.publicKey}, NOW(), true) ON CONFLICT (user_id, device_id) DO UPDATE SET is_active = true`);
     return { enrolled: true, deviceId: input.deviceId };
   }),
   revoke: auditedProcedure.input(z.object({ deviceId: z.string() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`UPDATE biometric_enrollments SET is_active = false WHERE user_id = ${ctx.user.id} AND device_id = ${input.deviceId}`).catch(() => null);
+    if (db) await db.execute(sql`UPDATE biometric_enrollments SET is_active = false WHERE user_id = ${ctx.user.id} AND device_id = ${input.deviceId}`);
     return { revoked: true };
   }),
   generateChallenge: auditedProcedure.mutation(async () => ({
@@ -530,13 +565,13 @@ export const biometricEnrollmentRouter = router({
 export const ledgerRouter = router({
   entries: protectedProcedure.input(z.object({ limit: z.number().default(50) })).query(async ({ ctx, input }) => {
     const db = await getDb();
-    if (!db) return [];
-    return db.select().from(transactions).where(eq(transactions.userId, ctx.user.id)).orderBy(desc(transactions.createdAt)).limit(input.limit).catch(() => []);
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    return db.select().from(transactions).where(eq(transactions.userId, ctx.user.id)).orderBy(desc(transactions.createdAt)).limit(input.limit);
   }),
   reconciliation: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    const walletRows = await db.select().from(wallets).where(eq(wallets.userId, ctx.user.id)).catch(() => []);
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const walletRows = await db.select().from(wallets).where(eq(wallets.userId, ctx.user.id));
     return (walletRows as any[]).map((w: any) => ({
       currency: w.currency, bookBalance: w.balance, availableBalance: w.availableBalance ?? w.balance,
       pendingDebits: 0, pendingCredits: 0, lastReconciled: new Date().toISOString(), status: "balanced",
@@ -544,7 +579,7 @@ export const ledgerRouter = router({
   }),
   doubleEntry: adminProcedure.input(z.object({
     debitAccount: z.string(), creditAccount: z.string(),
-    amount: z.number().positive(), currency: z.string().length(3),
+    amount: z.number().positive().max(10_000_000), currency: z.string().length(3),
     reference: z.string().min(1).max(100).trim(), description: z.string().min(0).max(500).trim(),
   })).mutation(async ({ input }) => ({
     entryId: genId("LE"), debitAccount: input.debitAccount, creditAccount: input.creditAccount,
@@ -556,8 +591,8 @@ export const ledgerRouter = router({
 export const transferGoalsRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    const rows = await db.execute(sql`SELECT id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status FROM transfer_goals WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`).catch(() => ({ rows: [] }));
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const rows = await db.execute(sql`SELECT id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status FROM transfer_goals WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`);
     if (!(rows as any).rows?.length) return [
       { id: 1, name: "School Fees — Lagos", targetAmount: 2500, currentAmount: 1850, currency: "USD", deadline: new Date(Date.now() + 86400000 * 45).toISOString(), autoTransferEnabled: true, status: "active", progressPct: 74 },
       { id: 2, name: "Family Support Fund", targetAmount: 5000, currentAmount: 3200, currency: "USD", deadline: new Date(Date.now() + 86400000 * 90).toISOString(), autoTransferEnabled: false, status: "active", progressPct: 64 },
@@ -565,24 +600,24 @@ export const transferGoalsRouter = router({
     return (rows as any).rows ?? [];
   }),
   create: protectedProcedure.input(z.object({
-    name: z.string().min(2).max(100), targetAmount: z.number().positive(),
+    name: z.string().min(2).max(100), targetAmount: z.number().positive().max(10_000_000),
     currency: z.string().length(3), deadline: z.string().optional(),
     autoTransferEnabled: z.boolean().default(false),
     autoTransferDay: z.number().min(1).max(28).optional(),
-    autoTransferAmount: z.number().positive().optional(),
+    autoTransferAmount: z.number().positive().max(10_000_000).optional(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO transfer_goals (user_id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status, created_at) VALUES (${ctx.user.id}, ${input.name}, ${input.targetAmount}, 0, ${input.currency}, ${input.deadline ?? null}, ${input.autoTransferEnabled}, 'active', NOW())`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO transfer_goals (user_id, name, target_amount, current_amount, currency, deadline, auto_transfer_enabled, status, created_at) VALUES (${ctx.user.id}, ${input.name}, ${input.targetAmount}, 0, ${input.currency}, ${input.deadline ?? null}, ${input.autoTransferEnabled}, 'active', NOW())`);
     return { goalId: genId("TG"), name: input.name, status: "active" };
   }),
-  topup: auditedProcedure.input(z.object({ goalId: z.number(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
+  topup: auditedProcedure.input(z.object({ goalId: z.number(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`UPDATE transfer_goals SET current_amount = current_amount + ${input.amount} WHERE id = ${input.goalId} AND user_id = ${ctx.user.id}`).catch(() => null);
+    if (db) await db.execute(sql`UPDATE transfer_goals SET current_amount = current_amount + ${input.amount} WHERE id = ${input.goalId} AND user_id = ${ctx.user.id}`);
     return { topped: true, amount: input.amount };
   }),
   delete: auditedProcedure.input(z.object({ goalId: z.number() })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`DELETE FROM transfer_goals WHERE id = ${input.goalId} AND user_id = ${ctx.user.id}`).catch(() => null);
+    if (db) await db.execute(sql`DELETE FROM transfer_goals WHERE id = ${input.goalId} AND user_id = ${ctx.user.id}`);
     return { deleted: true };
   }),
 });
@@ -653,37 +688,47 @@ export const analyticsPipelineRouter = router({
     eventName: z.string(), properties: z.record(z.string(), z.unknown()).optional(),
   })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO analytics_events (user_id, event_name, properties, created_at) VALUES (${ctx.user.id}, ${input.eventName}, ${JSON.stringify(input.properties ?? {})}, NOW())`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO analytics_events (user_id, event_name, properties, created_at) VALUES (${ctx.user.id}, ${input.eventName}, ${JSON.stringify(input.properties ?? {})}, NOW())`);
     return { tracked: true };
   }),
 });
 
 // ─── 20. Corridor Live Rates ──────────────────────────────────────────────────
+const CORRIDOR_PAIRS = [
+  { from: "USD", to: "NGN", spread: 1.07 }, { from: "GBP", to: "NGN", spread: 1.00 },
+  { from: "EUR", to: "NGN", spread: 1.12 }, { from: "USD", to: "KES", spread: 0.85 },
+  { from: "GBP", to: "KES", spread: 0.92 }, { from: "USD", to: "GHS", spread: 0.97 },
+  { from: "USD", to: "ZAR", spread: 0.78 }, { from: "EUR", to: "KES", spread: 0.89 },
+  { from: "USD", to: "TZS", spread: 1.15 }, { from: "USD", to: "UGX", spread: 1.22 },
+  { from: "EUR", to: "XOF", spread: 0.00 },
+];
 export const corridorLiveRatesRouter = router({
-  stream: publicProcedure.query(async () => ({
-    rates: [
-      { from: "USD", to: "NGN", rate: 1538.46, spread: 1.07, change24h: 0.23, high24h: 1542.10, low24h: 1531.20 },
-      { from: "GBP", to: "NGN", rate: 1940.12, spread: 1.00, change24h: -0.15, high24h: 1948.50, low24h: 1935.80 },
-      { from: "EUR", to: "NGN", rate: 1668.34, spread: 1.12, change24h: 0.08, high24h: 1672.10, low24h: 1661.90 },
-      { from: "USD", to: "KES", rate: 130.50, spread: 0.85, change24h: 0.31, high24h: 131.20, low24h: 129.80 },
-      { from: "GBP", to: "KES", rate: 164.82, spread: 0.92, change24h: -0.22, high24h: 165.50, low24h: 163.90 },
-      { from: "USD", to: "GHS", rate: 12.42, spread: 0.97, change24h: 0.45, high24h: 12.58, low24h: 12.35 },
-      { from: "USD", to: "ZAR", rate: 18.67, spread: 0.78, change24h: -0.18, high24h: 18.82, low24h: 18.55 },
-      { from: "EUR", to: "KES", rate: 143.21, spread: 0.89, change24h: 0.12, high24h: 143.90, low24h: 142.50 },
-      { from: "USD", to: "TZS", rate: 2548.30, spread: 1.15, change24h: 0.28, high24h: 2562.10, low24h: 2538.90 },
-      { from: "USD", to: "UGX", rate: 3712.50, spread: 1.22, change24h: -0.09, high24h: 3728.40, low24h: 3698.20 },
-      { from: "EUR", to: "XOF", rate: 655.96, spread: 0.00, change24h: 0.00, high24h: 655.96, low24h: 655.96 },
-    ],
-    updatedAt: new Date().toISOString(), source: "RemitFlow FX Engine v2",
-  })),
+  stream: publicProcedure.query(async () => {
+    let liveRates: Record<string, number> = {};
+    try {
+      const res = await fetch("https://open.er-api.com/v6/latest/USD");
+      if (res.ok) {
+        const data = await res.json() as { rates?: Record<string, number> };
+        liveRates = data.rates ?? {};
+      }
+    } catch { /* fallback to empty */ }
+    const rates = CORRIDOR_PAIRS.map(c => {
+      const fromRate = c.from === "USD" ? 1 : (liveRates[c.from] ?? 1);
+      const toRate = liveRates[c.to] ?? 1;
+      const rate = Math.round((toRate / fromRate) * 100) / 100;
+      const variance = rate * 0.003;
+      return { from: c.from, to: c.to, rate, spread: c.spread, change24h: 0, high24h: Math.round((rate + variance) * 100) / 100, low24h: Math.round((rate - variance) * 100) / 100 };
+    });
+    return { rates, updatedAt: new Date().toISOString(), source: "RemitFlow FX Engine v2" };
+  }),
 });
 
 // ─── 21. Beneficiary Groups ───────────────────────────────────────────────────
 export const beneficiaryGroupsRouter = router({
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    const rows = await db.execute(sql`SELECT g.id, g.name, g.description, g.color, COUNT(gm.beneficiary_id) as member_count FROM beneficiary_groups g LEFT JOIN beneficiary_group_members gm ON g.id = gm.group_id WHERE g.user_id = ${ctx.user.id} GROUP BY g.id ORDER BY g.created_at DESC`).catch(() => ({ rows: [] }));
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+    const rows = await db.execute(sql`SELECT g.id, g.name, g.description, g.color, COUNT(gm.beneficiary_id) as member_count FROM beneficiary_groups g LEFT JOIN beneficiary_group_members gm ON g.id = gm.group_id WHERE g.user_id = ${ctx.user.id} GROUP BY g.id ORDER BY g.created_at DESC`);
     if (!(rows as any).rows?.length) return [
       { id: 1, name: "Family", description: "Immediate family members", color: "#6366f1", memberCount: 4 },
       { id: 2, name: "Business Partners", description: "Regular business transfers", color: "#10b981", memberCount: 3 },
@@ -692,15 +737,15 @@ export const beneficiaryGroupsRouter = router({
   }),
   create: auditedProcedure.input(z.object({ name: z.string().min(1).max(50), description: z.string().optional(), color: z.string().default("#6366f1") })).mutation(async ({ ctx, input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO beneficiary_groups (user_id, name, description, color, created_at) VALUES (${ctx.user.id}, ${input.name}, ${input.description ?? null}, ${input.color}, NOW())`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO beneficiary_groups (user_id, name, description, color, created_at) VALUES (${ctx.user.id}, ${input.name}, ${input.description ?? null}, ${input.color}, NOW())`);
     return { groupId: genId("BG"), name: input.name };
   }),
   addMember: auditedProcedure.input(z.object({ groupId: z.number(), beneficiaryId: z.number() })).mutation(async ({ input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`INSERT INTO beneficiary_group_members (group_id, beneficiary_id, added_at) VALUES (${input.groupId}, ${input.beneficiaryId}, NOW()) ON CONFLICT DO NOTHING`).catch(() => null);
+    if (db) await db.execute(sql`INSERT INTO beneficiary_group_members (group_id, beneficiary_id, added_at) VALUES (${input.groupId}, ${input.beneficiaryId}, NOW()) ON CONFLICT DO NOTHING`);
     return { added: true };
   }),
-  bulkSend: auditedProcedure.input(z.object({ groupId: z.number(), amount: z.number().positive(), currency: z.string().length(3), note: z.string().optional() })).mutation(async ({ input }) => ({
+  bulkSend: auditedProcedure.input(z.object({ groupId: z.number(), amount: z.number().positive().max(10_000_000), currency: z.string().length(3), note: z.string().optional() })).mutation(async ({ input }) => ({
     batchRef: genId("BULK"), groupId: input.groupId, amount: input.amount,
     currency: input.currency, status: "processing",
     estimatedCompletion: new Date(Date.now() + 3600000).toISOString(),
@@ -722,7 +767,7 @@ export const whiteLabelConfigRouter = router({
     features: z.record(z.string(), z.boolean()).optional(),
   })).mutation(async ({ input }) => {
     const db = await getDb();
-    if (db) await db.execute(sql`UPDATE white_label_configs SET primary_color = COALESCE(${input.primaryColor ?? null}, primary_color), secondary_color = COALESCE(${input.secondaryColor ?? null}, secondary_color), app_name = COALESCE(${input.appName ?? null}, app_name), updated_at = NOW() WHERE tenant_id = ${input.tenantId}`).catch(() => null);
+    if (db) await db.execute(sql`UPDATE white_label_configs SET primary_color = COALESCE(${input.primaryColor ?? null}, primary_color), secondary_color = COALESCE(${input.secondaryColor ?? null}, secondary_color), app_name = COALESCE(${input.appName ?? null}, app_name), updated_at = NOW() WHERE tenant_id = ${input.tenantId}`);
     return { updated: true };
   }),
 });

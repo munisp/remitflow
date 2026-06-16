@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { toast } from "sonner";
 import { AlertTriangle, CheckCircle, FileText, Flag, TrendingUp } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   pending_review: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200",
@@ -24,6 +25,7 @@ const FLAG_REASON_LABELS: Record<string, string> = {
 };
 
 export default function CTRCompliance() {
+  const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState("");
   const [reviewId, setReviewId] = useState<number | null>(null);
   const [reviewStatus, setReviewStatus] = useState<"filed" | "dismissed" | "escalated">("filed");
@@ -45,7 +47,7 @@ export default function CTRCompliance() {
     onError: (e) => toast.error(e.message),
   });
 
-  const selectedFlag = (flagsData as any)?.rows.find((f) => f.id === reviewId);
+  const selectedFlag = (flagsData as any)?.rows.find((f: any) => f.id === reviewId);
 
   return (
 
@@ -120,7 +122,7 @@ export default function CTRCompliance() {
                   </tr>
                 </thead>
                 <tbody>
-                  {flagsData.rows.map((f) => (
+                  {flagsData!.rows.map((f: any) => (
                     <tr key={f.id} className="border-b hover:bg-muted/30 transition-colors">
                       <td className="py-2 pr-3 font-mono text-xs">#{f.id}</td>
                       <td className="pr-3 text-xs">User #{f.userId}</td>

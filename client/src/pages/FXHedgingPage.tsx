@@ -10,8 +10,10 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { TrendingUp, TrendingDown, Plus, X, BarChart3, DollarSign, Activity } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function FXHedgingPage() {
+  const { t } = useTranslation();
   const [openDialog, setOpenDialog] = useState(false);
   const [pair, setPair] = useState("USD/NGN");
   const [direction, setDirection] = useState<"long" | "short">("long");

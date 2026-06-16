@@ -8,8 +8,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { XCircle, Wallet, RefreshCw, Home } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function PaymentCancel() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
 
   return (

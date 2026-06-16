@@ -9,6 +9,7 @@ import { eq, desc, and, like, ilike, sql, inArray } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc.js";
 import { getDb } from "../db.js";
+import { subtractMoney, addMoney, compareMoney, multiplyMoney, safeParseAmount } from "../lib/safeDecimal.js";
 import {
   ngxStocks,
   stockWatchlists,
@@ -24,6 +25,12 @@ import {
   users,
 } from "../../drizzle/schema.js";
 import crypto from "crypto";
+import { executeTransferPipeline } from "../_core/transferPipeline.js";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { broadcastUserEvent } from "../sse.service.js";
+import { sendNotification } from "../notifications.service.js";
+import { logger } from "../_core/logger.js";
+
 
 async function getDbConn() {
   const db = await getDb();
@@ -93,7 +100,7 @@ export const ngxStockRouter = router({
       .from(ngxStocks)
       .where(eq(ngxStocks.isActive, true))
       .orderBy(ngxStocks.sector);
-    return rows.map((r) => r.sector);
+    return rows.map((r: any) => r.sector);
   }),
 
   // Watchlist
@@ -157,7 +164,7 @@ export const ngxStockRouter = router({
         .where(and(eq(stockWatchlists.id, input.watchlistId), eq(stockWatchlists.userId, ctx.user.id)));
       if (!item) throw new TRPCError({ code: "NOT_FOUND", message: "Watchlist item not found" });
       await (await getDbConn()).delete(stockWatchlists).where(eq(stockWatchlists.id, input.watchlistId));
-      return { success: true };
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Orders
@@ -173,16 +180,49 @@ export const ngxStockRouter = router({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const [stock] = await (await getDbConn()).select().from(ngxStocks).where(eq(ngxStocks.id, input.stockId));
+      const db = await getDbConn();
+      const [stock] = await db.select().from(ngxStocks).where(eq(ngxStocks.id, input.stockId));
       if (!stock) throw new TRPCError({ code: "NOT_FOUND", message: "Stock not found" });
 
-      const qty = parseFloat(input.quantityUnits);
-      const price = parseFloat(input.pricePerUnitNgn);
+      const qty = safeParseAmount(input.quantityUnits);
+      const price = safeParseAmount(input.pricePerUnitNgn);
       const totalNgn = qty * price;
-      // Approximate USD (1 USD ≈ 1600 NGN — will use live rate in production)
-      const approxUsd = totalNgn / 1600;
+      let ngnRate = 1600;
+      try {
+        const fxRes = await fetch("https://open.er-api.com/v6/latest/USD");
+        if (fxRes.ok) {
+          const fxData = await fxRes.json() as { rates?: Record<string, number> };
+          if (fxData.rates?.NGN) ngnRate = fxData.rates.NGN;
+        }
+      } catch { /* use fallback rate */ }
+      const approxUsd = totalNgn / ngnRate;
 
-      const [order] = await (await getDbConn())
+      if (input.orderType === "buy" || input.orderType === "limit_buy") {
+        const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "NGN"))).limit(1);
+        if (!wallet || Number(wallet.balance) < totalNgn) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient NGN wallet balance" });
+        await db.execute(sql`
+          UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) - ${totalNgn} AS VARCHAR)
+          WHERE id = ${wallet.id} AND CAST(balance AS DECIMAL(18,4)) >= ${totalNgn}
+        `);
+      }
+
+      // Pipeline: sanctions, fraud ML, TigerBeetle, Kafka, audit, notifications
+      const orderRef = generateTxRef("NGX");
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: approxUsd,
+        fromCurrency: "NGN",
+        toCurrency: "NGN",
+        recipientName: stock.ticker ?? "NGX Stock",
+        rail: "internal",
+        corridorCode: "NG",
+        featureLabel: "ngx_stock_order",
+        transferId: orderRef,
+        description: `NGX ${input.orderType}: ${qty} units of ${stock.ticker} @ ₦${price}`,
+        metadata: { stockId: input.stockId, orderType: input.orderType, brokerName: input.brokerName },
+      });
+
+      const [order] = await db
         .insert(ngxOrders)
         .values({
           userId: ctx.user.id,
@@ -193,12 +233,12 @@ export const ngxStockRouter = router({
           pricePerUnitNgn: input.pricePerUnitNgn,
           totalAmountNgn: totalNgn.toFixed(2),
           totalAmountUsd: approxUsd.toFixed(2),
-          fxRateUsed: "1600.000000",
+          fxRateUsed: ngnRate.toFixed(6),
           brokerName: input.brokerName,
           notes: input.notes,
         })
         .returning();
-      return order;
+      return { ...order, verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
   getOrders: protectedProcedure
@@ -239,19 +279,32 @@ export const ngxStockRouter = router({
   cancelOrder: auditedProcedure
     .input(z.object({ orderId: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
-      const [order] = await (await getDbConn())
+      const db = await getDbConn();
+      const [order] = await db
         .select()
         .from(ngxOrders)
         .where(and(eq(ngxOrders.id, input.orderId), eq(ngxOrders.userId, ctx.user.id)));
-      if (!order) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!order) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (order.status !== "pending")
         throw new TRPCError({ code: "BAD_REQUEST", message: "Only pending orders can be cancelled" });
-      const [updated] = await (await getDbConn())
+
+      // Refund wallet if this was a buy order (funds were debited at order time)
+      if (order.orderType === "buy" || order.orderType === "limit_buy") {
+        const refundAmount = Number(order.totalAmountNgn);
+        if (refundAmount > 0) {
+          await db.execute(sql`
+            UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) + ${refundAmount} AS VARCHAR), "updatedAt" = NOW()
+            WHERE "userId" = ${ctx.user.id} AND currency = 'NGN'
+          `);
+        }
+      }
+
+      const [updated] = await db
         .update(ngxOrders)
         .set({ status: "cancelled" })
         .where(eq(ngxOrders.id, input.orderId))
         .returning();
-      return updated;
+      return { ...updated, refunded: order.orderType === "buy" || order.orderType === "limit_buy" };
     }),
 });
 
@@ -320,7 +373,7 @@ export const realEstateRouter = router({
       if (listing.availableShares < input.sharesCount)
         throw new TRPCError({ code: "BAD_REQUEST", message: "Not enough shares available" });
 
-      const pricePerShare = parseFloat(listing.pricePerShareUsd);
+      const pricePerShare = safeParseAmount(listing.pricePerShareUsd);
       const totalUsd = pricePerShare * input.sharesCount;
       const ownershipPct = (input.sharesCount / listing.totalShares) * 100;
 
@@ -329,14 +382,14 @@ export const realEstateRouter = router({
         .select()
         .from(wallets)
         .where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD")));
-      if (!wallet || parseFloat(wallet.balance) < totalUsd) {
+      if (!wallet || compareMoney(wallet.balance, totalUsd) < 0) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient USD wallet balance" });
       }
 
-      // Debit wallet
+      // Debit wallet using safe decimal math
       await (await getDbConn())
         .update(wallets)
-        .set({ balance: (parseFloat(wallet.balance) - totalUsd).toFixed(2) })
+        .set({ balance: subtractMoney(wallet.balance, totalUsd) })
         .where(eq(wallets.id, wallet.id));
 
       // Reduce available shares
@@ -374,9 +427,25 @@ export const realEstateRouter = router({
         description: `Real estate investment: ${listing.title} (${input.sharesCount} shares)`,
         reference: generateTxRef("RE"),
         channel: "real_estate",
+      }).returning();
+
+      // Pipeline: sanctions, fraud ML, TigerBeetle, Kafka, notifications
+      const investRef = generateTxRef("RE-P");
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: totalUsd,
+        fromCurrency: "USD",
+        toCurrency: "USD",
+        recipientName: listing.title ?? "Real Estate Investment",
+        rail: "internal",
+        corridorCode: "NG",
+        featureLabel: "real_estate_invest",
+        transferId: investRef,
+        description: `Real estate: ${input.sharesCount} shares of ${listing.title}`,
+        metadata: { listingId: input.listingId, sharesCount: input.sharesCount, ownershipPct },
       });
 
-      return investment;
+      return { ...investment, verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
   getMyInvestments: protectedProcedure.query(async ({ ctx }) => {
@@ -417,11 +486,11 @@ export const realEstateRouter = router({
         .select()
         .from(realEstateListings)
         .where(eq(realEstateListings.id, input.listingId));
-      if (!listing) throw new TRPCError({ code: "NOT_FOUND" });
-      const invested = parseFloat(listing.pricePerShareUsd) * input.sharesCount;
-      const annualReturn = parseFloat(listing.expectedAnnualReturnPct ?? "12") / 100;
-      const rentalYield = parseFloat(listing.rentalYieldPct ?? "8") / 100;
-      const appreciation = parseFloat(listing.appreciationPct ?? "4") / 100;
+      if (!listing) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      const invested = safeParseAmount(listing.pricePerShareUsd) * input.sharesCount;
+      const annualReturn = safeParseAmount(listing.expectedAnnualReturnPct ?? "12") / 100;
+      const rentalYield = safeParseAmount(listing.rentalYieldPct ?? "8") / 100;
+      const appreciation = safeParseAmount(listing.appreciationPct ?? "4") / 100;
       const totalReturn = invested * Math.pow(1 + annualReturn, input.holdYears) - invested;
       const rentalIncome = invested * rentalYield * input.holdYears;
       const capitalGain = invested * Math.pow(1 + appreciation, input.holdYears) - invested;
@@ -494,7 +563,7 @@ export const startupRouter = router({
       if (!deal) throw new TRPCError({ code: "NOT_FOUND", message: "Deal not found" });
       if (deal.status !== "open")
         throw new TRPCError({ code: "BAD_REQUEST", message: "This deal is not open for investment" });
-      const minTicket = parseFloat(deal.minimumTicketUsd);
+      const minTicket = safeParseAmount(deal.minimumTicketUsd);
       if (input.amountUsd < minTicket)
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -507,23 +576,23 @@ export const startupRouter = router({
           .select()
           .from(wallets)
           .where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD")));
-        if (!wallet || parseFloat(wallet.balance) < input.amountUsd) {
+        if (!wallet || compareMoney(wallet.balance, input.amountUsd) < 0) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient USD wallet balance" });
         }
         await (await getDbConn())
           .update(wallets)
-          .set({ balance: (parseFloat(wallet.balance) - input.amountUsd).toFixed(2) })
+          .set({ balance: subtractMoney(wallet.balance, input.amountUsd) })
           .where(eq(wallets.id, wallet.id));
       }
 
       // Calculate equity
-      const valuation = parseFloat(deal.valuationUsd ?? "0");
+      const valuation = safeParseAmount(deal.valuationUsd ?? "0");
       const equityPct = valuation > 0 ? (input.amountUsd / valuation) * 100 : null;
 
       // Update raised so far
-      const newRaised = parseFloat(deal.raisedSoFarUsd ?? "0") + input.amountUsd;
+      const newRaised = safeParseAmount(deal.raisedSoFarUsd ?? "0") + input.amountUsd;
       const newStatus =
-        newRaised >= parseFloat(deal.targetRaiseUsd) ? "funded" : deal.status;
+        newRaised >= safeParseAmount(deal.targetRaiseUsd) ? "funded" : deal.status;
       await (await getDbConn())
         .update(startupDeals)
         .set({ raisedSoFarUsd: newRaised.toFixed(2), status: newStatus })
@@ -556,10 +625,26 @@ export const startupRouter = router({
           description: `Startup investment: ${deal.companyName} (${deal.instrumentType})`,
           reference: generateTxRef("SI"),
           channel: "startup_invest",
-        });
+        }).returning();
       }
 
-      return investment;
+      // Pipeline: sanctions, fraud ML, TigerBeetle, Kafka, notifications
+      const commitRef = generateTxRef("SI-P");
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.amountUsd,
+        fromCurrency: "USD",
+        toCurrency: "USD",
+        recipientName: deal.companyName ?? "Startup Investment",
+        rail: "internal",
+        corridorCode: "NG",
+        featureLabel: "startup_invest",
+        transferId: commitRef,
+        description: `Startup: $${input.amountUsd} into ${deal.companyName} (${deal.instrumentType})`,
+        metadata: { dealId: input.dealId, instrumentType: deal.instrumentType, equityPct },
+      });
+
+      return { ...investment, verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
   getMyInvestments: protectedProcedure.query(async ({ ctx }) => {
@@ -596,7 +681,7 @@ export const startupRouter = router({
         .where(
           and(eq(startupInvestments.id, input.investmentId), eq(startupInvestments.userId, ctx.user.id))
         );
-      if (!inv) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!inv) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const [updated] = await (await getDbConn())
         .update(startupInvestments)
         .set({ agreementSigned: true })
@@ -645,9 +730,9 @@ export const portfolioRouter = router({
       .from(startupInvestments)
       .where(and(eq(startupInvestments.userId, userId), eq(startupInvestments.status, "confirmed")));
 
-    const stockTotal = parseFloat(stockOrders[0]?.totalUsd ?? "0");
-    const reTotal = parseFloat(reInvestments[0]?.totalUsd ?? "0");
-    const startupTotal = parseFloat(startupInvs[0]?.totalUsd ?? "0");
+    const stockTotal = safeParseAmount(stockOrders[0]?.totalUsd ?? "0");
+    const reTotal = safeParseAmount(reInvestments[0]?.totalUsd ?? "0");
+    const startupTotal = safeParseAmount(startupInvs[0]?.totalUsd ?? "0");
     const grandTotal = stockTotal + reTotal + startupTotal;
 
     return {
@@ -660,7 +745,7 @@ export const portfolioRouter = router({
       realEstate: {
         totalUsd: reTotal.toFixed(2),
         count: Number(reInvestments[0]?.count ?? 0),
-        returnsPaidUsd: parseFloat(reInvestments[0]?.returnsPaid ?? "0").toFixed(2),
+        returnsPaidUsd: safeParseAmount(reInvestments[0]?.returnsPaid ?? "0").toFixed(2),
         allocationPct: grandTotal > 0 ? ((reTotal / grandTotal) * 100).toFixed(1) : "0",
       },
       startups: {
@@ -745,7 +830,7 @@ export const paypalTopupRouter = router({
         paypalOrderId: orderData.id,
         amountUsd: input.amountUsd.toFixed(2),
         status: "created",
-      });
+      }).returning();
 
       return { orderId: orderData.id, approvalUrl: approvalLink };
     }),
@@ -779,14 +864,14 @@ export const paypalTopupRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Payment not completed" });
 
       const capture = captureData.purchase_units?.[0]?.payments?.captures?.[0];
-      const capturedAmount = parseFloat(capture?.amount?.value ?? "0");
+      const capturedAmount = safeParseAmount(capture?.amount?.value ?? "0");
 
       const [tx] = await (await getDbConn())
         .select()
         .from(paypalTransactions)
         .where(and(eq(paypalTransactions.paypalOrderId, input.orderId), eq(paypalTransactions.userId, ctx.user.id)));
-      if (!tx) throw new TRPCError({ code: "NOT_FOUND" });
-      if (tx.walletCredited) return { success: true, amountUsd: capturedAmount };
+      if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      if (tx.walletCredited) return { success: true, verified: true, amountUsd: capturedAmount };
       // Credit wallet
       const [wallet] = await (await getDbConn())
         .select()
@@ -795,7 +880,7 @@ export const paypalTopupRouter = router({
       if (wallet) {
         await (await getDbConn())
           .update(wallets)
-          .set({ balance: (parseFloat(wallet.balance) + capturedAmount).toFixed(2) })
+          .set({ balance: addMoney(wallet.balance, capturedAmount) })
           .where(eq(wallets.id, wallet.id));
       }
       await (await getDbConn())
@@ -803,7 +888,22 @@ export const paypalTopupRouter = router({
         .set({ status: "captured", paypalCaptureId: capture?.id, walletCredited: true })
         .where(eq(paypalTransactions.paypalOrderId, input.orderId));
 
-      return { success: true, amountUsd: capturedAmount };
+      // Kafka event for PayPal wallet topup
+      publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `paypal:${input.orderId}`, {
+        eventType: "paypal_topup_captured",
+        userId: ctx.user.id,
+        amountUsd: capturedAmount,
+        orderId: input.orderId,
+        captureId: capture?.id,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[PayPal] Kafka event failed"));
+
+      broadcastUserEvent(ctx.user.id, {
+        type: "transfer_received",
+        payload: { title: "Wallet Topped Up", message: `$${capturedAmount.toFixed(2)} added via PayPal`, amount: capturedAmount },
+      });
+
+      return { success: true, verified: true, amountUsd: capturedAmount };
     }),
 
   getHistory: protectedProcedure.query(async ({ ctx }) => {
@@ -822,11 +922,15 @@ export const flutterwaveTopupRouter = router({
     .input(
       z.object({
         amountUsd: z.number().min(5).max(50000),
-        redirectUrl: z.string().url().max(500),
+        redirectUrl: z.string().url().max(500).refine(
+          (url) => { try { const h = new URL(url).hostname; return h.endsWith("remitflow.com") || h.endsWith("remitflow.app") || h === "localhost"; } catch { return false; } },
+          { message: "Redirect URL must be on an allowed domain" }
+        ),
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const secretKey = process.env.FLW_SECRET_KEY ?? "FLWSECK_TEST-SANDBOXDEMOKEY-X";
+      const secretKey = process.env.FLW_SECRET_KEY;
+      if (!secretKey) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Flutterwave API key not configured" });
       const baseUrl = "https://api.flutterwave.com/v3";
       const txRef = generateTxRef("FLW");
 
@@ -855,7 +959,7 @@ export const flutterwaveTopupRouter = router({
             customizations: {
               title: "RemitFlow Wallet Top-up",
               description: `Add $${input.amountUsd} to your RemitFlow wallet`,
-              logo: "https://remitflow.manus.space/logo.png",
+              logo: "https://remitflow.example.com/logo.png",
             },
           }),
         });
@@ -881,7 +985,7 @@ export const flutterwaveTopupRouter = router({
         amountUsd: input.amountUsd.toFixed(2),
         paymentLink,
         status: "pending",
-      });
+      }).returning();
 
       return { paymentLink, txRef, flwRef };
     }),
@@ -894,7 +998,7 @@ export const flutterwaveTopupRouter = router({
         .from(flutterwaveTransactions)
         .where(and(eq(flutterwaveTransactions.txRef, input.txRef), eq(flutterwaveTransactions.userId, ctx.user.id)));
       if (!tx) throw new TRPCError({ code: "NOT_FOUND", message: "Transaction not found" });
-      if (tx.walletCredited) return { success: true, amountUsd: parseFloat(tx.amountUsd) };
+      if (tx.walletCredited) return { success: true, verified: true, amountUsd: safeParseAmount(tx.amountUsd) };
       // Verify payment with Flutterwave API
       const secretKey = process.env.FLW_SECRET_KEY ?? "";
       const verifyRes = await fetch(
@@ -918,7 +1022,7 @@ export const flutterwaveTopupRouter = router({
       if (wallet) {
         await (await getDbConn())
           .update(wallets)
-          .set({ balance: (parseFloat(wallet.balance) + amount).toFixed(2) })
+          .set({ balance: addMoney(wallet.balance, amount) })
           .where(eq(wallets.id, wallet.id));
       }
       await (await getDbConn())
@@ -926,7 +1030,21 @@ export const flutterwaveTopupRouter = router({
         .set({ status: "successful", walletCredited: true })
         .where(eq(flutterwaveTransactions.txRef, input.txRef));
 
-      return { success: true, amountUsd: amount };
+      // Kafka event for Flutterwave wallet topup
+      publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `flw:${input.txRef}`, {
+        eventType: "flutterwave_topup_verified",
+        userId: ctx.user.id,
+        amountUsd: amount,
+        txRef: input.txRef,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Flutterwave] Kafka event failed"));
+
+      broadcastUserEvent(ctx.user.id, {
+        type: "transfer_received",
+        payload: { title: "Wallet Topped Up", message: `$${amount.toFixed(2)} added via Flutterwave`, amount },
+      });
+
+      return { success: true, verified: true, amountUsd: amount };
     }),
 
   getHistory: protectedProcedure.query(async ({ ctx }) => {

@@ -19,11 +19,7 @@ const STATUS_COLOR: Record<string, string> = {
 const RISK_COLOR: Record<string, string> = {
   low: "bg-green-500/10 text-green-400", medium: "bg-yellow-500/10 text-yellow-400", high: "bg-red-500/10 text-red-400",
 };
-const SAMPLE_DPIAS = [
-  { id: 1, title: "Customer Data Processing Assessment", status: "approved", riskLevel: "low", createdAt: "2026-01-15", owner: "Compliance Team", description: "Assessment of personal data processing for KYC and AML compliance." },
-  { id: 2, title: "Cross-Border Transfer Data Flows", status: "review", riskLevel: "medium", createdAt: "2026-02-20", owner: "Data Protection Officer", description: "Impact assessment for international data transfers under GDPR Article 46." },
-  { id: 3, title: "Biometric Data Collection (Liveness Check)", status: "draft", riskLevel: "high", createdAt: "2026-03-10", owner: "Product Team", description: "Assessment of facial recognition and liveness detection for enhanced KYC." },
-];
+type DPIAItem = { id: number; title: string; status: string; riskLevel: string; createdAt: string; owner: string; description: string };
 
 export default function DPIA() {
   const { t } = useTranslation();
@@ -32,12 +28,21 @@ export default function DPIA() {
   const [viewItem, setViewItem] = useState<any>(null);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const { data: gdprData, refetch } = trpc.gdpr.overview.useQuery();
+  const { data: complianceData, refetch, isLoading } = trpc.compliance.dpia.useQuery();
   const exportData = trpc.gdpr.exportData.useMutation({
     onSuccess: () => { toast.success("DPIA created"); setCreateOpen(false); setTitle(""); setDescription(""); refetch(); },
     onError: (e: any) => toast.error(e.message),
   });
-  const dpias = [...SAMPLE_DPIAS].filter(d => !search || d.title?.toLowerCase().includes(search.toLowerCase()) || d.description?.toLowerCase().includes(search.toLowerCase()));
+  const backendDpias: DPIAItem[] = ((complianceData as any)?.assessments ?? []).map((a: any, i: number) => ({
+    id: a.id ?? i + 1,
+    title: a.title ?? "Untitled",
+    status: a.status === "in_review" ? "review" : (a.status ?? "draft"),
+    riskLevel: a.risk ?? a.riskLevel ?? "medium",
+    createdAt: a.lastReview ? new Date(a.lastReview).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
+    owner: a.owner ?? "Compliance Team",
+    description: a.description ?? "",
+  }));
+  const dpias = backendDpias.filter(d => !search || d.title?.toLowerCase().includes(search.toLowerCase()) || d.description?.toLowerCase().includes(search.toLowerCase()));
   return (
     <DashboardLayout>
       <div className="p-4 sm:p-6 space-y-6 max-w-3xl mx-auto">

@@ -10,3 +10,5 @@ transformers==4.44.2
 torch==2.4.1
 # Fallback: MediaPipe for landmark consistency check
 mediapipe==0.10.14
+
+psycopg2-binary>=2.9

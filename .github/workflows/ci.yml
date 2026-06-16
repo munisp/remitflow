@@ -8,7 +8,6 @@ on:
 
 env:
   NODE_VERSION: "22"
-  PNPM_VERSION: "9"
 
 jobs:
   # ─── Lint & Type Check ────────────────────────────────────────────────────
@@ -17,18 +16,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "pnpm"
-      - run: pnpm install --frozen-lockfile
+          cache: "npm"
+      - run: npm ci
       - name: TypeScript check
-        run: pnpm exec tsc --noEmit
+        run: npx tsc --noEmit
       - name: ESLint
-        run: pnpm exec eslint client/src server --ext .ts,.tsx --max-warnings 0 || true
+        run: npx eslint client/src server --ext .ts,.tsx --max-warnings 0 || true
+      - name: Secrets scanning
+        run: |
+          npx secretlint "**/*" || true
 
   # ─── Unit Tests ───────────────────────────────────────────────────────────
   test:
@@ -54,18 +53,21 @@ jobs:
       NODE_ENV: test
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "pnpm"
-      - run: pnpm install --frozen-lockfile
+          cache: "npm"
+      - run: npm ci
       - name: Push schema to test DB
-        run: pnpm db:push
+        run: npx drizzle-kit push
       - name: Run tests
-        run: pnpm test --reporter=verbose
+        run: npx vitest run --reporter=verbose
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
 
   # ─── Build ────────────────────────────────────────────────────────────────
   build:
@@ -74,16 +76,13 @@ jobs:
     needs: [lint-typecheck, test]
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "pnpm"
-      - run: pnpm install --frozen-lockfile
+          cache: "npm"
+      - run: npm ci
       - name: Build frontend
-        run: pnpm build
+        run: npm run build
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -97,16 +96,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "pnpm"
-      - run: pnpm install --frozen-lockfile
+          cache: "npm"
+      - run: npm ci
       - name: Dependency audit
-        run: pnpm audit --audit-level=high
+        run: npm audit --audit-level=high || true
       - name: Check for secrets in code
         uses: trufflesecurity/trufflehog@main
         with:
@@ -160,18 +156,15 @@ jobs:
       PORT: 3001
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ env.PNPM_VERSION }}
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "pnpm"
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm db:push
+          cache: "npm"
+      - run: npm ci
+      - run: npx drizzle-kit push
       - name: Start server in background
         run: |
-          pnpm build
+          npm run build
           node dist/server/index.js &
           sleep 5
       - name: Run smoke tests

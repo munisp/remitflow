@@ -3649,7 +3649,7 @@ export const agentCashinTransactions = pgTable("agent_cashin_transactions", {
   agentFeeNgn: numeric("agent_fee_ngn", { precision: 10, scale: 2 }),
   tigerBeetleDebitEntry: bigint("tiger_beetle_debit_entry", { mode: "bigint" }),
   tigerBeetleCreditEntry: bigint("tiger_beetle_credit_entry", { mode: "bigint" }),
-  mojalooopTransferId: varchar("mojaloop_transfer_id", { length: 200 }),
+  mojaloopTransferId: varchar("mojaloop_transfer_id", { length: 200 }),
   fluvioOffset: bigint("fluvio_offset", { mode: "bigint" }),
   reference: varchar("reference", { length: 100 }).notNull(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -5147,3 +5147,266 @@ export const kycLivenessAudit = pgTable("kyc_liveness_audit", {
   index("kyc_liveness_audit_created_idx").on(t.createdAt),
 ]);
 export type KycLivenessAudit = typeof kycLivenessAudit.$inferSelect;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Property Escrow System — Diaspora Property Purchase with Milestone Protection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const builderProfiles = pgTable("builder_profiles", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  companyName: varchar("company_name", { length: 300 }).notNull(),
+  cacRegistrationNo: varchar("cac_registration_no", { length: 50 }),
+  cacVerified: boolean("cac_verified").default(false),
+  directorNames: json("director_names").$type<string[]>().default([]),
+  directorIdsVerified: boolean("director_ids_verified").default(false),
+  registeredAddress: text("registered_address"),
+  phone: varchar("phone", { length: 30 }),
+  email: varchar("email", { length: 200 }),
+  website: varchar("website", { length: 300 }),
+  yearsInOperation: integer("years_in_operation").default(0),
+  projectsCompleted: integer("projects_completed").default(0),
+  projectsInProgress: integer("projects_in_progress").default(0),
+  averageRating: numeric("average_rating", { precision: 3, scale: 2 }).default("0.00"),
+  totalReviews: integer("total_reviews").default(0),
+  financialHealthScore: numeric("financial_health_score", { precision: 5, scale: 2 }),
+  insurancePolicyNo: varchar("insurance_policy_no", { length: 100 }),
+  insuranceVerified: boolean("insurance_verified").default(false),
+  kybStatus: varchar("kyb_status", { length: 20 }).default("pending"),
+  kybSubmittedAt: timestamp("kyb_submitted_at"),
+  kybVerifiedAt: timestamp("kyb_verified_at"),
+  kybRejectionReason: text("kyb_rejection_reason"),
+  documents: json("documents").$type<{ name: string; url: string; type: string }[]>().default([]),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => [
+  index("idx_builder_profiles_user").on(t.userId),
+  index("idx_builder_profiles_status").on(t.kybStatus),
+]);
+export type BuilderProfile = typeof builderProfiles.$inferSelect;
+
+export const propertyEscrowPlans = pgTable("property_escrow_plans", {
+  id: serial("id").primaryKey(),
+  planId: varchar("plan_id", { length: 50 }).unique().notNull(),
+  buyerId: integer("buyer_id").notNull().references(() => users.id),
+  builderId: integer("builder_id").notNull().references(() => builderProfiles.id),
+  listingId: integer("listing_id").notNull().references(() => realEstateListings.id),
+  totalPriceNgn: numeric("total_price_ngn", { precision: 24, scale: 2 }).notNull(),
+  totalPriceUsd: numeric("total_price_usd", { precision: 18, scale: 2 }).notNull(),
+  depositPct: numeric("deposit_pct", { precision: 5, scale: 2 }).default("10.00"),
+  depositPaid: boolean("deposit_paid").default(false),
+  paymentCurrency: varchar("payment_currency", { length: 10 }).default("GBP"),
+  installmentCount: integer("installment_count").notNull(),
+  installmentAmount: numeric("installment_amount", { precision: 18, scale: 2 }).notNull(),
+  installmentFrequency: varchar("installment_frequency", { length: 20 }).default("monthly"),
+  fxRateLocked: numeric("fx_rate_locked", { precision: 18, scale: 8 }),
+  fxLockExpiresAt: timestamp("fx_lock_expires_at"),
+  smartContractId: varchar("smart_contract_id", { length: 50 }),
+  agreementId: integer("agreement_id"),
+  tigerBeetleEscrowAccount: bigint("tigerbeetle_escrow_account", { mode: "bigint" }),
+  totalPaidUsd: numeric("total_paid_usd", { precision: 18, scale: 2 }).default("0.00"),
+  totalReleasedUsd: numeric("total_released_usd", { precision: 18, scale: 2 }).default("0.00"),
+  status: varchar("status", { length: 30 }).default("draft"),
+  nextPaymentDate: timestamp("next_payment_date"),
+  startedAt: timestamp("started_at"),
+  completedAt: timestamp("completed_at"),
+  cancelledAt: timestamp("cancelled_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => [
+  index("idx_escrow_plans_buyer").on(t.buyerId),
+  index("idx_escrow_plans_builder").on(t.builderId),
+  index("idx_escrow_plans_listing").on(t.listingId),
+  index("idx_escrow_plans_status").on(t.status),
+]);
+export type PropertyEscrowPlan = typeof propertyEscrowPlans.$inferSelect;
+
+export const propertyMilestones = pgTable("property_milestones", {
+  id: serial("id").primaryKey(),
+  milestoneId: varchar("milestone_id", { length: 50 }).unique().notNull(),
+  escrowPlanId: integer("escrow_plan_id").notNull().references(() => propertyEscrowPlans.id),
+  sequenceNumber: integer("sequence_number").notNull(),
+  name: varchar("name", { length: 200 }).notNull(),
+  description: text("description"),
+  releasePct: numeric("release_pct", { precision: 5, scale: 2 }).notNull(),
+  releaseAmountUsd: numeric("release_amount_usd", { precision: 18, scale: 2 }).notNull(),
+  deadline: timestamp("deadline").notNull(),
+  verificationType: varchar("verification_type", { length: 30 }).default("inspector"),
+  status: varchar("status", { length: 30 }).default("pending"),
+  cureNoticeSentAt: timestamp("cure_notice_sent_at"),
+  cureNoticeExpiresAt: timestamp("cure_notice_expires_at"),
+  approvedBy: integer("approved_by").references(() => users.id),
+  approvedAt: timestamp("approved_at"),
+  rejectedReason: text("rejected_reason"),
+  fundsReleased: boolean("funds_released").default(false),
+  fundsReleasedAt: timestamp("funds_released_at"),
+  tigerBeetleTransferId: bigint("tigerbeetle_transfer_id", { mode: "bigint" }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => [
+  index("idx_milestones_plan").on(t.escrowPlanId),
+  index("idx_milestones_status").on(t.status),
+  index("idx_milestones_deadline").on(t.deadline),
+]);
+export type PropertyMilestone = typeof propertyMilestones.$inferSelect;
+
+export const milestoneEvidence = pgTable("milestone_evidence", {
+  id: serial("id").primaryKey(),
+  evidenceId: varchar("evidence_id", { length: 50 }).unique().notNull(),
+  milestoneId: integer("milestone_id").notNull().references(() => propertyMilestones.id),
+  submittedBy: integer("submitted_by").notNull().references(() => users.id),
+  evidenceType: varchar("evidence_type", { length: 30 }).notNull(),
+  fileUrl: text("file_url").notNull(),
+  fileName: varchar("file_name", { length: 300 }),
+  fileSizeBytes: bigint("file_size_bytes", { mode: "bigint" }),
+  description: text("description"),
+  gpsLatitude: numeric("gps_latitude", { precision: 10, scale: 7 }),
+  gpsLongitude: numeric("gps_longitude", { precision: 10, scale: 7 }),
+  metadata: json("metadata").$type<Record<string, unknown>>().default({}),
+  verified: boolean("verified").default(false),
+  verifiedBy: integer("verified_by").references(() => users.id),
+  verifiedAt: timestamp("verified_at"),
+  rejectionReason: text("rejection_reason"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => [
+  index("idx_evidence_milestone").on(t.milestoneId),
+  index("idx_evidence_submitted").on(t.submittedBy),
+]);
+export type MilestoneEvidence = typeof milestoneEvidence.$inferSelect;
+
+export const propertyEscrowDisputes = pgTable("property_escrow_disputes", {
+  id: serial("id").primaryKey(),
+  disputeId: varchar("dispute_id", { length: 50 }).unique().notNull(),
+  escrowPlanId: integer("escrow_plan_id").notNull().references(() => propertyEscrowPlans.id),
+  milestoneId: integer("milestone_id").references(() => propertyMilestones.id),
+  raisedBy: integer("raised_by").notNull().references(() => users.id),
+  disputeType: varchar("dispute_type", { length: 30 }).notNull(),
+  severity: varchar("severity", { length: 10 }).default("medium"),
+  description: text("description").notNull(),
+  evidenceIds: json("evidence_ids").$type<string[]>().default([]),
+  status: varchar("status", { length: 30 }).default("open"),
+  resolution: text("resolution"),
+  refundAmountUsd: numeric("refund_amount_usd", { precision: 18, scale: 2 }),
+  refundInitiatedAt: timestamp("refund_initiated_at"),
+  refundCompletedAt: timestamp("refund_completed_at"),
+  assignedMediator: integer("assigned_mediator").references(() => users.id),
+  cureDeadline: timestamp("cure_deadline"),
+  autoRefundDate: timestamp("auto_refund_date"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => [
+  index("idx_prop_disputes_plan").on(t.escrowPlanId),
+  index("idx_prop_disputes_status").on(t.status),
+  index("idx_prop_disputes_raised").on(t.raisedBy),
+]);
+export type PropertyEscrowDispute = typeof propertyEscrowDisputes.$inferSelect;
+
+export const escrowPaymentSchedule = pgTable("escrow_payment_schedule", {
+  id: serial("id").primaryKey(),
+  escrowPlanId: integer("escrow_plan_id").notNull().references(() => propertyEscrowPlans.id),
+  installmentNumber: integer("installment_number").notNull(),
+  dueDate: timestamp("due_date").notNull(),
+  amountUsd: numeric("amount_usd", { precision: 18, scale: 2 }).notNull(),
+  amountLocal: numeric("amount_local", { precision: 24, scale: 2 }),
+  fxRateUsed: numeric("fx_rate_used", { precision: 18, scale: 8 }),
+  status: varchar("status", { length: 20 }).default("scheduled"),
+  paidAt: timestamp("paid_at"),
+  transactionId: integer("transaction_id").references(() => transactions.id),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => [
+  index("idx_escrow_schedule_plan").on(t.escrowPlanId),
+  index("idx_escrow_schedule_due").on(t.dueDate),
+  index("idx_escrow_schedule_status").on(t.status),
+]);
+export type EscrowPaymentScheduleEntry = typeof escrowPaymentSchedule.$inferSelect;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// P2P Instant Payments (Zelle-style) — Alias Directory + Payment Requests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export const p2pAliasTypeEnum = pgEnum("p2p_alias_type", ["phone", "email"]);
+export const p2pAliasStatusEnum = pgEnum("p2p_alias_status", ["active", "pending_verification", "suspended", "deactivated"]);
+export const p2pRequestStatusEnum = pgEnum("p2p_request_status", ["pending", "approved", "declined", "expired", "cancelled"]);
+export const p2pTransferStatusEnum = pgEnum("p2p_transfer_status", ["initiated", "alias_resolved", "quoted", "compliance_cleared", "debited", "fx_converted", "settling", "completed", "failed", "compensated", "disputed", "escrowed", "streaming", "scheduled", "pending", "cancelled", "favorite"]);
+export const p2pTransferRailEnum = pgEnum("p2p_transfer_rail", ["internal", "mojaloop", "papss", "mpesa", "upi", "pix", "sepa", "fednow", "swift", "batch", "ilp_stream", "escrow", "favorite", "scheduled"]);
+
+export const paymentAliases = pgTable("payment_aliases", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  aliasType: p2pAliasTypeEnum("alias_type").notNull(),
+  aliasValue: varchar("alias_value", { length: 320 }).notNull(),
+  normalizedValue: varchar("normalized_value", { length: 320 }).notNull(),
+  currency: varchar("currency", { length: 8 }).notNull(),
+  walletId: integer("wallet_id"),
+  country: varchar("country", { length: 3 }).notNull(),
+  fspId: varchar("fsp_id", { length: 64 }).default("remitflow-fsp"),
+  status: p2pAliasStatusEnum("status").default("active").notNull(),
+  isPrimary: boolean("is_primary").default(false),
+  verifiedAt: timestamp("verified_at"),
+  mojaloopRegistered: boolean("mojaloop_registered").default(false),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => [
+  uniqueIndex("payment_aliases_normalized_unique").on(t.normalizedValue, t.aliasType),
+  index("payment_aliases_user_idx").on(t.userId),
+  index("payment_aliases_country_idx").on(t.country),
+]);
+export type PaymentAlias = typeof paymentAliases.$inferSelect;
+
+export const p2pPaymentRequests = pgTable("p2p_payment_requests", {
+  id: serial("id").primaryKey(),
+  requesterId: integer("requester_id").notNull(),
+  requesterAlias: varchar("requester_alias", { length: 320 }).notNull(),
+  payerAlias: varchar("payer_alias", { length: 320 }).notNull(),
+  payerId: integer("payer_id"),
+  amount: numeric("amount", { precision: 18, scale: 2 }).notNull(),
+  currency: varchar("currency", { length: 8 }).notNull(),
+  note: varchar("note", { length: 500 }),
+  status: p2pRequestStatusEnum("status").default("pending").notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  respondedAt: timestamp("responded_at"),
+  transferId: integer("transfer_id"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (t) => [
+  index("p2p_payment_requests_payer_idx").on(t.payerAlias),
+  index("p2p_payment_requests_requester_idx").on(t.requesterId),
+  index("p2p_payment_requests_status_idx").on(t.status),
+]);
+export type P2pPaymentRequest = typeof p2pPaymentRequests.$inferSelect;
+
+export const p2pTransfers = pgTable("p2p_transfers", {
+  id: serial("id").primaryKey(),
+  senderId: integer("sender_id").notNull(),
+  senderAlias: varchar("sender_alias", { length: 320 }),
+  receiverAlias: varchar("receiver_alias", { length: 320 }).notNull(),
+  receiverId: integer("receiver_id"),
+  receiverFspId: varchar("receiver_fsp_id", { length: 64 }),
+  sendAmount: numeric("send_amount", { precision: 18, scale: 2 }).notNull(),
+  sendCurrency: varchar("send_currency", { length: 8 }).notNull(),
+  receiveAmount: numeric("receive_amount", { precision: 18, scale: 2 }),
+  receiveCurrency: varchar("receive_currency", { length: 8 }),
+  fxRate: numeric("fx_rate", { precision: 18, scale: 8 }),
+  fee: numeric("fee", { precision: 18, scale: 2 }).default("0.00"),
+  rail: p2pTransferRailEnum("rail"),
+  corridorCode: varchar("corridor_code", { length: 10 }),
+  status: p2pTransferStatusEnum("status").default("initiated").notNull(),
+  mojaloopTransferId: varchar("mojaloop_transfer_id", { length: 64 }),
+  ilpCondition: varchar("ilp_condition", { length: 128 }),
+  ilpFulfillment: varchar("ilp_fulfillment", { length: 128 }),
+  amlCheckId: varchar("aml_check_id", { length: 64 }),
+  fraudScore: numeric("fraud_score", { precision: 5, scale: 4 }),
+  paymentRequestId: integer("payment_request_id"),
+  note: varchar("note", { length: 500 }),
+  idempotencyKey: varchar("idempotency_key", { length: 128 }).unique(),
+  completedAt: timestamp("completed_at"),
+  failedAt: timestamp("failed_at"),
+  failureReason: varchar("failure_reason", { length: 500 }),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (t) => [
+  index("p2p_transfers_sender_idx").on(t.senderId),
+  index("p2p_transfers_receiver_idx").on(t.receiverId),
+  index("p2p_transfers_status_idx").on(t.status),
+  index("p2p_transfers_idempotency_idx").on(t.idempotencyKey),
+  index("p2p_transfers_corridor_idx").on(t.corridorCode),
+]);

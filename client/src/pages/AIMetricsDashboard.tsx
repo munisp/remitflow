@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Brain, TrendingUp, AlertTriangle, CheckCircle2, BarChart3, Zap, Activity, Shield } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 function MetricCard({ label, value, unit, color, icon: Icon, description }: {
   label: string; value: string | number; unit?: string; color: string; icon: any; description?: string;
@@ -64,6 +65,7 @@ function LoadingMetrics() {
 }
 
 export default function AIMetricsDashboard() {
+  const { t } = useTranslation();
   const [featureModel, setFeatureModel] = useState<"fraud_detection" | "compliance_ml" | "risk_scoring">("fraud_detection");
 
   const { data: metrics, isLoading: metricsLoading } = trpc.mlInsights.getModelMetrics.useQuery();
@@ -300,9 +302,9 @@ export default function AIMetricsDashboard() {
                       <p className="text-xs text-muted-foreground">Threshold: {drift.metrics.driftThreshold}</p>
                     </div>
                     <div className="p-3 border rounded-lg">
-                      <p className="text-xs text-muted-foreground">P-Value</p>
-                      <p className="text-xl font-bold">{drift.metrics.pValue.toFixed(3)}</p>
-                      <p className="text-xs text-muted-foreground">{drift.metrics.pValue > 0.05 ? "Not significant" : "Significant"}</p>
+                      <p className="text-xs text-muted-foreground">Baseline Tx Count</p>
+                      <p className="text-xl font-bold">{drift.metrics.baselineTxCount.toLocaleString()}</p>
+                      <p className="text-xs text-muted-foreground">Recent: {drift.metrics.recentTxCount.toLocaleString()}</p>
                     </div>
                   </div>
                   <div className="p-4 bg-muted/50 rounded-lg">

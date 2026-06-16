@@ -153,7 +153,7 @@ async function dispatchWebPush(
   } catch (err: any) {
     if (err?.code === "MODULE_NOT_FOUND") {
       // web-push not installed — log and skip
-      console.info("[Push] web-push not installed, skipping notification");
+      logger.info("[Push] web-push not installed, skipping notification");
       return;
     }
     throw err;

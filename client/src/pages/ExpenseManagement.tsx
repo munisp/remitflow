@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Receipt, TrendingUp, CheckCircle, XCircle, Plus, Upload, AlertCircle } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 
 type FormState = {
@@ -43,6 +44,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function ExpenseManagement() {
+  const { t } = useTranslation();
   const [addOpen, setAddOpen] = useState(false);
   const companyId = 1;
   const [form, setForm] = useState<FormState>(defaultForm);
@@ -50,8 +52,8 @@ export default function ExpenseManagement() {
 
   const utils = trpc.useUtils();
   const { data: expenses, isLoading } = trpc.expenseManagement.listReports.useQuery({});
-  const { data: summary } = trpc.expenseManagement.listReports.useQuery();
-  const { data: policies } = trpc.expenseManagement.listPolicies.useQuery();
+  const { data: summary } = trpc.expenseManagement.listReports.useQuery({});
+  const { data: policies } = trpc.expenseManagement.listPolicies.useQuery({ companyId: 0 });
 
   const submitReport = trpc.expenseManagement.submitReport.useMutation({
     onSuccess: () => {
@@ -196,7 +198,7 @@ export default function ExpenseManagement() {
                 </div>
               ) : (
                 <div className="divide-y">
-                  {expenses?.map(exp => (
+                  {expenses?.map((exp: any) => (
                     <div key={exp.id} className="py-3 flex items-center justify-between gap-4">
                       <div className="flex-1 min-w-0">
                         <p className="font-medium text-sm truncate">{exp.merchant || exp.description}</p>
@@ -235,7 +237,7 @@ export default function ExpenseManagement() {
                 </div>
               ) : (
                 <div className="divide-y">
-                  {policies?.map(p => (
+                  {policies?.map((p: any) => (
                     <div key={p.id} className="py-3 flex items-center justify-between">
                       <div>
                         <p className="font-medium text-sm">{p.name}</p>

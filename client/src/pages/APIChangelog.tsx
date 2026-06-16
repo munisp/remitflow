@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Code2, Zap, Shield, Bug, Plus, AlertTriangle, RefreshCw } from "lucide-react";
 import { trpc } from "@/lib/trpc";
+import { useTranslation } from 'react-i18next';
 
 // Static extended changelog (local — covers all versions not yet in DB)
 const STATIC_CHANGELOG = [
@@ -92,7 +93,8 @@ const TYPE_CONFIG: Record<string, { color: string; icon: React.ReactElement; lab
 };
 
 export default function APIChangelog() {
-  const { data: dbEntries = [], isLoading } = trpc.apiChangelog.list.useQuery();
+  const { t } = useTranslation();
+  const { data: dbEntries = [], isLoading, isError } = trpc.apiChangelog.list.useQuery();
 
   // Merge DB entries (from apiChangelog router) with static entries, deduplicate by version
   const dbVersions = new Set((dbEntries as any[]).map((e: any) => e.version));

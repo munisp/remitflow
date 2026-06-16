@@ -42,6 +42,7 @@ import { runArchivalPipeline } from "./services/archivalPipeline";
 import { transferBatchQueue } from "./services/transferBatchQueue";
 import { walletCache } from "./services/walletCache";
 import { logger } from './_core/logger';
+import { safeParseAmount } from "./lib/safeDecimal";
 
 // ============================================================================
 // FX Rate Cache (backed by fx-rates.service with real API sources)
@@ -154,8 +155,8 @@ async function executeSingleRecurringPayment(payment: any): Promise<void> {
   }
 
   const wallet = userWallets[0];
-  const paymentAmount = parseFloat(payment.amount);
-  const walletBalance = parseFloat(wallet.balance);
+  const paymentAmount = safeParseAmount(payment.amount);
+  const walletBalance = safeParseAmount(wallet.balance);
 
   if (walletBalance < paymentAmount) {
     await createNotification(
@@ -286,7 +287,7 @@ async function checkFXRateAlerts(): Promise<void> {
       const currentRate = getCachedRate(alert.fromCurrency, alert.toCurrency);
       if (currentRate === null) continue;
 
-      const targetRate = parseFloat(alert.targetRate);
+      const targetRate = safeParseAmount(alert.targetRate);
       const isTriggered =
         alert.direction === "above"
           ? currentRate >= targetRate
@@ -536,7 +537,7 @@ async function sendKycExpiryReminders(): Promise<void> {
           html: `<p>Dear ${doc.userName ?? 'Valued Customer'},</p>
 <p>Your <strong>${doc.docType.replace('_', ' ')}</strong> document on file with RemitFlow will expire on <strong>${doc.expiresAt!.toLocaleDateString()}</strong> (${daysLeft} day${daysLeft !== 1 ? 's' : ''} from now).</p>
 <p>To avoid service interruption, please log in and upload a new document before the expiry date.</p>
-<p><a href="${process.env.APP_URL ?? 'https://remitflow.manus.space'}/kyc">Update your KYC documents →</a></p>
+<p><a href="${process.env.APP_URL ?? 'https://remitflow.example.com'}/kyc">Update your KYC documents →</a></p>
 <p>Thank you,<br/>The RemitFlow Compliance Team</p>`,
           text: `Your ${doc.docType} expires in ${daysLeft} day(s) on ${doc.expiresAt!.toLocaleDateString()}. Please log in to update your KYC documents.`,
         });
@@ -766,10 +767,10 @@ async function sendWeeklyFundDigests(): Promise<void> {
       const userVotes = await db.select({ proposalId: fundVotes.proposalId }).from(fundVotes).where(eq(fundVotes.userId, userId));
       if (userVotes.length === 0) continue;
 
-      const proposalIds = userVotes.map((v) => v.proposalId);
+      const proposalIds = userVotes.map((v: any) => v.proposalId);
       const proposalRows = await db.select({ fundId: fundProposals.fundId }).from(fundProposals).where(inArray(fundProposals.id, proposalIds));
 
-      const fundIds = Array.from(new Set(proposalRows.map((p) => p.fundId))) as number[];
+      const fundIds = Array.from(new Set(proposalRows.map((p: any) => p.fundId))) as number[];
       if (fundIds.length === 0) continue;
 
       const digestFunds: FundDigestEntry[] = [];
@@ -778,11 +779,11 @@ async function sendWeeklyFundDigests(): Promise<void> {
         const [fund] = await db.select().from(communityFunds).where(eq(communityFunds.id, fid)).limit(1);
         if (!fund) continue;
         const activeProposalRows = await db.select({ title: fundProposals.title, votesFor: fundProposals.votesFor }).from(fundProposals).where(and(eq(fundProposals.fundId, fid), eq(fundProposals.status, "voting" as any)));
-        const topProposal = activeProposalRows.sort((a, b) => Number(b.votesFor ?? 0) - Number(a.votesFor ?? 0))[0];
+        const topProposal = activeProposalRows.sort((a: any, b: any) => Number(b.votesFor ?? 0) - Number(a.votesFor ?? 0))[0];
         digestFunds.push({
           name: fund.name,
-          totalRaised: parseFloat(String(fund.totalRaised ?? 0)),
-          goalAmount: parseFloat(String(fund.goalAmount ?? 0)),
+          totalRaised: safeParseAmount(String(fund.totalRaised ?? 0)),
+          goalAmount: safeParseAmount(String(fund.goalAmount ?? 0)),
           contributorCount: fund.contributorCount ?? 0,
           currency: fund.currency ?? "USD",
           activeProposals: activeProposalRows.length,

@@ -35,6 +35,76 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+# ── PostgreSQL persistence ──────────────────────────────────────────────
+import psycopg2
+import psycopg2.extras
+from contextlib import contextmanager
+
+_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+_db_pool = None
+
+def _get_db():
+    global _db_pool
+    if _db_pool is None:
+        _db_pool = psycopg2.connect(_DB_URL)
+        _db_pool.autocommit = True
+        with _db_pool.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS deepfake_detector_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_deepfake_detector_updated
+                    ON deepfake_detector_state(updated_at);
+                CREATE TABLE IF NOT EXISTS deepfake_detector_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    payload JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_deepfake_detector_events_type
+                    ON deepfake_detector_events(event_type, created_at);
+            """)
+    return _db_pool
+
+def db_upsert(record_id: str, data: dict):
+    conn = _get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO deepfake_detector_state (id, data, updated_at)
+               VALUES (%s, %s, NOW())
+               ON CONFLICT (id) DO UPDATE SET data = %s, updated_at = NOW()""",
+            (record_id, psycopg2.extras.Json(data), psycopg2.extras.Json(data))
+        )
+
+def db_get(record_id: str) -> dict | None:
+    conn = _get_db()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT data FROM deepfake_detector_state WHERE id = %s", (record_id,))
+        row = cur.fetchone()
+        return row["data"] if row else None
+
+def db_list(limit: int = 100) -> list[dict]:
+    conn = _get_db()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT data FROM deepfake_detector_state ORDER BY updated_at DESC LIMIT %s",
+            (limit,)
+        )
+        return [row["data"] for row in cur.fetchall()]
+
+def db_log_event(event_type: str, payload: dict):
+    conn = _get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO deepfake_detector_events (event_type, payload) VALUES (%s, %s)",
+            (event_type, psycopg2.extras.Json(payload))
+        )
+# ── End PostgreSQL persistence ──────────────────────────────────────────
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -385,11 +455,6 @@ async def run_deepfake_check(req: DeepfakeCheckRequest) -> DeepfakeCheckResponse
     model_loaded = await _load_model()
     if model_loaded and _model_available:
         try:
-            is_deepfake, confidence, indicators = await asyncio.to_thread(
-                lambda: asyncio.run(_check_with_model(image_bytes))
-                if False else None  # placeholder — use executor below
-            )
-            # Use thread executor for CPU-bound model inference
             loop = asyncio.get_event_loop()
             is_deepfake, confidence, indicators = await loop.run_in_executor(
                 None, lambda: asyncio.run(_check_with_model(image_bytes))
@@ -472,6 +537,60 @@ app = FastAPI(
     version="1.0.0",
 )
 
+@app.get("/metrics")
+async def _prometheus_metrics():
+    uptime = _time_mod.time() - _PROCESS_START_TIME
+    return Response(
+        content=(
+            f"# HELP pod_uptime_seconds Time since process started\n"
+            f"# TYPE pod_uptime_seconds gauge\n"
+            f'pod_uptime_seconds{{service="python-deepfake-detector"}} {uptime:.1f}\n'
+            f"# HELP pod_ready Whether pod is ready\n"
+            f"# TYPE pod_ready gauge\n"
+            f'pod_ready{{service="python-deepfake-detector"}} 1\n'
+        ),
+        media_type="text/plain; version=0.0.4",
+    )
+
+
+# Graceful shutdown handling
+_shutdown_flag = False
+
+def _handle_shutdown(signum, frame):
+    global _shutdown_flag
+    _shutdown_flag = True
+    logging.getLogger("python-deepfake-detector").info(f"Received signal {signum}, initiating graceful shutdown...")
+    _emit_lifecycle_event("pod.shutdown.initiated", signal=signum)
+
+signal.signal(signal.SIGTERM, _handle_shutdown)
+signal.signal(signal.SIGINT, _handle_shutdown)
+
+# ── Pod Lifecycle Observability ─────────────────────────────────────────
+import time as _time_mod
+_PROCESS_START_TIME = _time_mod.time()
+_LIFECYCLE_LOGGER = logging.getLogger("pod-lifecycle")
+
+def _emit_lifecycle_event(event_type: str, **kwargs):
+    """Emit structured JSON lifecycle event for OpenSearch/Fluentd ingestion."""
+    import json as _json
+    payload = {
+        "event": event_type,
+        "service": "python-deepfake-detector",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        **kwargs
+    }
+    _LIFECYCLE_LOGGER.info(_json.dumps(payload))
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    logging.getLogger("python-deepfake-detector").info("FastAPI shutdown event — cleaning up resources")
+
+
+# Initialize PostgreSQL tables (middleware-ready)
+_db_ensure_tables("deepfake_detector")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(","),
@@ -501,6 +620,14 @@ async def check_deepfake(req: DeepfakeCheckRequest, request: Request):
         f"confidence={result.confidence:.3f} method={result.method} "
         f"latency={result.processing_time_ms:.0f}ms"
     )
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = result if isinstance(result, dict) else {"result": str(result)}
+        _db_upsert("deepfake_detector", f"check:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("deepfake_detector", "check", _result_data)
+    except Exception:
+        pass
     return result
 
 
@@ -522,6 +649,14 @@ async def check_deepfake_batch(req: BatchCheckRequest, request: Request):
     any_deepfake = any(r.is_deepfake for r in results)
     max_confidence = max((r.confidence for r in results), default=0.0)
 
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = BatchCheckResponse if isinstance(BatchCheckResponse, dict) else {"result": str(BatchCheckResponse)}
+        _db_upsert("deepfake_detector", f"batch:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("deepfake_detector", "batch", _result_data)
+    except Exception:
+        pass
     return BatchCheckResponse(
         results=list(results),
         any_deepfake=any_deepfake,
@@ -577,5 +712,111 @@ async def startup():
 
 if __name__ == "__main__":
     import uvicorn
+
+# ─── PostgreSQL Persistence (middleware-ready: swap to TigerBeetle/Kafka in production) ───
+import psycopg2
+import json as _json
+import signal
+import atexit
+
+def _get_db_conn():
+    """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""
+    try:
+        db_url = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = True
+        return conn
+    except Exception:
+        return None
+
+def _db_ensure_tables(table_prefix):
+    """Create state and events tables if they don't exist."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_prefix}_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL DEFAULT '{{}}',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_prefix}_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    payload JSONB DEFAULT '{{}}',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+def _db_upsert(table_prefix, record_id, data):
+    """Upsert a record to PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"INSERT INTO {table_prefix}_state (id, data, updated_at) VALUES (%s, %s, NOW()) "
+                f"ON CONFLICT (id) DO UPDATE SET data = %s, updated_at = NOW()",
+                (record_id, _json.dumps(data), _json.dumps(data))
+            )
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+def _db_get(table_prefix, record_id):
+    """Get a record from PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT data FROM {table_prefix}_state WHERE id = %s", (record_id,))
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+    return None
+
+def _db_list(table_prefix, limit=200):
+    """List records from PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT data FROM {table_prefix}_state ORDER BY updated_at DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [r[0] for r in rows]
+        except Exception:
+            pass
+    return []
+
+def _db_log_event(table_prefix, event_type, payload):
+    """Log an event to PostgreSQL events table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"INSERT INTO {table_prefix}_events (event_type, payload) VALUES (%s, %s)",
+                (event_type, _json.dumps(payload))
+            )
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
     port = int(os.getenv("PORT", "8097"))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

@@ -17,6 +17,7 @@ import {
   MessageSquare, Send, Eye, UserCheck
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const SEVERITY_COLORS: Record<string, string> = {
   low: "bg-blue-100 text-blue-800 border-blue-200",
@@ -205,7 +206,7 @@ function AlertDetailDrawer({ alertId, open, onClose }: { alertId: number | null;
             <Separator />
 
             {/* Status Transition Timeline */}
-            {detail.notes && detail.notes.filter(n => n.isInternal && (
+            {detail.notes && detail.notes.filter((n: any) => n.isInternal && (
               n.content.includes('Status changed') ||
               n.content.includes('assigned to') ||
               n.content.includes('unassigned') ||
@@ -219,7 +220,7 @@ function AlertDetailDrawer({ alertId, open, onClose }: { alertId: number | null;
                 <div className="relative pl-5">
                   <div className="absolute left-1.5 top-0 bottom-0 w-px bg-border" />
                   {detail.notes
-                    .filter(n => n.isInternal && (
+                    .filter((n: any) => n.isInternal && (
                       n.content.includes('Status changed') ||
                       n.content.includes('assigned to') ||
                       n.content.includes('unassigned') ||
@@ -227,7 +228,7 @@ function AlertDetailDrawer({ alertId, open, onClose }: { alertId: number | null;
                       n.content.includes('escalated')
                     ))
                     .slice(0, 8)
-                    .map((note, i) => (
+                    .map((note: any, i: any) => (
                       <div key={i} className="relative mb-3 last:mb-0">
                         <div className="absolute -left-3.5 top-1 w-2.5 h-2.5 rounded-full bg-primary border-2 border-background" />
                         <p className="text-xs text-foreground leading-snug">{note.content}</p>
@@ -246,7 +247,7 @@ function AlertDetailDrawer({ alertId, open, onClose }: { alertId: number | null;
               </h4>
               {detail.notes && detail.notes.length > 0 ? (
                 <div className="space-y-3 max-h-56 overflow-y-auto pr-1">
-                  {detail.notes.map(note => (
+                  {detail.notes.map((note: any) => (
                     <div key={note.id} className="bg-muted/40 rounded-lg p-3 text-sm">
                       <div className="flex items-center justify-between mb-1">
                         <span className="font-medium text-xs text-muted-foreground">
@@ -291,6 +292,7 @@ function AlertDetailDrawer({ alertId, open, onClose }: { alertId: number | null;
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function ComplianceAlerts() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [severityFilter, setSeverityFilter] = useState<string>("all");
@@ -549,7 +551,7 @@ export default function ComplianceAlerts() {
             {(sortBy === "priority"
               ? [...(alerts ?? [])].sort((a, b) => ((b as any).priorityScore ?? 0) - ((a as any).priorityScore ?? 0))
               : alerts ?? []
-            ).map(alert => (
+            ).map((alert: any) => (
               <Card
                 key={alert.id}
                 className={`border-l-4 cursor-pointer hover:shadow-md transition-shadow ${alert.severity === "critical" ? "border-l-red-500" : alert.severity === "high" ? "border-l-orange-500" : alert.severity === "medium" ? "border-l-yellow-500" : "border-l-blue-400"}`}
@@ -605,7 +607,7 @@ export default function ComplianceAlerts() {
                             </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="unassign">— Unassign —</SelectItem>
-                              {(officers ?? []).map(o => (
+                              {(officers ?? []).map((o: any) => (
                                 <SelectItem key={o.id} value={String(o.id)}>
                                   {o.name ?? o.email ?? `Officer #${o.id}`}
                                 </SelectItem>

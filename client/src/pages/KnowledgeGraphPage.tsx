@@ -8,8 +8,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Loader2, Network, AlertTriangle, Search, GitBranch, BarChart3 } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function KnowledgeGraphPage() {
+  const { t } = useTranslation();
   const [cypherQuery, setCypherQuery] = useState("MATCH (u:User)-[:SENT]->(t:Transaction) RETURN u.name, count(t) AS txCount ORDER BY txCount DESC LIMIT 10");
   const [fraudUserId, setFraudUserId] = useState("1");
   const [txPathFrom, setTxPathFrom] = useState("1");

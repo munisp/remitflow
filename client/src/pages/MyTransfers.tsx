@@ -27,6 +27,7 @@ import {
   Filter, TrendingUp, DollarSign, Calendar, ChevronDown, ChevronUp
 } from "lucide-react";
 import { useLocation } from "wouter";
+import { useTranslation } from 'react-i18next';
 
 const RAIL_LABELS: Record<string, string> = {
   papss: "PAPSS", mojaloop: "Mojaloop", bricspay: "BRICSPay",
@@ -181,6 +182,7 @@ function TransferCard({ tx, onCancel }: { tx: any; onCancel: (id: number) => voi
 }
 
 export default function MyTransfers() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const { user } = useAuth();
   const [search, setSearch] = useState("");

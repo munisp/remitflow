@@ -1,0 +1,220 @@
+# Backup & Disaster Recovery Configuration
+# Automated PostgreSQL backups, point-in-time recovery, cross-region replication
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup-daily
+  namespace: remitflow
+  labels:
+    app: remitflow
+    component: backup
+spec:
+  schedule: "0 2 * * *"  # 2 AM UTC daily
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 3
+      template:
+        spec:
+          serviceAccountName: backup-service-account
+          containers:
+            - name: pg-backup
+              image: postgres:16-alpine
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+                  TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+                  BACKUP_FILE="remitflow_${TIMESTAMP}.sql.gz"
+                  
+                  echo "[$(date)] Starting PostgreSQL backup..."
+                  pg_dump \
+                    --host=$PGHOST \
+                    --port=$PGPORT \
+                    --username=$PGUSER \
+                    --dbname=$PGDATABASE \
+                    --format=custom \
+                    --compress=9 \
+                    --verbose \
+                    --no-owner \
+                    --no-privileges \
+                    --file="/backups/${BACKUP_FILE}"
+                  
+                  echo "[$(date)] Backup complete: ${BACKUP_FILE} ($(du -h /backups/${BACKUP_FILE} | cut -f1))"
+                  
+                  # Upload to S3
+                  aws s3 cp "/backups/${BACKUP_FILE}" \
+                    "s3://${BACKUP_BUCKET}/postgres/daily/${BACKUP_FILE}" \
+                    --storage-class STANDARD_IA \
+                    --sse aws:kms \
+                    --sse-kms-key-id "${KMS_KEY_ID}"
+                  
+                  echo "[$(date)] Uploaded to S3: s3://${BACKUP_BUCKET}/postgres/daily/${BACKUP_FILE}"
+                  
+                  # Cleanup local backups older than 7 days
+                  find /backups -name "remitflow_*.sql.gz" -mtime +7 -delete
+                  
+                  # Verify backup integrity
+                  pg_restore --list "/backups/${BACKUP_FILE}" > /dev/null 2>&1 || {
+                    echo "ERROR: Backup verification failed!"
+                    exit 1
+                  }
+                  echo "[$(date)] Backup verified successfully"
+              env:
+                - name: PGHOST
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-credentials
+                      key: host
+                - name: PGPORT
+                  value: "5432"
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-credentials
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgres-credentials
+                      key: password
+                - name: PGDATABASE
+                  value: remitflow
+                - name: BACKUP_BUCKET
+                  value: remitflow-backups
+                - name: KMS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: backup-encryption-key
+                      key: kms-key-id
+              volumeMounts:
+                - name: backup-storage
+                  mountPath: /backups
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 1Gi
+                limits:
+                  cpu: "2"
+                  memory: 4Gi
+          volumes:
+            - name: backup-storage
+              persistentVolumeClaim:
+                claimName: backup-pvc
+          restartPolicy: OnFailure
+---
+# WAL archiving for point-in-time recovery
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-wal-config
+  namespace: remitflow
+data:
+  wal-archive.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    WAL_FILE=$1
+    DEST="s3://${BACKUP_BUCKET}/postgres/wal/$(basename ${WAL_FILE})"
+    aws s3 cp "${WAL_FILE}" "${DEST}" --sse aws:kms --sse-kms-key-id "${KMS_KEY_ID}"
+  
+  pitr-restore.sh: |
+    #!/bin/bash
+    set -euo pipefail
+    TARGET_TIME=$1
+    echo "Restoring to point-in-time: ${TARGET_TIME}"
+    
+    # 1. Find the latest base backup before target time
+    LATEST_BACKUP=$(aws s3 ls "s3://${BACKUP_BUCKET}/postgres/daily/" \
+      | sort -r | head -1 | awk '{print $4}')
+    
+    # 2. Download base backup
+    aws s3 cp "s3://${BACKUP_BUCKET}/postgres/daily/${LATEST_BACKUP}" /restore/
+    
+    # 3. Restore base backup
+    pg_restore \
+      --host=$PGHOST --port=$PGPORT --username=$PGUSER \
+      --dbname=$PGDATABASE --clean --if-exists \
+      "/restore/${LATEST_BACKUP}"
+    
+    # 4. Apply WAL files up to target time
+    echo "recovery_target_time = '${TARGET_TIME}'" >> /var/lib/postgresql/data/recovery.conf
+    echo "restore_command = 'aws s3 cp s3://${BACKUP_BUCKET}/postgres/wal/%f %p'" >> /var/lib/postgresql/data/recovery.conf
+    echo "recovery_target_action = 'promote'" >> /var/lib/postgresql/data/recovery.conf
+    
+    echo "PITR restore initiated to ${TARGET_TIME}"
+---
+# S3 lifecycle policy for backup retention
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-retention-policy
+  namespace: remitflow
+data:
+  policy.json: |
+    {
+      "Rules": [
+        {
+          "ID": "DailyBackupRetention",
+          "Prefix": "postgres/daily/",
+          "Status": "Enabled",
+          "Transitions": [
+            { "Days": 30, "StorageClass": "GLACIER" }
+          ],
+          "Expiration": { "Days": 365 }
+        },
+        {
+          "ID": "WALRetention",
+          "Prefix": "postgres/wal/",
+          "Status": "Enabled",
+          "Expiration": { "Days": 30 }
+        }
+      ]
+    }
+---
+# Disaster Recovery runbook
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dr-runbook
+  namespace: remitflow
+data:
+  runbook.md: |
+    # Disaster Recovery Runbook
+    
+    ## RPO: 15 minutes (WAL archiving)
+    ## RTO: 2 hours (full restore)
+    
+    ### Backup Schedule
+    - **Full backup**: Daily at 2 AM UTC
+    - **WAL archiving**: Continuous (every 15 min)
+    - **Retention**: 30 days hot, 365 days cold (Glacier)
+    
+    ### Recovery Procedures
+    
+    #### 1. Point-in-Time Recovery
+    ```bash
+    kubectl exec -it postgres-backup-pod -- /scripts/pitr-restore.sh "2024-01-15 14:30:00 UTC"
+    ```
+    
+    #### 2. Full Restore from Latest Backup
+    ```bash
+    LATEST=$(aws s3 ls s3://remitflow-backups/postgres/daily/ | sort -r | head -1 | awk '{print $4}')
+    aws s3 cp "s3://remitflow-backups/postgres/daily/${LATEST}" ./
+    pg_restore --host=DB_HOST --port=5432 --username=remitflow --dbname=remitflow --clean "${LATEST}"
+    ```
+    
+    #### 3. Cross-Region Failover
+    1. Promote read replica in secondary region
+    2. Update DNS to point to secondary region
+    3. Verify application connectivity
+    4. Notify on-call team
+    
+    ### Verification
+    Run weekly DR drill:
+    ```bash
+    kubectl create job --from=cronjob/postgres-backup-daily dr-drill-$(date +%Y%m%d)
+    ```

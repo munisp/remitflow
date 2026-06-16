@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { FileText, Download, Calendar, CheckCircle, Clock } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 type ReportType = "CTR" | "SAR" | "FBAR" | "ANNUAL_AML";
 
@@ -15,6 +16,7 @@ const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString(
 const today = now.toISOString().split("T")[0];
 
 export default function RegulatoryReportingPage() {
+  const { t } = useTranslation();
   const [reportType, setReportType] = useState<ReportType>("CTR");
   const { data: ctrData } = trpc.v90.regulatoryReporting.getCTRReport.useQuery({ startDate: startOfMonth, endDate: today });
   const { data: sarData } = trpc.v90.regulatoryReporting.getSARReport.useQuery({ startDate: startOfMonth, endDate: today });
@@ -64,7 +66,7 @@ export default function RegulatoryReportingPage() {
                   <div className="p-3 bg-muted rounded-lg"><p className="text-xs text-muted-foreground">Total Amount</p><p className="text-xl font-bold">${(ctrData.totalAmountCovered / 1000).toFixed(0)}K</p></div>
                 </div>
                 <div className="space-y-2">
-                  {ctrData.reports.slice(0, 3).map(r => (
+                  {ctrData.reports.slice(0, 3).map((r: any) => (
                     <div key={r.reportId} className="flex items-center justify-between text-sm p-2 border rounded">
                       <span className="font-mono text-xs">{r.reportId}</span>
                       <div className="flex items-center gap-2">
@@ -90,7 +92,7 @@ export default function RegulatoryReportingPage() {
                   <div className="p-3 bg-muted rounded-lg"><p className="text-xs text-muted-foreground">Filed</p><p className="text-xl font-bold text-green-600">{sarData.filed}</p></div>
                 </div>
                 <div className="space-y-2">
-                  {sarData.reports.slice(0, 3).map(r => (
+                  {sarData.reports.slice(0, 3).map((r: any) => (
                     <div key={r.reportId} className="flex items-center justify-between text-sm p-2 border rounded">
                       <div>
                         <span className="font-mono text-xs">{r.reportId}</span>

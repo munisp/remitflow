@@ -15,6 +15,7 @@ import {  Building2, User, Globe, Shield, Palette, CheckCircle2,
   ArrowRight, ArrowLeft, Rocket, FileText, DollarSign, Users
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STEPS = [
   { id: 1, title: "Company Info", icon: Building2, description: "Tell us about your business" },
@@ -33,6 +34,7 @@ const PLAN_FEATURES: Record<string, string[]> = {
 };
 
 export default function PartnerApply() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const [step, setStep] = useState(1);
   const [submitted, setSubmitted] = useState(false);

@@ -71,8 +71,9 @@ export const STATIC_RATES: Record<string, number> = {
 };
 
 // ============================================================================
-// In-memory rate cache (supplement to Redis)
+// In-memory rate cache (supplement to Redis) — bounded LRU
 // ============================================================================
+import { BoundedCache, registerCache } from "./lib/boundedCache";
 
 interface RateCache {
   rates: Record<string, number>;
@@ -81,8 +82,13 @@ interface RateCache {
   source: string;
 }
 
-const memCache: Map<string, RateCache> = new Map();
 const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const memCache = new BoundedCache<string, RateCache>({
+  maxSize: 200,
+  defaultTtlMs: CACHE_TTL_MS,
+  name: "fx-rates-mem",
+});
+registerCache(memCache as unknown as BoundedCache<unknown, unknown>);
 
 // ============================================================================
 // Source 1: Open Exchange Rates
@@ -178,9 +184,9 @@ export async function fetchLiveRates(base = "USD"): Promise<{ rates: Record<stri
     return { ...staticBase, ...r };
   }
 
-  // Check memory cache first
+  // Check memory cache first (BoundedCache handles TTL internally)
   const cached = memCache.get(base);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+  if (cached) {
     return { rates: mergeWithStatic(cached.rates), source: `${cached.source} (cached)` };
   }
 

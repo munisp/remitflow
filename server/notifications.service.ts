@@ -109,7 +109,7 @@ async function sendEmail(to: string, subject: string, body: string): Promise<boo
                   <hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0">
                   <p style="color:#9ca3af;font-size:12px">
                     This email was sent by RemitFlow. If you did not request this, please ignore it or
-                    <a href="https://remitflow.manus.space/security" style="color:#6366f1">secure your account</a>.
+                    <a href="https://remitflow.example.com/security" style="color:#6366f1">secure your account</a>.
                   </p>
                 </div>
               </div>
@@ -138,20 +138,20 @@ export const NotificationTemplates = {
   transferSent: (amount: string, currency: string, recipient: string) => ({
     title: "Transfer Sent",
     message: `Your transfer of ${amount} ${currency} to ${recipient} has been initiated and is being processed.`,
-    sms: `RemitFlow: Transfer of ${amount} ${currency} to ${recipient} sent. Track at remitflow.manus.space/tracking`,
+    sms: `RemitFlow: Transfer of ${amount} ${currency} to ${recipient} sent. Track at remitflow.example.com/tracking`,
     email: {
       subject: `Transfer of ${amount} ${currency} Sent`,
-      body: `Your transfer of ${amount} ${currency} to ${recipient} has been initiated.\n\nTrack your transfer at: https://remitflow.manus.space/tracking`,
+      body: `Your transfer of ${amount} ${currency} to ${recipient} has been initiated.\n\nTrack your transfer at: https://remitflow.example.com/tracking`,
     },
   }),
 
   transferReceived: (amount: string, currency: string, sender: string) => ({
     title: "Transfer Received",
     message: `You received ${amount} ${currency} from ${sender}.`,
-    sms: `RemitFlow: You received ${amount} ${currency} from ${sender}. Check your wallet at remitflow.manus.space`,
+    sms: `RemitFlow: You received ${amount} ${currency} from ${sender}. Check your wallet at remitflow.example.com`,
     email: {
       subject: `You Received ${amount} ${currency}`,
-      body: `Great news! You received ${amount} ${currency} from ${sender}.\n\nView your wallet at: https://remitflow.manus.space/wallet`,
+      body: `Great news! You received ${amount} ${currency} from ${sender}.\n\nView your wallet at: https://remitflow.example.com/wallet`,
     },
   }),
 
@@ -161,37 +161,37 @@ export const NotificationTemplates = {
     sms: `RemitFlow: KYC approved! You're now at ${tier}. Higher limits unlocked.`,
     email: {
       subject: "KYC Verification Approved",
-      body: `Congratulations! Your identity verification has been approved.\n\nYou are now at ${tier} with higher transaction limits.\n\nStart sending money at: https://remitflow.manus.space/send`,
+      body: `Congratulations! Your identity verification has been approved.\n\nYou are now at ${tier} with higher transaction limits.\n\nStart sending money at: https://remitflow.example.com/send`,
     },
   }),
 
   loginAlert: (device: string, location: string) => ({
     title: "New Login Detected",
     message: `New login from ${device} in ${location}. If this wasn't you, secure your account immediately.`,
-    sms: `RemitFlow SECURITY: New login from ${device} in ${location}. Not you? Visit remitflow.manus.space/security`,
+    sms: `RemitFlow SECURITY: New login from ${device} in ${location}. Not you? Visit remitflow.example.com/security`,
     email: {
       subject: "Security Alert: New Login Detected",
-      body: `A new login was detected on your RemitFlow account.\n\nDevice: ${device}\nLocation: ${location}\nTime: ${new Date().toLocaleString()}\n\nIf this wasn't you, please secure your account immediately at: https://remitflow.manus.space/security`,
+      body: `A new login was detected on your RemitFlow account.\n\nDevice: ${device}\nLocation: ${location}\nTime: ${new Date().toLocaleString()}\n\nIf this wasn't you, please secure your account immediately at: https://remitflow.example.com/security`,
     },
   }),
 
   fxAlertTriggered: (currency: string, rate: number, target: number) => ({
     title: "FX Rate Alert",
     message: `${currency} has reached your target rate of ${target}. Current rate: ${rate}.`,
-    sms: `RemitFlow: ${currency} rate alert! Current: ${rate}, your target: ${target}. Send now at remitflow.manus.space/send`,
+    sms: `RemitFlow: ${currency} rate alert! Current: ${rate}, your target: ${target}. Send now at remitflow.example.com/send`,
     email: {
       subject: `FX Alert: ${currency} Rate Target Reached`,
-      body: `Your FX rate alert has been triggered!\n\nCurrency: ${currency}\nCurrent Rate: ${rate}\nYour Target: ${target}\n\nSend money now at: https://remitflow.manus.space/send`,
+      body: `Your FX rate alert has been triggered!\n\nCurrency: ${currency}\nCurrent Rate: ${rate}\nYour Target: ${target}\n\nSend money now at: https://remitflow.example.com/send`,
     },
   }),
 
   paymentFailed: (amount: string, currency: string, reason: string) => ({
     title: "Payment Failed",
     message: `Your payment of ${amount} ${currency} failed. Reason: ${reason}`,
-    sms: `RemitFlow: Payment of ${amount} ${currency} failed. ${reason}. Retry at remitflow.manus.space`,
+    sms: `RemitFlow: Payment of ${amount} ${currency} failed. ${reason}. Retry at remitflow.example.com`,
     email: {
       subject: `Payment Failed: ${amount} ${currency}`,
-      body: `Your payment of ${amount} ${currency} could not be processed.\n\nReason: ${reason}\n\nPlease retry or contact support at: https://remitflow.manus.space/support`,
+      body: `Your payment of ${amount} ${currency} could not be processed.\n\nReason: ${reason}\n\nPlease retry or contact support at: https://remitflow.example.com/support`,
     },
   }),
 
@@ -211,7 +211,7 @@ export const NotificationTemplates = {
     sms: `RemitFlow: You earned ${amount} for referring ${referredUser}! Check your wallet.`,
     email: {
       subject: `You Earned a Referral Reward: ${amount}`,
-      body: `Great news! You earned ${amount} for referring ${referredUser} to RemitFlow.\n\nKeep referring friends to earn more rewards at: https://remitflow.manus.space/referral`,
+      body: `Great news! You earned ${amount} for referring ${referredUser} to RemitFlow.\n\nKeep referring friends to earn more rewards at: https://remitflow.example.com/referral`,
     },
   }),
 };

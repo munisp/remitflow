@@ -9,8 +9,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Store, CheckCircle, XCircle, Clock, Search, Plus } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function MerchantOnboardingPage() {
+  const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState<"pending"|"active"|"suspended"|"rejected"|"all">("all");
   const [search, setSearch] = useState("");
   const [approveDialog, setApproveDialog] = useState<number | null>(null);
@@ -28,8 +30,8 @@ export default function MerchantOnboardingPage() {
     onError: (e) => toast.error(e.message),
   });
 
-  const filtered = (merchants ?? []).filter(m =>
-    !search || m.businessName.toLowerCase().includes(search.toLowerCase()) || m.email.toLowerCase().includes(search.toLowerCase())
+  const filtered = (merchants ?? []).filter((m: any) =>
+    !search || m.businessName?.toLowerCase().includes(search.toLowerCase()) || m.email?.toLowerCase().includes(search.toLowerCase())
   );
 
   const statusIcon = (s: string) => {
@@ -107,9 +109,9 @@ export default function MerchantOnboardingPage() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { label: "Total", value: (merchants ?? []).length, color: "text-foreground" },
-          { label: "Active", value: (merchants ?? []).filter(m => m.status === "active").length, color: "text-green-500" },
-          { label: "Pending", value: (merchants ?? []).filter(m => m.status === "pending").length, color: "text-orange-500" },
-          { label: "Rejected", value: (merchants ?? []).filter(m => m.status === "rejected").length, color: "text-red-500" },
+          { label: "Active", value: (merchants ?? []).filter((m: any) => m.status === "active").length, color: "text-green-500" },
+          { label: "Pending", value: (merchants ?? []).filter((m: any) => m.status === "pending").length, color: "text-orange-500" },
+          { label: "Rejected", value: (merchants ?? []).filter((m: any) => m.status === "rejected").length, color: "text-red-500" },
         ].map(s => (
           <Card key={s.label}><CardContent className="p-4">
             <p className="text-sm text-muted-foreground">{s.label}</p>
@@ -137,7 +139,7 @@ export default function MerchantOnboardingPage() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map(m => (
+                {filtered.map((m: any) => (
                   <tr key={m.id} className="border-b hover:bg-muted/30">
                     <td className="p-2">
                       <p className="font-medium">{m.businessName}</p>

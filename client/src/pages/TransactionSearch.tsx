@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Label } from "@/components/ui/label";
 import { Search, Download, Filter, X, ChevronLeft, ChevronRight, ArrowUpDown } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   completed: "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400",
@@ -21,6 +22,7 @@ const STATUS_COLORS: Record<string, string> = {
 const CURRENCIES = ["USD", "GBP", "EUR", "CAD", "NGN", "GHS", "KES", "ZAR", "XOF", "EGP"];
 
 export default function TransactionSearch() {
+  const { t } = useTranslation();
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<string>("all");
   const [fromDate, setFromDate] = useState("");
@@ -50,7 +52,7 @@ export default function TransactionSearch() {
     sortDir,
   };
 
-  const { data, isLoading, refetch } = trpc.txSearch.search.useQuery(searchInput, {
+  const { data, isLoading, refetch, isError } = trpc.txSearch.search.useQuery(searchInput, {
     enabled: applied,
   });
 

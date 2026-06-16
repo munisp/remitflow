@@ -4,9 +4,11 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Activity, CheckCircle, AlertTriangle, XCircle, Clock, Zap } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function SLAMonitor() {
-  const { data: overview } = trpc.slaMonitoring.overview.useQuery();
+  const { t } = useTranslation();
+  const { data: overview, isLoading } = trpc.slaMonitoring.overview.useQuery();
   const { data: incidents } = trpc.slaMonitoring.incidents.useQuery();
   const { data: targets } = trpc.slaMonitoring.slaTargets.useQuery();
 

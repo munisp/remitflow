@@ -6,19 +6,22 @@ import { paymentRequests, transactions } from "../../drizzle/schema.js";
 import { getDb, createTransaction } from "../db.js";
 import { protectedProcedure, publicProcedure, router, rateLimitedProcedure } from "../_core/trpc.js";
 import { sendEmail } from "../email.service.js";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { broadcastUserEvent } from "../sse.service.js";
+import { logger } from "../_core/logger.js";
 
 export const requestMoneyRouter = router({
   // Create a new payment request (Request Money)
   create: protectedProcedure
     .input(z.object({
-      amount: z.number().positive().optional(),
+      amount: z.number().positive().max(10_000_000).optional(),
       currency: z.string().default("USD"),
       description: z.string().max(256).optional(),
       expiresInHours: z.number().min(1).max(168).default(48),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const token = randomBytes(32).toString("hex");
       const expiresAt = new Date(Date.now() + input.expiresInHours * 3600 * 1000);
       const [req] = await db.insert(paymentRequests).values({
@@ -30,7 +33,7 @@ export const requestMoneyRouter = router({
         status: "pending",
         expiresAt,
       }).returning();
-      const paymentLink = `${ctx.req.headers.origin || "https://remitflow.manus.space"}/pay/${token}`;
+      const paymentLink = `${ctx.req.headers.origin || (process.env.APP_URL ?? "https://remitflow.example.com")}/pay/${token}`;
       return { id: req.id, token, paymentLink, expiresAt };
     }),
 
@@ -43,7 +46,7 @@ export const requestMoneyRouter = router({
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const conditions = [eq(paymentRequests.requesterId, ctx.user.id)];
       if (input.status) conditions.push(eq(paymentRequests.status, input.status));
       const rows = await db.select().from(paymentRequests)
@@ -59,7 +62,7 @@ export const requestMoneyRouter = router({
     .input(z.object({ token: z.string().length(64) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [req] = await db.select().from(paymentRequests)
         .where(eq(paymentRequests.token, input.token));
       if (!req) throw new TRPCError({ code: "NOT_FOUND", message: "Payment request not found" });
@@ -73,14 +76,14 @@ export const requestMoneyRouter = router({
   pay: protectedProcedure
     .input(z.object({
       token: z.string().length(64),
-      amount: z.number().positive().optional(), // override if request has no fixed amount
+      amount: z.number().positive().max(10_000_000).optional(), // override if request has no fixed amount
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [req] = await db.select().from(paymentRequests)
         .where(eq(paymentRequests.token, input.token));
-      if (!req) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!req) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (req.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: "Payment request is no longer active" });
       if (req.expiresAt && req.expiresAt < new Date()) throw new TRPCError({ code: "BAD_REQUEST", message: "Payment request has expired" });
       const payAmount = input.amount ?? (req.amount ? Number(req.amount) : null);
@@ -98,8 +101,23 @@ export const requestMoneyRouter = router({
       // Mark request as paid
       await db.update(paymentRequests)
         .set({ status: "paid", payerUserId: ctx.user.id, paidAt: new Date(), updatedAt: new Date() })
-        .where(eq(paymentRequests.id, req.id));
-      return { success: true, transactionRef: txRef };
+        .where(eq(paymentRequests.id, req.id)).returning();
+      // Kafka event + notification for payment request fulfillment
+      publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `reqpay:${req.id}`, {
+        eventType: "payment_request_fulfilled",
+        payerId: ctx.user.id,
+        requesterId: req.requesterId,
+        amount: payAmount,
+        currency: req.currency,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[RequestMoney] Kafka event failed"));
+
+      broadcastUserEvent(req.requesterId, {
+        type: "transfer_received",
+        payload: { title: "Payment Request Fulfilled", message: `Someone paid your request of ${req.currency} ${payAmount}`, amount: payAmount },
+      });
+
+      return { success: true, verified: true, transactionRef: txRef };
     }),
 
   // Send a payment request via email to a specific recipient
@@ -107,14 +125,14 @@ export const requestMoneyRouter = router({
     .input(z.object({
       recipientEmail: z.string().email(),
       recipientName: z.string().min(1).max(100),
-      amount: z.number().positive().optional(),
+      amount: z.number().positive().max(10_000_000).optional(),
       currency: z.string().default("USD"),
       note: z.string().max(500).optional(),
       expiresInHours: z.number().min(1).max(168).default(48),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const token = randomBytes(32).toString("hex");
       const expiresAt = new Date(Date.now() + input.expiresInHours * 3600 * 1000);
       const [req] = await db.insert(paymentRequests).values({
@@ -126,7 +144,7 @@ export const requestMoneyRouter = router({
         status: "pending",
         expiresAt,
       } as any).returning();
-      const paymentLink = `https://remitflow.manus.space/pay/${token}`;
+      const paymentLink = `https://remitflow.example.com/pay/${token}`;
       const senderName = (ctx.user as any).name ?? "Someone";
       const amountStr = input.amount ? `${input.currency} ${input.amount.toFixed(2)}` : "an amount";
       const emailSent = await sendEmail({
@@ -143,14 +161,15 @@ export const requestMoneyRouter = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [req] = await db.select().from(paymentRequests)
         .where(and(eq(paymentRequests.id, input.id), eq(paymentRequests.requesterId, ctx.user.id)));
-      if (!req) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!req) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (req.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: "Only pending requests can be cancelled" });
-      await db.update(paymentRequests)
+      const [_row] = await db.update(paymentRequests)
         .set({ status: "cancelled", updatedAt: new Date() })
-        .where(eq(paymentRequests.id, input.id));
-      return { success: true };
+        .where(eq(paymentRequests.id, input.id)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });

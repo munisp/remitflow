@@ -11,6 +11,7 @@ import {
   TrendingUp, AlertTriangle, Clock, CheckCircle, Shield, BarChart2, PieChart as PieIcon
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const SEVERITY_COLORS: Record<string, string> = {
   critical: "#ef4444",
@@ -22,9 +23,10 @@ const SEVERITY_COLORS: Record<string, string> = {
 const BUCKET_COLORS = ["#22c55e", "#84cc16", "#eab308", "#f97316", "#ef4444"];
 
 export default function ComplianceAnalytics() {
+  const { t } = useTranslation();
   const [days, setDays] = useState(30);
 
-  const { data: summary } = trpc.complianceAnalytics.summary.useQuery({ days });
+  const { data: summary, isLoading, isError } = trpc.complianceAnalytics.summary.useQuery({ days });
   const { data: timeSeries } = trpc.complianceAnalytics.timeSeries.useQuery({ days });
   const { data: severityTrend } = trpc.complianceAnalytics.severityTrend.useQuery({ days });
   const { data: resolutionTime } = trpc.complianceAnalytics.resolutionTime.useQuery({ days });
@@ -234,7 +236,7 @@ export default function ComplianceAnalytics() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {officerTrend && officerTrend.weeks && officerTrend.weeks.length > 0 ? (
+              {officerTrend && !Array.isArray(officerTrend) && officerTrend.weeks && officerTrend.weeks.length > 0 ? (
                 <ResponsiveContainer width="100%" height={200}>
                   <LineChart data={officerTrend.weeks} margin={{ top: 4, right: 8, left: -20, bottom: 4 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
@@ -242,7 +244,7 @@ export default function ComplianceAnalytics() {
                     <YAxis tick={{ fontSize: 10 }} domain={[0, 100]} unit="%" />
                     <Tooltip contentStyle={{ fontSize: 11, background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }} formatter={(v: number) => [`${v}%`, "Resolution Rate"]} />
                     <Legend iconSize={10} wrapperStyle={{ fontSize: 11 }} />
-                    {officerTrend.officers.map((officer, i) => (
+                    {officerTrend.officers.map((officer: any, i: any) => (
                       <Line
                         key={officer}
                         type="monotone"

@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -104,6 +105,7 @@ function StatCard({ icon: Icon, label, value, sub, color = "text-primary" }: {
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function CorridorPricingAdmin() {
+  const { t } = useTranslation();
   // ── State ──────────────────────────────────────────────────────────────────
   const [editingCorridor, setEditingCorridor] = useState<Corridor | null>(null);
   const [editMode, setEditMode] = useState<"margin" | "delivery" | null>(null);
@@ -604,7 +606,7 @@ export default function CorridorPricingAdmin() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {historyData.rows.map((row) => (
+                {historyData.rows.map((row: any) => (
                   <TableRow key={row.id}>
                     <TableCell className="text-xs font-mono font-medium">{row.corridorId}</TableCell>
                     <TableCell>

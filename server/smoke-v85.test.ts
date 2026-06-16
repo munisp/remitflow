@@ -8,7 +8,7 @@ import type { TrpcContext } from "./_core/context";
 function makeCtx(overrides: Record<string, any> = {}): TrpcContext {
   const user = {
     id: 1, openId: "v85-smoke-user", email: "v85smoke@remitflow.test",
-    name: "V85 Smoke User", loginMethod: "manus", role: "user" as const,
+    name: "V85 Smoke User", loginMethod: "keycloak", role: "user" as const,
     createdAt: new Date(), updatedAt: new Date(), lastSignedIn: new Date(), kycTier: "tier1",
     ...overrides,
   };

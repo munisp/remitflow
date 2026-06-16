@@ -106,19 +106,7 @@ export const v98Router = router({
           errorTopics,
           healthStatus: errorTopics === 0 ? "healthy" : errorTopics < 3 ? "degraded" : "critical",
         },
-        // Simulate live data when no real Kafka is connected
-        simulatedTopics: Object.values(KAFKA_TOPICS).map((topic, i) => ({
-          topic,
-          groupId: "remitflow-consumers",
-          partition: 0,
-          currentOffset: 1000 + i * 47,
-          logEndOffset: 1000 + i * 47 + (i % 5),
-          lag: (i % 5),
-          messagesConsumed: 1000 + i * 47,
-          messagesPerSecond: ((i % 200) / 100).toFixed(2),
-          lastConsumedAt: new Date(Date.now() - (i % 60) * 1000).toISOString(),
-          status: "active" as const,
-        })),
+
       };
     }),
 
@@ -137,7 +125,7 @@ export const v98Router = router({
       }))
       .mutation(async ({ input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const lag = Math.max(0, input.logEndOffset - input.currentOffset);
         await db.insert(kafkaConsumerMetrics).values({
           topic: input.topic,
@@ -151,14 +139,14 @@ export const v98Router = router({
           status: input.status,
           errorMessage: input.errorMessage,
           lastConsumedAt: new Date(),
-        });
+        }).returning();
         return { recorded: true, lag };
       }),
 
     /** Alias for getMetrics — used by CircuitBreakerDashboard */
     consumerHealth: adminProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return { topics: [], summary: { totalTopics: 0, totalLag: 0, totalConsumed: 0, errorTopics: 0, healthStatus: "unknown" }, simulatedTopics: [] };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select().from(kafkaConsumerMetrics).orderBy(desc(kafkaConsumerMetrics.recordedAt)).limit(100);
       const byTopic = new Map<string, typeof rows[0]>();
       for (const row of rows) { if (!byTopic.has(row.topic)) byTopic.set(row.topic, row); }
@@ -169,13 +157,7 @@ export const v98Router = router({
       return {
         topics,
         summary: { totalTopics: topics.length, totalLag, totalConsumed, errorTopics, healthStatus: errorTopics === 0 ? "healthy" : "degraded" },
-        simulatedTopics: Object.values(KAFKA_TOPICS).map((topic, i) => ({
-          topic, groupId: "remitflow-consumers", partition: 0,
-          currentOffset: 1000 + i * 47, logEndOffset: 1000 + i * 47 + (i % 5),
-          lag: (i % 5), messagesConsumed: 1000 + i * 47,
-          messagesPerSecond: ((i % 200) / 100).toFixed(2),
-          lastConsumedAt: new Date(Date.now() - (i % 60) * 1000).toISOString(), status: "active" as const,
-        })),
+
       };
     }),
     /** Real circuit breaker stats from in-memory CircuitBreaker instances */
@@ -218,7 +200,7 @@ export const v98Router = router({
     /** List user's export history */
     list: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db
         .select()
         .from(transactionExports)
@@ -240,7 +222,7 @@ export const v98Router = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         // Fetch transactions matching filters
         const conditions = [eq(transactions.userId, ctx.user.id)];
@@ -256,7 +238,7 @@ export const v98Router = router({
 
         if (input.format === "csv") {
           const headers = ["ID", "Date", "Type", "Status", "From Amount", "From Currency", "To Amount", "To Currency", "FX Rate", "Fee", "Recipient", "Reference", "Description"];
-          const rows = txns.map(t => [
+          const rows = txns.map((t: any) => [
             t.id,
             new Date(t.createdAt).toISOString(),
             t.type,
@@ -271,7 +253,7 @@ export const v98Router = router({
             t.reference ?? "",
             (t.description ?? "").replace(/,/g, ";"),
           ]);
-          csvContent = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
+          csvContent = [headers.join(","), ...rows.map((r: any) => r.join(","))].join("\n");
         }
 
         // Record export request
@@ -308,9 +290,10 @@ export const v98Router = router({
       .input(z.object({ id: z.number() }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-        await db.delete(transactionExports)
-          .where(and(eq(transactionExports.id, input.id), eq(transactionExports.userId, ctx.user.id)));
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const _deleted = await db.delete(transactionExports)
+          .where(and(eq(transactionExports.id, input.id), eq(transactionExports.userId, ctx.user.id))).returning();
+        if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         return { deleted: true };
       }),
   }),
@@ -322,7 +305,7 @@ export const v98Router = router({
       .input(z.object({ limit: z.number().min(1).max(100).default(20) }))
       .query(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const rows = await db
           .select()
           .from(ipLoginHistory)
@@ -344,7 +327,7 @@ export const v98Router = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) return { recorded: false };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         // Check if this IP is new for this user
         const existingIps = await db
@@ -356,7 +339,7 @@ export const v98Router = router({
           ))
           .limit(50);
 
-        const knownIps = new Set(existingIps.map(r => r.ip));
+        const knownIps = new Set(existingIps.map((r: any) => r.ip));
         const isNewIp = !knownIps.has(input.ipAddress);
         const isSuspicious = isNewIp && knownIps.size > 0;
         const suspiciousReason = isSuspicious ? "login_from_new_ip" : undefined;
@@ -371,7 +354,7 @@ export const v98Router = router({
           isSuspicious,
           suspiciousReason,
           deviceFingerprint: input.deviceFingerprint,
-        });
+        }).returning();
 
         if (isSuspicious) {
           // Notify user via SSE
@@ -402,7 +385,7 @@ export const v98Router = router({
       .input(z.object({ limit: z.number().default(50), page: z.number().default(1) }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return { rows: [], total: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const offset = (input.page - 1) * input.limit;
         const [rows, [{ total }]] = await Promise.all([
           db.select().from(ipLoginHistory)
@@ -429,7 +412,7 @@ export const v98Router = router({
       }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return { rows: [], total: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const conditions = [];
         if (input.userId) conditions.push(eq(cbdcMintBurnLog.userId, input.userId));
         if (input.currency) conditions.push(eq(cbdcMintBurnLog.currency, input.currency));
@@ -457,7 +440,7 @@ export const v98Router = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         // Get current wallet balance
         const [wallet] = await db.select().from(wallets)
@@ -471,14 +454,14 @@ export const v98Router = router({
         if (wallet) {
           await db.update(wallets)
             .set({ balance: String(balanceAfter), updatedAt: new Date() })
-            .where(eq(wallets.id, wallet.id));
+            .where(eq(wallets.id, wallet.id)).returning();
         } else {
           await db.insert(wallets).values({
             userId: input.userId,
             currency: input.currency,
             balance: String(balanceAfter),
             isDefault: false,
-          });
+          }).returning();
         }
 
         // Log the operation
@@ -492,7 +475,7 @@ export const v98Router = router({
           authorizedBy: ctx.user.id,
           reason: input.reason,
           status: "completed",
-        });
+        }).returning();
 
         await createAuditLog({
           userId: ctx.user.id,
@@ -513,7 +496,7 @@ export const v98Router = router({
           },
         });
 
-        return { success: true, balanceBefore, balanceAfter, currency: input.currency };
+        return { success: true, verified: true, balanceBefore, balanceAfter, currency: input.currency };
       }),
 
     /** Burn CBDC tokens from a user (admin only) */
@@ -521,12 +504,12 @@ export const v98Router = router({
       .input(z.object({
         userId: z.number(),
         currency: z.enum(["eNGN", "eGHS", "eKES", "eZAR"]),
-        amount: z.number().positive(),
+        amount: z.number().positive().max(10_000_000),
         reason: z.string().min(10).max(500),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         const [wallet] = await db.select().from(wallets)
           .where(and(eq(wallets.userId, input.userId), eq(wallets.currency, input.currency)))
@@ -541,7 +524,7 @@ export const v98Router = router({
 
         await db.update(wallets)
           .set({ balance: String(balanceAfter), updatedAt: new Date() })
-          .where(eq(wallets.id, wallet.id));
+          .where(eq(wallets.id, wallet.id)).returning();
 
         await db.insert(cbdcMintBurnLog).values({
           userId: input.userId,
@@ -553,7 +536,7 @@ export const v98Router = router({
           authorizedBy: ctx.user.id,
           reason: input.reason,
           status: "completed",
-        });
+        }).returning();
 
         await createAuditLog({
           userId: ctx.user.id,
@@ -561,7 +544,7 @@ export const v98Router = router({
           description: `Burned ${input.amount} ${input.currency} from user ${input.userId}`,
         });
 
-        return { success: true, balanceBefore, balanceAfter, currency: input.currency };
+        return { success: true, verified: true, balanceBefore, balanceAfter, currency: input.currency };
       }),
   }),
 
@@ -577,7 +560,7 @@ export const v98Router = router({
       }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return { items: [], total: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         const conditions = [eq(communityActivityFeed.isPublic, true)];
         if (input.activityType) conditions.push(eq(communityActivityFeed.activityType, input.activityType));
@@ -610,7 +593,7 @@ export const v98Router = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         const user = await db.select({ name: users.name, avatar: users.avatar })
           .from(users).where(eq(users.id, ctx.user.id)).limit(1);
@@ -648,17 +631,17 @@ export const v98Router = router({
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         await db.update(communityActivityFeed)
           .set({ likesCount: sql`${communityActivityFeed.likesCount} + 1` })
-          .where(eq(communityActivityFeed.id, input.id));
+          .where(eq(communityActivityFeed.id, input.id)).returning();
         return { liked: true };
       }),
 
     /** Get SDG impact metrics */
     sdgMetrics: publicProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db
         .select({
           sdgGoal: communityActivityFeed.sdgGoal,
@@ -682,12 +665,12 @@ export const v98Router = router({
     checkAndFlag: protectedProcedure
       .input(z.object({
         transactionId: z.number(),
-        amount: z.number(),
+        amount: z.number().positive().max(10_000_000),
         currency: z.string(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) return { flagged: false };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         const amountUsd = toUsd(input.amount, input.currency);
         const CTR_THRESHOLD_USD = 10000;
@@ -703,7 +686,7 @@ export const v98Router = router({
           ))
           .limit(20);
 
-        const recentUsdTotal = recentTxns.reduce((s, t) =>
+        const recentUsdTotal = recentTxns.reduce((s: any, t: any) =>
           s + toUsd(Number(t.fromAmount), t.fromCurrency), 0);
 
         const flagReason = amountUsd >= CTR_THRESHOLD_USD
@@ -756,7 +739,7 @@ export const v98Router = router({
       }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return { rows: [], total: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const conditions = [];
         if (input.status) conditions.push(eq(ctrAutoFlags.status, input.status));
         const offset = (input.page - 1) * input.limit;
@@ -776,11 +759,11 @@ export const v98Router = router({
       .input(z.object({
         id: z.number(),
         status: z.enum(["filed", "dismissed", "escalated"]),
-        notes: z.string().optional(),
+        notes: z.string().max(2000).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         await db.update(ctrAutoFlags)
           .set({
             status: input.status,
@@ -789,14 +772,14 @@ export const v98Router = router({
             filedAt: input.status === "filed" ? new Date() : null,
             notes: input.notes,
           })
-          .where(eq(ctrAutoFlags.id, input.id));
+          .where(eq(ctrAutoFlags.id, input.id)).returning();
         return { reviewed: true };
       }),
 
     /** Get CTR statistics */
     stats: adminProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return {};
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [stats] = await db.select({
         total: count(),
         pending: sql<number>`COUNT(*) FILTER (WHERE status = 'pending_review')`,
@@ -819,7 +802,7 @@ export const v98Router = router({
     /** List all FSPs */
     list: publicProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(mojaloopFsps).where(eq(mojaloopFsps.isActive, true)).orderBy(mojaloopFsps.name);
     }),
 
@@ -835,7 +818,7 @@ export const v98Router = router({
       }))
       .mutation(async ({ input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const [fsp] = await db.insert(mojaloopFsps).values({
           fspId: input.fspId,
           name: input.name,
@@ -851,17 +834,17 @@ export const v98Router = router({
     update: adminProcedure
       .input(z.object({
         id: z.number(),
-        name: z.string().optional(),
+        name: z.string().max(2000).optional(),
         endpoint: z.string().url().optional(),
         isActive: z.boolean().optional(),
       }))
       .mutation(async ({ input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { id, ...updates } = input;
         await db.update(mojaloopFsps)
           .set({ ...updates, updatedAt: new Date() })
-          .where(eq(mojaloopFsps.id, id));
+          .where(eq(mojaloopFsps.id, id)).returning();
         return { updated: true };
       }),
 
@@ -870,9 +853,10 @@ export const v98Router = router({
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-        await db.delete(mojaloopFsps).where(eq(mojaloopFsps.id, input.id));
-        return { deleted: true };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const [_deleted] = await db.delete(mojaloopFsps).where(eq(mojaloopFsps.id, input.id)).returning();
+        if (!_deleted) throw new TRPCError({ code: "NOT_FOUND", message: "FSP not found" });
+        return { deleted: true, verified: true };
       }),
   }),
 
@@ -886,13 +870,13 @@ export const v98Router = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         // Suspend wallets for all target users
         for (const userId of input.userIds) {
           await db.update(wallets)
             .set({ status: "suspended" })
-            .where(eq(wallets.userId, userId));
+            .where(eq(wallets.userId, userId)).returning();
         }
 
         await db.insert(bulkUserActionLog).values({
@@ -902,7 +886,7 @@ export const v98Router = router({
           affectedCount: input.userIds.length,
           status: "completed",
           notes: input.reason,
-        });
+        }).returning();
 
         await createAuditLog({
           userId: ctx.user.id,
@@ -918,12 +902,12 @@ export const v98Router = router({
       .input(z.object({ userIds: z.array(z.number()).min(1).max(100) }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         for (const userId of input.userIds) {
           await db.update(wallets)
             .set({ status: "active" })
-            .where(eq(wallets.userId, userId));
+            .where(eq(wallets.userId, userId)).returning();
         }
 
         await db.insert(bulkUserActionLog).values({
@@ -932,7 +916,7 @@ export const v98Router = router({
           targetUserIds: input.userIds as any,
           affectedCount: input.userIds.length,
           status: "completed",
-        });
+        }).returning();
 
         return { affected: input.userIds.length };
       }),
@@ -946,7 +930,7 @@ export const v98Router = router({
       }))
       .query(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         const conditions = [];
         if (input.userIds && input.userIds.length > 0) {
@@ -969,7 +953,7 @@ export const v98Router = router({
           .limit(1000);
 
         const headers = ["ID", "Name", "Email", "Phone", "Role", "KYC Tier", "Created", "Last Login"];
-        const csvRows = rows.map(r => [
+        const csvRows = rows.map((r: any) => [
           r.id,
           (r.name ?? "").replace(/,/g, ";"),
           (r.email ?? "").replace(/,/g, ";"),
@@ -980,15 +964,15 @@ export const v98Router = router({
           r.lastSignedIn ? new Date(r.lastSignedIn).toISOString() : "",
         ]);
 
-        const csv = [headers.join(","), ...csvRows.map(r => r.join(","))].join("\n");
+        const csv = [headers.join(","), ...csvRows.map((r: any) => r.join(","))].join("\n");
 
         await db.insert(bulkUserActionLog).values({
           adminId: ctx.user.id,
           action: "export_csv",
-          targetUserIds: rows.map(r => r.id) as any,
+          targetUserIds: rows.map((r: any) => r.id) as any,
           affectedCount: rows.length,
           status: "completed",
-        });
+        }).returning();
 
         return { csv, count: rows.length, exportedAt: new Date().toISOString() };
       }),
@@ -998,7 +982,7 @@ export const v98Router = router({
       .input(z.object({ limit: z.number().default(20) }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         return db.select().from(bulkUserActionLog)
           .orderBy(desc(bulkUserActionLog.createdAt))
           .limit(input.limit);
@@ -1015,7 +999,7 @@ export const v98Router = router({
       }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const conditions = [];
         if (input.status) conditions.push(eq(stripeWebhookRetryLog.status, input.status));
         return db.select().from(stripeWebhookRetryLog)
@@ -1029,29 +1013,29 @@ export const v98Router = router({
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         await db.update(stripeWebhookRetryLog)
           .set({ status: "completed", resolvedAt: new Date() })
-          .where(eq(stripeWebhookRetryLog.id, input.id));
+          .where(eq(stripeWebhookRetryLog.id, input.id)).returning();
         return { resolved: true };
       }),
 
     /** Abandon a failed webhook */
     abandon: adminProcedure
-      .input(z.object({ id: z.number(), reason: z.string().optional() }))
+      .input(z.object({ id: z.number(), reason: z.string().max(2000).optional() }))
       .mutation(async ({ input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         await db.update(stripeWebhookRetryLog)
           .set({ status: "abandoned", errorMessage: input.reason })
-          .where(eq(stripeWebhookRetryLog.id, input.id));
+          .where(eq(stripeWebhookRetryLog.id, input.id)).returning();
         return { abandoned: true };
       }),
 
     /** Get retry stats */
     stats: adminProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return {};
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [stats] = await db.select({
         total: count(),
         pending: sql<number>`COUNT(*) FILTER (WHERE status = 'pending')`,
@@ -1073,7 +1057,7 @@ export const v98Router = router({
   notifBadge: router({
     getUnreadCount: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return { count: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [{ total }] = await db.select({ total: count() })
         .from(notifications)
         .where(and(eq(notifications.userId, ctx.user.id), eq(notifications.isRead, false)));
@@ -1091,7 +1075,7 @@ export const v98Router = router({
       }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
         if (input.category === "referrals") {
           const rows = await db
@@ -1101,7 +1085,7 @@ export const v98Router = router({
             .groupBy(referrals.referrerId, users.name, users.avatar)
             .orderBy(desc(count()))
             .limit(input.limit);
-          return rows.map((r) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), category: "referrals" }));
+          return rows.map((r: any) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), category: "referrals" }));
         }
 
         if (input.category === "community") {
@@ -1122,7 +1106,7 @@ export const v98Router = router({
             .groupBy(communityActivityFeed.userId, users.name, users.avatar)
             .orderBy(desc(count()))
             .limit(input.limit);
-          return rows.filter(r => r.userId).map((r) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), likes: Number(r.likes), category: "community" }));
+          return rows.filter((r: any) => r.userId).map((r: any) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), likes: Number(r.likes), category: "community" }));
         }
 
         // transfers leaderboard
@@ -1140,7 +1124,7 @@ export const v98Router = router({
           .groupBy(transactions.userId, users.name, users.avatar)
           .orderBy(desc(sql`SUM(CAST(${transactions.fromAmount} AS DECIMAL))`))
           .limit(input.limit);
-        return rows.map((r) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), totalAmount: Number(r.totalAmount), category: "transfers" }));
+        return rows.map((r: any) => ({ userId: r.userId, name: r.name ?? "Anonymous", avatar: r.avatar, score: Number(r.count), totalAmount: Number(r.totalAmount), category: "transfers" }));
       }),
   }),
 
@@ -1148,7 +1132,7 @@ export const v98Router = router({
   fxAlertHistory: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(fxAlerts)
         .where(eq(fxAlerts.userId, ctx.user.id))
         .orderBy(desc(fxAlerts.createdAt))
@@ -1157,7 +1141,7 @@ export const v98Router = router({
 
     getTriggered: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(fxAlerts)
         .where(and(eq(fxAlerts.userId, ctx.user.id), eq(fxAlerts.triggered, true)))
         .orderBy(desc(fxAlerts.triggeredAt))
@@ -1174,7 +1158,7 @@ export const v98Router = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const [alert] = await db.insert(fxAlerts).values({
           userId: ctx.user.id,
           fromCurrency: input.fromCurrency,
@@ -1189,19 +1173,21 @@ export const v98Router = router({
       .input(z.object({ id: z.number() }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-        await db.delete(fxAlerts).where(and(eq(fxAlerts.id, input.id), eq(fxAlerts.userId, ctx.user.id)));
-        return { deleted: true };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const [_deleted] = await db.delete(fxAlerts).where(and(eq(fxAlerts.id, input.id), eq(fxAlerts.userId, ctx.user.id))).returning();
+        if (!_deleted) throw new TRPCError({ code: "NOT_FOUND", message: "FX alert not found" });
+        return { deleted: true, verified: true };
       }),
     toggle: protectedProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const [existing] = await db.select({ isActive: fxAlerts.isActive }).from(fxAlerts)
           .where(and(eq(fxAlerts.id, input.id), eq(fxAlerts.userId, ctx.user.id))).limit(1);
-        if (!existing) throw new TRPCError({ code: "NOT_FOUND" });
-        await db.update(fxAlerts).set({ isActive: !existing.isActive }).where(eq(fxAlerts.id, input.id));
+        if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+        const [_row] = await db.update(fxAlerts).set({ isActive: !existing.isActive }).where(eq(fxAlerts.id, input.id)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         return { toggled: true, isActive: !existing.isActive };
       }),
   }),
@@ -1211,7 +1197,7 @@ export const v98Router = router({
       .input(z.object({ resolved: z.boolean().optional(), limit: z.number().default(50) }).optional())
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         // Return transactions with fee mismatch or status inconsistency
         const rows = await db.select().from(transactions)
           .where(and(
@@ -1220,7 +1206,7 @@ export const v98Router = router({
           ))
           .orderBy(desc(transactions.createdAt))
           .limit(input?.limit ?? 50);
-        return rows.map(r => ({
+        return rows.map((r: any) => ({
           id: r.id,
           transactionId: r.id,
           type: "missing_fee",
@@ -1233,7 +1219,7 @@ export const v98Router = router({
       }),
     runReconciliation: adminProcedure.mutation(async () => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Count discrepancies
       const [missing] = await db.select({ cnt: count() }).from(transactions)
         .where(and(eq(transactions.status, "completed"), isNull(transactions.fee)));
@@ -1248,13 +1234,14 @@ export const v98Router = router({
       .mutation(async ({ input }) => {
         // Mark the transaction as having fee resolved
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-        await db.update(transactions).set({ fee: "0" }).where(eq(transactions.id, input.id));
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const [_row] = await db.update(transactions).set({ fee: "0" }).where(eq(transactions.id, input.id)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         return { resolved: true };
       }),
     reconciliationSummary: adminProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return {};
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [txnStats] = await db.select({
         totalTxns: count(),
@@ -1360,7 +1347,7 @@ export const v98Router = router({
       .input(z.object({ status: z.string().optional(), limit: z.number().default(50) }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return { events: [] };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const conditions = [];
         if (input.status) conditions.push(eq(stripeWebhookRetryLog.status, input.status as any));
         const events = await db.select().from(stripeWebhookRetryLog)
@@ -1371,7 +1358,7 @@ export const v98Router = router({
       }),
     webhookStats: adminProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return { total: 0, delivered: 0, failed: 0, pending: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select({
         status: stripeWebhookRetryLog.status,
         cnt: count(),
@@ -1390,23 +1377,23 @@ export const v98Router = router({
       .input(z.object({ id: z.number() }))
       .mutation(async ({ input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const [row] = await db.select().from(stripeWebhookRetryLog).where(eq(stripeWebhookRetryLog.id, input.id)).limit(1);
-        if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+        if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         await db.update(stripeWebhookRetryLog)
           .set({ status: "pending", attemptCount: (row.attemptCount ?? 0) + 1, lastError: null })
-          .where(eq(stripeWebhookRetryLog.id, input.id));
+          .where(eq(stripeWebhookRetryLog.id, input.id)).returning();
         return { message: "Webhook queued for retry" };
       }),
     retryAllFailed: adminProcedure.mutation(async () => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const failed = await db.select({ id: stripeWebhookRetryLog.id }).from(stripeWebhookRetryLog)
         .where(eq(stripeWebhookRetryLog.status, "failed")).limit(100);
       if (failed.length > 0) {
         await db.update(stripeWebhookRetryLog)
           .set({ status: "pending" })
-          .where(inArray(stripeWebhookRetryLog.id, failed.map(r => r.id)));
+          .where(inArray(stripeWebhookRetryLog.id, failed.map((r: any) => r.id))).returning();
       }
       return { queued: failed.length };
     }),
@@ -1418,7 +1405,7 @@ export const v98Router = router({
       .input(z.object({ limit: z.number().default(50) }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         return db.select().from(ipLoginHistory)
           .orderBy(desc(ipLoginHistory.loginAt))
           .limit(input.limit);
@@ -1427,20 +1414,20 @@ export const v98Router = router({
       .input(z.object({ limit: z.number().default(20) }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         return db.select().from(ipLoginHistory)
           .where(eq(ipLoginHistory.isSuspicious, true))
           .orderBy(desc(ipLoginHistory.loginAt))
           .limit(input.limit);
       }),
     blockIp: adminProcedure
-      .input(z.object({ ipAddress: z.string(), reason: z.string().optional() }))
+      .input(z.object({ ipAddress: z.string(), reason: z.string().max(2000).optional() }))
       .mutation(async ({ input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         await db.update(ipLoginHistory)
           .set({ isBlocked: true })
-          .where(eq(ipLoginHistory.ipAddress, input.ipAddress));
+          .where(eq(ipLoginHistory.ipAddress, input.ipAddress)).returning();
         return { message: `IP ${input.ipAddress} blocked` };
       }),
   }),
@@ -1451,7 +1438,7 @@ export const v98Router = router({
       .input(z.object({ period: z.enum(["7d", "30d", "90d", "1y"]).default("30d") }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return { summary: null, bySource: [] };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const days = { "7d": 7, "30d": 30, "90d": 90, "1y": 365 }[input.period];
         const since = new Date(Date.now() - days * 86400000);
         const [stats] = await db.select({
@@ -1497,7 +1484,7 @@ export const v98Router = router({
       .input(z.object({ period: z.enum(["7d", "30d", "90d", "1y"]).default("30d"), limit: z.number().default(10) }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const days = { "7d": 7, "30d": 30, "90d": 90, "1y": 365 }[input.period];
         const since = new Date(Date.now() - days * 86400000);
         const rows = await db.select({
@@ -1510,13 +1497,13 @@ export const v98Router = router({
           .groupBy(transactions.fromCurrency, transactions.toCurrency)
           .orderBy(desc(sql`SUM(CAST(${transactions.fromAmount} AS DECIMAL))`))
           .limit(input.limit);
-        return rows.map(r => ({ ...r, volume: Number(r.volume), txCount: Number(r.txCount) }));
+        return rows.map((r: any) => ({ ...r, volume: Number(r.volume), txCount: Number(r.txCount) }));
       }),
     userGrowth: adminProcedure
       .input(z.object({ period: z.enum(["7d", "30d", "90d", "1y"]).default("30d") }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return { newSignups: 0, kycVerified: 0, firstTransfer: 0, churned: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const days = { "7d": 7, "30d": 30, "90d": 90, "1y": 365 }[input.period];
         const since = new Date(Date.now() - days * 86400000);
         const [newSignups] = await db.select({ cnt: count() }).from(users).where(gte(users.createdAt, since));
@@ -1535,7 +1522,7 @@ export const v98Router = router({
   gdpr: router({
     listMyRequests: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT * FROM gdpr_requests WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 20
       `);
@@ -1555,7 +1542,7 @@ export const v98Router = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const [row] = await db.execute(sql`
           INSERT INTO gdpr_requests (user_id, request_type, status, reason, created_at)
           VALUES (${ctx.user.id}, ${input.requestType}, 'pending', ${input.reason ?? null}, NOW())
@@ -1572,7 +1559,7 @@ export const v98Router = router({
       .input(z.object({ id: z.number() }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         await db.execute(sql`
           UPDATE gdpr_requests SET status = 'cancelled' WHERE id = ${input.id} AND user_id = ${ctx.user.id} AND status = 'pending'
         `);

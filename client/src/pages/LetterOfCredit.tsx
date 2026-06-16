@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { FileCheck, Globe, Shield, Plus, AlertCircle, CheckCircle } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = ["USD", "GBP", "EUR", "NGN", "KES", "GHS", "ZAR"];
 const LC_TYPES: Array<"sight" | "usance" | "standby" | "revolving"> = ["sight", "usance", "standby", "revolving"];
@@ -26,6 +27,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function LetterOfCredit() {
+  const { t } = useTranslation();
   const [openLCDialog, setOpenLCDialog] = useState(false);
   const [selectedLcId, setSelectedLcId] = useState<number | null>(null);
   const [form, setForm] = useState({

@@ -4,7 +4,7 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { checkPolicy } from "../security.pbac";
 import { getDb, createAuditLog } from "../db";
 import {
@@ -29,6 +29,7 @@ import {
   users,
 } from "../../drizzle/schema";
 import crypto from "crypto";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -63,7 +64,7 @@ export const embeddedPayrollApiRouter = router({
   issueApiKey: protectedProcedure
     .input(z.object({
       partnerName:  z.string().min(2),
-      description:  z.string().optional(),
+      description:  z.string().max(2000).optional(),
       allowedScopes: z.array(z.enum(["run_payroll", "list_employees", "get_reports", "tax_filing"])).default(["run_payroll"]),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -119,7 +120,7 @@ export const embeddedPayrollApiRouter = router({
         .set({ status: "revoked" })
         .where(eq(embeddedPayrollApiKeys.id, input.keyId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -176,7 +177,7 @@ export const embeddedPayrollApiRouter = router({
         .select()
         .from(embeddedPayrollRequests)
         .where(eq(embeddedPayrollRequests.externalRunId, input.requestRef));
-      if (!request) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return request;
     }),
 
@@ -207,8 +208,8 @@ export const diasporaMortgageRouter = router({
       propertyCity:       z.string().min(2),
       propertyAddress:    z.string().optional(),
       propertyType:       z.enum(["residential", "commercial", "land"]).default("residential"),
-      propertyValueUsd:   z.number().positive(),
-      loanAmountUsd:      z.number().positive(),
+      propertyValueUsd:   z.number().positive().max(10_000_000),
+      loanAmountUsd:      z.number().positive().max(10_000_000),
       ltvRatioPct:        z.number().min(10).max(80).default(70),
       termYears:          z.number().min(5).max(30).default(20),
       applicantIncome:    z.number().positive(),
@@ -293,7 +294,7 @@ export const diasporaMortgageRouter = router({
         .select()
         .from(mortgageApplications)
         .where(and(eq(mortgageApplications.id, input.applicationId), eq(mortgageApplications.applicantId, ctx.user.id)));
-      if (!application) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!application) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const repayments = await db
         .select()
@@ -304,10 +305,10 @@ export const diasporaMortgageRouter = router({
       // Generate amortisation schedule if no repayments yet
       let schedule = repayments;
       if (repayments.length === 0 && application.status === "disbursed") {
-        const loanAmount = parseFloat(application.loanAmountUsd);
-        const monthlyRate = parseFloat(application.annualRatePct) / 100 / 12;
+        const loanAmount = safeParseAmount(application.loanAmountUsd);
+        const monthlyRate = safeParseAmount(application.annualRatePct) / 100 / 12;
         const totalPayments = application.termYears * 12;
-        const monthlyPayment = parseFloat(application.monthlyPaymentUsd);
+        const monthlyPayment = safeParseAmount(application.monthlyPaymentUsd);
         let balance = loanAmount;
         const projected = [];
         for (let i = 1; i <= Math.min(totalPayments, 12); i++) {
@@ -323,14 +324,13 @@ export const diasporaMortgageRouter = router({
     }),
 
   // Admin: approve mortgage
-  adminApprove: protectedProcedure
+  adminApprove: adminProcedure
     .input(z.object({
       applicationId: z.number(),
       approvedUsd:   z.number().positive(),
-      notes:         z.string().optional(),
+      notes:         z.string().max(2000).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const offerExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
       const [updated] = await db
@@ -343,7 +343,7 @@ export const diasporaMortgageRouter = router({
         })
         .where(eq(mortgageApplications.id, input.applicationId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 });
@@ -362,7 +362,7 @@ export const businessCreditScoringRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Gather signals for scoring
       const [txVolume] = await db
@@ -434,7 +434,7 @@ export const businessCreditScoringRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [score] = await db
         .select()
@@ -468,7 +468,7 @@ export const businessCreditScoringRouter = router({
       if (!score) throw new TRPCError({ code: "BAD_REQUEST", message: "No valid credit score found. Request a credit score first." });
       if (new Date() > score.expiresAt!) throw new TRPCError({ code: "BAD_REQUEST", message: "Credit score expired. Request a new score." });
 
-      const maxLimit = parseFloat(score.maxCreditLimitUsd);
+      const maxLimit = safeParseAmount(score.maxCreditLimitUsd);
       if (input.requestedUsd > maxLimit) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Requested amount exceeds credit limit of $${maxLimit.toLocaleString()}` });
       }
@@ -527,7 +527,7 @@ export const esgReportingRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Get transaction data for the period
       const [txStats] = await db
@@ -604,7 +604,7 @@ export const esgReportingRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return db
         .select()
         .from(esgReports)
@@ -621,7 +621,7 @@ export const esgReportingRouter = router({
         .select()
         .from(esgReports)
         .where(eq(esgReports.id, input.reportId));
-      if (!report) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return report;
     }),
 });

@@ -11,6 +11,9 @@ import { eq, and, desc } from "drizzle-orm";
 import { sendEmail } from "../email.service.js";
 import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { broadcastUserEvent } from "../sse.service.js";
+import { logger } from "../_core/logger.js";
 
 export const splitBillRouter = router({
   /** Create a split bill — one group, N participant shares */
@@ -18,14 +21,14 @@ export const splitBillRouter = router({
     .input(
       z.object({
         title: z.string().min(1).max(200),
-        totalAmount: z.number().positive(),
+        totalAmount: z.number().positive().max(10_000_000),
         currency: z.string().length(3),
         participants: z
           .array(
             z.object({
               name: z.string().min(1),
               email: z.string().email().optional(),
-              shareAmount: z.number().positive(),
+              shareAmount: z.number().positive().max(10_000_000),
             })
           )
           .min(2)
@@ -51,7 +54,7 @@ export const splitBillRouter = router({
         note: input.note ?? null,
         status: "active",
         expiresAt,
-      } as any);
+      } as any).returning();
 
       // Create one participant record per person
       const created: { id: number; token: string; name: string; email?: string; amount: number }[] = [];
@@ -68,7 +71,7 @@ export const splitBillRouter = router({
             token,
             status: "pending",
           } as any)
-          .returning({ id: splitBillParticipants.id });
+          .returning({ id: splitBillParticipants.id }).returning();
 
         created.push({ id: row.id, token, name: p.name, email: p.email, amount: p.shareAmount });
       }
@@ -94,13 +97,24 @@ export const splitBillRouter = router({
         }
       }
 
+      // Kafka event for split bill creation
+      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `splitbill:${groupId}`, {
+        eventType: "split_bill_created",
+        userId: ctx.user.id,
+        groupId,
+        totalAmount: input.totalAmount,
+        currency: input.currency,
+        participantCount: input.participants.length,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[SplitBill] Kafka event failed"));
+
       return { groupId, participants: created };
     }),
 
   /** List all split bill groups created by the current user */
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const groups = await db
       .select()
@@ -111,7 +125,7 @@ export const splitBillRouter = router({
 
     // For each group, get participant counts
     const result = await Promise.all(
-      groups.map(async (g) => {
+      groups.map(async (g: any) => {
         const participants = await db
           .select({ id: splitBillParticipants.id, status: splitBillParticipants.status })
           .from(splitBillParticipants)
@@ -119,7 +133,7 @@ export const splitBillRouter = router({
         return {
           ...g,
           participants: participants.length,
-          paid: participants.filter((p) => p.status === "paid").length,
+          paid: participants.filter((p: any) => p.status === "paid").length,
         };
       })
     );
@@ -132,14 +146,14 @@ export const splitBillRouter = router({
     .input(z.object({ groupId: z.string().uuid() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [group] = await db
         .select()
         .from(splitBillGroups)
         .where(and(eq(splitBillGroups.groupId, input.groupId), eq(splitBillGroups.creatorId, ctx.user.id)));
 
-      if (!group) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!group) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const participants = await db
         .select()
@@ -154,7 +168,7 @@ export const splitBillRouter = router({
     .input(z.object({ groupId: z.string().uuid() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Verify ownership
       const [group] = await db
@@ -162,7 +176,7 @@ export const splitBillRouter = router({
         .from(splitBillGroups)
         .where(and(eq(splitBillGroups.groupId, input.groupId), eq(splitBillGroups.creatorId, ctx.user.id)));
 
-      if (!group) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!group) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Update group status
       await db
@@ -195,14 +209,14 @@ export const splitBillRouter = router({
     .input(z.object({ participantId: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [participant] = await db
         .select()
         .from(splitBillParticipants)
         .where(eq(splitBillParticipants.id, input.participantId));
 
-      if (!participant) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!participant) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (!participant.email) throw new TRPCError({ code: "BAD_REQUEST", message: "No email for this participant" });
 
       // Verify creator owns the group
@@ -211,7 +225,7 @@ export const splitBillRouter = router({
         .from(splitBillGroups)
         .where(and(eq(splitBillGroups.groupId, participant.groupId), eq(splitBillGroups.creatorId, ctx.user.id)));
 
-      if (!group) throw new TRPCError({ code: "FORBIDDEN" });
+      if (!group) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
       const payLink = `${ctx.req?.headers?.origin ?? "https://remitflow.app"}/pay-request?token=${participant.token}`;
       await sendEmail({

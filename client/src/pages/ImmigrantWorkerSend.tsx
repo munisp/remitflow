@@ -12,6 +12,7 @@ import { Progress } from "@/components/ui/progress";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Loader2, ArrowRight, ShieldCheck, AlertTriangle } from "lucide-react";
 import { Link } from "wouter";
+import { useTranslation } from 'react-i18next';
 
 const CORRIDORS = [
   { value: "TG", label: "Togo" },
@@ -22,6 +23,7 @@ const CORRIDORS = [
 ];
 
 export default function ImmigrantWorkerSend() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [amountNgn, setAmountNgn] = useState(20000);
   const [recipientMobile, setRecipientMobile] = useState("");

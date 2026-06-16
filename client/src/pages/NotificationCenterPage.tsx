@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { Bell, BellOff, Check, CheckCheck, Trash2, Settings } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const TYPE_COLORS: Record<string, string> = {
   transfer: "bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-300",
@@ -17,10 +18,11 @@ const TYPE_COLORS: Record<string, string> = {
 };
 
 export default function NotificationCenterPage() {
+  const { t } = useTranslation();
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [showPrefs, setShowPrefs] = useState(false);
 
-  const { data: notifData, refetch } = trpc.v100.notificationsV2.list.useQuery({ unreadOnly, limit: 50 });
+  const { data: notifData, refetch, isError } = trpc.v100.notificationsV2.list.useQuery({ unreadOnly, limit: 50 });
   const { data: preferences } = trpc.v100.notificationsV2.getPreferences.useQuery();
 
   const markReadMutation = trpc.v100.notificationsV2.markRead.useMutation({
@@ -112,13 +114,13 @@ export default function NotificationCenterPage() {
         {["all", "transfer", "security", "promo", "system"].map(tab => (
           <TabsContent key={tab} value={tab}>
             <div className="space-y-2">
-              {notifications.filter(n => tab === "all" || (n as any).type === tab).length === 0 ? (
+              {notifications.filter((n: any) => tab === "all" || (n as any).type === tab).length === 0 ? (
                 <Card><CardContent className="p-8 text-center">
                   <BellOff className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
                   <p className="text-muted-foreground">No notifications</p>
                 </CardContent></Card>
               ) : (
-                notifications.filter(n => tab === "all" || (n as any).type === tab).map(n => (
+                notifications.filter((n: any) => tab === "all" || (n as any).type === tab).map((n: any) => (
                   <Card key={n.id} className={!(n as any).isRead ? "border-primary/30 bg-primary/5" : ""}>
                     <CardContent className="p-4">
                       <div className="flex items-start gap-3">

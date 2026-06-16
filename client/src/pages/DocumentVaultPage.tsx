@@ -18,6 +18,7 @@ import {
   CheckCircle, History,
 } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
+import { useTranslation } from 'react-i18next';
 
 const categoryColor: Record<string, string> = {
   identity:   "bg-blue-100 text-blue-700",
@@ -46,6 +47,7 @@ function getExpiryUrgency(expiresAt: Date | string | null | undefined) {
 }
 
 export default function DocumentVaultPage() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -112,27 +114,27 @@ export default function DocumentVaultPage() {
   };
 
   const docs = data?.documents ?? [];
-  const expiringSoon = docs.filter(d => {
+  const expiringSoon = docs.filter((d: any) => {
     if (!d.expiresAt) return false;
     const daysLeft = Math.ceil((new Date(d.expiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
     return daysLeft <= 30;
   });
-  const filtered = docs.filter(d => {
+  const filtered = docs.filter((d: any) => {
     const matchSearch = !search || d.name.toLowerCase().includes(search.toLowerCase());
     const matchCategory = categoryFilter === "all" || d.category === categoryFilter;
     return matchSearch && matchCategory;
   });
   const reminderLogs = reminderLogData?.logs ?? [];
-  const criticalDocs = expiringSoon.filter(d => {
+  const criticalDocs = expiringSoon.filter((d: any) => {
     const daysLeft = Math.ceil((new Date(d.expiresAt!).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
     return daysLeft <= 7;
   });
   const stats = {
     total: docs.length,
-    active: docs.filter(d => d.status === "active").length,
+    active: docs.filter((d: any) => d.status === "active").length,
     expiringSoon: expiringSoon.length,
-    expired: docs.filter(d => d.expiresAt && new Date(d.expiresAt) < new Date()).length,
-    shared: docs.filter(d => d.status === "shared").length,
+    expired: docs.filter((d: any) => d.expiresAt && new Date(d.expiresAt) < new Date()).length,
+    shared: docs.filter((d: any) => d.status === "shared").length,
   };
   const prefs = (prefsData as any) ?? {
     remind30d: true, remind14d: true, remind7d: true, remind3d: true, remind1d: true,
@@ -225,7 +227,7 @@ export default function DocumentVaultPage() {
                   {criticalDocs.length} document{criticalDocs.length !== 1 ? "s" : ""} expiring within 7 days
                 </p>
                 <div className="mt-1 flex flex-wrap gap-2">
-                  {criticalDocs.slice(0, 3).map(d => {
+                  {criticalDocs.slice(0, 3).map((d: any) => {
                     const u = getExpiryUrgency(d.expiresAt);
                     return (
                       <span key={d.id} className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">
@@ -340,7 +342,7 @@ export default function DocumentVaultPage() {
                 <CardHeader><CardTitle className="text-base flex items-center gap-2"><History className="w-4 h-4" /> Reminder History</CardTitle></CardHeader>
                 <CardContent className="p-0">
                   <div className="divide-y">
-                    {reminderLogs.map(log => (
+                    {reminderLogs.map((log: any) => (
                       <div key={log.id} className="flex items-center gap-4 px-4 py-3">
                         <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${log.channel === "email" ? "bg-blue-100" : "bg-purple-100"}`}>
                           <Bell className={`w-4 h-4 ${log.channel === "email" ? "text-blue-600" : "text-purple-600"}`} />

@@ -17,6 +17,7 @@ import {
   DollarSign, Download, BarChart2, Award,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const PLAN_COLORS: Record<string, string> = {
   starter: "#6366f1",
@@ -42,13 +43,14 @@ const STEP_LABELS: Record<number, string> = {
 const REVENUE_COLORS = ["#6366f1", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#f97316", "#84cc16", "#ec4899", "#14b8a6"];
 
 export default function PartnerAnalytics() {
+  const { t } = useTranslation();
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [feeMonths, setFeeMonths] = useState(6);
 
   const { data, isLoading, refetch, dataUpdatedAt } = trpc.adminInviteCodes.analytics.useQuery(undefined, {
     refetchInterval: autoRefresh ? 15_000 : false,
   });
-  const { data: feeData, isLoading: feeLoading, refetch: feeRefetch } = trpc.adminInviteCodes.feeRevenue.useQuery(
+  const { data: feeData, isLoading: feeLoading, refetch: feeRefetch, isError } = trpc.adminInviteCodes.feeRevenue.useQuery(
     { months: feeMonths },
     { refetchInterval: autoRefresh ? 30_000 : false }
   );
@@ -60,8 +62,8 @@ export default function PartnerAnalytics() {
 
   // Build funnel chart data
   const funnelByStep = [1,2,3,4,5,6].map((step) => {
-    const entries = funnel.filter(f => f.step === step);
-    const total = entries.reduce((s, e) => s + e.count, 0);
+    const entries = funnel.filter((f: any) => f.step === step);
+    const total = entries.reduce((s: any, e: any) => s + e.count, 0);
     return { step: STEP_LABELS[step] ?? `Step ${step}`, total };
   }).filter(s => s.total > 0);
 
@@ -378,7 +380,7 @@ export default function PartnerAnalytics() {
                         </tr>
                       </thead>
                       <tbody>
-                        {codePerformance.map((code) => {
+                        {codePerformance.map((code: any) => {
                           const usagePct = code.maxUses > 0 ? Math.round((code.usedCount / code.maxUses) * 100) : 0;
                           const isExpired = code.expiresAt && new Date() > new Date(code.expiresAt);
                           return (
@@ -433,7 +435,7 @@ export default function PartnerAnalytics() {
                   <div className="p-8 text-center text-muted-foreground text-sm">No onboarding sessions yet. Share your invite codes to get started!</div>
                 ) : (
                   <div className="divide-y">
-                    {recentActivity.map((session) => {
+                    {recentActivity.map((session: any) => {
                       const StatusIcon = session.status === "completed" ? CheckCircle2 : session.status === "abandoned" ? XCircle : Clock;
                       const statusColor = STATUS_COLORS[session.status] ?? "#94a3b8";
                       return (

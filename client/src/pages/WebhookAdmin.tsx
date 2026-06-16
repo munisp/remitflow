@@ -62,6 +62,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { format } from 'date-fns';
+import { useTranslation } from 'react-i18next';
 
 const EVENT_TYPES = [
   'transfer.completed',
@@ -84,6 +85,7 @@ interface WebhookFormValues {
 }
 
 export default function WebhookAdmin() {
+  const { t } = useTranslation();
   const utils = trpc.useContext();
   const [searchQuery, setSearchQuery] = useState('');
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
@@ -157,7 +159,7 @@ export default function WebhookAdmin() {
     }
   };
 
-  const filteredWebhooks = webhooks?.filter((w) =>
+  const filteredWebhooks = webhooks?.filter((w: any) =>
     w.url.toLowerCase().includes(searchQuery.toLowerCase()) ||
     w.description?.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -285,7 +287,7 @@ export default function WebhookAdmin() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredWebhooks?.map((webhook) => (
+                    {filteredWebhooks?.map((webhook: any) => (
                       <TableRow key={webhook.id}>
                         <TableCell className="font-medium">
                           <div className="flex flex-col">
@@ -295,7 +297,7 @@ export default function WebhookAdmin() {
                         </TableCell>
                         <TableCell>
                           <div className="flex flex-wrap gap-1">
-                            {webhook.events.slice(0, 2).map((event) => (
+                            {webhook.events.slice(0, 2).map((event: any) => (
                               <Badge key={event} variant="secondary" className="text-[10px]">
                                 {event}
                               </Badge>

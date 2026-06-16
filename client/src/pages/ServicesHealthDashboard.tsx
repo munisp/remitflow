@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState, useEffect, useRef, useCallback } from "react";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -180,6 +181,7 @@ function useServicesHealthSSE() {
 }
 
 export default function ServicesHealthDashboard() {
+  const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const { services, summary, connStatus, lastUpdate, circuitTrips, forceRefresh } = useServicesHealthSSE();
   const { data: registry } = trpc.svcHealth.registry.useQuery();

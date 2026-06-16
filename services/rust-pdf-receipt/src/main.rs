@@ -20,8 +20,69 @@ use actix_cors::Cors;
 use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::collections::HashMap;
 use uuid::Uuid;
+
+// ── PostgreSQL persistence layer ──────────────────────────────────────────────
+mod db {
+    use std::env;
+    use std::sync::OnceLock;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    
+    static DB_URL: OnceLock<String> = OnceLock::new();
+    
+    pub fn get_db_url() -> &'static str {
+        DB_URL.get_or_init(|| {
+            env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string())
+        })
+    }
+    
+    /// Initialize the service's state table in PostgreSQL
+    pub async fn init_db(service_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let table_name = service_name.replace('-', "_");
+        let client = tokio_postgres::connect(get_db_url(), tokio_postgres::NoTls).await;
+        match client {
+            Ok((client, connection)) => {
+                tokio::spawn(async move { if let Err(e) = connection.await { eprintln!("DB connection error: {}", e); } });
+                let create_sql = format!(
+                    "CREATE TABLE IF NOT EXISTS {table}_state (
+                        id TEXT PRIMARY KEY,
+                        data JSONB NOT NULL DEFAULT '{{}}',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )", table = table_name);
+                client.execute(&create_sql, &[]).await?;
+                let idx_sql = format!(
+                    "CREATE INDEX IF NOT EXISTS idx_{table}_updated ON {table}_state(updated_at)",
+                    table = table_name);
+                client.execute(&idx_sql, &[]).await?;
+                eprintln!("[{}] PostgreSQL connected, table {}_state ready", service_name, table_name);
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("[{}] PostgreSQL unavailable ({}), using in-memory fallback", service_name, e);
+                Ok(())
+            }
+        }
+    }
+    
+    /// Upsert a record into the state table
+    pub async fn upsert(service_name: &str, id: &str, data: &serde_json::Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let table_name = service_name.replace('-', "_");
+        let client = tokio_postgres::connect(get_db_url(), tokio_postgres::NoTls).await;
+        if let Ok((client, connection)) = client {
+            tokio::spawn(async move { let _ = connection.await; });
+            let sql = format!(
+                "INSERT INTO {table}_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()",
+                table = table_name);
+            client.execute(&sql, &[&id, &serde_json::to_string(data)?]).await?;
+        }
+        Ok(())
+    }
+}
 
 // ─── Request / Response Types ─────────────────────────────────────────────────
 
@@ -458,8 +519,8 @@ async fn kyc_receipt(req: web::Json<KycReceiptRequest>) -> impl Responder {
 <table class="limits-table">
   <thead><tr><th>Limit Type</th><th>Amount</th><th>Currency</th></tr></thead>
   <tbody>
-    <tr><td>Daily Transfer Limit</td><td><strong>{daily:,.2}</strong></td><td>{currency}</td></tr>
-    <tr><td>Monthly Transfer Limit</td><td><strong>{monthly:,.2}</strong></td><td>{currency}</td></tr>
+    <tr><td>Daily Transfer Limit</td><td><strong>{daily:.2}</strong></td><td>{currency}</td></tr>
+    <tr><td>Monthly Transfer Limit</td><td><strong>{monthly:.2}</strong></td><td>{currency}</td></tr>
   </tbody>
 </table>
 <p>Your account is now fully verified and you can enjoy the full benefits of RemitFlow's cross-border payment services.</p>
@@ -597,6 +658,17 @@ async fn batch_receipt(req: web::Json<BatchReceiptRequest>) -> impl Responder {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
+    let service_name = "rust-pdf-receipt";
+    let _ = db::init_db(service_name).await;
+
     tracing_subscriber::fmt::init();
     let port = std::env::var("PORT").unwrap_or_else(|_| "8096".to_string());
     let addr = format!("0.0.0.0:{}", port);
@@ -612,10 +684,22 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(cors)
             .service(health)
-            .service(transfer_receipt)
-            .service(statement_receipt)
-            .service(kyc_receipt)
-            .service(batch_receipt)
+            .service(
+                web::scope("")
+                    .wrap(actix_web::middleware::from_fn(|req: actix_web::dev::ServiceRequest, next: actix_web::middleware::Next<actix_web::body::BoxBody>| async move {
+                        let key = std::env::var("INTERNAL_SERVICE_KEY").unwrap_or_else(|_| "remitflow-internal-2026".to_string());
+                        let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                        let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                        if api_key == key || (auth.starts_with("Bearer ") && auth[7..] == key) {
+                            return next.call(req).await;
+                        }
+                        Err(actix_web::error::ErrorUnauthorized("unauthorized"))
+                    }))
+                    .service(transfer_receipt)
+                    .service(statement_receipt)
+                    .service(kyc_receipt)
+                    .service(batch_receipt)
+            )
     })
     .bind(&addr)?
     .run()

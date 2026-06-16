@@ -135,7 +135,7 @@ export function pbacMiddleware(policy: PolicyKey) {
 
 // ── Admin-only procedure guard ────────────────────────────────────────────────
 export function requireAdmin(ctx: Context): void {
-  if (!ctx.user || !['admin', 'owner'].includes(ctx.user.role)) {
+  if (!ctx.user || !ctx.user.role || !['admin', 'owner'].includes(ctx.user.role)) {
     throw new TRPCError({ code: 'FORBIDDEN', message: 'Admin access required' });
   }
 }
@@ -149,7 +149,7 @@ export function requireOwner(ctx: Context): void {
 
 // ── Compliance officer guard ──────────────────────────────────────────────────
 export function requireComplianceOfficer(ctx: Context): void {
-  if (!ctx.user || !['admin', 'owner', 'compliance_officer', 'aml_analyst'].includes(ctx.user.role)) {
+  if (!ctx.user || !ctx.user.role || !['admin', 'owner', 'compliance_officer', 'aml_analyst'].includes(ctx.user.role)) {
     throw new TRPCError({ code: 'FORBIDDEN', message: 'Compliance officer access required' });
   }
 }

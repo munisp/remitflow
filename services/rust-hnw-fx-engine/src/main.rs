@@ -2,6 +2,7 @@
 /// Provides sub-millisecond FX rate computation with negotiated spreads,
 /// rate locks, and real-time P&L tracking via TigerBeetle.
 use std::collections::HashMap;
+use warp::Filter;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -184,8 +185,112 @@ async fn handle_health() -> Result<impl warp::Reply, warp::Rejection> {
     })))
 }
 
+
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+async fn init_db() -> PgPool {
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to PostgreSQL");
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hnw_fx_engine_state (
+            id TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to create state table");
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_hnw_fx_engine_updated ON hnw_fx_engine_state(updated_at)"
+    )
+    .execute(&pool)
+    .await
+    .ok(); // Index may already exist
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hnw_fx_engine_events (
+            id BIGSERIAL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            payload JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to create events table");
+
+    tracing::info!("PostgreSQL connected for rust-hnw-fx-engine");
+    pool
+}
+
+async fn db_upsert(pool: &PgPool, id: &str, data: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO hnw_fx_engine_state (id, data, updated_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()"
+    )
+    .bind(id)
+    .bind(data)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn db_get(pool: &PgPool, id: &str) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    let row: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT data FROM hnw_fx_engine_state WHERE id = $1"
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.0))
+}
+
+async fn db_list(pool: &PgPool, limit: i64) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT data FROM hnw_fx_engine_state ORDER BY updated_at DESC LIMIT $1"
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO hnw_fx_engine_events (event_type, payload) VALUES ($1, $2)"
+    )
+    .bind(event_type)
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::main]
-async fn main() {
+async fn main() -> std::io::Result<()> {
+    // Panic hook for logging panics without crashing silently
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
+    let _pool = init_db().await;
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8100".to_string())
         .parse()
@@ -211,8 +316,37 @@ async fn main() {
             async move { handle_rate_lock(l, body).await }
         });
 
-    let routes = health_route.or(price_route).or(rate_lock_route);
+    let auth_filter = warp::header::optional::<String>("authorization")
+        .and(warp::header::optional::<String>("x-api-key"))
+        .and_then(|auth: Option<String>, api_key: Option<String>| async move {
+            let key = std::env::var("INTERNAL_SERVICE_KEY")
+                .unwrap_or_else(|_| "remitflow-internal-2026".to_string());
+            if let Some(ak) = &api_key {
+                if ak == &key { return Ok(()); }
+            }
+            if let Some(a) = &auth {
+                if a.starts_with("Bearer ") && &a[7..] == key { return Ok(()); }
+            }
+            Err(warp::reject::reject())
+        })
+        .untuple_one();
+    let protected = auth_filter.and(price_route.or(rate_lock_route));
+    let routes = health_route.or(protected);
 
     println!("[rust-hnw-fx-engine] Starting on :{}", port);
-    warp::serve(routes).run(([0, 0, 0, 0], port)).await;
+    let (addr, server) = warp::serve(routes).bind_with_graceful_shutdown(
+        ([0, 0, 0, 0], port),
+        async {
+            tokio::signal::ctrl_c().await.ok();
+            eprintln!("[rust-hnw-fx-engine] Graceful shutdown initiated");
+        eprintln!("{{\"event\":\"pod.shutdown.initiated\",\"service\":\"rust-hnw-fx-engine\",\"timestamp\":\"{}\"}}",
+            chrono::Utc::now().to_rfc3339());;
+        },
+    );
+    eprintln!("[rust-hnw-fx-engine] Listening on {}", addr);
+    let startup_ms = _PROCESS_START.get_or_init(Instant::now).elapsed().as_millis();
+    eprintln!("{{\"event\":\"pod.startup.complete\",\"service\":\"rust-hnw-fx-engine\",\"startup_ms\":{},\"timestamp\":\"{}\"}}",
+        startup_ms, chrono::Utc::now().to_rfc3339());;
+    server.await;
+    Ok(())
 }

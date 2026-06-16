@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Loader2, Plus, Trash2, Users, Copy, CheckCircle2, XCircle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 interface Participant {
   name: string;
@@ -17,6 +18,7 @@ interface Participant {
 }
 
 export default function SplitBill() {
+  const { t } = useTranslation();
   const [title, setTitle] = useState("");
   const [currency, setCurrency] = useState("USD");
   const [note, setNote] = useState("");

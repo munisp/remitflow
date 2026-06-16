@@ -8,10 +8,12 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Activity, AlertTriangle, CheckCircle2, TrendingDown } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 type Scenario = "mild" | "moderate" | "severe" | "extreme";
 
 export default function LiquidityStressTestPage() {
+  const { t } = useTranslation();
   const [scenario, setScenario] = useState<Scenario>("moderate");
 
   const { data: history } = trpc.v101.liquidityStressTesting.getHistoricalScenarios.useQuery();
@@ -106,7 +108,7 @@ export default function LiquidityStressTestPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {runScenario.data.positions.map((p) => (
+                  {runScenario.data.positions.map((p: any) => (
                     <TableRow key={p.currency}>
                       <TableCell className="font-medium">{p.currency}</TableCell>
                       <TableCell>${p.currentBalance.toLocaleString()}</TableCell>

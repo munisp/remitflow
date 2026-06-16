@@ -10,7 +10,7 @@ export interface SseClient {
 }
 
 export interface AdminSseEvent {
-  type: "new_kyc" | "new_compliance_case" | "case_updated" | "kyc_updated" | "case_escalated" | "fraud_alert" | "fraud_alert_reviewed" | "kyc_provider_result" | "fx_alert_triggered" | "ping";
+  type: "new_kyc" | "new_compliance_case" | "case_updated" | "kyc_updated" | "case_escalated" | "fraud_alert" | "fraud_alert_reviewed" | "kyc_provider_result" | "fx_alert_triggered" | "bulk_action" | "ping";
   payload: Record<string, unknown>;
   timestamp: string;
 }
@@ -109,6 +109,7 @@ export interface UserSseEvent {
     | "kyc_approved" | "kyc_rejected" | "kyc_pending"
     | "login_new_device" | "password_changed" | "2fa_enabled" | "2fa_disabled"
     | "rate_alert_hit" | "low_balance" | "referral_bonus" | "card_transaction"
+    | "fx_alert" | "bulk_action"
     | "ping" | "notification";
   payload: Record<string, unknown>;
   timestamp: string;

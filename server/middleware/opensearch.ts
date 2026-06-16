@@ -8,7 +8,11 @@ import { logger } from '../_core/logger';
 
 const OPENSEARCH_URL = process.env.OPENSEARCH_URL || "http://localhost:9200";
 const OPENSEARCH_USER = process.env.OPENSEARCH_USER || "admin";
-const OPENSEARCH_PASS = process.env.OPENSEARCH_PASS || "RemitFlow@Admin2024!";
+const OPENSEARCH_PASS = process.env.OPENSEARCH_PASS || "";
+
+if (!process.env.OPENSEARCH_PASS && process.env.NODE_ENV === "production") {
+  logger.warn("[OpenSearch] OPENSEARCH_PASS not set in production — authentication will fail");
+}
 
 // ── Index Names ───────────────────────────────────────────────────────────────
 
@@ -81,6 +85,64 @@ export async function logSecurityEvent(event: {
   } catch { /* graceful */ }
 }
 
+/** Index mappings — defines field types, analyzers, and tokenizers for each index */
+const INDEX_MAPPINGS: Record<string, Record<string, unknown>> = {
+  [OS_INDICES.SECURITY_EVENTS]: {
+    properties: {
+      type: { type: "keyword" },
+      severity: { type: "keyword" },
+      userId: { type: "integer" },
+      ipAddress: { type: "ip" },
+      details: { type: "text", analyzer: "standard" },
+      "@timestamp": { type: "date" },
+    },
+  },
+  [OS_INDICES.FRAUD_ALERTS]: {
+    properties: {
+      alertType: { type: "keyword" },
+      userId: { type: "integer" },
+      transactionId: { type: "keyword" },
+      riskScore: { type: "float" },
+      amount: { type: "scaled_float", scaling_factor: 100 },
+      currency: { type: "keyword" },
+      status: { type: "keyword" },
+      "@timestamp": { type: "date" },
+    },
+  },
+  [OS_INDICES.KYC_EVENTS]: {
+    properties: {
+      eventType: { type: "keyword" },
+      userId: { type: "integer" },
+      kycTier: { type: "integer" },
+      documentType: { type: "keyword" },
+      status: { type: "keyword" },
+      "@timestamp": { type: "date" },
+    },
+  },
+  [OS_INDICES.API_LOGS]: {
+    properties: {
+      method: { type: "keyword" },
+      path: { type: "keyword" },
+      statusCode: { type: "integer" },
+      duration: { type: "float" },
+      userId: { type: "integer" },
+      ip: { type: "ip" },
+      "@timestamp": { type: "date" },
+    },
+  },
+  [OS_INDICES.COMPLIANCE]: {
+    properties: {
+      reportType: { type: "keyword" },
+      jurisdiction: { type: "keyword" },
+      status: { type: "keyword" },
+      riskLevel: { type: "keyword" },
+      userId: { type: "integer" },
+      amount: { type: "scaled_float", scaling_factor: 100 },
+      "@timestamp": { type: "date" },
+    },
+  },
+};
+
 export async function ensureIndicesExist(): Promise<void> {
   const c = await getRealOSClient();
   if (!c) return;
@@ -89,10 +151,73 @@ export async function ensureIndicesExist(): Promise<void> {
     try {
       const exists = await c.indices.exists({ index });
       if (!exists.body) {
-        await c.indices.create({ index, body: { settings: { number_of_shards: 1, number_of_replicas: 0 } } });
+        const mappings = INDEX_MAPPINGS[index];
+        await c.indices.create({
+          index,
+          body: {
+            settings: { number_of_shards: 1, number_of_replicas: 0 },
+            ...(mappings ? { mappings } : {}),
+          },
+        });
+        logger.info(`[OpenSearch] Created index ${index} with mappings`);
       }
     } catch { /* ignore */ }
   }
+}
+
+/** Retry OpenSearch connection — allows recovery after transient failures */
+export async function retryOSConnection(): Promise<boolean> {
+  _realChecked = false;
+  _realAvailable = false;
+  _realClient = null;
+  const client = await getRealOSClient();
+  return client !== null;
+}
+
+// ── Search Query Builders ───────────────────────────────────────────────────
+
+export function buildMatchQuery(field: string, value: string): Record<string, unknown> {
+  return { match: { [field]: value } };
+}
+
+export function buildTermQuery(field: string, value: string | number): Record<string, unknown> {
+  return { term: { [field]: value } };
+}
+
+export function buildRangeQuery(field: string, gte?: unknown, lte?: unknown): Record<string, unknown> {
+  const range: Record<string, unknown> = {};
+  if (gte !== undefined) range.gte = gte;
+  if (lte !== undefined) range.lte = lte;
+  return { range: { [field]: range } };
+}
+
+export function buildBoolQuery(params: {
+  must?: Record<string, unknown>[];
+  filter?: Record<string, unknown>[];
+  should?: Record<string, unknown>[];
+  mustNot?: Record<string, unknown>[];
+}): Record<string, unknown> {
+  const bool: Record<string, unknown> = {};
+  if (params.must?.length) bool.must = params.must;
+  if (params.filter?.length) bool.filter = params.filter;
+  if (params.should?.length) bool.should = params.should;
+  if (params.mustNot?.length) bool.must_not = params.mustNot;
+  return { bool };
+}
+
+export function buildSecurityEventQuery(params: {
+  severity?: string;
+  type?: string;
+  userId?: number;
+  from?: string;
+  to?: string;
+}): Record<string, unknown> {
+  const filters: Record<string, unknown>[] = [];
+  if (params.severity) filters.push(buildTermQuery("severity", params.severity));
+  if (params.type) filters.push(buildTermQuery("type", params.type));
+  if (params.userId) filters.push(buildTermQuery("userId", params.userId));
+  if (params.from || params.to) filters.push(buildRangeQuery("@timestamp", params.from, params.to));
+  return filters.length > 0 ? buildBoolQuery({ filter: filters }) : { match_all: {} };
 }
 
 // ── Legacy HTTP Client (graceful degradation) ─────────────────────────────────

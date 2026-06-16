@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -38,6 +39,7 @@ const STAGE_COLORS: Record<string, string> = {
 };
 
 export default function StartupDealRoom() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState("deals");
   const [search, setSearch] = useState("");
   const [stage, setStage] = useState("all");
@@ -67,8 +69,8 @@ export default function StartupDealRoom() {
     onError: (e) => toast.error(e.message),
   });
 
-  const totalInvested = myInvestments?.reduce((s, i) => s + parseFloat(i.amountUsd ?? "0"), 0) ?? 0;
-  const activeDeals = myInvestments?.filter((i) => i.status === "active").length ?? 0;
+  const totalInvested = myInvestments?.reduce((s: any, i: any) => s + parseFloat(i.amountUsd ?? "0"), 0) ?? 0;
+  const activeDeals = myInvestments?.filter((i: any) => i.status === "active").length ?? 0;
 
   return (
     <DashboardLayout>
@@ -184,7 +186,7 @@ export default function StartupDealRoom() {
               </div>
             ) : (
               <div className="grid md:grid-cols-2 gap-4">
-                {deals?.map((deal) => {
+                {deals?.map((deal: any) => {
                   const raisedPct = deal.targetRaiseUsd && deal.raisedSoFarUsd
                     ? Math.min(100, (parseFloat(deal.raisedSoFarUsd) / parseFloat(deal.targetRaiseUsd)) * 100)
                     : 0;
@@ -239,7 +241,7 @@ export default function StartupDealRoom() {
 
                         {deal.metrics && deal.metrics.length > 0 && (
                           <p className="text-xs text-muted-foreground bg-muted/30 p-2 rounded">
-                            📊 {deal.metrics.map(m => `${m.label}: ${m.value}`).join(" · ")}
+                            📊 {deal.metrics.map((m: any) => `${m.label}: ${m.value}`).join(" · ")}
                           </p>
                         )}
 
@@ -293,7 +295,7 @@ export default function StartupDealRoom() {
               </Card>
             ) : (
               <div className="space-y-3">
-                {myInvestments.map((inv) => (
+                {myInvestments.map((inv: any) => (
                   <Card key={inv.id}>
                     <CardContent className="pt-4 pb-3">
                       <div className="flex items-center justify-between flex-wrap gap-3">
@@ -440,7 +442,7 @@ export default function StartupDealRoom() {
               {selectedDealData.metrics && selectedDealData.metrics.length > 0 && (
                 <div className="p-3 bg-muted/30 rounded text-sm">
                   <p className="font-medium mb-1">Key Metrics</p>
-                  <div className="space-y-1">{selectedDealData.metrics.map((m, i) => <div key={i} className="flex justify-between text-muted-foreground"><span>{m.label}</span><span className="font-mono">{m.value}</span></div>)}</div>
+                  <div className="space-y-1">{selectedDealData.metrics.map((m: any, i: any) => <div key={i} className="flex justify-between text-muted-foreground"><span>{m.label}</span><span className="font-mono">{m.value}</span></div>)}</div>
                 </div>
               )}
               {selectedDealData.description && (

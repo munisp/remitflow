@@ -9,8 +9,10 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Route, Zap, DollarSign, Shield, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function SmartRoutingV2Page() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<"simulate" | "decisions" | "stats">("simulate");
   const [fromCurrency, setFromCurrency] = useState("USD");
   const [toCurrency, setToCurrency] = useState("NGN");
@@ -180,7 +182,7 @@ export default function SmartRoutingV2Page() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(decisionsQuery.data?.decisions ?? []).map((d) => (
+                  {(decisionsQuery.data?.decisions ?? []).map((d: any) => (
                     <tr key={d.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                       <td className="p-3 font-mono text-xs text-muted-foreground">#{d.id}</td>
                       <td className="p-3 font-mono text-xs">{d.fromCurrency}→{d.toCurrency}</td>

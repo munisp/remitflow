@@ -7,12 +7,14 @@ import { Badge } from "@/components/ui/badge";
 import { getLoginUrl } from "@/const";
 import { Building2, Plus, ArrowRight, Globe, Users, Settings, Zap } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function MyTenants() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const { user, loading } = useAuth();
 
-  const { data: tenants = [], isLoading } = trpc.partnerOnboarding.myTenants.useQuery(undefined, {
+  const { data: tenants = [], isLoading, isError } = trpc.partnerOnboarding.myTenants.useQuery(undefined, {
     enabled: !!user,
   });
 

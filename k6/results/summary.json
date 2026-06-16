@@ -1,0 +1,487 @@
+{
+  "setup_data": {
+    "loggedIn": true
+  },
+  "root_group": {
+    "path": "",
+    "id": "d41d8cd98f00b204e9800998ecf8427e",
+    "groups": [
+      {
+        "name": "setup",
+        "path": "::setup",
+        "id": "5c0f8025f7e0b6654089e5b00e950f1a",
+        "groups": [],
+        "checks": []
+      },
+      {
+        "name": "Transfer Flow",
+        "path": "::Transfer Flow",
+        "id": "47c736947bf50ff59438975431ab6adf",
+        "groups": [],
+        "checks": [
+            {
+              "name": "FX quote success",
+              "path": "::Transfer Flow::FX quote success",
+              "id": "fb8258aa888ce59fb23cf49d22eaaaa6",
+              "passes": 0,
+              "fails": 29
+            },
+            {
+              "passes": 0,
+              "fails": 29,
+              "name": "Transfer initiated",
+              "path": "::Transfer Flow::Transfer initiated",
+              "id": "78ee9d7d623a2cad311074b50fef8425"
+            },
+            {
+              "path": "::Transfer Flow::Transfer list success",
+              "id": "114843d1aa9597ca00d088f5a7ff487e",
+              "passes": 0,
+              "fails": 29,
+              "name": "Transfer list success"
+            }
+          ]
+      },
+      {
+        "checks": [
+          {
+            "name": "FX quote fetched",
+            "path": "::FX Rate Flow::FX quote fetched",
+            "id": "fb91054fa1bcf2b5011e4aad6e584685",
+            "passes": 0,
+            "fails": 175
+          }
+        ],
+        "name": "FX Rate Flow",
+        "path": "::FX Rate Flow",
+        "id": "1b6e183824ea13a19dbb808fe05c2bea",
+        "groups": []
+      },
+      {
+        "path": "::Auth Flow",
+        "id": "5c11e31c00a627a5c2755b3235403ac9",
+        "groups": [],
+        "checks": [
+            {
+              "id": "0076e8598c2bf084cc5b6c2b4869ee0c",
+              "passes": 20,
+              "fails": 0,
+              "name": "Dev login responded",
+              "path": "::Auth Flow::Dev login responded"
+            },
+            {
+              "name": "Health check success",
+              "path": "::Auth Flow::Health check success",
+              "id": "3aa41575a2b3a2cdf5e189494a465513",
+              "passes": 20,
+              "fails": 0
+            }
+          ],
+        "name": "Auth Flow"
+      },
+      {
+        "name": "Wallet Flow",
+        "path": "::Wallet Flow",
+        "id": "87f82d0dcb80b8b50962d68aed5c778b",
+        "groups": [],
+        "checks": [
+            {
+              "name": "Health check success",
+              "path": "::Wallet Flow::Health check success",
+              "id": "93145d7d8ef3540540dc204e225be1b6",
+              "passes": 29,
+              "fails": 0
+            },
+            {
+              "id": "4ed10f05d8b5a3f81f17dafcd3a91917",
+              "passes": 0,
+              "fails": 29,
+              "name": "Quote success",
+              "path": "::Wallet Flow::Quote success"
+            },
+            {
+              "path": "::Wallet Flow::Beneficiary list success",
+              "id": "12dbd6d0fd375d86d3c4d5e1193fc658",
+              "passes": 2,
+              "fails": 27,
+              "name": "Beneficiary list success"
+            }
+          ]
+      },
+      {
+        "name": "Admin Flow",
+        "path": "::Admin Flow",
+        "id": "bb69cd9117ef4a3d0be0f2190194261e",
+        "groups": [],
+        "checks": [
+            {
+              "fails": 0,
+              "name": "System ready success",
+              "path": "::Admin Flow::System ready success",
+              "id": "8815d113749e55dda0f3dc92c23c04c2",
+              "passes": 7
+            },
+            {
+              "id": "592e844ea6a43a87fd632272ae5d2a10",
+              "passes": 7,
+              "fails": 0,
+              "name": "Health success",
+              "path": "::Admin Flow::Health success"
+            },
+            {
+              "name": "Feature flags success",
+              "path": "::Admin Flow::Feature flags success",
+              "id": "f4b27961fb7744bf65c1d34247e4828b",
+              "passes": 0,
+              "fails": 7
+            }
+          ]
+      },
+      {
+        "name": "Compliance Flow",
+        "path": "::Compliance Flow",
+        "id": "9884a56629d3895f2690c5f523baf0b7",
+        "groups": [],
+        "checks": [
+            {
+              "name": "LEI validation success",
+              "path": "::Compliance Flow::LEI validation success",
+              "id": "492e7cb9016bdc75852661c599a0d6de",
+              "passes": 18,
+              "fails": 0
+            },
+            {
+              "id": "f1e6b8b79f6457cd09d8690892056145",
+              "passes": 0,
+              "fails": 18,
+              "name": "Beneficiary list success",
+              "path": "::Compliance Flow::Beneficiary list success"
+            }
+          ]
+      }
+    ],
+    "checks": [],
+    "name": ""
+  },
+  "options": {
+    "summaryTrendStats": [
+      "avg",
+      "min",
+      "med",
+      "max",
+      "p(90)",
+      "p(95)"
+    ],
+    "summaryTimeUnit": "",
+    "noColor": false
+  },
+  "state": {
+    "testRunDurationMs": 78796.91223,
+    "isStdOutTTY": true,
+    "isStdErrTTY": true
+  },
+  "metrics": {
+    "http_req_blocked": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 0.007308958515283829,
+        "min": 0.001212,
+        "med": 0.003477,
+        "max": 0.365602,
+        "p(90)": 0.005343000000000001,
+        "p(95)": 0.007962499999999999
+      }
+    },
+    "http_req_receiving": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "max": 0.570374,
+        "p(90)": 0.1339043,
+        "p(95)": 0.1640815,
+        "avg": 0.08784074890829686,
+        "min": 0.041838,
+        "med": 0.0752355
+      }
+    },
+    "checks": {
+      "type": "rate",
+      "contains": "default",
+      "values": {
+        "rate": 0.23094170403587444,
+        "passes": 103,
+        "fails": 343
+      }
+    },
+    "group_duration": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "max": 20317.153847,
+        "p(90)": 7814.7797498,
+        "p(95)": 11054.709254600002,
+        "avg": 2551.3932908478255,
+        "min": 506.073789,
+        "med": 1010.4365339999999
+      }
+    },
+    "http_req_tls_handshaking": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 0,
+        "min": 0,
+        "med": 0,
+        "max": 0,
+        "p(90)": 0,
+        "p(95)": 0
+      }
+    },
+    "iteration_duration": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "max": 20317.424141,
+        "p(90)": 7814.7092312,
+        "p(95)": 11039.484674299998,
+        "avg": 2534.937034791366,
+        "min": 18.232339,
+        "med": 1010.475521
+      }
+    },
+    "http_req_sending": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 0.031916777292576394,
+        "min": 0.006171,
+        "med": 0.031739,
+        "max": 0.095668,
+        "p(90)": 0.049946000000000004,
+        "p(95)": 0.060957649999999995
+      }
+    },
+    "data_received": {
+      "contains": "data",
+      "values": {
+        "count": 3213140,
+        "rate": 40777.486186529466
+      },
+      "type": "counter"
+    },
+    "http_req_connecting": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 0.0019735043668122274,
+        "min": 0,
+        "med": 0,
+        "max": 0.179635,
+        "p(90)": 0,
+        "p(95)": 0
+      }
+    },
+    "http_req_duration{expected_response:true}": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "med": 8.375005,
+        "max": 9010.09359,
+        "p(90)": 4610.100473400008,
+        "p(95)": 7009.359317,
+        "avg": 957.5080568,
+        "min": 0.655489
+      }
+    },
+    "http_req_failed": {
+      "type": "rate",
+      "contains": "default",
+      "values": {
+        "passes": 343,
+        "fails": 115,
+        "rate": 0.7489082969432315
+      }
+    },
+    "p99_latency": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 1.0346747931034483,
+        "min": 0.781319,
+        "med": 1.038731,
+        "max": 1.655201,
+        "p(90)": 1.1986504,
+        "p(95)": 1.2207876
+      }
+    },
+    "auth_latency": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "min": 0.722904,
+        "med": 3.780507,
+        "max": 9009.50534,
+        "p(90)": 3661.2581996000017,
+        "p(95)": 6109.174794799994,
+        "avg": 830.8433401499999
+      },
+      "thresholds": {
+        "p(95)<300": {
+          "ok": false
+        },
+        "p(99)<800": {
+          "ok": false
+        }
+      }
+    },
+    "http_req_duration": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "p(95)": 4082.071254449989,
+        "avg": 442.41559672925774,
+        "min": 0.64889,
+        "med": 1.1471844999999998,
+        "max": 10504.346898,
+        "p(90)": 25.35135100000002
+      },
+      "thresholds": {
+        "p(95)<500": {
+          "ok": false
+        },
+        "p(99)<1500": {
+          "ok": false
+        }
+      }
+    },
+    "iterations": {
+      "type": "counter",
+      "contains": "default",
+      "values": {
+        "count": 138,
+        "rate": 1.7513376615214609
+      }
+    },
+    "errors": {
+      "thresholds": {
+        "rate<0.01": {
+          "ok": false
+        }
+      },
+      "type": "rate",
+      "contains": "default",
+      "values": {
+        "passes": 256,
+        "fails": 22,
+        "rate": 0.920863309352518
+      }
+    },
+    "wallet_latency": {
+      "values": {
+        "max": 10504.346898,
+        "p(90)": 4906.287717600006,
+        "p(95)": 7356.0155724000015,
+        "avg": 1024.5019782068966,
+        "min": 0.723733,
+        "med": 3.612513
+      },
+      "thresholds": {
+        "p(95)<200": {
+          "ok": false
+        },
+        "p(99)<500": {
+          "ok": false
+        }
+      },
+      "type": "trend",
+      "contains": "time"
+    },
+    "http_reqs": {
+      "type": "counter",
+      "contains": "default",
+      "values": {
+        "count": 458,
+        "rate": 5.812410499832095
+      }
+    },
+    "http_req_waiting": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "max": 10504.200847,
+        "p(90)": 25.18354440000002,
+        "p(95)": 4081.887656099989,
+        "avg": 442.2958392030566,
+        "min": 0.561985,
+        "med": 1.026652
+      }
+    },
+    "transfer_latency": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "med": 1.038731,
+        "max": 1.655201,
+        "p(90)": 1.1986504,
+        "p(95)": 1.2207876,
+        "avg": 1.0346747931034483,
+        "min": 0.781319
+      },
+      "thresholds": {
+        "p(95)<800": {
+          "ok": true
+        },
+        "p(99)<2000": {
+          "ok": true
+        }
+      }
+    },
+    "vus": {
+      "type": "gauge",
+      "contains": "default",
+      "values": {
+        "value": 1,
+        "min": 1,
+        "max": 5
+      }
+    },
+    "vus_max": {
+      "type": "gauge",
+      "contains": "default",
+      "values": {
+        "value": 5,
+        "min": 5,
+        "max": 5
+      }
+    },
+    "fx_rate_latency": {
+      "type": "trend",
+      "contains": "time",
+      "values": {
+        "avg": 1.1192512303921565,
+        "min": 0.64889,
+        "med": 0.920175,
+        "max": 9.843104,
+        "p(90)": 1.288268,
+        "p(95)": 1.4005988999999999
+      },
+      "thresholds": {
+        "p(95)<200": {
+          "ok": true
+        },
+        "p(99)<500": {
+          "ok": true
+        }
+      }
+    },
+    "data_sent": {
+      "contains": "data",
+      "values": {
+        "count": 127264,
+        "rate": 1615.088667796139
+      },
+      "type": "counter"
+    }
+  }
+}

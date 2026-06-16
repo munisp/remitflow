@@ -10,10 +10,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import { DollarSign, TrendingDown, Award, History, Calculator, Zap, Star, ChevronRight } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = ["USD", "GBP", "EUR", "NGN", "KES", "GHS", "ZAR", "UGX", "TZS"];
 
 export default function FeeNegotiationPage() {
+  const { t } = useTranslation();
   const [fromCurrency, setFromCurrency] = useState("USD");
   const [toCurrency, setToCurrency] = useState("NGN");
   const [amount, setAmount] = useState("1000");
@@ -229,7 +231,7 @@ export default function FeeNegotiationPage() {
                 </div>
               </div>
               <div className="space-y-2 max-h-48 overflow-y-auto">
-                {history.transactions.slice(0, 10).map((tx, i) => (
+                {history.transactions.slice(0, 10).map((tx: any, i: any) => (
                   <div key={i} className="flex items-center justify-between text-sm py-1.5 border-b last:border-0">
                     <span className="text-muted-foreground">{new Date(tx.date!).toLocaleDateString()}</span>
                     <span>{tx.amount.toFixed(2)} {tx.currency}</span>

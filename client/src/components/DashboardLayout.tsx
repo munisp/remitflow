@@ -43,7 +43,11 @@ import {
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { NotificationBell } from "./NotificationBell";
 import { ChatWidget } from "./ChatWidget";
+import { GlobalMobileNav } from "./GlobalMobileNav";
+import { OfflineQueueBanner } from "./OfflineQueueBanner";
+import { SessionTimeout } from "./SessionTimeout";
 import { CSSProperties, useCallback, useEffect, useRef, useState } from "react";
+import { useTheme } from "@/contexts/ThemeContext";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from "./DashboardLayoutSkeleton";
 import { trpc } from "@/lib/trpc";
@@ -421,7 +425,7 @@ const MAX_WIDTH = 480;
 
 // ─── ONBOARDING STEPS ─────────────────────────────────────────────────────────
 function getOnboardingSteps(
-  user: { kycTier?: string; email?: string | null } | null
+  user: { kycTier?: string | null; email?: string | null } | null
 ) {
   if (!user) return [];
   return [
@@ -596,7 +600,7 @@ function CommandPalette({
 function OnboardingProgress({
   user,
 }: {
-  user: { kycTier?: string; email?: string | null } | null;
+  user: { kycTier?: string | null; email?: string | null } | null;
 }) {
   const [, setLocation] = useLocation();
   const [dismissed, setDismissed] = useState(
@@ -669,6 +673,15 @@ function OnboardingProgress({
 }
 
 // ─── BREADCRUMB ───────────────────────────────────────────────────────────────
+function DarkModeToggle() {
+  const { theme, toggleTheme } = useTheme();
+  return (
+    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggleTheme} aria-label="Toggle dark mode">
+      {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+    </Button>
+  );
+}
+
 function Breadcrumb({ path }: { path: string }) {
   const item = ALL_NAV_ITEMS.find((i) => i.path === path);
   if (!item) return null;
@@ -1134,23 +1147,17 @@ function DashboardLayoutContent({
               </kbd>
             </button>
             <NotificationBell />
+            <DarkModeToggle />
             <LanguageSwitcher />
           </div>
         </div>
 
-        {/* Mobile FAB */}
-        {isMobile && (
-          <button
-            onClick={() => setLocation("/send")}
-            className="fixed bottom-6 right-6 z-50 h-14 w-14 rounded-full bg-primary text-primary-foreground shadow-lg flex items-center justify-center hover:bg-primary/90 active:scale-95 transition-all"
-            aria-label="Send money"
-          >
-            <ArrowUpRight className="h-6 w-6" />
-          </button>
-        )}
+        <OfflineQueueBanner />
 
-        <main className="flex-1 p-4">{children}</main>
+        <main className="flex-1 p-4 pb-safe">{children}</main>
         <ChatWidget />
+        <GlobalMobileNav />
+        <SessionTimeout />
       </SidebarInset>
     </>
   );

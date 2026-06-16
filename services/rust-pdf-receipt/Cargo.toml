@@ -8,6 +8,7 @@ name = "rust-pdf-receipt"
 path = "src/main.rs"
 
 [dependencies]
+tokio-postgres = "0.7"
 actix-web = "4"
 actix-cors = "0.7"
 serde = { version = "1", features = ["derive"] }

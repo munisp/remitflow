@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import React, { useState, useEffect, useCallback } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -37,6 +38,7 @@ const RAIL_CURRENCIES: Record<string, string[]> = {
 };
 
 export default function PaymentRails() {
+  const { t } = useTranslation();
   const [selectedRail, setSelectedRail] = useState("cips");
   const [fromAmount, setFromAmount] = useState("1000");
   const [fromCurrency, setFromCurrency] = useState("USD");

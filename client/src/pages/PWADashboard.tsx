@@ -19,6 +19,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { useState, useMemo } from "react";
+import { useTranslation } from 'react-i18next';
 
 // ─── Category definitions (mirrors DashboardLayout NAV_GROUPS) ───────────────
 const CATEGORIES = [
@@ -283,11 +284,12 @@ const CATEGORIES = [
 const TOTAL_ROUTES = CATEGORIES.reduce((sum, c) => sum + c.items.length, 0);
 
 export default function PWADashboard() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const [search, setSearch] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const { user } = useAuth();
-  const { data: walletData } = trpc.wallet.balance.useQuery(undefined, {
+  const { data: walletData, isLoading, isError } = trpc.wallet.balance.useQuery(undefined, {
     enabled: !!user,
     refetchInterval: 30_000,
   });

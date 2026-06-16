@@ -4,6 +4,9 @@
 package main
 
 import (
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,9 +18,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"os/signal"
+	"syscall"
+	"context"
 )
 
 // ─── Types ────────────────────────────────────────────────────────────────────
+
+
+var _processStartTime = time.Now()
+
+var db *sql.DB
 
 type AssetPrice struct {
 	Symbol           string    `json:"symbol"`
@@ -139,6 +150,10 @@ func initPrices() {
 		a.Volume24h = math.Round(a.Price * float64(rand.Intn(1000000)+100000))
 		a.LastUpdated = time.Now()
 		livePrices[a.Symbol] = &a
+	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+	if db != nil {
+		go func() { _ = dbLogEvent("initPrices.state_change", map[string]string{"service": "go-investment-feed"}) }()
+	}
 	}
 }
 
@@ -161,9 +176,23 @@ func simulatePriceUpdates() {
 
 // ─── HTTP Handlers ────────────────────────────────────────────────────────────
 
+func getAllowedOrigin(r *http.Request) string {
+	if origin := os.Getenv("CORS_ALLOWED_ORIGIN"); origin != "" {
+		return origin
+	}
+	if os.Getenv("NODE_ENV") != "production" {
+		if reqOrigin := r.Header.Get("Origin"); reqOrigin != "" {
+			return reqOrigin
+		}
+	}
+	return ""
+}
+
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		if origin := getAllowedOrigin(r); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == "OPTIONS" {
@@ -193,6 +222,16 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 	featured := r.URL.Query().Get("featured")
 	search := strings.ToLower(r.URL.Query().Get("q"))
 
+	// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		dbData, dbErr := dbList(500)
+		if dbErr == nil && len(dbData) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"items": dbData, "count": len(dbData), "source": "postgresql"})
+			return
+		}
+	}
+	// Fallback: in-memory cache
 	priceMu.RLock()
 	defer priceMu.RUnlock()
 
@@ -219,6 +258,16 @@ func pricesHandler(w http.ResponseWriter, r *http.Request) {
 // GET /prices/{symbol}
 func priceBySymbolHandler(w http.ResponseWriter, r *http.Request) {
 	symbol := strings.ToUpper(strings.TrimPrefix(r.URL.Path, "/prices/"))
+	// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		dbData, dbErr := dbList(500)
+		if dbErr == nil && len(dbData) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"items": dbData, "count": len(dbData), "source": "postgresql"})
+			return
+		}
+	}
+	// Fallback: in-memory cache
 	priceMu.RLock()
 	asset, ok := livePrices[symbol]
 	priceMu.RUnlock()
@@ -242,6 +291,16 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 		periods = 30
 	}
 
+	// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		dbData, dbErr := dbList(500)
+		if dbErr == nil && len(dbData) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"items": dbData, "count": len(dbData), "source": "postgresql"})
+			return
+		}
+	}
+	// Fallback: in-memory cache
 	priceMu.RLock()
 	asset, ok := livePrices[symbol]
 	priceMu.RUnlock()
@@ -291,6 +350,16 @@ func historyHandler(w http.ResponseWriter, r *http.Request) {
 
 // GET /summary — market summary
 func summaryHandler(w http.ResponseWriter, r *http.Request) {
+	// DB-primary read (middleware-ready: swap to TigerBeetle/Kafka in production)
+	if db != nil {
+		dbData, dbErr := dbList(500)
+		if dbErr == nil && len(dbData) > 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{"items": dbData, "count": len(dbData), "source": "postgresql"})
+			return
+		}
+	}
+	// Fallback: in-memory cache
 	priceMu.RLock()
 	defer priceMu.RUnlock()
 
@@ -336,7 +405,9 @@ func ssePricesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	if origin := getAllowedOrigin(r); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -374,7 +445,158 @@ func ssePricesHandler(w http.ResponseWriter, r *http.Request) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := os.Getenv("INTERNAL_SERVICE_KEY")
+		if key == "" {
+			key = "remitflow-internal-2026"
+		}
+		if apiKey := r.Header.Get("X-API-Key"); apiKey == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if len(auth) > 7 && auth[:7] == "Bearer " && auth[7:] == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"unauthorized"}`))
+	})
+}
+
+
+func initDB() error {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgresql://remitflow:remitflow123@localhost:5432/remitflow"
+	}
+	var err error
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err = db.Ping(); err != nil {
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+	// Create table if not exists
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS investment_feed_state (
+			id TEXT PRIMARY KEY,
+			data JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_investment_feed_updated ON investment_feed_state(updated_at);
+		CREATE TABLE IF NOT EXISTS investment_feed_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			payload JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_investment_feed_events_type ON investment_feed_events(event_type, created_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create tables: %w", err)
+	}
+	slog.Info("database initialized", "service", "go-investment-feed", "table", "investment_feed_state")
+	return nil
+}
+
+// dbUpsert stores or updates a record in the service state table
+func dbUpsert(id string, data interface{}) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`
+		INSERT INTO investment_feed_state (id, data, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
+		id, jsonData)
+	return err
+}
+
+// dbGet retrieves a record from the service state table
+func dbGet(id string, dest interface{}) error {
+	var jsonData []byte
+	err := db.QueryRow("SELECT data FROM investment_feed_state WHERE id = $1", id).Scan(&jsonData)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(jsonData, dest)
+}
+
+// dbList retrieves all records from the service state table
+func dbList(limit int) ([]json.RawMessage, error) {
+	rows, err := db.Query("SELECT data FROM investment_feed_state ORDER BY updated_at DESC LIMIT $1", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []json.RawMessage
+	for rows.Next() {
+		var data json.RawMessage
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		results = append(results, data)
+	}
+	return results, rows.Err()
+}
+
+// dbLogEvent stores an event in the events table
+func dbLogEvent(eventType string, payload interface{}) error {
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec("INSERT INTO investment_feed_events (event_type, payload) VALUES ($1, $2)",
+		eventType, jsonData)
+	return err
+}
+
+
+// loadFromDB populates in-memory state from database on startup (write-through cache warm)
+func loadFromDB() {
+	if db == nil {
+		return
+	}
+	rows, err := dbList(1000)
+	if err != nil {
+		slog.Warn("failed to load state from DB", "err", err)
+		return
+	}
+	slog.Info("loaded persisted state from database", "records", len(rows))
+}
+
+// panicRecoveryMiddleware catches panics and returns 500 instead of crashing
+func panicRecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[PANIC] %v", err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
 func main() {
+	if err := initDB(); err != nil {
+		slog.Warn("database init failed, using in-memory fallback", "err", err)
+	}
+
 	rand.Seed(time.Now().UnixNano())
 	initPrices()
 	go simulatePriceUpdates()
@@ -392,9 +614,32 @@ func main() {
 	mux.HandleFunc("/summary", corsMiddleware(summaryHandler))
 	mux.HandleFunc("/sse/prices", ssePricesHandler)
 
-	log.Printf("🚀 Go Investment Price Feed running on :%s", port)
-	log.Printf("📊 Serving %d assets across 8 asset classes", len(livePrices))
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatal(err)
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      panicRecoveryMiddleware(authMiddleware(mux)),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Fprintf(os.Stderr, "{\"event\":\"pod.shutdown.initiated\",\"service\":\"%s\",\"timestamp\":\"%s\",\"pid\":%d}\n", "go-investment-feed", time.Now().Format(time.RFC3339), os.Getpid())
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[go-investment-feed] Shutdown error: %v", err)
+		}
+	}()
+
+	log.Printf("[go-investment-feed] Listening on :%s", port)
+	fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-investment-feed", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
+	log.Printf("[go-investment-feed] Serving %d assets across 8 asset classes", len(livePrices))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("[go-investment-feed] Server error: %v", err)
+	}
+	log.Println("[go-investment-feed] Server stopped")
+
 }

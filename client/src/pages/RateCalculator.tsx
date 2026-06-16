@@ -28,7 +28,7 @@ export default function RateCalculator() {
   const [to, setTo] = useState("NGN");
   const [history, setHistory] = useState<Array<{from:string;to:string;amount:string;result:string;rate:string}>>([]);
 
-  const { data: rates, refetch, isFetching } = trpc.fx.liveRates.useQuery({ base: from });
+  const { data: rates, refetch, isFetching, isError: ratesError } = trpc.fx.liveRates.useQuery({ base: from });
   const rateMap: Record<string, number> = (rates as any)?.rates ?? {};
   const rate = rateMap[to] ?? 0;
   const converted = rate ? (parseFloat(amount || "0") * rate).toFixed(2) : "—";

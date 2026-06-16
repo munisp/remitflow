@@ -11,6 +11,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { useTranslation } from 'react-i18next';
 
 const SEVERITY_COLORS: Record<string, string> = {
   critical: "text-red-600 bg-red-50 border-red-200 dark:bg-red-950/20 dark:border-red-800",
@@ -78,10 +79,11 @@ function SiemEventRow({ event }: { event: any }) {
 }
 
 export default function SecurityDashboard() {
+  const { t } = useTranslation();
   const [refreshKey, setRefreshKey] = useState(0);
   const queryOpts = { refetchInterval: 30_000 };
 
-  const { data: report, isLoading } = trpc.securityAudit.getAuditReport.useQuery(undefined, queryOpts);
+  const { data: report, isLoading, isError } = trpc.securityAudit.getAuditReport.useQuery(undefined, queryOpts);
   const { data: events } = trpc.securityAudit.getSecurityEvents.useQuery({ limit: 50 }, queryOpts);
   const { data: pbacDenies } = trpc.securityAudit.getPbacDenyEvents.useQuery({ limit: 100 }, queryOpts);
   const { data: anomalies } = trpc.securityAudit.getAnomalyAlerts.useQuery({ limit: 100 }, queryOpts);

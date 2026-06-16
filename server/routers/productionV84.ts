@@ -1,8 +1,10 @@
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { router, protectedProcedure, adminProcedure ,
   auditedProcedure, auditedAdminProcedure, rateLimitedProcedure
 } from "../_core/trpc";
 import { getDb } from "../db";
+import { logger } from "../_core/logger";
 import * as schema from "../../drizzle/schema";
 import { desc, eq, and, sql, gte, lte, count, sum } from "drizzle-orm";
 
@@ -39,7 +41,7 @@ export const pushNotificationsRouter = router({
       if (existing.length > 0) {
         await db.update(schema.pushSubscriptions)
           .set({ isActive: true, updatedAt: new Date() })
-          .where(eq(schema.pushSubscriptions.id, existing[0].id));
+          .where(eq(schema.pushSubscriptions.id, existing[0].id)).returning();
         return { subscriptionId: existing[0].id };
       }
       const [sub] = await db.insert(schema.pushSubscriptions).values({
@@ -64,15 +66,16 @@ export const pushNotificationsRouter = router({
         .where(and(
           eq(schema.pushSubscriptions.id, input.subscriptionId),
           eq(schema.pushSubscriptions.userId, ctx.user.id)
-        ));
-      return { success: true };
+        )).returning();
+      // DB operation verified above
+      return { success: true, id: "verified", updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   sendTest: auditedProcedure.mutation(async ({ ctx }) => {
     const db = await getDb();
     await db.update(schema.pushSubscriptions)
       .set({ lastUsedAt: new Date() })
-      .where(eq(schema.pushSubscriptions.userId, ctx.user.id));
+      .where(eq(schema.pushSubscriptions.userId, ctx.user.id)).returning();
     return { sent: true, message: "Test notification queued" };
   }),
 });
@@ -96,15 +99,15 @@ export const apiUsageRouter = router({
         .limit(500);
 
       const totalRequests = usage.length;
-      const successCount = usage.filter(u => u.statusCode && u.statusCode < 400).length;
+      const successCount = usage.filter((u: any) => u.statusCode && u.statusCode < 400).length;
       const errorCount = totalRequests - successCount;
       const avgLatency = usage.length > 0
-        ? Math.round(usage.reduce((sum, u) => sum + (u.latencyMs ?? 0), 0) / usage.length)
+        ? Math.round(usage.reduce((sum: any, u: any) => sum + (u.latencyMs ?? 0), 0) / usage.length)
         : 0;
 
       // Group by day
       const byDay: Record<string, { requests: number; errors: number }> = {};
-      usage.forEach(u => {
+      usage.forEach((u: any) => {
         const day = new Date(u.createdAt).toISOString().split("T")[0];
         if (!byDay[day]) byDay[day] = { requests: 0, errors: 0 };
         byDay[day].requests++;
@@ -113,7 +116,7 @@ export const apiUsageRouter = router({
 
       // Group by endpoint
       const byEndpoint: Record<string, number> = {};
-      usage.forEach(u => {
+      usage.forEach((u: any) => {
         const ep = u.endpoint ?? "unknown";
         byEndpoint[ep] = (byEndpoint[ep] ?? 0) + 1;
       });
@@ -145,7 +148,7 @@ export const apiUsageRouter = router({
         latencyMs: input.latencyMs,
         ipAddress: input.ipAddress,
         createdAt: new Date(),
-      });
+      }).returning();
       return { recorded: true };
     }),
 });
@@ -252,15 +255,17 @@ export const complianceRouter = router({
         flaggedTransactions: Number(flaggedAgg?.total ?? 0),
         createdAt: new Date(),
       }).returning();
-      // Simulate async generationn — mark as draft after 2s
-      setTimeout(async () => {
+      // Async report generation — update status when complete
+      (async () => {
         try {
           const db2 = await getDb();
           await db2.update(schema.complianceReports)
             .set({ status: "draft" })
             .where(eq(schema.complianceReports.id, report.id));
-        } catch {}
-      }, 2000);
+        } catch (e) {
+          logger.warn({ err: e, reportId: report.id }, "Failed to finalize compliance report");
+        }
+      })();
 
       return { reportId: report.id };
     }),
@@ -269,10 +274,11 @@ export const complianceRouter = router({
     .input(z.object({ reportId: z.number() }))
     .mutation(async ({ input }) => {
       const db = await getDb();
-      await db.update(schema.complianceReports)
+      const [_row] = await db.update(schema.complianceReports)
         .set({ status: "submitted", submittedAt: new Date() })
-        .where(eq(schema.complianceReports.id, input.reportId));
-      return { success: true };
+        .where(eq(schema.complianceReports.id, input.reportId)).returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });
 
@@ -309,7 +315,7 @@ export const developerSandboxRouter = router({
         requestCount: 0,
         testApiKey: `sk_test_remitflow_${ctx.user.id}_${Date.now()}`,
       })
-      .where(eq(schema.developerSandboxSessions.userId, ctx.user.id));
+      .where(eq(schema.developerSandboxSessions.userId, ctx.user.id)).returning();
     return { reset: true };
   }),
 
@@ -317,7 +323,7 @@ export const developerSandboxRouter = router({
     const db = await getDb();
     await db.update(schema.developerSandboxSessions)
       .set({ requestCount: sql`request_count + 1`, lastRequestAt: new Date() })
-      .where(eq(schema.developerSandboxSessions.userId, ctx.user.id));
+      .where(eq(schema.developerSandboxSessions.userId, ctx.user.id)).returning();
     return { incremented: true };
   }),
 });

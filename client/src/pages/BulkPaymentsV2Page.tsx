@@ -7,8 +7,10 @@ import { Input } from "@/components/ui/input";
 import { Upload, CheckCircle, Clock, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function BulkPaymentsV2Page() {
+  const { t } = useTranslation();
   const [batchIdToCheck, setBatchIdToCheck] = useState("");
   const [checkedBatchId, setCheckedBatchId] = useState<string | null>(null);
   const { data: batchStatus } = trpc.v90.bulkPayments.getBatchStatus.useQuery(

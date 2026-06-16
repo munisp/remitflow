@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,9 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
 )
 
 var (
@@ -36,22 +40,33 @@ type DaprEvent struct {
 	Type            string          `json:"type"`
 }
 
-// publishEvent publishes an event to a Dapr topic
+// publishEvent publishes an event to a Dapr topic with retry
 func publishEvent(ctx context.Context, pubsubName, topic string, data any) error {
-	body, err := json.Marshal(data)
+	jsonBytes, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
 	url := fmt.Sprintf("http://localhost:%s/v1.0/publish/%s/%s", daprHTTPPort, pubsubName, topic)
-	req, _ := http.NewRequestWithContext(ctx, "POST", url, nil)
-	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBytes))
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+			continue
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		lastErr = fmt.Errorf("dapr publish returned %d", resp.StatusCode)
+		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
 	}
-	defer resp.Body.Close()
-	return nil
+	log.Printf("[Dapr] Publish to %s/%s failed after 3 retries: %v", pubsubName, topic, lastErr)
+	return lastErr
 }
 
 // Subscription handlers
@@ -116,7 +131,119 @@ func subscriptionsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(subscriptions)
 }
 
+
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := os.Getenv("INTERNAL_SERVICE_KEY")
+		if key == "" {
+			key = "remitflow-internal-2026"
+		}
+		if apiKey := r.Header.Get("X-API-Key"); apiKey == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if len(auth) > 7 && auth[:7] == "Bearer " && auth[7:] == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"unauthorized"}`))
+	})
+}
+
+
+// ── PostgreSQL Persistence Layer ─────────────────────────────────────────────
+var db *sql.DB
+
+func initDB() error {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgresql://remitflow:remitflow123@localhost:5432/remitflow"
+	}
+	var err error
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		return fmt.Errorf("db connect: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err = db.Ping(); err != nil {
+		return fmt.Errorf("db ping: %w", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS go_dapr_service_state (
+			id TEXT PRIMARY KEY,
+			data JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_go_dapr_service_updated ON go_dapr_service_state(updated_at);
+		CREATE TABLE IF NOT EXISTS go_dapr_service_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			payload JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_go_dapr_service_events_type ON go_dapr_service_events(event_type, created_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("create tables: %w", err)
+	}
+	slog.Info("PostgreSQL connected", "service", "go-dapr-service", "table", "go_dapr_service_state")
+	return nil
+}
+
+func dbUpsert(id string, data interface{}) error {
+	if db == nil { return nil }
+	jsonData, err := json.Marshal(data)
+	if err != nil { return err }
+	_, err = db.Exec(`INSERT INTO go_dapr_service_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`, id, jsonData)
+	return err
+}
+
+func dbGet(id string, dest interface{}) error {
+	if db == nil { return fmt.Errorf("no db") }
+	var jsonData []byte
+	err := db.QueryRow("SELECT data FROM go_dapr_service_state WHERE id = $1", id).Scan(&jsonData)
+	if err != nil { return err }
+	return json.Unmarshal(jsonData, dest)
+}
+
+func dbList(limit int) ([]json.RawMessage, error) {
+	if db == nil { return nil, nil }
+	rows, err := db.Query("SELECT data FROM go_dapr_service_state ORDER BY updated_at DESC LIMIT $1", limit)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var results []json.RawMessage
+	for rows.Next() {
+		var data json.RawMessage
+		if err := rows.Scan(&data); err != nil { return nil, err }
+		results = append(results, data)
+	}
+	return results, rows.Err()
+}
+
+func dbLogEvent(eventType string, payload interface{}) error {
+	if db == nil { return nil }
+	jsonData, err := json.Marshal(payload)
+	if err != nil { return err }
+	_, err = db.Exec("INSERT INTO go_dapr_service_events (event_type, payload) VALUES ($1, $2)", eventType, jsonData)
+	return err
+}
+// ── End PostgreSQL Layer ─────────────────────────────────────────────────────
+
 func main() {
+	if err := initDB(); err != nil {
+		slog.Warn("PostgreSQL init failed, using in-memory fallback", "err", err)
+	}
+
 	log.Printf("[Dapr Service] Starting %s on %s", appID, appPort)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
@@ -124,5 +251,5 @@ func main() {
 	mux.HandleFunc("/events/transfer-created", transferCreatedHandler)
 	mux.HandleFunc("/events/payout-completed", payoutCompletedHandler)
 	mux.HandleFunc("/events/kyc-approved", kycApprovedHandler)
-	log.Fatal(http.ListenAndServe(appPort, mux))
+	log.Fatal(http.ListenAndServe(appPort, authMiddleware(mux)))
 }

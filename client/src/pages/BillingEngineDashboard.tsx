@@ -21,6 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -53,6 +54,7 @@ function PnLCard({ label, value, sub, color = "text-foreground" }: {
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function BillingEngineDashboard() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [periodDays, setPeriodDays] = useState("30");
   const [tenantId] = useState("default");
@@ -260,7 +262,7 @@ export default function BillingEngineDashboard() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {(corridorQuery.data ?? []).map((row) => (
+                      {(corridorQuery.data ?? []).map((row: any) => (
                         <TableRow key={`${row.corridor}-${row.sendCurrency}`}>
                           <TableCell className="font-medium">{row.corridor}</TableCell>
                           <TableCell>{row.sendCurrency}</TableCell>
@@ -311,7 +313,7 @@ export default function BillingEngineDashboard() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {(eventsQuery.data?.events ?? []).map((ev) => (
+                    {(eventsQuery.data?.events ?? []).map((ev: any) => (
                       <TableRow key={ev.eventId}>
                         <TableCell className="font-mono text-xs">{ev.eventId.slice(0, 12)}…</TableCell>
                         <TableCell>{ev.corridor}</TableCell>
@@ -481,7 +483,7 @@ export default function BillingEngineDashboard() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {(auditQuery.data?.entries ?? []).map((entry) => (
+                    {(auditQuery.data?.entries ?? []).map((entry: any) => (
                       <TableRow key={entry.id}>
                         <TableCell>
                           <Badge variant={entry.eventType === "TENANT_PROVISIONED" ? "default" : "secondary"}>

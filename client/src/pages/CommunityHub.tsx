@@ -149,7 +149,7 @@ export default function CommunityHub() {
   const [hoveredFeature, setHoveredFeature] = useState<string | null>(null);
 
   // Fetch live stats
-  const { data: communityFunds } = trpc.community.listFunds.useQuery();
+  const { data: communityFunds, isLoading, isError } = trpc.community.listFunds.useQuery();
   const { data: marketListings } = trpc.marketplace.listListings.useQuery({ page: 1, pageSize: 1 });
   const { data: talentExperts } = trpc.talent.listExperts.useQuery();
   const { data: collectives } = trpc.diaspora.listCollectives.useQuery();

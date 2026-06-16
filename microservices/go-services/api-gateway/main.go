@@ -280,7 +280,14 @@ func main() {
 
 	// CORS + logging middleware
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := os.Getenv("CORS_ALLOWED_ORIGIN")
+		if origin == "" && os.Getenv("NODE_ENV") != "production" {
+			origin = r.Header.Get("Origin")
+			if origin == "" { origin = "*" }
+		}
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 		if r.Method == http.MethodOptions {

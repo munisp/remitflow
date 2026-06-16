@@ -379,8 +379,111 @@ async fn dca_projection(req: web::Json<DcaRequest>) -> impl Responder {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+async fn init_db() -> PgPool {
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to PostgreSQL");
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS portfolio_calc_state (
+            id TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to create state table");
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_portfolio_calc_updated ON portfolio_calc_state(updated_at)"
+    )
+    .execute(&pool)
+    .await
+    .ok(); // Index may already exist
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS portfolio_calc_events (
+            id BIGSERIAL PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            payload JSONB NOT NULL DEFAULT '{}',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )"
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to create events table");
+
+    tracing::info!("PostgreSQL connected for rust-portfolio-calc");
+    pool
+}
+
+async fn db_upsert(pool: &PgPool, id: &str, data: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO portfolio_calc_state (id, data, updated_at) VALUES ($1, $2, NOW())
+         ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()"
+    )
+    .bind(id)
+    .bind(data)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn db_get(pool: &PgPool, id: &str) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    let row: Option<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT data FROM portfolio_calc_state WHERE id = $1"
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.0))
+}
+
+async fn db_list(pool: &PgPool, limit: i64) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT data FROM portfolio_calc_state ORDER BY updated_at DESC LIMIT $1"
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
+async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO portfolio_calc_events (event_type, payload) VALUES ($1, $2)"
+    )
+    .bind(event_type)
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
+    let _pool = init_db().await;
     let port = std::env::var("PORT").unwrap_or_else(|_| "8088".to_string());
     let addr = format!("0.0.0.0:{}", port);
     println!("🦀 Rust Portfolio Calculator running on {}", addr);
@@ -393,9 +496,21 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(cors)
             .service(health)
-            .service(analyze)
-            .service(calc_returns)
-            .service(dca_projection)
+            .service(
+                web::scope("")
+                    .wrap(actix_web::middleware::from_fn(|req: actix_web::dev::ServiceRequest, next: actix_web::middleware::Next<actix_web::body::BoxBody>| async move {
+                        let key = std::env::var("INTERNAL_SERVICE_KEY").unwrap_or_else(|_| "remitflow-internal-2026".to_string());
+                        let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                        let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                        if api_key == key || (auth.starts_with("Bearer ") && auth[7..] == key) {
+                            return next.call(req).await;
+                        }
+                        Err(actix_web::error::ErrorUnauthorized("unauthorized"))
+                    }))
+                    .service(analyze)
+                    .service(calc_returns)
+                    .service(dca_projection)
+            )
     })
     .bind(&addr)?
     .run()

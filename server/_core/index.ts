@@ -24,6 +24,10 @@ import { requestIdMiddleware } from "../middleware/requestId";
 import { attachServicesHealthWS, stopServicesHealthWS } from "../ws-services-health.js";
 import { requireValidEnv } from "./startup-validation";
 import { logger } from "./logger";
+import { safeParseAmount } from "../lib/safeDecimal";
+import { podLifecycleMiddleware, recordStartupComplete, recordShutdownStart, recordShutdownComplete, recordPanicRecovery } from "../middleware/podLifecycleObservability";
+import { registerProductionHardeningRoutes } from "./productionHardening";
+import { ensureFeatureTables } from "./featurePersistence";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -59,6 +63,9 @@ async function startServer() {
   // KYC provider webhooks (Onfido, Sumsub, Veriff) — raw body needed for HMAC verification
   registerKycProviderWebhooks(app);
 
+  // Pod lifecycle observability — Prometheus /metrics, shutdown coordination, in-flight tracking
+  app.use(podLifecycleMiddleware);
+
   // Request ID tracing — adds X-Request-ID header to every request
   app.use(requestIdMiddleware);
 
@@ -71,32 +78,114 @@ async function startServer() {
   app.use(openAppSecHeadersMiddleware);
   app.use(openAppSecWafMiddleware);
 
-  // Body parser — reduced to 10mb (KYC uploads go through S3 presigned URLs)
-  app.use(express.json({ limit: "10mb" }));
-  app.use(express.urlencoded({ limit: "10mb", extended: true }));
+  // API versioning headers — all responses include version metadata
+  app.use((_req, res, next) => {
+    res.setHeader("X-API-Version", "v1");
+    res.setHeader("X-Supported-Versions", "v1");
+    res.setHeader("X-Min-Client-Version", "1.0.0");
+    res.setHeader("X-Server-Version", "69.0.0");
+    next();
+  });
 
-  // Health check endpoint (public, no auth)
+  // Body parser — 1MB for API payloads (KYC uploads go through S3 presigned URLs)
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ limit: "1mb", extended: true }));
+
+  // Production hardening: health checks, metrics, CORS, OpenAPI
+  registerProductionHardeningRoutes(app);
+
+  // Ensure feature persistence tables exist
+  ensureFeatureTables().catch(() => {});
+
+  // Health check endpoint (public, no auth) — returns 503 during shutdown
   app.get("/health", (_req, res) => {
+    if (isShuttingDown) return res.status(503).json({ status: "shutting_down" });
     res.json({ status: "ok", timestamp: new Date().toISOString(), version: "69.0.0" });
   });
 
   // API health alias (for smoke tests and legacy clients)
   app.get("/api/health", (_req, res) => {
+    if (isShuttingDown) return res.status(503).json({ status: "shutting_down" });
     res.json({ status: "ok", timestamp: new Date().toISOString(), version: "69.0.0" });
   });
 
-  // Kubernetes readiness probe — checks DB connectivity
+  // Kubernetes readiness probe — checks DB + Redis + payment subsystems
   app.get("/api/ready", async (_req, res) => {
+    const subsystems: Record<string, { status: string; latencyMs?: number; error?: string }> = {};
+    let allReady = true;
+
+    // DB check (critical — must be available)
+    try {
+      const t0 = Date.now();
+      const { getDb } = await import("../db.js");
+      const db = await getDb();
+      if (!db) { subsystems.database = { status: "error", error: "DB unavailable" }; allReady = false; }
+      else { await db.execute("SELECT 1" as any); subsystems.database = { status: "ok", latencyMs: Date.now() - t0 }; }
+    } catch (err: any) {
+      subsystems.database = { status: "error", error: err.message }; allReady = false;
+    }
+
+    // Redis check (degraded without — rate limiting falls back to in-memory)
+    try {
+      const t0 = Date.now();
+      const Redis = (await import("ioredis")).default;
+      const url = process.env.REDIS_URL ?? "redis://localhost:6379";
+      const client = new Redis(url, { lazyConnect: true, connectTimeout: 2000 });
+      await client.connect();
+      const pong = await client.ping();
+      subsystems.redis = { status: pong === "PONG" ? "ok" : "degraded", latencyMs: Date.now() - t0 };
+      await client.quit();
+    } catch {
+      subsystems.redis = { status: "degraded", error: "Redis unavailable — using in-memory fallback" };
+    }
+
+    // Payment provider check (which provider is active)
+    try {
+      const { selectProvider } = await import("../lib/paymentProviders.js");
+      const usdProvider = selectProvider("USD");
+      const ngnProvider = selectProvider("NGN");
+      subsystems.payments = {
+        status: usdProvider ? "ok" : "degraded",
+        error: !usdProvider ? "No USD payment provider configured" : undefined,
+      };
+      subsystems.payments_africa = {
+        status: ngnProvider ? "ok" : "degraded",
+        error: !ngnProvider ? "No NGN payment provider configured" : undefined,
+      };
+    } catch {
+      subsystems.payments = { status: "degraded", error: "Payment module unavailable" };
+    }
+
+    // Webhook retry queue health
     try {
       const { getDb } = await import("../db.js");
       const db = await getDb();
-      if (!db) return res.status(503).json({ status: "not_ready", reason: "db_unavailable" });
-      // Lightweight ping
-      await db.execute("SELECT 1" as any);
-      res.json({ status: "ready", timestamp: new Date().toISOString() });
-    } catch (err: any) {
-      res.status(503).json({ status: "not_ready", reason: err.message });
+      if (db) {
+        const result = await db.execute("SELECT COUNT(*) as cnt FROM webhook_retry_queue WHERE status = 'dead_letter'" as any);
+        const rows = result as unknown as Array<{ cnt: string }>;
+        const deadLetterCount = parseInt(rows?.[0]?.cnt ?? "0", 10);
+        subsystems.webhook_queue = { status: deadLetterCount > 10 ? "degraded" : "ok" };
+      }
+    } catch {
+      // Table may not exist yet — that's fine
+      subsystems.webhook_queue = { status: "ok" };
     }
+
+    // Circuit breaker status
+    try {
+      const { getAllCircuitStatus } = await import("../lib/circuitBreaker.js");
+      const circuits = getAllCircuitStatus();
+      const openCircuits = circuits.filter(c => c.state === "open");
+      subsystems.circuit_breakers = {
+        status: openCircuits.length > 0 ? "degraded" : "ok",
+        error: openCircuits.length > 0 ? `${openCircuits.length} circuit(s) open: ${openCircuits.map(c => c.name).join(", ")}` : undefined,
+      };
+    } catch {
+      subsystems.circuit_breakers = { status: "ok" };
+    }
+
+    const status = allReady ? "ready" : "not_ready";
+    res.status(allReady ? 200 : 503).json({ status, timestamp: new Date().toISOString(), subsystems });
   });
 
   // Detailed health check — DB + FX service + scheduler
@@ -123,6 +212,41 @@ async function startServer() {
       timestamp: new Date().toISOString(),
       checks,
     });
+  });
+
+  // DB connection pool metrics — for Prometheus/Grafana dashboards
+  app.get("/api/metrics/db", async (_req, res) => {
+    try {
+      const { getDb } = await import("../db.js");
+      const db = await getDb();
+      if (!db) return res.status(503).json({ error: "DB unavailable" });
+
+      const poolStats = await db.execute("SELECT count(*) as total_connections, sum(CASE WHEN state = 'active' THEN 1 ELSE 0 END) as active, sum(CASE WHEN state = 'idle' THEN 1 ELSE 0 END) as idle, sum(CASE WHEN wait_event IS NOT NULL THEN 1 ELSE 0 END) as waiting FROM pg_stat_activity WHERE datname = current_database()" as any);
+      const rows = poolStats as unknown as Array<{ total_connections: string; active: string; idle: string; waiting: string }>;
+      const stats = rows[0] ?? { total_connections: "0", active: "0", idle: "0", waiting: "0" };
+
+      const slowQueries = await db.execute("SELECT count(*) as slow_count FROM pg_stat_activity WHERE datname = current_database() AND state = 'active' AND now() - query_start > interval '5 seconds'" as any);
+      const slowRows = slowQueries as unknown as Array<{ slow_count: string }>;
+
+      const dbSize = await db.execute("SELECT pg_database_size(current_database()) as size_bytes" as any);
+      const sizeRows = dbSize as unknown as Array<{ size_bytes: string }>;
+
+      res.json({
+        pool: {
+          totalConnections: parseInt(stats.total_connections, 10),
+          active: parseInt(stats.active, 10),
+          idle: parseInt(stats.idle, 10),
+          waiting: parseInt(stats.waiting, 10),
+          maxPool: parseInt(process.env.DB_POOL_MAX ?? "50", 10),
+        },
+        slowQueries: parseInt(slowRows[0]?.slow_count ?? "0", 10),
+        databaseSizeBytes: parseInt(sizeRows[0]?.size_bytes ?? "0", 10),
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      res.status(500).json({ error: message });
+    }
   });
 
   // Security score endpoint — OWASP Top 10 coverage assessment + OpenAppSec vulnerability score
@@ -265,7 +389,7 @@ async function startServer() {
         .setProtectedHeader({ alg: "HS256", typ: "JWT" })
         .setExpirationTime(expirationSeconds)
         .sign(secretKey);
-      res.cookie(COOKIE_NAME, sessionToken, { httpOnly: true, secure: true, sameSite: "none", maxAge: expiresInMs, path: "/" });
+      res.cookie(COOKIE_NAME, sessionToken, { httpOnly: true, secure: true, sameSite: "lax", maxAge: expiresInMs, path: "/" });
       // Redirect to dashboard with impersonation flag in query
       // SECURITY: validate redirect origin against allowlist to prevent open redirect
       const { validateRedirectOrigin } = await import("../security.middleware.js");
@@ -562,9 +686,9 @@ async function startServer() {
                   eq(revenueShareLedger.periodYear, periodYear),
                 ));
 
-              const totalRevenue = ledgerRows.reduce((s: number, r: any) => s + parseFloat(r.grossRevenue || "0"), 0);
-              const platformEarnings = ledgerRows.reduce((s: number, r: any) => s + parseFloat(r.platformEarnings || "0"), 0);
-              const partnerEarnings = ledgerRows.reduce((s: number, r: any) => s + parseFloat(r.partnerEarnings || "0"), 0);
+              const totalRevenue = ledgerRows.reduce((s: number, r: any) => s + safeParseAmount(r.grossRevenue || "0"), 0);
+              const platformEarnings = ledgerRows.reduce((s: number, r: any) => s + safeParseAmount(r.platformEarnings || "0"), 0);
+              const partnerEarnings = ledgerRows.reduce((s: number, r: any) => s + safeParseAmount(r.partnerEarnings || "0"), 0);
               const txCount = ledgerRows.reduce((s: number, r: any) => s + (r.transactionCount || 0), 0);
 
               await db.insert(revenueShareReports).values({
@@ -576,7 +700,7 @@ async function startServer() {
                 platformEarnings: platformEarnings.toString(),
                 partnerEarnings: partnerEarnings.toString(),
                 transactionCount: txCount,
-                status: partnerEarnings >= parseFloat(agreement.minPayoutThreshold || "50") ? "pending" : "below_threshold",
+                status: partnerEarnings >= safeParseAmount(agreement.minPayoutThreshold || "50") ? "pending" : "below_threshold",
                 generatedAt: new Date(),
               });
               reportsGenerated++;
@@ -637,7 +761,7 @@ async function startServer() {
       let totalInterestPaid = 0;
 
       for (const account of accounts) {
-        const balance = parseFloat(String(account.currentAmount));
+        const balance = safeParseAmount(String(account.currentAmount));
         const apr = 0.05; // 5% APR default for savings goals
         const dailyRate = apr / 365;
         const interest = Math.round(balance * dailyRate * 100) / 100;
@@ -698,7 +822,7 @@ async function startServer() {
 
       // Get current FX rates
       const rates = await db.select().from(fxRateCache);
-      const rateMap = new Map(rates.map(r => [`${r.fromCurrency}_${r.toCurrency}`, r.rate]));
+      const rateMap = new Map(rates.map((r: any) => [`${r.fromCurrency}_${r.toCurrency}`, r.rate]));
 
       let triggered = 0;
       for (const alert of pendingAlerts) {
@@ -987,7 +1111,10 @@ async function startServer() {
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
       res.setHeader("X-Accel-Buffering", "no");
-      res.setHeader("Access-Control-Allow-Origin", "*");
+      const allowedOrigin = process.env.CORS_ALLOWED_ORIGIN ?? req.headers.origin ?? "";
+      if (allowedOrigin && (allowedOrigin === process.env.CORS_ALLOWED_ORIGIN || process.env.NODE_ENV !== "production")) {
+        res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
+      }
       res.flushHeaders();
       const STATIC_RATES: Record<string, number> = {
         USD: 1, EUR: 0.9215, GBP: 0.7925, JPY: 149.5, CAD: 1.36, AUD: 1.53,
@@ -1052,6 +1179,13 @@ async function startServer() {
         if (error.code === "INTERNAL_SERVER_ERROR") {
           logger.error(`[tRPC] Error on ${path}:`, error.message);
         }
+        // Strip stack traces in production to prevent information leakage
+        if (process.env.NODE_ENV === "production") {
+          delete (error as any).stack;
+          if (error.cause && typeof error.cause === "object") {
+            delete (error.cause as any).stack;
+          }
+        }
       },
     })
   );
@@ -1085,6 +1219,17 @@ async function startServer() {
     }
   });
 
+  // Global Express error handler — strip stack traces in production
+  app.use((err: any, _req: any, res: any, _next: any) => {
+    const status = err.status ?? err.statusCode ?? 500;
+    logger.error({ err: err.message, status, path: _req.path }, "[Express] Unhandled error");
+    if (process.env.NODE_ENV === "production") {
+      res.status(status).json({ error: status >= 500 ? "Internal server error" : err.message });
+    } else {
+      res.status(status).json({ error: err.message, stack: err.stack });
+    }
+  });
+
   // development mode uses Vite, production mode uses static files
   if (process.env.NODE_ENV === "development") {
     await setupVite(app, server);
@@ -1102,27 +1247,50 @@ async function startServer() {
   // Attach WebSocket server for Services Health real-time feed
   attachServicesHealthWS(server);
 
-  server.listen(port, () => {
+  server.listen(port, async () => {
     logger.info(`Server running on http://localhost:${port}/`);
+    // Record pod startup complete for observability (metrics + Kafka + OpenSearch)
+    recordStartupComplete({ dbConnected: true, cacheWarmed: false, sidecarCount: 3 });
     // Start background cron scheduler (recurring payments, FX alerts, fraud escalation)
     startScheduler();
     // Auto-start polyglot microservices in development (no-op in production)
     startMicroservices();
     // Initialize Kafka topics (non-blocking, graceful fallback if Kafka unavailable)
     ensureTopicsExist().catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic init failed (non-blocking):"));
+    // Start webhook retry scheduler (exponential backoff for failed payment callbacks)
+    try {
+      const { ensureWebhookQueueTable, startWebhookRetryScheduler } = await import("../lib/webhookRetryQueue.js");
+      await ensureWebhookQueueTable();
+      startWebhookRetryScheduler(30_000);
+      logger.info("[Webhooks] Retry scheduler started (30s interval)");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "unknown";
+      logger.warn({ errMsg: message }, "[Webhooks] Retry scheduler failed to start (non-blocking):");
+    }
   });
 }
 
-startServer().catch(console.error);
+startServer().catch((err) => logger.error({ err: err instanceof Error ? err.message : String(err) }, "Server startup failed"));
 
 // ─── Graceful Shutdown ───────────────────────────────────────────────────────
 // Handles SIGTERM (Kubernetes pod termination) and SIGINT (Ctrl+C)
+// Steps: 1) Stop accepting new connections  2) Drain in-flight requests
+//        3) Close downstream connections (Redis, DB, Kafka)  4) Exit
 let isShuttingDown = false;
+
+export function isShutdownInProgress(): boolean { return isShuttingDown; }
 
 async function gracefulShutdown(signal: string) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   logger.info(`[Shutdown] Received ${signal}. Graceful shutdown initiated...`);
+
+  // Record shutdown in observability stack (OTel metrics + Kafka + OpenSearch)
+  await recordShutdownStart({
+    reason: signal === "SIGTERM" ? "SIGTERM" : signal === "SIGINT" ? "SIGINT" : "HEALTH_CHECK_FAILURE",
+    connectionsToClose: 0,
+    inFlightRequests: 0,
+  });
 
   // Give in-flight requests up to 30 seconds to complete
   const shutdownTimeout = setTimeout(() => {
@@ -1130,8 +1298,24 @@ async function gracefulShutdown(signal: string) {
     process.exit(1);
   }, 30_000);
 
+  // Stop webhook retry scheduler
+  try {
+    const { stopWebhookRetryScheduler } = await import("../lib/webhookRetryQueue.js");
+    stopWebhookRetryScheduler();
+    logger.info("[Shutdown] Webhook retry scheduler stopped");
+  } catch { /* non-critical */ }
+
   // Stop WebSocket broadcaster
   stopServicesHealthWS();
+
+  // Disconnect Redis
+  try {
+    const { disconnectRedis } = await import("../middleware/redis");
+    await disconnectRedis();
+    logger.info("[Shutdown] Redis disconnected");
+  } catch (err: any) {
+    logger.warn({ errMsg: err.message }, "[Shutdown] Redis disconnect warning:");
+  }
 
   try {
     // Close DB connection pool
@@ -1151,6 +1335,7 @@ async function gracefulShutdown(signal: string) {
   }
 
   clearTimeout(shutdownTimeout);
+  recordShutdownComplete(true);
   logger.info("[Shutdown] Clean exit");
   process.exit(0);
 }
@@ -1159,6 +1344,7 @@ process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT",  () => gracefulShutdown("SIGINT"));
 process.on("uncaughtException", (err) => {
   logger.error({ err: err }, "[UncaughtException]");
+  recordPanicRecovery({ service: "remitflow-api", errorMessage: err.message, stackTrace: err.stack, language: "typescript" });
   gracefulShutdown("uncaughtException");
 });
 process.on("unhandledRejection", (reason) => {

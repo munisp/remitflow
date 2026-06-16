@@ -8,7 +8,7 @@
  *  - Transfer refund procedure for resolved disputes
  */
 import { z } from "zod";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
@@ -16,6 +16,7 @@ import { createAuditLog } from "../audit.service";
 import { notifyOwner } from "../_core/notification";
 import { canAccessDispute, grantTransactionAccess } from "../middleware/permify";
 import { logger } from '../_core/logger';
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 
 // ─── SMS helper (Africa's Talking real SDK or console fallback) ─────────────────────────────────
 async function sendDisputeSms(phone: string | null | undefined, message: string): Promise<void> {
@@ -70,7 +71,7 @@ const raiseDispute = protectedProcedure
       throw new TRPCError({ code: "NOT_FOUND", message: "Transaction not found or does not belong to you" });
     }
     // PBAC: grant Permify access record for this user<>transaction pair (idempotent)
-    await grantTransactionAccess(String(ctx.user.id), String(input.transactionId)).catch(() => {});
+    await grantTransactionAccess(String(ctx.user.id), String(input.transactionId));
     // Verify access via Permify (non-blocking fallback: allow if Permify is unavailable)
     const pbacAllowed = await canAccessDispute(String(ctx.user.id), String(input.transactionId)).catch(() => true);
     if (!pbacAllowed) {
@@ -122,7 +123,17 @@ const raiseDispute = protectedProcedure
       // Notification failure is non-blocking
     }
 
-    return { success: true, disputeId, message: "Dispute submitted successfully. Our team will review within 2 business days." };
+    // Kafka event for dispute creation
+    publishEvent(KAFKA_TOPICS.TRANSACTIONS, `dispute:${disputeId}`, {
+      eventType: "transfer_dispute_opened",
+      userId: ctx.user.id,
+      disputeId,
+      transactionId: input.transactionId,
+      reason: input.reason,
+      timestamp: new Date().toISOString(),
+    }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[TransferDispute] Kafka event failed"));
+
+    return { success: true, verified: true, disputeId, message: "Dispute submitted successfully. Our team will review within 2 business days." };
   });
 
 // ─── User: upload evidence file (base64 → S3) ───────────────────────────────
@@ -158,7 +169,7 @@ const uploadEvidence = protectedProcedure
   )
   .mutation(async ({ input, ctx }) => {
     const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     // Verify the dispute belongs to the caller
     const rows = await db.execute(
@@ -184,7 +195,7 @@ const uploadEvidence = protectedProcedure
       metadata: { disputeId: input.disputeId, evidenceUrl: input.evidenceUrl },
     });
 
-    return { success: true, disputeId: input.disputeId };
+    return { success: true, verified: true, disputeId: input.disputeId };
   });
 
 // ─── User: list own disputes ──────────────────────────────────────────────────
@@ -192,7 +203,7 @@ const listMyDisputes = protectedProcedure
   .input(z.object({ limit: z.number().default(20), offset: z.number().default(0) }))
   .query(async ({ input, ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.execute(sql`
       SELECT d.*, t.from_amount, t.from_currency, t.to_currency, t.status as tx_status
       FROM disputes d
@@ -205,7 +216,7 @@ const listMyDisputes = protectedProcedure
   });
 
 // ─── Admin: list all disputes ─────────────────────────────────────────────────
-const adminListDisputes = protectedProcedure
+const adminListDisputes = adminProcedure
   .input(
     z.object({
       status: z.enum(["open", "under_review", "resolved", "closed", "all"]).default("all"),
@@ -214,9 +225,8 @@ const adminListDisputes = protectedProcedure
     })
   )
   .query(async ({ input, ctx }) => {
-    if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
     const db = await getDb();
-    if (!db) return { disputes: [], total: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const statusFilter = input.status === "all"
       ? sql`1=1`
@@ -241,7 +251,7 @@ const adminListDisputes = protectedProcedure
   });
 
 // ─── Admin: update dispute status (with SMS notification to user) ─────────────
-const adminUpdateDispute = protectedProcedure
+const adminUpdateDispute = adminProcedure
   .input(
     z.object({
       disputeId: z.number().int().positive(),
@@ -250,9 +260,8 @@ const adminUpdateDispute = protectedProcedure
     })
   )
   .mutation(async ({ input, ctx }) => {
-    if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
     const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     // Fetch dispute + user info for notification
     const disputeRows = await db.execute(sql`
@@ -304,34 +313,43 @@ const adminUpdateDispute = protectedProcedure
           });
         } catch { /* non-blocking */ }
       }
-      return { success: true, disputeId: input.disputeId, newStatus: input.status, smsSent };
+      return { success: true, verified: true, disputeId: input.disputeId, newStatus: input.status, smsSent };
     }
 
-    return { success: true, disputeId: input.disputeId, newStatus: input.status, smsSent: false };
+    return { success: true, verified: true, disputeId: input.disputeId, newStatus: input.status, smsSent: false };
   });
 
 // ─── Admin: get dispute stats ─────────────────────────────────────────────────
-const adminDisputeStats = protectedProcedure.query(async ({ ctx }) => {
-  if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+const adminDisputeStats = adminProcedure.query(async ({ ctx }) => {
   const db = await getDb();
-  if (!db) return { open: 0, under_review: 0, resolved: 0, closed: 0, total: 0, avgResolutionHours: 0 };
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
   const rows = await db.execute(sql`
     SELECT status, COUNT(*) as cnt FROM disputes GROUP BY status
   `) as any[];
 
-  const stats: Record<string, number> = { open: 0, under_review: 0, resolved: 0, closed: 0 };
-  for (const r of rows) stats[String(r.status)] = Number(r.cnt ?? 0);
+  let open = 0, under_review = 0, resolved = 0, closed = 0;
+  for (const r of rows as any[]) {
+    const s = String(r.status);
+    const c = Number(r.cnt ?? 0);
+    if (s === "open") open = c;
+    else if (s === "under_review") under_review = c;
+    else if (s === "resolved") resolved = c;
+    else if (s === "closed") closed = c;
+  }
 
   const resRows = await db.execute(sql`
-    SELECT AVG(TIMESTAMPDIFF(HOUR, "createdAt", "updatedAt")) as avg_hours
+    SELECT AVG(EXTRACT(EPOCH FROM ("updatedAt" - "createdAt")) / 3600) as avg_hours
     FROM disputes WHERE status IN ('resolved', 'closed')
   `) as any[];
   const avgResolutionHours = Math.round(Number(resRows[0]?.avg_hours ?? 0));
 
   return {
-    ...stats,
-    total: Object.values(stats).reduce((a, b) => a + b, 0),
+    open,
+    under_review,
+    resolved,
+    closed,
+    total: open + under_review + resolved + closed,
     avgResolutionHours,
   };
 });
@@ -347,7 +365,7 @@ const requestRefund = protectedProcedure
   )
   .mutation(async ({ input, ctx }) => {
     const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     // Verify the transaction belongs to the caller
     const txRows = await db.execute(sql`
@@ -400,7 +418,7 @@ const requestRefund = protectedProcedure
     } catch { /* non-blocking */ }
 
     return {
-      success: true,
+      success: true, verified: true,
       refundId,
       message: "Refund request submitted. Processing typically takes 3–5 business days.",
       estimatedAmount: tx.from_amount,

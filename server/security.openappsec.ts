@@ -52,6 +52,40 @@ interface WafDecision {
  * anomaly scoring. Blocks the request if the agent returns action="block".
  * Falls through gracefully if the agent is unavailable (fail-open with logging).
  */
+/**
+ * IP Blocklist — managed dynamically via admin API or loaded from env.
+ * In production: synced from OpenAppSec management portal.
+ */
+const ipBlocklist = new Set<string>(
+  (process.env.OPENAPPSEC_IP_BLOCKLIST || "").split(",").filter(Boolean)
+);
+
+export function addToBlocklist(ip: string): void {
+  ipBlocklist.add(ip);
+  logger.info(`[OpenAppSec] Added ${ip} to blocklist (total: ${ipBlocklist.size})`);
+}
+
+export function removeFromBlocklist(ip: string): void {
+  ipBlocklist.delete(ip);
+}
+
+export function getBlocklistSize(): number {
+  return ipBlocklist.size;
+}
+
+const _wafBlockCounts = new Map<string, number>();
+
+/** Safely extract request body snippet for inspection (max 4KB) */
+function getRequestBodySnippet(req: Request): string | undefined {
+  if (!req.body) return undefined;
+  try {
+    const bodyStr = typeof req.body === "string" ? req.body : JSON.stringify(req.body);
+    return bodyStr.slice(0, 4096);
+  } catch {
+    return undefined;
+  }
+}
+
 export async function openAppSecWafMiddleware(
   req: Request,
   res: Response,
@@ -61,9 +95,25 @@ export async function openAppSecWafMiddleware(
   if (!req.path.startsWith("/api/") || req.path === "/api/health") {
     return next();
   }
+
+  // IP blocklist check — fast reject before hitting WAF agent
+  const clientIp = req.ip || (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim();
+  if (clientIp && ipBlocklist.has(clientIp)) {
+    logger.warn(`[OpenAppSec] Blocked request from blocklisted IP: ${clientIp}`);
+    res.status(403).json({
+      error: "Request blocked",
+      code: "IP_BLOCKED",
+    });
+    return;
+  }
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 200); // 200ms max
+
+    // Include request body snippet for full inspection (SQL injection, XSS in POST bodies)
+    const bodySnippet = getRequestBodySnippet(req);
+
     const resp = await fetch(`${OPENAPPSEC_AGENT_URL}/v1/check`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -75,9 +125,13 @@ export async function openAppSecWafMiddleware(
           "user-agent": req.headers["user-agent"],
           "content-type": req.headers["content-type"],
           "x-forwarded-for": req.headers["x-forwarded-for"],
+          "origin": req.headers["origin"],
+          "referer": req.headers["referer"],
         },
         body_size: req.headers["content-length"] || 0,
-        source_ip: req.ip,
+        body_snippet: bodySnippet,
+        source_ip: clientIp,
+        protocol: req.protocol,
       }),
       signal: controller.signal,
     });
@@ -90,19 +144,29 @@ export async function openAppSecWafMiddleware(
         logger.warn(
           `[OpenAppSec] Blocked request: ${req.method} ${req.path} — ${decision.reason}`
         );
+        // Auto-add to blocklist after 3+ blocks from same IP
+        if (clientIp) {
+          const blockKey = `openappsec:blocks:${clientIp}`;
+          const store = _wafBlockCounts;
+          const blockCount = (store.get(blockKey) || 0) + 1;
+          store.set(blockKey, blockCount);
+          if (blockCount >= 3) {
+            addToBlocklist(clientIp);
+          }
+        }
         res.status(403).json({
           error: "Request blocked by WAF",
           code: "WAF_BLOCK",
-          requestId: (req as any).requestId,
+          requestId: (req as unknown as Record<string, unknown>).requestId as string,
         });
         return;
       }
     }
   } catch {
-    // Agent unavailable — fail-open (log but don't block)
-    // In production, set OPENAPPSEC_FAIL_CLOSED=true to block on agent failure
-    if (process.env.OPENAPPSEC_FAIL_CLOSED === "true") {
-      logger.error("[OpenAppSec] Agent unavailable — fail-closed mode active");
+    const failClosed = process.env.OPENAPPSEC_FAIL_CLOSED === "true" ||
+      (process.env.NODE_ENV === "production" && process.env.OPENAPPSEC_FAIL_CLOSED !== "false");
+    if (failClosed) {
+      logger.error("[OpenAppSec] Agent unavailable — fail-closed (production default)");
       res.status(503).json({ error: "Security agent unavailable" });
       return;
     }

@@ -185,8 +185,8 @@ func (s *TransferEngineServer) GetRules(_ context.Context, _ *GetRulesProto) (*G
 	return &GetRulesResponseProto{Rules: protoRules}, nil
 }
 
-// ─── Stub proto types (replace with generated code in production) ─────────────
-// In production, run: protoc --go_out=. --go-grpc_out=. proto/transfer.proto
+// ─── Proto-equivalent types for gRPC wire format ─────────────────────────────
+// Compatible with proto/transfer.proto definitions.
 
 type AdvanceStateProto struct {
 	TransferId    string

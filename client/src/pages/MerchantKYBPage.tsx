@@ -9,8 +9,10 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Building2, Search, CheckCircle, Clock, XCircle, FileText } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function MerchantKYBPage() {
+  const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
@@ -46,7 +48,7 @@ export default function MerchantKYBPage() {
     rejected: "bg-red-100 text-red-800",
   };
 
-  const filteredApps = (data?.applications ?? []).filter((a) =>
+  const filteredApps = (data?.applications ?? []).filter((a: any) =>
     !search ||
     a.documentType?.toLowerCase().includes(search.toLowerCase()) ||
     String(a.userId).includes(search)
@@ -77,7 +79,7 @@ export default function MerchantKYBPage() {
                 <div>
                   <div className="text-xs text-muted-foreground capitalize">{s.replace("_", " ")}</div>
                   <div className="text-xl font-bold">
-                    {(data?.applications ?? []).filter((a) => a.status === s).length}
+                    {(data?.applications ?? []).filter((a: any) => a.status === s).length}
                   </div>
                 </div>
               </div>
@@ -121,7 +123,7 @@ export default function MerchantKYBPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {filteredApps.map((app) => (
+                  {filteredApps.map((app: any) => (
                     <TableRow key={app.id}>
                       <TableCell className="font-mono text-xs">{app.id}</TableCell>
                       <TableCell>{app.userId}</TableCell>

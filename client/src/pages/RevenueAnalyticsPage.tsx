@@ -4,10 +4,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DollarSign, TrendingUp, BarChart2, Globe } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function RevenueAnalyticsPage() {
+  const { t } = useTranslation();
   const [period, setPeriod] = useState<"today"|"week"|"month"|"quarter"|"year">("month");
-  const { data, isLoading } = trpc.v90.revenueAnalytics.getSummary.useQuery({ period, currency: "USD" });
+  const { data, isLoading, isError } = trpc.v90.revenueAnalytics.getSummary.useQuery({ period, currency: "USD" });
   const { data: daily } = trpc.v90.revenueAnalytics.getRevenueByDay.useQuery({ days: 30 });
   if (isLoading) return <div className="p-6 text-muted-foreground">Loading revenue analytics...</div>;
   return (
@@ -57,8 +59,8 @@ export default function RevenueAnalyticsPage() {
             <Card><CardHeader><CardTitle>Daily Revenue (30 days)</CardTitle></CardHeader>
               <CardContent>
                 <div className="flex items-end gap-1 h-32">
-                  {daily.points.slice(-30).map((p, i) => {
-                    const max = Math.max(...daily.points.map(x => x.revenue));
+                  {daily.points.slice(-30).map((p: { date: string; revenue: number; transactions: number; feeRevenue: number; fxRevenue: number }, i: number) => {
+                    const max = Math.max(...daily.points.map((x: { revenue: number }) => x.revenue));
                     return <div key={i} className="flex-1 bg-primary/70 rounded-t hover:bg-primary transition-colors" style={{ height: `${(p.revenue/max)*100}%` }} title={`${p.date}: $${p.revenue.toLocaleString()}`} />;
                   })}
                 </div>

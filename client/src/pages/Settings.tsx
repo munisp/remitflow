@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
+import { useTheme } from "@/contexts/ThemeContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -181,7 +182,13 @@ export default function Settings() {
   const p = (profileData as any) ?? {};
   const [currency, setCurrency] = useState(p.defaultCurrency ?? "NGN");
   const [language, setLanguage] = useState(p.language ?? "English");
-  const [theme, setTheme] = useState("dark");
+  const { theme: currentTheme, toggleTheme } = useTheme();
+  const [theme, setTheme] = useState(currentTheme);
+  useEffect(() => {
+    if ((theme === "dark" && currentTheme === "light") || (theme === "light" && currentTheme === "dark")) {
+      toggleTheme?.();
+    }
+  }, [theme]);
   const [emailNotifs, setEmailNotifs] = useState(true);
   const [pushNotifs, setPushNotifs] = useState(true);
   const [smsNotifs, setSmsNotifs] = useState(false);
@@ -210,7 +217,7 @@ export default function Settings() {
         <Card>
           <CardHeader className="pb-2"><div className="flex items-center gap-2"><Palette className="h-4 w-4 text-muted-foreground" /><CardTitle className="text-base">Appearance</CardTitle></div></CardHeader>
           <CardContent>
-            <div><label className="text-xs text-muted-foreground mb-1 block">Theme</label><Select value={theme} onValueChange={setTheme}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{THEMES.map(t => <SelectItem key={t} value={t} className="capitalize">{t}</SelectItem>)}</SelectContent></Select></div>
+            <div><label className="text-xs text-muted-foreground mb-1 block">Theme</label><Select value={theme} onValueChange={(v) => setTheme(v as "dark" | "light")}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{THEMES.map(t => <SelectItem key={t} value={t} className="capitalize">{t}</SelectItem>)}</SelectContent></Select></div>
           </CardContent>
         </Card>
         <Button className="w-full" onClick={() => updateProfile.mutate({ name: p.name ?? '' })} disabled={updateProfile.isPending}>Save Settings</Button>

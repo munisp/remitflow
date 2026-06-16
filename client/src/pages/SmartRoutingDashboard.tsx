@@ -9,6 +9,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Route, Zap, TrendingDown, Clock, RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const PROVIDERS = [
   { id: "wise", name: "Wise", fee: 0.5, time: 60, reliability: 99.8, color: "bg-green-500" },
@@ -19,6 +20,7 @@ const PROVIDERS = [
 ];
 
 export default function SmartRoutingDashboard() {
+  const { t } = useTranslation();
   const [amount, setAmount] = useState("1000");
   const [fromCurrency, setFromCurrency] = useState("USD");
   const [toCurrency, setToCurrency] = useState("NGN");
@@ -26,7 +28,7 @@ export default function SmartRoutingDashboard() {
   const [simResult, setSimResult] = useState<any>(null);
   const [simLoading, setSimLoading] = useState(false);
 
-  const { data: routeData, isLoading } = trpc.smartRouting.getRoute.useQuery(
+  const { data: routeData, isLoading, isError } = trpc.smartRouting.getRoute.useQuery(
     { fromCurrency, toCurrency, amount: parseFloat(amount) || 1000, priority: priority === "balanced" ? "cost" : priority },
     { enabled: parseFloat(amount) > 0 }
   );

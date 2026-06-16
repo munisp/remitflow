@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { TrendingUp, DollarSign, Star, Clock, Plus, RefreshCw } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const GRADE_COLORS: Record<string, string> = {
   AAA: "bg-emerald-100 text-emerald-800",
@@ -27,6 +28,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function BusinessCreditScoring() {
+  const { t } = useTranslation();
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyForm, setApplyForm] = useState({ requestedUsd: "", termMonths: "12", purpose: "" });
 

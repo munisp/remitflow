@@ -10,6 +10,9 @@ import { scheduledTransfers, scheduledTransferRuns } from "../../drizzle/schema.
 import { eq, and, desc, gte } from "drizzle-orm";
 import { sendEmail } from "../email.service.js";
 import { TRPCError } from "@trpc/server";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { broadcastUserEvent } from "../sse.service.js";
+import { logger } from "../_core/logger.js";
 
 const frequencyEnum = z.enum(["once", "daily", "weekly", "biweekly", "monthly"]);
 
@@ -21,7 +24,7 @@ export const scheduledTransfersV117Router = router({
         beneficiaryId: z.number().int().positive().optional(),
         fromCurrency: z.string().length(3),
         toCurrency: z.string().length(3),
-        amount: z.number().positive(),
+        amount: z.number().positive().max(10_000_000),
         frequency: frequencyEnum,
         startDate: z.string().datetime(), // ISO string
         maxRuns: z.number().int().positive().optional(),
@@ -31,7 +34,7 @@ export const scheduledTransfersV117Router = router({
     )
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const nextRunAt = new Date(input.startDate);
       const [row] = await db
@@ -50,6 +53,30 @@ export const scheduledTransfersV117Router = router({
           promoCode: input.promoCode ?? null,
         })
         .returning();
+
+      // Kafka event for scheduled transfer creation
+      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `scheduled:${row.id}`, {
+        eventType: "scheduled_transfer_created",
+        userId: ctx.user.id,
+        amount: input.amount,
+        fromCurrency: input.fromCurrency,
+        toCurrency: input.toCurrency,
+        frequency: input.frequency,
+        startDate: input.startDate,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[ScheduledTransfers] Kafka event failed"));
+
+      // Push notification
+      broadcastUserEvent(ctx.user.id, {
+        type: "transfer_sent",
+        payload: {
+          title: "Scheduled Transfer Created",
+          message: `${input.fromCurrency} ${input.amount} → ${input.toCurrency} (${input.frequency}) starting ${new Date(input.startDate).toLocaleDateString()}`,
+          amount: input.amount,
+          fromCurrency: input.fromCurrency,
+          toCurrency: input.toCurrency,
+        },
+      });
 
       // Send confirmation email
       const user = ctx.user as { email?: string; name?: string };
@@ -81,7 +108,7 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ status: z.enum(["active", "paused", "completed", "cancelled", "all"]).default("all") }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const query = db
         .select()
         .from(scheduledTransfers)
@@ -100,12 +127,12 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ id: z.number().int().positive() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [row] = await db
         .select()
         .from(scheduledTransfers)
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)));
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return row;
     }),
 
@@ -114,7 +141,7 @@ export const scheduledTransfersV117Router = router({
     .input(
       z.object({
         id: z.number().int().positive(),
-        amount: z.number().positive().optional(),
+        amount: z.number().positive().max(10_000_000).optional(),
         frequency: frequencyEnum.optional(),
         nextRunAt: z.string().datetime().optional(),
         maxRuns: z.number().int().positive().nullable().optional(),
@@ -123,7 +150,7 @@ export const scheduledTransfersV117Router = router({
     )
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const updates: Record<string, unknown> = {};
       if (input.amount !== undefined) updates.amount = input.amount.toString();
       if (input.frequency !== undefined) updates.frequency = input.frequency;
@@ -135,7 +162,7 @@ export const scheduledTransfersV117Router = router({
         .set(updates)
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)))
         .returning();
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return row;
     }),
 
@@ -144,13 +171,13 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [row] = await db
         .update(scheduledTransfers)
         .set({ status: "paused" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)))
         .returning();
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return row;
     }),
 
@@ -159,13 +186,13 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [row] = await db
         .update(scheduledTransfers)
         .set({ status: "active" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)))
         .returning();
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return row;
     }),
 
@@ -174,13 +201,13 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ id: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [row] = await db
         .update(scheduledTransfers)
         .set({ status: "cancelled" })
         .where(and(eq(scheduledTransfers.id, input.id), eq(scheduledTransfers.userId, ctx.user.id)))
         .returning();
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return row;
     }),
 
@@ -189,7 +216,7 @@ export const scheduledTransfersV117Router = router({
     .input(z.object({ scheduleId: z.number().int().positive(), limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db
         .select()
         .from(scheduledTransferRuns)

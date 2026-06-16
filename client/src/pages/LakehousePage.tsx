@@ -8,8 +8,10 @@ import { Input } from "@/components/ui/input";
 import { Loader2, Database, Layers, ArrowDown, Play, BarChart3 } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function LakehousePage() {
+  const { t } = useTranslation();
   const [etlLimit, setEtlLimit] = useState("1000");
   const [bronzeTable, setBronzeTable] = useState("transactions");
   const [bronzeLimit, setBronzeLimit] = useState("500");
@@ -21,17 +23,19 @@ export default function LakehousePage() {
   const { data: statusData } = trpc.lakehouse.status.useQuery();
 
   const etlMutation = trpc.lakehouse.runETL.useMutation({
-    onSuccess: (data) => {
-      setEtlResult(data);
-      toast.success(`ETL complete: ${data.totalRows} rows processed in ${data.durationMs}ms`);
+    onSuccess: (data: unknown) => {
+      const d = data as Record<string, unknown>;
+      setEtlResult(d);
+      toast.success(`ETL complete: ${d.totalRows ?? d.duration_ms ?? ""} rows processed`);
     },
     onError: (err) => toast.error(err.message),
   });
 
   const bronzeMutation = trpc.lakehouse.ingestBronze.useMutation({
-    onSuccess: (data) => {
-      setBronzeResult(data);
-      toast.success(`Bronze ingestion: ${data.rowCount} rows → ${data.key}`);
+    onSuccess: (data: unknown) => {
+      const d = data as Record<string, unknown>;
+      setBronzeResult(d);
+      toast.success(`Bronze ingestion complete`);
     },
     onError: (err) => toast.error(err.message),
   });

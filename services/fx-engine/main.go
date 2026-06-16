@@ -32,16 +32,19 @@ type QuoteRequest struct {
 }
 
 type QuoteResponse struct {
-	From        string  `json:"from"`
-	To          string  `json:"to"`
-	SendAmount  float64 `json:"sendAmount"`
+	From          string  `json:"from"`
+	To            string  `json:"to"`
+	SendAmount    float64 `json:"sendAmount"`
 	ReceiveAmount float64 `json:"receiveAmount"`
-	FXRate      float64 `json:"fxRate"`
-	Fee         float64 `json:"fee"`
-	TotalCost   float64 `json:"totalCost"`
-	Spread      float64 `json:"spread"`
-	FSP         string  `json:"fsp"`
-	ExpiresAt   int64   `json:"expiresAt"`
+	Rate          float64 `json:"rate"`
+	FXRate        float64 `json:"fxRate"`
+	Fee           float64 `json:"fee"`
+	TotalCost     float64 `json:"totalCost"`
+	Spread        float64 `json:"spread"`
+	FSP           string  `json:"fsp"`
+	ExpiresAt     int64   `json:"expiresAt"`
+	SendAmountSnake    float64 `json:"send_amount"`
+	ReceiveAmountSnake float64 `json:"receive_amount"`
 }
 
 type ExecuteRequest struct {
@@ -214,6 +217,36 @@ func handleRates(c *gin.Context) {
 	})
 }
 
+var validCurrencies = map[string]bool{
+	"USD": true, "EUR": true, "GBP": true, "NGN": true, "GHS": true, "KES": true,
+	"ZAR": true, "TZS": true, "UGX": true, "RWF": true, "XOF": true, "XAF": true,
+	"EGP": true, "MAD": true, "BRL": true, "INR": true, "CNY": true, "JPY": true,
+	"CAD": true, "AUD": true, "CHF": true, "SEK": true, "NOK": true, "DKK": true,
+	"MXN": true, "ARS": true, "COP": true, "PEN": true, "CLP": true, "PHP": true,
+	"THB": true, "IDR": true, "MYR": true, "SGD": true, "HKD": true, "TWD": true,
+	"KRW": true, "AED": true, "SAR": true, "QAR": true, "BHD": true, "OMR": true,
+}
+
+func handleSingleRate(c *gin.Context) {
+	from := strings.ToUpper(c.DefaultQuery("from", "USD"))
+	to := strings.ToUpper(c.DefaultQuery("to", "NGN"))
+	if !validCurrencies[from] || !validCurrencies[to] {
+		c.JSON(400, gin.H{"error": "invalid currency pair"})
+		return
+	}
+	rates, err := fetchRates(from)
+	if err != nil {
+		c.JSON(502, gin.H{"error": err.Error()})
+		return
+	}
+	rate, ok := rates[to]
+	if !ok {
+		c.JSON(404, gin.H{"error": "pair not found"})
+		return
+	}
+	c.JSON(200, gin.H{"from": from, "to": to, "rate": rate, "timestamp": time.Now().Unix()})
+}
+
 func handleQuote(c *gin.Context) {
 	var req QuoteRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -247,17 +280,21 @@ func handleQuote(c *gin.Context) {
 		receiveAmount = 0
 	}
 
+	roundedRate := math.Round(appliedRate*10000) / 10000
 	c.JSON(200, QuoteResponse{
-		From:          req.From,
-		To:            req.To,
-		SendAmount:    req.Amount,
-		ReceiveAmount: receiveAmount,
-		FXRate:        math.Round(appliedRate*10000) / 10000,
-		Fee:           fee,
-		TotalCost:     req.Amount,
-		Spread:        spread,
-		FSP:           fsp,
-		ExpiresAt:     time.Now().Add(5 * time.Minute).Unix(),
+		From:               req.From,
+		To:                 req.To,
+		SendAmount:         req.Amount,
+		ReceiveAmount:      receiveAmount,
+		Rate:               roundedRate,
+		FXRate:             roundedRate,
+		Fee:                fee,
+		TotalCost:          req.Amount,
+		Spread:             spread,
+		FSP:                fsp,
+		ExpiresAt:          time.Now().Add(5 * time.Minute).Unix(),
+		SendAmountSnake:    req.Amount,
+		ReceiveAmountSnake: receiveAmount,
 	})
 }
 
@@ -325,9 +362,15 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())
 
-	// CORS
+	// CORS — use env-based origin in production
 	r.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
+		origin := os.Getenv("CORS_ALLOWED_ORIGIN")
+		if origin == "" && os.Getenv("NODE_ENV") != "production" {
+			origin = c.GetHeader("Origin")
+		}
+		if origin != "" {
+			c.Header("Access-Control-Allow-Origin", origin)
+		}
 		c.Header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if c.Request.Method == "OPTIONS" {
@@ -339,6 +382,7 @@ func main() {
 
 	r.GET("/health", handleHealth)
 	r.GET("/rates", handleRates)
+	r.GET("/rate", handleSingleRate)
 	r.POST("/quote", handleQuote)
 	r.POST("/execute", handleExecute)
 	r.GET("/corridors", handleCorridors)

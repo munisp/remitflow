@@ -118,7 +118,7 @@ export function Sparkline({ symbol, currentPrice }: { symbol: string; currentPri
   );
 
   const points = useMemo(() =>
-    data.map(d => ({ close: Number(d.close), timestamp: d.timestamp })),
+    data.map((d: any) => ({ close: Number(d.close), timestamp: d.timestamp })),
     [data]
   );
 
@@ -174,7 +174,7 @@ export default function PriceChart({ symbol, currentPrice, compact = false, clas
   );
 
   const points = useMemo(() =>
-    data.map(d => ({
+    data.map((d: any) => ({
       open: Number(d.open),
       high: Number(d.high),
       low: Number(d.low),
@@ -191,8 +191,8 @@ export default function PriceChart({ symbol, currentPrice, compact = false, clas
   const isUp = lastClose >= firstClose;
   const pct = firstClose > 0 ? ((lastClose - firstClose) / firstClose) * 100 : 0;
   const color = isUp ? "#10b981" : "#ef4444";
-  const minClose = Math.min(...points.map(p => p.low));
-  const maxClose = Math.max(...points.map(p => p.high));
+  const minClose = Math.min(...points.map((p: any) => p.low));
+  const maxClose = Math.max(...points.map((p: any) => p.high));
   const padding = (maxClose - minClose) * 0.08;
 
   if (compact) {
@@ -348,7 +348,7 @@ export default function PriceChart({ symbol, currentPrice, compact = false, clas
       )}
 
       {/* Volume bar */}
-      {!isLoading && points.some(p => p.volume > 0) && (
+      {!isLoading && points.some((p: any) => p.volume > 0) && (
         <div className="h-14 w-full">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={points} margin={{ top: 0, right: 4, bottom: 0, left: 0 }}>

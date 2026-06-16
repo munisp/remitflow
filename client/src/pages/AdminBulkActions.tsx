@@ -8,8 +8,10 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { toast } from "sonner";
 import { Users, Download, Ban, CheckCircle, AlertTriangle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function AdminBulkActions() {
+  const { t } = useTranslation();
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [exportFormat, setExportFormat] = useState<"csv" | "json">("csv");
 
@@ -44,7 +46,7 @@ export default function AdminBulkActions() {
     const a = document.createElement("a");
     a.href = url; a.download = `users-export-${Date.now()}.${format}`; a.click();
     URL.revokeObjectURL(url);
-    toast.success(`Exported ${count} users as ${format.toUpperCase()}`);
+    toast.success(`Exported ${count} users as ${format!.toUpperCase()}`);
   }
 
   const userList = usersData?.users ?? [];

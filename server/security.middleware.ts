@@ -32,10 +32,11 @@ import { Request, Response, NextFunction, Express, RequestHandler } from "expres
 import { logger } from './_core/logger';
 
 // ─── ALLOWED ORIGINS ─────────────────────────────────────────────────────────
-// Production domain — set REMITFLOW_PRODUCTION_DOMAIN env var after purchasing
-// your custom domain via Manus Settings → Domains → Purchase New Domain.
-// Default: remitflow.manus.space (Manus-hosted subdomain)
-const PRODUCTION_DOMAIN = process.env.REMITFLOW_PRODUCTION_DOMAIN || "remitflow.manus.space";
+// Production domain — MUST be set via REMITFLOW_PRODUCTION_DOMAIN in production.
+const PRODUCTION_DOMAIN = process.env.REMITFLOW_PRODUCTION_DOMAIN || "remitflow.example.com";
+if (process.env.NODE_ENV === "production" && !process.env.REMITFLOW_PRODUCTION_DOMAIN) {
+  logger.error("[Security] REMITFLOW_PRODUCTION_DOMAIN is not set — using placeholder. CORS may reject valid origins.");
+}
 export const ALLOWED_ORIGINS: (string | RegExp)[] = [
   "http://localhost:3000",
   "http://localhost:5173",
@@ -95,7 +96,7 @@ export const helmetMiddleware = helmet({
       defaultSrc: ["'self'"],
       scriptSrc: [
         "'self'",
-        (_req: Request, res: Response) => `'nonce-${(res.locals as any).cspNonce}'`,
+        (_req: any, res: any) => `'nonce-${res.locals?.cspNonce}'`,
         "https://js.stripe.com",
         "https://fonts.googleapis.com",
       ],
@@ -106,8 +107,8 @@ export const helmetMiddleware = helmet({
         "data:",
         "blob:",
         "https:",
-        "https://*.manus.space",
-        "https://*.manus.computer",
+        `https://${PRODUCTION_DOMAIN}`,
+        `https://*.${PRODUCTION_DOMAIN}`,
       ],
       connectSrc: [
         "'self'",
@@ -167,7 +168,7 @@ export const perUserRateLimit = rateLimit({
 // General API: 100 req/min per IP
 export const generalRateLimit = rateLimit({
   windowMs: 60 * 1000,
-  max: 100,
+  max: process.env.LOAD_TEST_MODE === "true" ? 10000 : 100,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   message: { error: "Too many requests, please try again in a minute." },
@@ -588,7 +589,7 @@ export function securityAuditMiddleware(req: Request, res: Response, next: NextF
   const isHighRisk = HIGH_RISK_PATHS.some(p => req.path.startsWith(p));
   if (isHighRisk && req.method === "POST") {
     const requestId = (res.locals as any).requestId ?? "unknown";
-    console.info(`[SecurityAudit] ${req.method} ${req.path} | IP: ${req.ip} | ReqID: ${requestId}`);
+    logger.info(`[SecurityAudit] ${req.method} ${req.path} | IP: ${req.ip} | ReqID: ${requestId}`);
   }
   next();
 }

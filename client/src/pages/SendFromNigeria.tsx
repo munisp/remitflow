@@ -11,6 +11,7 @@ import { Badge } from "@/components/ui/badge";
 import { Loader2, ArrowRight, ShieldCheck, Globe } from "lucide-react";
 import { AnnualLimitBadge } from "@/components/AnnualLimitBadge";
 import { CrossSellOfferModal } from "@/components/CrossSellOfferModal";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = ["USD","GBP","EUR","CAD","AUD","JPY","CNY"];
 const PURPOSE_CODES = [
@@ -20,6 +21,7 @@ const PURPOSE_CODES = [
 ];
 
 export default function SendFromNigeria() {
+  const { t } = useTranslation();
   const { isAuthenticated } = useAuth();
   const [amountNgn, setAmountNgn] = useState("");
   const [currency, setCurrency] = useState("USD");
@@ -101,7 +103,7 @@ export default function SendFromNigeria() {
           <CardHeader><CardTitle>Transfer Quote</CardTitle></CardHeader>
           <CardContent className="space-y-4">
             {quoteQuery.isPending&&<div className="flex items-center gap-2"><Loader2 className="animate-spin h-4 w-4"/><span>Fetching live rate...</span></div>}
-            {quoteQuery.data&&(
+            {quoteQuery.data?(
               <div className="space-y-3">
                 <div className="grid grid-cols-2 gap-4 text-sm">
                   <div><p className="text-muted-foreground">You send</p><p className="text-xl font-bold">NGN {parseFloat(amountNgn).toLocaleString()}</p></div>
@@ -118,7 +120,7 @@ export default function SendFromNigeria() {
                   <Button className="flex-1" onClick={()=>setStep("confirm")}>Confirm Transfer</Button>
                 </div>
               </div>
-            )}
+            ):null}
             {quoteQuery.error&&<p className="text-destructive text-sm">{quoteQuery.error.message}</p>}
           </CardContent>
         </Card>
@@ -145,7 +147,7 @@ export default function SendFromNigeria() {
         <CardHeader><CardTitle className="text-base">Fee Schedule</CardTitle></CardHeader>
         <CardContent>
           {feeScheduleQuery.isPending&&<Loader2 className="animate-spin h-4 w-4"/>}
-          {feeScheduleQuery.data&&(
+          {feeScheduleQuery.data?(
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead><tr className="border-b"><th className="text-left py-2">Segment</th><th className="text-right py-2">Fee %</th><th className="text-right py-2">Spread (bps)</th><th className="text-right py-2">Min Fee</th></tr></thead>
@@ -161,7 +163,7 @@ export default function SendFromNigeria() {
                 </tbody>
               </table>
             </div>
-          )}
+          ):null}
         </CardContent>
       </Card>
     </div>

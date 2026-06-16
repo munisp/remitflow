@@ -6,11 +6,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { TrendingUp, DollarSign, Users, BarChart3, ArrowUp, ArrowDown } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function RevenueAnalytics() {
+  const { t } = useTranslation();
   const [period, setPeriod] = useState<"7d" | "30d" | "90d" | "1y">("30d");
 
-  const { data: revenue } = trpc.v98.analytics.revenue.useQuery({ period });
+  const { data: revenue, isLoading, isError } = trpc.v98.analytics.revenue.useQuery({ period });
   const { data: topCorridors } = trpc.v98.analytics.topCorridors.useQuery({ period, limit: 10 });
   const { data: userGrowth } = trpc.v98.analytics.userGrowth.useQuery({ period });
 
@@ -134,7 +136,7 @@ export default function RevenueAnalytics() {
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
-              {(topCorridors ?? []).slice(0, 8).map((c, i) => (
+              {(topCorridors ?? []).slice(0, 8).map((c: any, i: any) => (
                 <div key={`${c.fromCurrency}-${c.toCurrency}`} className="flex items-center justify-between p-2 rounded hover:bg-muted/30 transition-colors">
                   <div className="flex items-center gap-2">
                     <span className="text-muted-foreground text-xs w-5">{i + 1}.</span>

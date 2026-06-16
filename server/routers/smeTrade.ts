@@ -7,6 +7,11 @@ import { smeTradeBatches, smeTradePayments, formMDocuments } from "../../drizzle
 import { eq, desc, and, gte, lte, like, sql, count } from "drizzle-orm";
 import { users } from "../../drizzle/schema";
 import { logger } from '../_core/logger';
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { screenSanctions } from "../_core/polyglotClient";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+import { broadcastUserEvent } from "../sse.service";
+import { sendNotification } from "../notifications.service";
 
 const SME_TRADE_URL = process.env.SME_TRADE_URL ?? "http://go-sme-trade-service:8097";
 const SME_COMPLIANCE_URL = process.env.SME_COMPLIANCE_URL ?? "http://python-sme-compliance:8102";
@@ -58,7 +63,7 @@ export const smeTradeRouter = router({
     .input(z.object({
       formMNumber: z.string().min(10).max(30),
       corridorCode: z.string().length(2),
-      valueUsd: z.number().positive(),
+      valueUsd: z.number().positive().max(10_000_000),
       importerName: z.string().min(2).max(200).optional(),
       exporterName: z.string().min(2).max(200).optional(),
       goodsDescription: z.string().min(5).max(500).optional(),
@@ -139,7 +144,7 @@ export const smeTradeRouter = router({
           },
           status: serviceResult.is_valid ? "validated" : "rejected",
           createdAt: new Date(),
-        });
+        }).returning();
       } catch (dbErr) {
         // Non-fatal: log but don't block the response
         logger.error({ err: dbErr }, '[validateFormM] Failed to persist to form_m_documents:');
@@ -170,6 +175,38 @@ export const smeTradeRouter = router({
       const db = await getDb();
       const batchId = `SME-${Date.now()}-${ctx.user.id}`;
 
+      // Batch sanctions screening for all recipients
+      const sanctionChecks = await Promise.all(
+        input.payments.map(p => screenSanctions({ name: p.recipientName, country: input.corridorCode }))
+      );
+      const blocked = sanctionChecks.filter(s => s.isSanctioned);
+      if (blocked.length > 0) {
+        publishEvent(KAFKA_TOPICS.COMPLIANCE_ALERT, `sme-sanctions:${ctx.user.id}`, {
+          alertType: "sme_batch_sanctions_match",
+          userId: ctx.user.id,
+          blockedCount: blocked.length,
+          batchId,
+          timestamp: new Date().toISOString(),
+        }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[SME] Kafka sanctions alert failed"));
+        throw new TRPCError({ code: "FORBIDDEN", message: `Batch blocked: ${blocked.length} recipient(s) matched sanctions list` });
+      }
+
+      // Execute pipeline for total batch amount
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: totalAmountUsd,
+        fromCurrency: "NGN",
+        toCurrency: "USD",
+        recipientName: `SME Batch (${input.payments.length} payments)`,
+        rail: "swift",
+        corridorCode: input.corridorCode,
+        featureLabel: "sme_trade",
+        transferId: batchId,
+        description: `SME trade batch to ${input.corridorCode}`,
+        metadata: { formMNumber: input.formMNumber, paymentCount: input.payments.length },
+        skipVelocity: true, // SME batches are bulk by nature
+      });
+
       // Create batch record
       await db.insert(smeTradeBatches).values({
         batchId,
@@ -181,7 +218,7 @@ export const smeTradeRouter = router({
         batchReference: input.batchReference,
         status: "processing",
         createdAt: new Date(),
-      });
+      }).returning();
 
       // Submit to Go SME trade service
       const result = await callSmeService(SME_TRADE_URL, "/batch", {
@@ -200,9 +237,27 @@ export const smeTradeRouter = router({
           succeeded: result.succeeded ?? 0,
           failed: result.failed ?? 0,
         })
-        .where(eq(smeTradeBatches.batchId, batchId));
+        .where(eq(smeTradeBatches.batchId, batchId)).returning();
 
-      return { ...result, batchId };
+      // Notification
+      broadcastUserEvent(ctx.user.id, {
+        type: "transfer_sent",
+        payload: {
+          title: "SME Trade Batch Submitted",
+          message: `${input.payments.length} payments totaling $${totalAmountUsd.toLocaleString()} submitted to ${input.corridorCode}`,
+          amount: totalAmountUsd,
+          fromCurrency: "NGN",
+          toCurrency: "USD",
+        },
+      });
+      sendNotification({
+        userId: ctx.user.id,
+        title: "SME Trade Batch Submitted",
+        message: `Your SME trade batch of ${input.payments.length} payments ($${totalAmountUsd.toLocaleString()}) has been submitted.`,
+        type: "transfer",
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[SME] Notification failed"));
+
+      return { ...result, batchId, verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
   getBatchStatus: protectedProcedure

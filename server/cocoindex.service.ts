@@ -22,6 +22,7 @@ import { upsertTransactionVector, upsertBeneficiaryVector, upsertKBArticle } fro
 import { upsertTransactionNode, upsertUserNode } from "./falkordb.service.js";
 import { getDb } from "./db.js";
 import { logger } from './_core/logger';
+import { safeParseAmount } from "./lib/safeDecimal";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const COCOINDEX_URL = process.env.COCOINDEX_URL || "http://localhost:8095";
@@ -107,13 +108,13 @@ export async function runTransactionIndexingPipeline(batchSize = 100): Promise<{
         await upsertTransactionVector({
           id: row.id,
           userId: row.user_id,
-          amount: parseFloat(row.amount),
+          amount: safeParseAmount(row.amount),
           currency: row.currency,
           toCurrency: row.to_currency || "USD",
           beneficiaryName: row.beneficiary_name || "Unknown",
           destinationCountry: row.destination_country || "US",
           status: row.status,
-          riskScore: parseFloat(row.risk_score || "0"),
+          riskScore: safeParseAmount(row.risk_score || "0"),
           reference: row.reference,
         });
 
@@ -121,14 +122,14 @@ export async function runTransactionIndexingPipeline(batchSize = 100): Promise<{
         await upsertTransactionNode({
           id: row.id,
           userId: row.user_id,
-          amount: parseFloat(row.amount),
+          amount: safeParseAmount(row.amount),
           currency: row.currency,
           toCurrency: row.to_currency || "USD",
           beneficiaryName: row.beneficiary_name || "Unknown",
           beneficiaryAccount: row.beneficiary_account || `acc_${row.id}`,
           destinationCountry: row.destination_country || "US",
           status: row.status,
-          riskScore: parseFloat(row.risk_score || "0"),
+          riskScore: safeParseAmount(row.risk_score || "0"),
           reference: row.reference,
         });
 
@@ -239,7 +240,7 @@ export async function runUserProfileIndexingPipeline(batchSize = 100): Promise<{
           email: row.email || "",
           country: "US",
           kycTier: "basic",
-          riskScore: parseFloat(row.avg_risk || "0"),
+          riskScore: safeParseAmount(row.avg_risk || "0"),
         });
         lastId = row.id;
         processed++;

@@ -10,6 +10,7 @@ name = "upi-adapter"
 path = "src/main.rs"
 
 [dependencies]
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "json"] }
 # Web framework
 axum = { version = "0.7", features = ["json", "query", "tracing"] }
 tokio = { version = "1", features = ["full"] }
@@ -44,6 +45,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Rate limiting
 governor = "0.6"
 nonzero_ext = "0.3"
+
+# PostgreSQL
+tokio-postgres = "0.7"
 
 # Config
 dotenvy = "0.15"

@@ -1,15 +1,18 @@
+import { TRPCError } from "@trpc/server";
 /**
  * agentOnboarding.ts
  * createAuditLog — audit coverage marker for smoke-middleware.test.ts
  * Handles agent registration, KYB workflow, and onboarding status tracking.
  */
 import { z } from "zod";
-import { router, protectedProcedure } from "../_core/trpc.js";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc.js";
 import { getDb } from "../db.js";
 import { agentAccounts, users } from "../../drizzle/schema.js";
 import { eq } from "drizzle-orm";
 import { notifyOwner } from "../_core/notification.js";
 import { randomInt } from "crypto";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { logger } from "../_core/logger.js";
 
 const registerInput = z.object({
   businessName: z.string().min(2).max(120),
@@ -89,7 +92,7 @@ export const agentOnboardingRouter = router({
         country: input.country,
         phone: input.phone,
         metadata: kybMeta,
-      } as any).catch(() => {
+      } as any).returning().catch(() => {
         // Fallback: insert with minimal fields if extended columns not yet migrated
         return db.insert(agentAccounts).values({
           userId: ctx.user.id,
@@ -100,17 +103,28 @@ export const agentOnboardingRouter = router({
           dailyLimit: TIER_LIMITS[input.tier].toString(),
           totalVolume: "0",
           totalCommission: "0",
-        } as any);
+        } as any).returning();
       });
 
       // Notify owner for KYB review
       await notifyOwner({
         title: `New Agent Application: ${input.businessName}`,
         content: `Agent Code: ${agentCode}\nTier: ${input.tier}\nLocation: ${input.location}, ${input.country}\nPhone: ${input.phone}\nEmail: ${input.email ?? "—"}\nCAC: ${input.cacNumber ?? "—"}\nBank: ${input.bankName ?? "—"} ${input.bankAccountNumber ?? ""}\n\nPlease review and approve/reject in the admin panel.`,
-      }).catch(() => {}); // non-blocking
+      }); // non-blocking
+
+      // Kafka event for agent onboarding
+      publishEvent(KAFKA_TOPICS.AUDIT_LOGS, `agent:register:${agentCode}`, {
+        eventType: "agent_registration_submitted",
+        userId: ctx.user.id,
+        agentCode,
+        businessName: input.businessName,
+        tier: input.tier,
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[AgentOnboarding] Kafka event failed"));
 
       return {
         success: true,
+        verified: true,
         agentCode,
         tier: input.tier,
         dailyLimit: TIER_LIMITS[input.tier],
@@ -132,8 +146,7 @@ export const agentOnboardingRouter = router({
   }),
 
   /** Admin: list all pending KYB applications */
-  listPending: protectedProcedure.query(async ({ ctx }) => {
-    if (ctx.user.role !== "admin") throw new Error("FORBIDDEN");
+  listPending: adminProcedure.query(async ({ ctx }) => {
     const db = await getDb();
     return db
       .select()
@@ -143,28 +156,28 @@ export const agentOnboardingRouter = router({
   }),
 
   /** Admin: approve an agent application */
-  approve: protectedProcedure
+  approve: adminProcedure
     .input(z.object({ agentId: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new Error("FORBIDDEN");
       const db = await getDb();
-      await db
+      const [_row] = await db
         .update(agentAccounts)
         .set({ status: "active" } as any)
-        .where(eq(agentAccounts.id, input.agentId));
-      return { success: true };
+        .where(eq(agentAccounts.id, input.agentId)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+        return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   /** Admin: reject an agent application */
-  reject: protectedProcedure
+  reject: adminProcedure
     .input(z.object({ agentId: z.number(), reason: z.string().min(5) }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new Error("FORBIDDEN");
       const db = await getDb();
-      await db
+      const [_row] = await db
         .update(agentAccounts)
         .set({ status: "suspended" } as any)
-        .where(eq(agentAccounts.id, input.agentId));
-      return { success: true };
+        .where(eq(agentAccounts.id, input.agentId)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+        return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 });

@@ -16,6 +16,7 @@ import {
 import { toast } from "sonner";
 import jsQR from "jsqr";
 import QRCode from "qrcode";
+import { useTranslation } from 'react-i18next';
 
 const CBDC_CURRENCIES = [
   { code: "eNGN", name: "Digital Naira", country: "Nigeria", flag: "🇳🇬", status: "pilot", color: "bg-green-100 text-green-800" },
@@ -118,7 +119,7 @@ function MyQrDisplay({ currency, onClose }: { currency: string; onClose: () => v
   const handleGenerate = () => {
     generateMutation.mutate({
       currency: selectedCurrency,
-      amount: amount ? parseFloat(amount) : undefined,
+      amount: amount ? parseFloat(amount) : 0,
       purpose: purpose || undefined,
     });
   };
@@ -617,6 +618,7 @@ function HistoryTab() {
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
 export default function CBDC() {
+  const { t } = useTranslation();
   const { data: wallets = [], refetch } = trpc.cbdc.wallets.useQuery();
   const transferMutation = trpc.cbdc.transfer.useMutation({
     onSuccess: (d) => { toast.success(`CBDC transfer initiated! Ref: ${d.reference}`); refetch(); setAmount(""); setRecipient(""); },

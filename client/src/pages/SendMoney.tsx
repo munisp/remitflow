@@ -18,6 +18,8 @@ import { useAuth } from "@/hooks/useAuth";
 import { useLocation } from "wouter";
 import RateLockBanner from "@/components/RateLockBanner";
 import { useTranslation } from 'react-i18next';
+import { haptics } from "@/lib/haptics";
+import { SecurityBadge } from "@/components/SecurityBadge";
 
 const CURRENCIES = ["NGN", "USD", "GBP", "EUR", "KES", "GHS", "ZAR", "UGX", "TZS", "XOF"];
 
@@ -145,7 +147,7 @@ export default function SendMoney() {
     onError: (err) => toast.error(err.message),
   });
 
-  const filtered = (beneficiaries ?? []).filter(r =>
+  const filtered = (beneficiaries ?? []).filter((r: any) =>
     r.name.toLowerCase().includes(search.toLowerCase()) ||
     (r.accountNumber ?? "").includes(search) ||
     (r.country ?? "").toLowerCase().includes(search.toLowerCase())
@@ -194,6 +196,7 @@ export default function SendMoney() {
   };
 
   const handleSend = () => {
+    haptics.medium();
     // Open confirmation dialog before sending
     setConfirmOpen(true);
   };
@@ -240,10 +243,11 @@ export default function SendMoney() {
         <div className="p-4 sm:p-6 max-w-lg mx-auto space-y-4">
           <Card className="text-center">
             <CardContent className="pt-10 pb-6 space-y-4">
-              <div className="w-20 h-20 rounded-full bg-emerald-100 flex items-center justify-center mx-auto">
+              <div className="w-20 h-20 rounded-full bg-emerald-100 flex items-center justify-center mx-auto animate-success-check">
                 <CheckCircle2 className="h-10 w-10 text-emerald-600" />
               </div>
-              <h2 className="text-2xl font-bold text-emerald-700">Transfer Sent!</h2>
+              <h2 className="text-2xl font-bold text-emerald-700 animate-count-up">Transfer Sent!</h2>
+              <SecurityBadge variant="inline" label="Bank-grade encryption" />
               <p className="text-muted-foreground">{amount} {fromCurrency} → {selected?.name}</p>
               <p className="text-sm text-muted-foreground">Recipient receives approximately {quote?.toAmount?.toFixed(2)} {toCurrency}</p>
 
@@ -385,7 +389,7 @@ export default function SendMoney() {
                   <p className="text-sm">Add a recipient to get started.</p>
                 </div>
               )}
-              {filtered.map(r => (
+              {filtered.map((r: any) => (
                 <button key={r.id} onClick={() => { setSelected(r); goToStep("amount"); }} className="w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left hover:border-primary hover:bg-primary/5">
                   <div className="w-10 h-10 rounded-full bg-gradient-to-br from-primary to-violet-600 flex items-center justify-center text-white font-bold text-sm flex-shrink-0">
                     {r.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase()}
@@ -443,7 +447,8 @@ export default function SendMoney() {
               {quote && (
                 <div className="bg-muted/50 rounded-lg p-3 space-y-1 text-sm">
                   <div className="flex justify-between"><span className="text-muted-foreground">Exchange rate</span><span>1 {fromCurrency} = {quote.fxRate?.toFixed(4)} {toCurrency}</span></div>
-                  <div className="flex justify-between"><span className="text-muted-foreground">Fee (0.5%)</span><span>{quote.fee?.toFixed(2)} {fromCurrency}</span></div>
+                  <div className="flex justify-between"><span className="text-muted-foreground">Transfer fee</span><span>{quote.fee?.toFixed(2)} {fromCurrency}</span></div>
+                  {(quote as any).fxMarkup ? <div className="flex justify-between text-xs"><span className="text-muted-foreground">FX markup</span><span>{((quote as any).fxMarkup * 100).toFixed(2)}%</span></div> : null}
                   <Separator className="my-1" />
                   <div className="flex justify-between font-semibold"><span>Total deducted</span><span>{(parseFloat(amount) + (quote.fee ?? 0)).toFixed(2)} {fromCurrency}</span></div>
                 </div>

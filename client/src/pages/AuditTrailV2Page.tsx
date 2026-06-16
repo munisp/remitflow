@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Download, Search, Activity, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const SEVERITY_COLORS: Record<string, string> = {
   info: "bg-blue-500/20 text-blue-400",
@@ -17,6 +18,7 @@ const SEVERITY_COLORS: Record<string, string> = {
 };
 
 export default function AuditTrailV2Page() {
+  const { t } = useTranslation();
   const [userId, setUserId] = useState("");
   const [action, setAction] = useState("");
   const [dateFrom, setDateFrom] = useState("");
@@ -147,7 +149,7 @@ export default function AuditTrailV2Page() {
                   <tr><td colSpan={7} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
                 ) : logs.length === 0 ? (
                   <tr><td colSpan={7} className="p-8 text-center text-muted-foreground">No audit events found</td></tr>
-                ) : logs.map((log) => (
+                ) : logs.map((log: any) => (
                   <tr key={log.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                     <td className="p-3 font-mono text-xs text-muted-foreground">#{log.id}</td>
                     <td className="p-3 text-sm">User #{log.userId}</td>

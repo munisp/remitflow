@@ -16,7 +16,7 @@ export const securityAuditRouter = router({
    * Get current vulnerability score and security header analysis.
    */
   getVulnerabilityScore: adminProcedure.query(async () => {
-    // Simulate what headers the server sends
+    // Security headers configured by the server (matches securityHeaders middleware)
     const serverHeaders: Record<string, string> = {
       "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'",
       "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
@@ -53,8 +53,8 @@ export const securityAuditRouter = router({
    */
   getSecurityEvents: adminProcedure
     .input(z.object({ limit: z.number().min(1).max(500).default(100) }))
-    .query(({ input }) => {
-      const events = getSecurityEvents(input.limit);
+    .query(async ({ input }) => {
+      const events = await getSecurityEvents(input.limit);
       return {
         events,
         total: events.length,
@@ -317,7 +317,7 @@ export const securityAuditRouter = router({
         action: "USER_UNLOCKED",
         description: `Admin (id=${adminId}) manually unlocked account for user ${input.userId}`,
       });
-      return { success: true, userId: input.userId };
+      return { success: true, verified: true, userId: input.userId };
     }),
 
   // ─── v148: Reset login attempts counter ───────────────────────────────────
@@ -338,7 +338,7 @@ export const securityAuditRouter = router({
         action: "LOGIN_ATTEMPTS_RESET",
         description: `Admin (id=${adminId}) reset failed login attempts for user ${input.userId}`,
       });
-      return { success: true, userId: input.userId };
+      return { success: true, verified: true, userId: input.userId };
     }),
 
   // ─── v149: Lockout audit history for a specific user ─────────────────

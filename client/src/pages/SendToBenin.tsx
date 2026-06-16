@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Loader2, ArrowRight, Phone } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const CORRIDOR = "BJ";
 const DFSP_OPTIONS = [
@@ -18,6 +19,7 @@ const DFSP_OPTIONS = [
 ];
 
 export default function SendToBenin() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [amountNgn, setAmountNgn] = useState(50000);
   const [recipientMobile, setRecipientMobile] = useState("");

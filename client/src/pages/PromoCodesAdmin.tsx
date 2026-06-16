@@ -12,8 +12,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
 import { Plus, Tag, Pencil, Trash2, Users, TrendingDown, Search, Copy, CheckCircle, XCircle } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function PromoCodesAdmin() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [search, setSearch] = useState("");
   const [activeOnly, setActiveOnly] = useState(false);

@@ -11,6 +11,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Palette, Eye, Save, RefreshCw, Smartphone, Monitor, Tablet } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const FONT_OPTIONS = [
   { value: "Inter", label: "Inter (Default)" },
@@ -33,6 +34,7 @@ const PRESET_THEMES = [
 type ViewMode = "desktop" | "tablet" | "mobile";
 
 export default function BrandingPreview() {
+  const { t } = useTranslation();
   const [tenantId] = useState(1);
   const [viewMode, setViewMode] = useState<ViewMode>("desktop");
   const [primaryColor, setPrimaryColor] = useState("#7c3aed");

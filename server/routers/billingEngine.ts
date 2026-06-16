@@ -32,6 +32,7 @@ import {
 } from "../../drizzle/schema";
 import { eq, desc, and, gte, lte, sql } from "drizzle-orm";
 import { logger } from '../_core/logger';
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Billing Engine HTTP client ───────────────────────────────────────────────
 
@@ -227,14 +228,14 @@ export const billingEngineRouter = router({
           input.midMarketRate,
           {
             feeMode: cfg.feeMode as "PERCENTAGE" | "FLAT" | "HYBRID",
-            feePercentage: parseFloat(cfg.feePercentage ?? "1.5"),
+            feePercentage: safeParseAmount(cfg.feePercentage ?? "1.5"),
             flatFeeMinor: cfg.flatFeeMinor ?? 0,
             feeCapMinor: cfg.feeCapMinor ?? 2000,
             feeFloorMinor: cfg.feeFloorMinor ?? 100,
-            fxSpreadPercentage: parseFloat(cfg.fxSpreadPercentage ?? "0.80"),
-            hedgeCostPercentage: parseFloat(cfg.hedgeCostPercentage ?? "0.15"),
-            platformFeeSharePct: parseFloat(cfg.platformFeeSharePct ?? "40.0"),
-            platformFxSharePct: parseFloat(cfg.platformFxSharePct ?? "100.0"),
+            fxSpreadPercentage: safeParseAmount(cfg.fxSpreadPercentage ?? "0.80"),
+            hedgeCostPercentage: safeParseAmount(cfg.hedgeCostPercentage ?? "0.15"),
+            platformFeeSharePct: safeParseAmount(cfg.platformFeeSharePct ?? "40.0"),
+            platformFxSharePct: safeParseAmount(cfg.platformFxSharePct ?? "100.0"),
             overheadPerTxMinor: cfg.overheadPerTxMinor ?? 50,
           },
           input.payoutMethod
@@ -272,7 +273,7 @@ export const billingEngineRouter = router({
         createdByUserId: String(ctx.user.id),
         billingConfigVersion: cfg.version ?? "default",
         eventTimestampMs: now,
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
 
       return {
         eventId,
@@ -292,7 +293,7 @@ export const billingEngineRouter = router({
     .input(z.object({ tenantId: z.string().default("default") }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const configs = await db
         .select()
         .from(billingConfigs)
@@ -359,7 +360,7 @@ export const billingEngineRouter = router({
         beforeState: JSON.stringify(existing[0]),
         afterState: JSON.stringify({ ...existing[0], ...updates, version: newVersion }),
         occurredAtMs: now,
-      });
+      }).returning();
 
       // Audit log for billing config change
       await createAuditLog({
@@ -370,8 +371,8 @@ export const billingEngineRouter = router({
         description: `Billing config updated for tenant ${tenantId}: ${changeReason}`,
         severity: "warning",
         metadata: { tenantId, changeReason },
-      }).catch(() => {});
-      return { success: true, version: newVersion, updatedAt: now };
+      });
+      return { success: true, verified: true, version: newVersion, updatedAt: now };
     }),
 
   // ── List billing events for a tenant ─────────────────────────────────────
@@ -386,7 +387,7 @@ export const billingEngineRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { events: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const conditions = [eq(billingEvents.tenantId, input.tenantId)];
       if (input.corridor) conditions.push(eq(billingEvents.corridor, input.corridor));
@@ -414,7 +415,7 @@ export const billingEngineRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const fromMs = Date.now() - input.periodDays * 24 * 60 * 60 * 1000;
 
@@ -467,7 +468,7 @@ export const billingEngineRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const fromMs = Date.now() - input.periodDays * 24 * 60 * 60 * 1000;
 
@@ -501,7 +502,7 @@ export const billingEngineRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db
         .select()
         .from(billingConfigHistory)
@@ -519,7 +520,7 @@ export const billingEngineRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { entries: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const conditions = input.tenantId ? [eq(billingAuditLog.tenantId, input.tenantId)] : [];
 
@@ -562,7 +563,7 @@ export const billingEngineRouter = router({
         ownerEmail: `admin@${input.tenantId}.com`,
         ownerName: input.tenantName,
         onboardedAt: new Date(),
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
 
       // Provision billing config
       await db.insert(billingConfigs).values({
@@ -584,7 +585,7 @@ export const billingEngineRouter = router({
         changeReason: "Initial provisioning at tenant onboarding",
         createdAtMs: now,
         updatedAtMs: now,
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
 
       // Audit log
       await db.insert(billingAuditLog).values({
@@ -596,9 +597,9 @@ export const billingEngineRouter = router({
         actorRole: ctx.user.role ?? "admin",
         afterState: JSON.stringify({ configId, tenantId: input.tenantId }),
         occurredAtMs: now,
-      });
+      }).returning();
 
-      return { success: true, configId, tenantId: input.tenantId };
+      return { success: true, verified: true, configId, tenantId: input.tenantId };
     }),
 
 
@@ -640,7 +641,7 @@ export const billingEngineRouter = router({
         isActive: true,
         contactEmail: input.contactEmail,
         onboardedAt: new Date(),
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
       await db.insert(billingConfigs).values({
         configId,
         tenantId,
@@ -660,7 +661,7 @@ export const billingEngineRouter = router({
         changeReason: "Initial provisioning via onboarding wizard",
         createdAtMs: now,
         updatedAtMs: now,
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
       await createAuditLog({
         userId: ctx.user.id,
         action: "billing.tenant.provisioned",
@@ -669,7 +670,7 @@ export const billingEngineRouter = router({
         description: `Tenant ${input.companyName} provisioned via onboarding wizard`,
         severity: "info",
         metadata: { tenantId, companyType: input.companyType, corridors: input.corridors, workflowId },
-      }).catch(() => {});
+      });
       try {
         const { getTemporalClient } = await import("../_core/temporal");
         const client = await getTemporalClient();

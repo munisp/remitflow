@@ -10,6 +10,7 @@ import {
   Clock, Zap, Globe, TrendingUp, Shield, ArrowLeft
 } from "lucide-react";
 import { useLocation } from "wouter";
+import { useTranslation } from 'react-i18next';
 
 const RAIL_META: Record<string, { label: string; region: string; type: string; color: string; description: string }> = {
   mojaloop:  { label: "Mojaloop",   region: "Pan-Africa",     type: "DFSP",       color: "#2563EB", description: "ISO 20022 interop hub — 14 African markets" },
@@ -74,6 +75,7 @@ function UptimePill({ pct }: { pct: number | null }) {
 }
 
 export default function RailsHealthDashboard() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
 

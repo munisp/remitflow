@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Loader2, CheckCircle, ShieldCheck, Upload } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const TIERS = [
   { tier: "tier1", label: "Tier 1 — Basic", limit: "$500/month", color: "bg-yellow-500", description: "NIN + Selfie + Phone" },
@@ -18,6 +19,7 @@ const TIERS = [
 ];
 
 export default function TieredKYCFlow() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [activeStep, setActiveStep] = useState(1);
   const [nin, setNin] = useState("");

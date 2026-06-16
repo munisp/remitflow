@@ -8,6 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Bell, BellOff, Smartphone, Monitor, Trash2, RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const NOTIFICATION_CATEGORIES = [
   { id: "transfers", label: "Transfer Updates", description: "Sent, received, failed" },
@@ -18,6 +19,7 @@ const NOTIFICATION_CATEGORIES = [
 ];
 
 export default function VAPIDPushManager() {
+  const { t } = useTranslation();
   const [permission, setPermission] = useState<NotificationPermission>("default");
   const [isSubscribed, setIsSubscribed] = useState(false);
   const [subscribing, setSubscribing] = useState(false);

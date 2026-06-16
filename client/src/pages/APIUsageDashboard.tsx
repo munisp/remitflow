@@ -7,8 +7,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { BarChart3, Zap, AlertTriangle, CheckCircle2, RefreshCw, TrendingUp, Clock } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function APIUsageDashboard() {
+  const { t } = useTranslation();
   const [days, setDays] = useState(7);
 
   // apiUsage namespace (from productionV82) has: summary, timeSeries

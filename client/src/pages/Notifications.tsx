@@ -17,7 +17,8 @@ export default function Notifications() {
   const [prefs, setPrefs] = useState({ emailTx: true, emailSecurity: true, emailMarketing: false, pushTx: true, pushSecurity: true, pushMarketing: true });
   const utils = trpc.useUtils();
 
-  const { data: notifs = [], isLoading, refetch } = trpc.notifications.list.useQuery({ limit: 50, offset: 0, unreadOnly });
+  const { data: listData, isLoading, refetch, isError } = trpc.notifications.list.useQuery({ limit: 50, offset: 0, unreadOnly });
+  const notifs = Array.isArray(listData) ? listData : (listData as any)?.notifications ?? [];
   const { data: countData } = trpc.notifications.unreadCount.useQuery();
   const markRead = trpc.notifications.markRead.useMutation({ onSuccess: () => utils.notifications.list.invalidate() });
   const markAllRead = trpc.notifications.markAllRead.useMutation({ onSuccess: () => { utils.notifications.list.invalidate(); utils.notifications.unreadCount.invalidate(); toast.success("All notifications marked as read"); } });

@@ -10,10 +10,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ArrowDownLeft, Copy, QrCode, Building2, Share2, Clock, CheckCircle, XCircle, Link2 } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const SUPPORTED_CURRENCIES = ["USD", "GBP", "EUR", "NGN", "KES", "GHS", "ZAR"];
 
 export default function ReceiveMoney() {
+  const { t } = useTranslation();
   const { data: profile } = trpc.auth.me.useQuery();
   const { data: wallets = [] } = trpc.wallet.list.useQuery();
   const { data: virtualAccounts = [] } = trpc.virtualAccount.list.useQuery();

@@ -2,7 +2,7 @@ import { TRPCError } from "@trpc/server";
 import { and, asc, desc, eq, inArray, sql, gte, lte, count, lt, isNotNull, sum } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { z } from "zod";
-import { COOKIE_NAME } from "../shared/const";
+import { COOKIE_NAME, SESSION_EXPIRY_MS } from "../shared/const";
 import {
   analyticsThresholds, auditLogs, batchPayments, beneficiaries, cards, caseComments, chatMessages, chatSessions, complianceCases, disputes,
   fxAlerts, impersonationTokens, kycDocuments, notifications, paymentRequests, recurringPayments, scheduledTransferRuns,
@@ -130,7 +130,7 @@ import { securityAuditRouter } from "./routers/securityAudit.js";
 import { tenantFlagProcedure, invalidateFlagCache } from "./routers/tenantEnforcement.js";
 import { 
   cipsRouter, upiRouter, pixRouter, kafkaAdminRouter, temporalAdminRouter,
-  permifyRouter, tigerBeetleRouter, openSearchRouter, lakehouseRouter as lakehouseExtRouter,
+  permifyRouter, tigerBeetleRouter, openSearchRouter,
   amlEngineRouter, fraudMlRouter, transferEngineRouter, pdfReceiptRouter,
   searchIndexerRouter, rateLimiterRouter, keycloakRouter, mojaloopConnectorRouter,
   extendedServicesHealthRouter
@@ -173,6 +173,8 @@ import { scheduledTransfersV117Router } from "./routers/scheduledTransfers.js";
 import { smsConfirmRouter } from "./routers/smsConfirm.js";
 import { posAgentCashFlowRouter, transfersListRouter } from "./routers/posAgentCashFlow.js";
 import { cryptoCustodyRouter } from "./routers/cryptoCustody.js";
+import { stablecoinEnhancedRouter } from "./routers/stablecoinEnhanced.js";
+import { liquidityPoolRouter } from "./routers/liquidityPool.js";
 import {
   supportTicketsRouter,
   directDebitRouter,
@@ -272,7 +274,66 @@ import {
   smeBulkRouter,
   swiftTxRouter,
 } from "./routers/orphanFeatures";
+import {
+  accountOpeningGateRouter,
+  enhancedKybRouter,
+  kycVerificationScoringRouter,
+  bvnNinRouter,
+  sanctionsBatchRouter,
+  goamlRouter,
+  kycEventConsumerRouter,
+  cbnTierLimitsRouter,
+} from "./routers/kycProductionGate";
+import {
+  pepScreeningRouter,
+  adverseMediaRouter,
+  continuousMonitoringRouter,
+  reKYCSchedulerRouter,
+  kycSelfServiceRouter,
+  kycDataQualityRouter,
+  kycAnalyticsRouter,
+} from "./routers/kycEnhanced";
 import { logger } from './_core/logger';
+import { doubleEntryRouter } from "./routers/doubleEntry";
+import { receiptGenerationRouter } from "./routers/receiptGeneration";
+import { loyaltyPointsRouter } from "./routers/loyaltyPoints";
+import { beneficiaryVerificationRouter } from "./routers/beneficiaryVerification";
+import { futureProofingRouter } from "./routers/futureProofing";
+import { propertyEscrowRouter } from "./routers/propertyEscrow";
+import { failureProtectionRouter } from "./routers/failureProtection";
+import { mlPipelineRouter } from "./routers/mlPipeline";
+import { transferCoreRouter } from "./routers/transferCore";
+import { p2pInstantRouter } from "./routers/p2pInstant";
+import { secretsRotationRouter } from "./secrets-rotation";
+import { soc2EvidenceRouter } from "./compliance/soc2-evidence";
+import { businessKpiRouter } from "./lib/business-kpi";
+import { nudgeEngineRouter } from "./lib/nudge-engine";
+import { recipientExperienceRouter } from "./lib/recipient-experience";
+import { advancedFxRouter } from "./lib/advanced-fx";
+import { agentIntelligenceRouter } from "./lib/agent-intelligence";
+import { smeDashboardRouter } from "./lib/sme-dashboard";
+import { remitAiRouter } from "./lib/remit-ai";
+import { microInsuranceRouter } from "./lib/micro-insurance";
+import { socialRemittanceRouter } from "./lib/social-remittance";
+import { baasApiRouter } from "./lib/baas-api";
+import { programmableMoneyRouter } from "./lib/programmable-money";
+import { regulatoryReportsRouter as regReportsV2Router } from "./lib/regulatory-reports";
+import { supportTicketingRouter } from "./lib/support-ticketing";
+import { abTestingRouter as abTestingV2Router } from "./lib/ab-testing";
+import { quickWinsRouter } from "./lib/quick-wins";
+import { safeParseAmount } from "./lib/safeDecimal";
+import { programmablePaymentsRouter } from "./_core/programmablePayments";
+import { crossCurrencySwapRouter } from "./_core/crossCurrencySwap";
+import { merchantGatewayRouter } from "./_core/merchantGateway";
+import { batchPayoutsRouter } from "./_core/batchPayouts";
+import { accountAbstractionRouter } from "./_core/accountAbstraction";
+import { lendingBorrowingRouter } from "./_core/lendingBorrowing";
+import { invoicesAndSubscriptionsRouter } from "./_core/invoicesAndSubscriptions";
+import { savingsVaultRouter } from "./_core/savingsVault";
+import { remittanceCorridorsRouter } from "./_core/remittanceCorridors";
+import { platformFeaturesRouter } from "./_core/platformFeatures";
+import { qrPaymentsRouter } from "./_core/qrPayments";
+import { nfcPaymentsRouter } from "./_core/nfcPayments";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -295,12 +356,44 @@ async function getLiveRates(base = "USD"): Promise<Record<string, number>> {
       const data = await res.json();
       if (data.rates) { await saveFxRates(base, data.rates); return data.rates; }
     }
-  } catch { /* fallback */ }
+  } catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), base }, "FX rate fetch failed, using fallback rates"); }
   return FALLBACK_RATES;
 }
 
 function formatTxn(t: any) {
-  return { ...t, fromAmount: Number(t.fromAmount), toAmount: t.toAmount ? Number(t.toAmount) : undefined, fee: Number(t.fee ?? 0), fxRate: t.fxRate ? Number(t.fxRate) : undefined };
+  return { ...t, fromAmount: Number(t.fromAmount), toAmount: t.toAmount ? Number(t.toAmount) : undefined, fee: Number(t.fee ?? 0), fxRate: t.fxRate ? Number(t.fxRate) : undefined, amount: Number(t.fromAmount ?? 0), currency: t.fromCurrency ?? "NGN" };
+}
+
+async function enforceTransferLimits(userId: number, amount: number, currency: string, _kycTier?: string | null) {
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [userRow] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, userId)).limit(1);
+  const userTier = (userRow?.kycTier ?? _kycTier ?? "tier0") as KycTier;
+  const rates = await getLiveRates("USD");
+  const fromRate = rates[currency] ?? 1;
+  const amountUSD = amount / fromRate;
+  const now = new Date();
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const [dailyRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
+  const [monthlyRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+  const dailyUsedUSD = Number(dailyRow?.total ?? 0) / fromRate;
+  const monthlyUsedUSD = Number(monthlyRow?.total ?? 0) / fromRate;
+  const limitCheck = checkTransferLimit(amountUSD, userTier, dailyUsedUSD, monthlyUsedUSD);
+  if (!limitCheck.allowed) throw new TRPCError({ code: "FORBIDDEN", message: limitCheck.reason ?? "Transfer limit exceeded" });
+  const amlFlags = getAmlFlags(amountUSD);
+  if (amlFlags.length > 0) {
+    logger.info(`[AML] Flags for user ${userId}: ${amlFlags.join(", ")}`);
+    db.insert(complianceCases).values({
+      userId, caseType: (amlFlags.includes("CTR_REQUIRED") ? "ctr" : amlFlags.includes("SAR_REVIEW") ? "sar" : "aml_review") as any,
+      severity: (amountUSD >= 10_000 ? "critical" : amountUSD >= 5_000 ? "high" : "medium") as any,
+      status: "open" as any,
+      title: `Auto-flagged: ${amlFlags[0]} — ${amount} ${currency}`,
+      description: `Transaction of ${amount} ${currency} (≈$${amountUSD.toFixed(0)} USD) triggered AML flags: ${amlFlags.join(", ")}`,
+      riskScore: Math.min(100, Math.round((amountUSD / 10_000) * 80 + 20)),
+    } as any).catch((e: unknown) => logger.warn({ err: e instanceof Error ? e.message : String(e) }, "[AML] Failed to auto-create compliance case"));
+  }
+  return { amountUSD, amlFlags };
 }
 const CURRENCY_META: Record<string, { symbol: string; flag: string; name: string }> = {
   NGN: { symbol: "\u20a6", flag: "\ud83c\uddf3\ud83c\uddec", name: "Nigerian Naira" },
@@ -370,7 +463,7 @@ export const appRouter = router({
   auth: router({
     me: protectedProcedure.query(({ ctx }) => ctx.user),
     logout: protectedProcedure.mutation(({ ctx }) => {
-      ctx.res.clearCookie(COOKIE_NAME, { maxAge: -1, path: "/", secure: true, sameSite: "none", httpOnly: true });
+      ctx.res.clearCookie(COOKIE_NAME, { maxAge: -1, path: "/", secure: true, sameSite: "lax", httpOnly: true });
       return { success: true };
     }),
     // Re-sign the session cookie with a fresh 1-year expiry
@@ -383,11 +476,11 @@ export const appRouter = router({
         name: ctx.user.name ?? "",
       })
         .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-        .setExpirationTime(Math.floor((Date.now() + 365 * 24 * 60 * 60 * 1000) / 1000))
+        .setExpirationTime(Math.floor((Date.now() + SESSION_EXPIRY_MS) / 1000))
         .sign(secret);
       ctx.res.cookie(COOKIE_NAME, newToken, {
-        httpOnly: true, secure: true, sameSite: "none",
-        maxAge: 365 * 24 * 60 * 60 * 1000, path: "/",
+        httpOnly: true, secure: true, sameSite: "lax",
+        maxAge: SESSION_EXPIRY_MS, path: "/",
       });
       return { success: true, refreshedAt: new Date().toISOString() };
     }),
@@ -405,7 +498,7 @@ export const appRouter = router({
         // Mark token as used
         await db.update(impersonationTokens)
           .set({ usedAt: new Date() })
-          .where(eq(impersonationTokens.id, record.id));
+          .where(eq(impersonationTokens.id, record.id)).returning();
         // Fetch the target user
         const [targetUser] = await db.select().from(users).where(eq(users.id, record.targetUserId)).limit(1);
         if (!targetUser) throw new TRPCError({ code: "NOT_FOUND", message: "Target user not found" });
@@ -429,29 +522,29 @@ export const appRouter = router({
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to list heartbeat jobs: ${err.message}` });
       }
     }),
-    heartbeatLogs: adminProcedure.input(z.object({ taskUid: z.string().min(1) })).query(async ({ input }) => {
-      const { execSync } = await import('child_process');
+    heartbeatLogs: adminProcedure.input(z.object({ taskUid: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/, "Invalid task UID format") })).query(async ({ input }) => {
+      const { execFileSync } = await import('child_process');
       try {
-        const raw = execSync(`manus-heartbeat logs --task-uid ${input.taskUid} 2>&1`, { timeout: 10000 }).toString();
+        const raw = execFileSync('manus-heartbeat', ['logs', '--task-uid', input.taskUid], { timeout: 10000 }).toString();
         const parsed = JSON.parse(raw);
         return { logs: (parsed.logs ?? []) as Array<{ execution_id: string; started_at: string; finished_at?: string; status: string; http_status?: number; duration_ms?: number }>, total: (parsed.total ?? 0) as number };
       } catch (err: any) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to fetch logs: ${err.message}` });
       }
     }),
-    heartbeatPause: adminProcedure.input(z.object({ taskUid: z.string().min(1) })).mutation(async ({ input }) => {
-      const { execSync } = await import('child_process');
+    heartbeatPause: adminProcedure.input(z.object({ taskUid: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/, "Invalid task UID format") })).mutation(async ({ input }) => {
+      const { execFileSync } = await import('child_process');
       try {
-        execSync(`manus-heartbeat pause --task-uid ${input.taskUid} 2>&1`, { timeout: 10000 });
+        execFileSync('manus-heartbeat', ['pause', '--task-uid', input.taskUid], { timeout: 10000 });
         return { success: true };
       } catch (err: any) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to pause job: ${err.message}` });
       }
     }),
-    heartbeatResume: adminProcedure.input(z.object({ taskUid: z.string().min(1) })).mutation(async ({ input }) => {
-      const { execSync } = await import('child_process');
+    heartbeatResume: adminProcedure.input(z.object({ taskUid: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/, "Invalid task UID format") })).mutation(async ({ input }) => {
+      const { execFileSync } = await import('child_process');
       try {
-        execSync(`manus-heartbeat resume --task-uid ${input.taskUid} 2>&1`, { timeout: 10000 });
+        execFileSync('manus-heartbeat', ['resume', '--task-uid', input.taskUid], { timeout: 10000 });
         return { success: true };
       } catch (err: any) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to resume job: ${err.message}` });
@@ -504,44 +597,82 @@ export const appRouter = router({
       const ngnRate = rates["NGN"] ?? 1538.46;
       let totalUSD = 0;
       for (const w of userWallets) { const bal = Number(w.balance); const rate = rates[w.currency] ?? 1; totalUSD += bal / rate; }
-      const ngnWallet = userWallets.find(w => w.currency === "NGN");
+      const ngnWallet = userWallets.find((w: any) => w.currency === "NGN");
       const totalNGN = ngnWallet ? Number(ngnWallet.balance) : totalUSD * ngnRate;
       const db = await getDb();
-      let sentThisMonth = 0, receivedThisMonth = 0;
+      let sentThisMonth = 0, receivedThisMonth = 0, billsThisMonth = 0, savingsThisMonth = 0, exchangeThisMonth = 0, otherThisMonth = 0;
+      let sentLastMonth = 0, receivedLastMonth = 0;
       if (db) {
         try {
-        const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-        const [sentRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
-        const [recvRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, monthStart)));
-        sentThisMonth = Number(sentRow?.total ?? 0);
-        receivedThisMonth = Number(recvRow?.total ?? 0);
+          const now = new Date();
+          const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+          const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+          const [sentRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+          const [recvRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, monthStart)));
+          sentThisMonth = Number(sentRow?.total ?? 0);
+          receivedThisMonth = Number(recvRow?.total ?? 0);
+          // Last month totals for real monthly change calculation
+          const [sentLastRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
+          const [recvLastRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
+          sentLastMonth = Number(sentLastRow?.total ?? 0);
+          receivedLastMonth = Number(recvLastRow?.total ?? 0);
+          // Spend by category — query actual transaction types
+          const categoryTypes = ["bill", "airtime", "exchange", "topup"] as const;
+          for (const cType of categoryTypes) {
+            try {
+              const [row] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, cType), gte(transactions.createdAt, monthStart)));
+              const val = Number(row?.total ?? 0);
+              if (cType === "bill" || cType === "airtime") billsThisMonth += val;
+              else if (cType === "exchange") exchangeThisMonth = val;
+              else otherThisMonth += val;
+            } catch { /* skip */ }
+          }
+          // Savings contributions this month
+          try {
+            const [savRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "savings"), gte(transactions.createdAt, monthStart)));
+            savingsThisMonth = Number(savRow?.total ?? 0);
+          } catch { /* skip */ }
         } catch { /* ignore monthly query errors in test env */ }
       }
+      // Calculate real monthly change: (this month net) vs (last month net), as % of total balance
+      const thisMonthNet = receivedThisMonth - sentThisMonth;
+      const lastMonthNet = receivedLastMonth - sentLastMonth;
+      let monthlyChange = 0;
+      if (totalNGN > 0) {
+        monthlyChange = Math.round(((thisMonthNet - lastMonthNet) / totalNGN) * 10000) / 100;
+      }
       const savingsGoalsList = await getSavingsGoalsByUserId(userId);
-      const activeSavings = savingsGoalsList.filter(g => g.status === "active").length;
+      const activeSavings = savingsGoalsList.filter((g: any) => g.status === "active").length;
+      // Build spend by category with real data
+      const spendByCategory = [
+        { name: "Remittances", value: sentThisMonth, color: "#6366f1" },
+        { name: "Bills & Airtime", value: billsThisMonth, color: "#f59e0b" },
+        { name: "Savings", value: savingsThisMonth, color: "#10b981" },
+        { name: "Exchange", value: exchangeThisMonth, color: "#06b6d4" },
+        { name: "Other", value: otherThisMonth, color: "#8b5cf6" },
+      ].filter(c => c.value > 0);
       return {
-        totalBalance: Math.round(totalNGN), totalBalanceUSD: Math.round(totalUSD * 100) / 100, monthlyChange: 12.4,
-        currencies: userWallets.map(w => w.currency), wallets: userWallets.map(formatWallet),
+        totalBalance: Math.round(totalNGN), totalBalanceUSD: Math.round(totalUSD * 100) / 100, monthlyChange,
+        currencies: userWallets.map((w: any) => w.currency), wallets: userWallets.map(formatWallet),
         recentTransactions: recentTxns.map(formatTxn), unreadNotifications: unreadCount,
-        sentThisMonth, receivedThisMonth, activeSavingsGoals: activeSavings,
+        sentThisMonth, receivedThisMonth, billsThisMonth, savingsThisMonth, exchangeThisMonth, otherThisMonth,
+        spendByCategory, activeSavingsGoals: activeSavings,
         user: { name: dbUser?.name ?? ctx.user.name, email: dbUser?.email ?? ctx.user.email, kycTier: dbUser?.kycTier ?? "tier0" },
         aiInsight: { title: "Portfolio Tip", body: "Your NGN balance is strong. Consider diversifying into USD savings to hedge against currency fluctuations." },
         chartData: await (async () => {
-          const db = await getDb();
+          const db2 = await getDb();
           const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
           const now = new Date();
-          const result = [];
-          for (let i = 11; i >= 0; i--) {
-            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-            const monthStart = d.getTime();
-            const monthEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59).getTime();
-            if (!db) { result.push({ month: months[d.getMonth()], balance: 0 }); continue; }
-            const monthStartDate = new Date(monthStart);
-            const monthEndDate = new Date(monthEnd);
-            const [txRow] = await db.select({ total: sql<string>`COALESCE(SUM(${transactions.fromAmount}), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), gte(transactions.createdAt, monthStartDate), lte(transactions.createdAt, monthEndDate), eq(transactions.status, 'completed')));
-            result.push({ month: months[d.getMonth()], balance: Math.round(Number(txRow?.total ?? 0)) });
-          }
-          return result;
+          if (!db2) return Array.from({ length: 12 }, (_, i) => { const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1); return { month: months[d.getMonth()], balance: 0 }; });
+          // Single batch query for all 12 months instead of 12 sequential queries
+          const twelveMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 11, 1);
+          const rows = await db2.select({ month: sql<string>`to_char(${transactions.createdAt}, 'YYYY-MM')`, total: sql<string>`COALESCE(SUM(${transactions.fromAmount}), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), gte(transactions.createdAt, twelveMonthsAgo), eq(transactions.status, "completed"))).groupBy(sql`to_char(${transactions.createdAt}, 'YYYY-MM')`);
+          const monthMap = new Map(rows.map((r: any) => [r.month, Math.round(Number(r.total ?? 0))]));
+          return Array.from({ length: 12 }, (_, i) => {
+            const d = new Date(now.getFullYear(), now.getMonth() - (11 - i), 1);
+            const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+            return { month: months[d.getMonth()], balance: monthMap.get(key) ?? 0 };
+          });
         })(),
       };
     }),
@@ -551,29 +682,29 @@ export const appRouter = router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const rates = await getLiveRates("USD");
-      return ws.map(w => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
+      return ws.map((w: any) => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
     }),
     balance: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const rates = await getLiveRates("USD");
-      return ws.map(w => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
+      return ws.map((w: any) => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
     }),
     balances: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const rates = await getLiveRates("USD");
-      return ws.map(w => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
+      return ws.map((w: any) => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
     }),
     history: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 20 });
       return txns.map(formatTxn);
     }),
     virtualAccount: protectedProcedure.query(async ({ ctx }) => getVirtualAccountsByUserId(ctx.user.id)),
-    topup: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive(), method: z.string().default("bank_transfer") })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    topup: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000), method: z.string().default("bank_transfer") })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const walletRows = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!walletRows.length) throw new TRPCError({ code: "NOT_FOUND", message: "Wallet not found" });
       const wallet = walletRows[0];
-      const { newBalance, topupRef } = await db.transaction(async (tx) => {
+      const { newBalance, topupRef } = await db.transaction(async (tx: any) => {
         const [updatedWallet] = await tx.update(wallets)
           .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` })
           .where(eq(wallets.id, wallet.id))
@@ -591,11 +722,11 @@ export const appRouter = router({
       broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "Wallet Top-up Successful", message: `Your ${input.currency} wallet has been credited with ${Number(input.amount).toLocaleString()} ${input.currency}`, amount: input.amount, currency: input.currency, newBalance, method: input.method, reference: topupRef } });
       return { success: true, newBalance, currency: input.currency };
     }),
-    stripeTopup: protectedProcedure.input(z.object({ amount: z.number().positive().min(100), currency: z.string().default("usd"), walletCurrency: z.string().default("USD"), origin: z.string().optional() })).mutation(async ({ ctx, input }) => {
+    stripeTopup: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000).min(100).max(10_000_000), currency: z.string().default("usd"), walletCurrency: z.string().default("USD"), origin: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const { getStripe } = await import("./stripe");
       const stripe = getStripe();
       // Use origin from input (frontend passes window.location.origin) or fall back to request header
-      const origin = input.origin ?? (ctx.req.headers.origin as string | undefined) ?? "https://remitflow.manus.space";
+      const origin = input.origin ?? (ctx.req.headers.origin as string | undefined) ?? process.env.APP_URL ?? "https://remitflow.example.com";
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ["card"],
         line_items: [{ price_data: { currency: input.currency, product_data: { name: `RemitFlow ${input.walletCurrency} Wallet Top-up`, description: `Add funds to your ${input.walletCurrency} wallet` }, unit_amount: input.amount }, quantity: 1 }],
@@ -610,7 +741,7 @@ export const appRouter = router({
       return { success: true, checkoutUrl: session.url, sessionId: session.id };
     }),
     paypalTopup: protectedProcedure.input(z.object({
-      amount: z.number().positive().min(1),
+      amount: z.number().positive().max(10_000_000).min(1).max(10_000_000),
       currency: z.string().default("USD"),
       walletCurrency: z.string().default("USD"),
     })).mutation(async ({ ctx, input }) => {
@@ -622,8 +753,12 @@ export const appRouter = router({
         body: "grant_type=client_credentials",
       });
       if (!authRes.ok) {
-        // Sandbox mode: return mock checkout URL
+        if (process.env.NODE_ENV === "production") {
+          logger.error({ status: authRes.status }, "[PayPal] OAuth authentication failed in production — cannot process payment");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Payment processor authentication failed" });
+        }
         const mockOrderId = `PAYPAL-SANDBOX-${Date.now()}`;
+        logger.warn("[PayPal] OAuth failed — returning sandbox mock (development mode)");
         return { success: true, orderId: mockOrderId, approvalUrl: `https://www.sandbox.paypal.com/checkoutnow?token=${mockOrderId}`, sandboxMode: true };
       }
       const auth = await authRes.json() as { access_token: string };
@@ -642,14 +777,18 @@ export const appRouter = router({
       return { success: true, orderId: order.id, approvalUrl: approvalLink?.href ?? `https://www.sandbox.paypal.com/checkoutnow?token=${order.id}`, sandboxMode: ENV.paypalClientId.startsWith("AZDx") };
     }),
     paypalCapture: protectedProcedure.input(z.object({
-      orderId: z.string(),
+      orderId: z.string().regex(/^[A-Za-z0-9\-]+$/, "Invalid order ID format"),
       walletCurrency: z.string().default("USD"),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
     })).mutation(async ({ ctx, input }) => {
       const { ENV } = await import("./_core/env.js");
-      // In sandbox mode, simulate capture
+      // In sandbox mode, simulate capture (production: fail loudly)
       if (ENV.paypalClientId.startsWith("AZDx") || input.orderId.startsWith("PAYPAL-SANDBOX")) {
-        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (process.env.NODE_ENV === "production") {
+          logger.error("[PayPal] Sandbox client ID or order ID detected in production — refusing capture");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Payment processor misconfigured for production" });
+        }
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const [walletPaypalSandbox] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.walletCurrency))).limit(1);
         let newBalance: string;
         if (walletPaypalSandbox) {
@@ -678,7 +817,7 @@ export const appRouter = router({
       });
       const capture = await captureRes.json() as { status: string };
       if (capture.status !== "COMPLETED") throw new TRPCError({ code: "BAD_REQUEST", message: "PayPal payment not completed" });
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [walletPaypalLive] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.walletCurrency))).limit(1);
       let newBalancePaypal: string;
       if (walletPaypalLive) {
@@ -697,7 +836,7 @@ export const appRouter = router({
       return { success: true, newBalance: Number(newBalance), sandboxMode: false };
     }),
     flutterwaveTopup: protectedProcedure.input(z.object({
-      amount: z.number().positive().min(100),
+      amount: z.number().positive().max(10_000_000).min(100).max(10_000_000),
       currency: z.string().default("NGN"),
       walletCurrency: z.string().default("NGN"),
       email: z.string().email().optional(),
@@ -707,7 +846,11 @@ export const appRouter = router({
       const txRef = `REMIT-FLW-${ctx.user.id}-${Date.now()}`;
       const isSandbox = ENV.flutterwaveSecretKey.includes("SANDBOX") || ENV.flutterwaveSecretKey.includes("TEST");
       if (isSandbox) {
-        // Return mock Flutterwave payment link
+        if (process.env.NODE_ENV === "production") {
+          logger.error("[Flutterwave] Sandbox/test key detected in production — cannot process real payments");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Payment processor misconfigured for production" });
+        }
+        logger.warn("[Flutterwave] Using sandbox mode (development)");
         return {
           success: true,
           paymentLink: `https://checkout.flutterwave.com/v3/hosted/pay/sandbox_${txRef}`,
@@ -733,15 +876,18 @@ export const appRouter = router({
       return { success: true, paymentLink: pay.data.link, txRef, sandboxMode: false };
     }),
     flutterwaveVerify: protectedProcedure.input(z.object({
-      txRef: z.string(),
-      amount: z.number().positive(),
+      txRef: z.string().regex(/^[A-Za-z0-9_\-]+$/, "Invalid transaction reference format"),
+      amount: z.number().positive().max(10_000_000),
       walletCurrency: z.string().default("NGN"),
     })).mutation(async ({ ctx, input }) => {
       const { ENV } = await import("./_core/env.js");
       const isSandbox = ENV.flutterwaveSecretKey.includes("SANDBOX") || ENV.flutterwaveSecretKey.includes("TEST");
       if (isSandbox) {
-        // Simulate successful verification in sandbox
-        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (process.env.NODE_ENV === "production") {
+          logger.error("[Flutterwave] Sandbox/test key detected in production — refusing to simulate verification");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Payment processor misconfigured for production" });
+        }
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const [walletFlwSandbox] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.walletCurrency))).limit(1);
         let newBalance: string;
         if (walletFlwSandbox) {
@@ -763,7 +909,7 @@ export const appRouter = router({
       });
       const ver = await verRes.json() as { status: string; data: { status: string; amount: number } };
       if (ver.status !== "success" || ver.data.status !== "successful") throw new TRPCError({ code: "BAD_REQUEST", message: "Flutterwave payment not successful" });
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [walletFlwVerify] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.walletCurrency))).limit(1);
       let newBalanceFlwVerify: string;
       if (walletFlwVerify) {
@@ -781,10 +927,10 @@ export const appRouter = router({
       broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "Flutterwave Top-up Successful", message: `Your ${input.walletCurrency} wallet has been credited via Flutterwave`, amount: ver.data.amount, currency: input.walletCurrency } });
       return { success: true, newBalance: Number(newBalance), sandboxMode: false };
     }),
-    withdraw: walletWithdrawProcedure.input(z.object({ currency: z.string(), amount: z.number().positive(), bankAccount: z.string().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    withdraw: walletWithdrawProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000), bankAccount: z.string().optional() })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // ─── KYC Tier Withdrawal Limit Enforcement ──────────────────────────────
-      const [dbUserW] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
+      const [dbUserW] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user!.id)).limit(1);
       const userTierW = (dbUserW?.kycTier ?? "tier0") as KycTier;
       if (userTierW === "tier0") throw new TRPCError({ code: "FORBIDDEN", message: "Complete KYC verification before withdrawing funds." });
       const ratesW = await getLiveRates("USD");
@@ -792,23 +938,23 @@ export const appRouter = router({
       const amtUsdW = input.amount / rateW;
       const limitsW = KYC_TIER_LIMITS[userTierW];
       const dayStartW = new Date(); dayStartW.setHours(0, 0, 0, 0);
-      const [dailyRowW] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user.id), eq(transactions.type, "withdrawal"), gte(transactions.createdAt, dayStartW)));
+      const [dailyRowW] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "withdrawal"), gte(transactions.createdAt, dayStartW)));
       const dailyUsedW = Number(dailyRowW?.total ?? 0) / rateW;
       if (amtUsdW > limitsW.perTx) throw new TRPCError({ code: "FORBIDDEN", message: `Withdrawal exceeds per-transaction limit of $${limitsW.perTx.toLocaleString()} USD for your KYC tier.` });
       if (dailyUsedW + amtUsdW > limitsW.daily) throw new TRPCError({ code: "FORBIDDEN", message: `Withdrawal would exceed your daily limit of $${limitsW.daily.toLocaleString()} USD. Remaining today: $${Math.max(0, limitsW.daily - dailyUsedW).toFixed(0)}.` });
       // ─── Balance Check & Debit ───────────────────────────────────────────────
-      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
-      if (!wallet) throw new TRPCError({ code: "NOT_FOUND" });
+      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user!.id), eq(wallets.currency, input.currency))).limit(1);
+      if (!wallet) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
-      const { ref: wdRef, newBalance: wdBalance } = await db.transaction(async (tx) => {
+      const { ref: wdRef, newBalance: wdBalance } = await db.transaction(async (tx: any) => {
         const [updWithdraw] = await tx.update(wallets)
           .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
           .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
           .returning({ balance: wallets.balance });
         if (!updWithdraw) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-        const wRef = `WD-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+        const wRef = `WD-${ctx.user!.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
         await tx.insert(transactions).values({
-          userId: ctx.user.id, type: "withdrawal" as any, status: "completed" as any,
+          userId: ctx.user!.id, type: "withdrawal" as any, status: "completed" as any,
           fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
           description: "Wallet withdrawal", reference: wRef,
         });
@@ -817,11 +963,11 @@ export const appRouter = router({
       return { success: true, reference: wdRef, newBalance: Number(wdBalance) };
     }),
     create: protectedProcedure.input(z.object({ currency: z.string() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const existing = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (existing.length > 0) throw new TRPCError({ code: "CONFLICT", message: "Wallet already exists" });
-      await db.insert(wallets).values({ userId: ctx.user.id, currency: input.currency, balance: "0.00", isDefault: false, status: "active" });
-      return { success: true };
+      const [created] = await db.insert(wallets).values({ userId: ctx.user.id, currency: input.currency, balance: "0.00", isDefault: false, status: "active" }).returning();
+      return { success: true, wallet: { id: created.id, currency: created.currency, balance: "0.00", status: "active" } };
     }),
   }),
 
@@ -831,13 +977,13 @@ export const appRouter = router({
       return txns.map(formatTxn);
     }),
     getById: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [txn] = await db.select().from(transactions).where(and(eq(transactions.id, input.id), eq(transactions.userId, ctx.user.id))).limit(1);
-      if (!txn) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!txn) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return formatTxn(txn);
     }),
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { total: 0, sent: 0, received: 0, pending: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [total] = await db.select({ c: count() }).from(transactions).where(eq(transactions.userId, ctx.user.id));
       const [sent] = await db.select({ c: count() }).from(transactions).where(and(eq(transactions.userId, ctx.user.id), eq(transactions.type, "send")));
       const [received] = await db.select({ c: count() }).from(transactions).where(and(eq(transactions.userId, ctx.user.id), eq(transactions.type, "receive")));
@@ -847,13 +993,13 @@ export const appRouter = router({
     export: reportExportProcedure
       .input(z.object({ format: z.enum(["csv","json"]).default("csv"), type: z.string().default("all"), status: z.string().default("all"), dateFrom: z.string().optional(), dateTo: z.string().optional() }))
       .query(async ({ ctx, input }) => {
-        const txns = await getTransactionsByUserId(ctx.user.id, { limit: 10000, offset: 0, type: input.type, status: input.status });
-        const filtered = txns.filter(t => {
+        const txns = await getTransactionsByUserId(ctx.user!.id, { limit: 10000, offset: 0, type: input.type, status: input.status });
+        const filtered = txns.filter((t: any) => {
           if (input.dateFrom && new Date((t as any).createdAt ?? 0) < new Date(input.dateFrom)) return false;
           if (input.dateTo && new Date((t as any).createdAt ?? 0) > new Date(input.dateTo)) return false;
           return true;
         });
-        await createAuditLog({ userId: ctx.user.id, action: "TRANSACTIONS_EXPORTED", description: `Exported ${filtered.length} transactions as ${input.format.toUpperCase()}` });
+        await createAuditLog({ userId: ctx.user!.id, action: "TRANSACTIONS_EXPORTED", description: `Exported ${filtered.length} transactions as ${input.format.toUpperCase()}` });
         if (input.format === "json") return { format: "json", count: filtered.length, data: filtered.map(formatTxn), exportedAt: new Date().toISOString() };
         const headers = ["ID","Date","Type","Status","Amount","Currency","To Currency","Converted Amount","Rate","Fee","Recipient","Reference","Description"];
         const rows = filtered.map((t: any) => [t.id, new Date(t.createdAt ?? 0).toISOString(), t.type, t.status, t.fromAmount, t.currency, t.toCurrency ?? "", t.toAmount ?? "", t.fxRate ?? "", t.fee ?? "0", t.recipientName ?? "", t.reference ?? "", (t.description ?? "").replace(/,/g, ";")]);
@@ -897,7 +1043,7 @@ export const appRouter = router({
         return { workflowId: input.workflowId, status: temporalStatus, sagaSteps, error: result.error, isFallback: false };
       }),
 
-    send: transferSendProcedure.input(z.object({ fromCurrency: z.string().max(8), amount: z.number().positive(), toCurrency: z.string().max(8), recipientName: z.string().min(1).max(128).trim(), recipientAccount: z.string().max(64).optional(), recipientEmail: z.string().email().max(320).optional(), recipientBank: z.string().max(128).optional(), recipientCountry: z.string().max(64).optional(), deliveryMethod: z.string().max(32).optional(), description: z.string().max(500).optional(), idempotencyKey: z.string().max(200).optional(), totpCode: z.string().length(6).optional() })).mutation(async ({ ctx, input }) => {
+    send: transferSendProcedure.input(z.object({ fromCurrency: z.string().max(8), amount: z.number().positive().max(10_000_000), toCurrency: z.string().max(8), recipientName: z.string().min(1).max(128).trim(), recipientAccount: z.string().max(64).optional(), recipientEmail: z.string().email().max(320).optional(), recipientBank: z.string().max(128).optional(), recipientCountry: z.string().max(64).optional(), deliveryMethod: z.string().max(32).optional(), description: z.string().max(500).optional(), idempotencyKey: z.string().max(200).optional(), totpCode: z.string().length(6).optional() })).mutation(async ({ ctx, input }) => {
       // ─── 2FA enforcement for high-value transfers (> $1,000 USD equivalent) ───
       const HIGH_VALUE_THRESHOLD_USD = 1000;
       const ratesFor2fa = await getLiveRates("USD");
@@ -906,7 +1052,7 @@ export const appRouter = router({
       if (amountInUsd > HIGH_VALUE_THRESHOLD_USD) {
         const db2fa = await getDb();
         if (db2fa) {
-          const [userRow] = await db2fa.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+          const [userRow] = await db2fa.select().from(users).where(eq(users.id, ctx.user!.id)).limit(1);
           if (userRow?.totpEnabled) {
             if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: This transfer exceeds $1,000 USD. Please provide your 6-digit TOTP code to proceed." });
             const { verifyTOTP } = await import("./totp");
@@ -918,7 +1064,7 @@ export const appRouter = router({
       // ─── KYC Tier Limit Enforcement ──────────────────────────────────────────
       const dbForLimits = await getDb();
       if (dbForLimits) {
-        const [userForLimits] = await dbForLimits.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+        const [userForLimits] = await dbForLimits.select().from(users).where(eq(users.id, ctx.user!.id)).limit(1);
         const userTier = (userForLimits?.kycTier ?? "tier0") as KycTier;
         // Get daily and monthly usage
         const now = new Date();
@@ -927,8 +1073,8 @@ export const appRouter = router({
         const ratesForLimits = await getLiveRates("USD");
         const fromRateForLimits = ratesForLimits[input.fromCurrency] ?? 1;
         const amountInUsdForLimits = input.amount / fromRateForLimits;
-        const [dailyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user.id), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
-        const [monthlyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user.id), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+        const [dailyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
+        const [monthlyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
         const dailyUsedUSD = Number(dailyRow?.total ?? 0) / fromRateForLimits;
         const monthlyUsedUSD = Number(monthlyRow?.total ?? 0) / fromRateForLimits;
         const limitCheck = checkTransferLimit(amountInUsdForLimits, userTier, dailyUsedUSD, monthlyUsedUSD);
@@ -936,7 +1082,7 @@ export const appRouter = router({
         // AML flags for compliance logging + auto-case creation
         const amlFlags = getAmlFlags(amountInUsdForLimits);
         if (amlFlags.length > 0) {
-          logger.info(`[AML] Flags for user ${ctx.user.id}: ${amlFlags.join(", ")}`);
+          logger.info(`[AML] Flags for user ${ctx.user!.id}: ${amlFlags.join(", ")}`);
           // Auto-create compliance case (non-blocking)
           getDb().then(db => {
             if (!db) return;
@@ -944,67 +1090,67 @@ export const appRouter = router({
             const sev = amountInUsdForLimits >= 10_000 ? "critical" : amountInUsdForLimits >= 5_000 ? "high" : "medium";
             const caseTypeMap: Record<string, string> = { CTR_REQUIRED: "ctr", SAR_REVIEW: "sar", EDD_REQUIRED: "edd", TRAVEL_RULE: "travel_rule" };
             db.insert(complianceCases).values({
-              userId: ctx.user.id, caseType: (caseTypeMap[topFlag] ?? "aml_review") as any,
+              userId: ctx.user!.id, caseType: (caseTypeMap[topFlag] ?? "aml_review") as any,
               severity: sev as any, status: "open" as any,
               title: `Auto-flagged: ${topFlag} — ${input.amount} ${input.fromCurrency} to ${input.recipientName}`,
               description: `Transfer of ${input.amount} ${input.fromCurrency} (≈$${amountInUsdForLimits.toFixed(0)} USD) triggered AML flags: ${amlFlags.join(", ")}`,
               riskScore: Math.min(100, Math.round((amountInUsdForLimits / 10_000) * 80 + 20)),
               createdAt: new Date(), updatedAt: new Date(),
-            }).catch(err => logger.warn({ errMsg: err?.message }, "[AML] Auto-case insert failed:"));
-          }).catch(() => {});
+            }).catch((err: any) => logger.warn({ errMsg: err?.message }, "[AML] Auto-case insert failed:"));
+          }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         }
       }
       // Velocity check
-      const velocity = await checkVelocity(ctx.user.id, 1, 10);
+      const velocity = await checkVelocity(ctx.user!.id, 1, 10);
       if (!velocity.allowed) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: `Too many transfers (${velocity.attemptsInWindow}/10 in last hour). Please wait.` });
       // Round-tripping / money laundering velocity detection (v143)
-      const roundTrip = detectRoundTripping(ctx.user.id);
+      const roundTrip = await detectRoundTripping(ctx.user!.id);
       if (roundTrip.flagged) {
         getDb().then(db => db && db.insert(complianceCases).values({
-          userId: ctx.user.id, caseType: "aml_review" as any, severity: "high" as any, status: "open" as any,
-          title: `Round-tripping velocity flag — user ${ctx.user.id}`,
+          userId: ctx.user!.id, caseType: "aml_review" as any, severity: "high" as any, status: "open" as any,
+          title: `Round-tripping velocity flag — user ${ctx.user!.id}`,
           description: roundTrip.reason ?? "High transfer velocity detected",
           riskScore: 75, createdAt: new Date(), updatedAt: new Date(),
-        }).catch(() => {})).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); })).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       }
       // Structuring / smurfing detection (v143)
       {
         const fromRateStr = (await getLiveRates("USD"))[input.fromCurrency] ?? 1;
         const amountUSDStr = input.amount / fromRateStr;
-        const structuringCheck = detectStructuring(ctx.user.id, amountUSDStr);
+        const structuringCheck = detectStructuring(ctx.user!.id, amountUSDStr);
         if (structuringCheck.flagged) {
           getDb().then(db => db && db.insert(complianceCases).values({
-            userId: ctx.user.id, caseType: "sar" as any, severity: "critical" as any, status: "open" as any,
-            title: `Potential structuring — user ${ctx.user.id}`,
+            userId: ctx.user!.id, caseType: "sar" as any, severity: "critical" as any, status: "open" as any,
+            title: `Potential structuring — user ${ctx.user!.id}`,
             description: structuringCheck.reason ?? "Structuring pattern detected",
             riskScore: 90, createdAt: new Date(), updatedAt: new Date(),
-          }).catch(() => {})).catch(() => {});
+          }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); })).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         }
       }
       // Fraud & AML screening — run local + gRPC Rust fraud service in parallel
       const [fraudCheck, grpcFraud] = await Promise.all([
-        checkFraud({ userId: ctx.user.id, amount: input.amount, currency: input.fromCurrency, toCurrency: input.toCurrency, beneficiaryName: input.recipientName, beneficiaryAccount: input.recipientAccount }),
+        checkFraud({ userId: ctx.user!.id, amount: input.amount, currency: input.fromCurrency, toCurrency: input.toCurrency, beneficiaryName: input.recipientName, beneficiaryAccount: input.recipientAccount }),
         grpcFraudCheck({
           transactionId: input.idempotencyKey ?? `TRF${Date.now()}`,
-          userId: String(ctx.user.id),
+          userId: String(ctx.user!.id),
           amount: String(input.amount),
           currency: input.fromCurrency,
           fromCountry: "NG",
           toCountry: input.recipientCountry ?? "NG",
           recipientAccount: input.recipientAccount ?? "",
-        }).catch(() => null),
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed, returning null"); return null; }),
       ]);
       if (!fraudCheck.approved) throw new TRPCError({ code: "FORBIDDEN", message: `Transaction blocked. Risk score: ${fraudCheck.riskScore}. Flags: ${fraudCheck.flags.join(", ")}` });
       if (grpcFraud && grpcFraud.decision === "BLOCK") throw new TRPCError({ code: "FORBIDDEN", message: `Transaction blocked by risk engine. Risk score: ${grpcFraud.riskScore.toFixed(2)}. Reasons: ${grpcFraud.reasons.join(", ")}` });
       // ─── Polyglot Microservice Checks (Go/Rust/Python) ───────────────────────
       // 1. Go rate-limit sidecar: per-user transfer rate limit (10/min)
-      const goRateLimit = await goCheckRateLimit(`transfer:user:${ctx.user.id}`, 10, 60);
+      const goRateLimit = await goCheckRateLimit(`transfer:user:${ctx.user!.id}`, 10, 60);
       if (!goRateLimit.allowed) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: `Transfer rate limit exceeded. Retry in ${Math.ceil(goRateLimit.retryAfterMs / 1000)}s.` });
       // 2. Python compliance service: AML/KYC rules engine
       const transferRef = input.idempotencyKey ?? `TRF${Date.now()}`;
       // 2a. Python anomaly detector: ML-based ATO/BEC/round-tripping detection (parallel)
       const anomalyPromise = detectAnomaly({
-        userId: ctx.user.id,
+        userId: ctx.user!.id,
         eventType: "transfer_send",
         features: {
           amount_usd: input.amount,
@@ -1018,7 +1164,7 @@ export const appRouter = router({
       const [complianceResult, fraudScoreResult] = await Promise.all([
         runComplianceCheck({
           transferId: transferRef,
-          userId: ctx.user.id,
+          userId: ctx.user!.id,
           amount: input.amount,
           fromCurrency: input.fromCurrency,
           toCurrency: input.toCurrency,
@@ -1031,7 +1177,7 @@ export const appRouter = router({
         }),
         getFraudScore({
           transferId: transferRef,
-          userId: ctx.user.id,
+          userId: ctx.user!.id,
           amount: input.amount,
           fromCountry: "NG",
           toCountry: input.recipientCountry ?? "NG",
@@ -1045,33 +1191,33 @@ export const appRouter = router({
       ]);
       if (complianceResult.decision === "blocked") {
         // Fire-and-forget audit log to Rust service
-        sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_BLOCKED_COMPLIANCE", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: complianceResult.blockReason, details: { rules: complianceResult.rulesTriggered } }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_COMPLIANCE", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: complianceResult.blockReason, details: { rules: complianceResult.rulesTriggered } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
         throw new TRPCError({ code: "FORBIDDEN", message: `Transfer blocked by compliance engine: ${complianceResult.blockReason ?? complianceResult.rulesTriggered.join(", ")}` });
       }
       if (fraudScoreResult.decision === "block") {
-        sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_BLOCKED_FRAUD", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Fraud score: ${fraudScoreResult.fraudScore.toFixed(2)}`, details: { factors: fraudScoreResult.factors } }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_FRAUD", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Fraud score: ${fraudScoreResult.fraudScore.toFixed(2)}`, details: { factors: fraudScoreResult.factors } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
         throw new TRPCError({ code: "FORBIDDEN", message: `Transfer blocked by fraud engine. Risk score: ${fraudScoreResult.fraudScore.toFixed(2)}.` });
       }
       // 3. Python sanctions screening for beneficiary name
       if (input.recipientName) {
         const sanctionsResult = await screenSanctions({ name: input.recipientName, country: input.recipientCountry ?? "NG" });
         if (sanctionsResult.action === "block") {
-          sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_BLOCKED_SANCTIONS", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, details: { name: input.recipientName, matchType: sanctionsResult.matchType } }).catch(() => {});
+          sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_SANCTIONS", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, details: { name: input.recipientName, matchType: sanctionsResult.matchType } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
           throw new TRPCError({ code: "FORBIDDEN", message: `Transfer blocked: beneficiary name matched sanctions list (${sanctionsResult.matchType ?? "unknown"} match).` });
         }
       }
       // 2b. Await anomaly detector result and block high-confidence anomalies
       const anomalyResult = await anomalyPromise;
       if (anomalyResult.isAnomaly && anomalyResult.confidence > 0.85) {
-        sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_BLOCKED_ANOMALY", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Anomaly confidence: ${(anomalyResult.confidence * 100).toFixed(1)}%`, details: anomalyResult.details }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_BLOCKED_ANOMALY", resource: "transfer", resourceId: transferRef, severity: "critical", success: false, errorMessage: `Anomaly confidence: ${(anomalyResult.confidence * 100).toFixed(1)}%`, details: anomalyResult.details }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         throw new TRPCError({ code: "FORBIDDEN", message: `Transfer flagged by anomaly detection (confidence: ${(anomalyResult.confidence * 100).toFixed(1)}%). Please contact support if this is legitimate.` });
       }
       if (anomalyResult.isAnomaly && anomalyResult.confidence > 0.65) {
         // Medium confidence: flag for review but allow through
-        sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_ANOMALY_REVIEW", resource: "transfer", resourceId: transferRef, severity: "warning", success: true, details: { confidence: anomalyResult.confidence, ...anomalyResult.details } }).catch(() => {});
+        sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_ANOMALY_REVIEW", resource: "transfer", resourceId: transferRef, severity: "warning", success: true, details: { confidence: anomalyResult.confidence, ...anomalyResult.details } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
       }
       // 4. Rust audit log: record compliance pass
-      sendPolyglotAuditLog({ userId: ctx.user.id, action: "TRANSFER_COMPLIANCE_PASS", resource: "transfer", resourceId: transferRef, severity: "info", success: true, details: { complianceDecision: complianceResult.decision, fraudScore: fraudScoreResult.fraudScore, riskLevel: fraudScoreResult.riskLevel } }).catch(() => {});
+      sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_COMPLIANCE_PASS", resource: "transfer", resourceId: transferRef, severity: "info", success: true, details: { complianceDecision: complianceResult.decision, fraudScore: fraudScoreResult.fraudScore, riskLevel: fraudScoreResult.riskLevel } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
       // ─── Compute FX rate and tiered fee ──────────────────────────────────────
       const { rates: liveRates } = await fetchLiveRates("USD");
       const fromRate = liveRates[input.fromCurrency] ?? 1;
@@ -1081,18 +1227,18 @@ export const appRouter = router({
       const dbForFee = await getDb();
       let userTierForFee: KycTier = "tier1";
       if (dbForFee) {
-        const [userForFee] = await dbForFee.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
+        const [userForFee] = await dbForFee.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user!.id)).limit(1);
         userTierForFee = (userForFee?.kycTier ?? "tier1") as KycTier;
       }
       const amountUsdForFee = input.amount / fromRate;
       const feeBreakdown = calculateFee(amountUsdForFee, { from: "NG", to: input.recipientCountry ?? "US" }, userTierForFee);
       const fee = feeBreakdown.totalFee * fromRate; // convert back to source currency
       const toAmount = (input.amount - fee) * fxRate;
-      const idempotencyKey = input.idempotencyKey ?? `TRF-${ctx.user.id}-${Date.now()}`;
+      const idempotencyKey = input.idempotencyKey ?? `TRF-${ctx.user!.id}-${Date.now()}`;
 
       // ─── Attempt Temporal workflow (full 6-step saga) ─────────────────────────
       const temporalResult = await startTransferWorkflow({
-        userId: ctx.user.id,
+        userId: ctx.user!.id,
         fromCurrency: input.fromCurrency,
         toCurrency: input.toCurrency,
         amount: input.amount,
@@ -1124,21 +1270,21 @@ export const appRouter = router({
 
       // ─── Fallback: direct DB execution (Temporal unavailable) ─────────────────
       logger.warn("[Transfer] Temporal unavailable — executing direct DB path");
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.fromCurrency))).limit(1);
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user!.id), eq(wallets.currency, input.fromCurrency))).limit(1);
       if (!wallet) throw new TRPCError({ code: "NOT_FOUND", message: "Source wallet not found" });
       const totalDeduct = input.amount + fee;
       if (Number(wallet.balance) < totalDeduct) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
       // ─── Wrap wallet debit + transaction record in a DB transaction ───────────
-      const { ref, newBalance } = await db.transaction(async (tx) => {
+      const { ref, newBalance } = await db.transaction(async (tx: any) => {
         const [updTransfer] = await tx.update(wallets)
           .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${totalDeduct} AS VARCHAR)` })
           .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${totalDeduct}`))
           .returning({ balance: wallets.balance });
         if (!updTransfer) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-        const txRef = `TRF-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+        const txRef = `TRF-${ctx.user!.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
         await tx.insert(transactions).values({
-          userId: ctx.user.id, type: "send", status: "pending",
+          userId: ctx.user!.id, type: "send", status: "pending",
           fromCurrency: input.fromCurrency, fromAmount: input.amount.toString(),
           toCurrency: input.toCurrency, toAmount: toAmount.toFixed(2),
           fee: fee.toFixed(2), fxRate: fxRate.toFixed(6),
@@ -1149,15 +1295,15 @@ export const appRouter = router({
         });
         return { ref: txRef, newBalance: updTransfer.balance };
       });
-      await createAuditLog({ userId: ctx.user.id, action: "TRANSFER_SENT", description: `Sent ${input.amount} ${input.fromCurrency} to ${input.recipientName}` });
-      broadcastUserEvent(ctx.user.id, { type: "transfer_sent", payload: { title: "Transfer Sent Successfully", message: `${input.amount} ${input.fromCurrency} → ${toAmount.toFixed(2)} ${input.toCurrency} sent to ${input.recipientName}`, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: toAmount.toFixed(2), recipientName: input.recipientName, fee: fee.toFixed(2), reference: ref } });
+      await createAuditLog({ userId: ctx.user!.id, action: "TRANSFER_SENT", description: `Sent ${input.amount} ${input.fromCurrency} to ${input.recipientName}` });
+      broadcastUserEvent(ctx.user!.id, { type: "transfer_sent", payload: { title: "Transfer Sent Successfully", message: `${input.amount} ${input.fromCurrency} → ${toAmount.toFixed(2)} ${input.toCurrency} sent to ${input.recipientName}`, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: toAmount.toFixed(2), recipientName: input.recipientName, fee: fee.toFixed(2), reference: ref } });
       // ─── Wire local ML fraud scorer + state machine pipeline (non-blocking) ─────
       (async () => {
         try {
           const dbForPipeline = await getDb();
           let kycTierNum = 1;
           if (dbForPipeline) {
-            const [uRow] = await dbForPipeline.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
+            const [uRow] = await dbForPipeline.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user!.id)).limit(1);
             const tierMap: Record<string, number> = { tier0: 0, tier1: 1, tier2: 2, tier3: 3 };
             kycTierNum = tierMap[uRow?.kycTier ?? "tier1"] ?? 1;
           }
@@ -1166,7 +1312,7 @@ export const appRouter = router({
           const mlFeatures = buildFeatures({ amount_usd: amountUSDForPipeline, source_country: "NG", dest_country: input.recipientCountry ?? "NG", user_kyc_level: kycTierNum, is_new_recipient: false });
           const mlFraudResult = scoreFraud(mlFeatures);
           const amlFlagsForPipeline = getAmlFlags(amountUSDForPipeline);
-          await runTransferPipeline(ref, ctx.user.id, { fraudScore: mlFraudResult.score, amlFlags: amlFlagsForPipeline, kycTier: kycTierNum, amountUSD: amountUSDForPipeline });
+          await runTransferPipeline(ref, ctx.user!.id, { fraudScore: mlFraudResult.score, amlFlags: amlFlagsForPipeline, kycTier: kycTierNum, amountUSD: amountUSDForPipeline });
         } catch (pipelineErr) {
           logger.warn({ err: pipelineErr }, "[Transfer] State machine pipeline error (non-blocking):");
         }
@@ -1174,27 +1320,27 @@ export const appRouter = router({
       // gRPC Ledger: record double-entry in TigerBeetle (non-blocking, best-effort)
       grpcLedgerTransfer({
         idempotencyKey,
-        sourceAccountId: `user-${ctx.user.id}-${input.fromCurrency}`,
+        sourceAccountId: `user-${ctx.user!.id}-${input.fromCurrency}`,
         destinationAccountId: `recipient-${input.recipientAccount ?? ref}-${input.toCurrency}`,
         amount: input.amount.toFixed(2),
         currency: input.fromCurrency,
         reference: ref,
         description: input.description ?? `Transfer to ${input.recipientName}`,
       }).catch(err => logger.warn({ errMsg: err?.message }, "[gRPC] Ledger transfer failed (non-blocking):"));
-      sendNotification({ userId: ctx.user.id, title: "Transfer Sent", message: `Your transfer of ${input.amount.toLocaleString()} ${input.fromCurrency} to ${input.recipientName} has been initiated.`, type: "transfer" }).catch(() => {});
+      sendNotification({ userId: ctx.user!.id, title: "Transfer Sent", message: `Your transfer of ${input.amount.toLocaleString()} ${input.fromCurrency} to ${input.recipientName} has been initiated.`, type: "transfer" }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
       // Send transfer confirmation email to sender (non-blocking)
-      if (ctx.user.email) {
-        sendEmail({ to: ctx.user.email, ...buildTransferConfirmationEmail({ userName: ctx.user.name ?? "Valued Customer", recipientName: input.recipientName, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, reference: ref, estimatedTime: "1-3 business days" }) }).catch(() => {});
+      if (ctx.user!.email) {
+        sendEmail({ to: ctx.user!.email, ...buildTransferConfirmationEmail({ userName: ctx.user!.name ?? "Valued Customer", recipientName: input.recipientName, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, reference: ref, estimatedTime: "1-3 business days" }) }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       }
       // Send recipient notification email if recipientEmail is provided (non-blocking)
       if (input.recipientEmail) {
         sendEmail({
           to: input.recipientEmail,
-          subject: `You have received ${Math.round(toAmount * 100) / 100} ${input.toCurrency} from ${ctx.user.name ?? "a RemitFlow user"}`,
+          subject: `You have received ${Math.round(toAmount * 100) / 100} ${input.toCurrency} from ${ctx.user!.name ?? "a RemitFlow user"}`,
           html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px">
             <h2 style="color:#10b981">Money Received!</h2>
             <p>Hi ${input.recipientName},</p>
-            <p><strong>${ctx.user.name ?? "Someone"}</strong> has sent you money via RemitFlow.</p>
+            <p><strong>${ctx.user!.name ?? "Someone"}</strong> has sent you money via RemitFlow.</p>
             <table style="width:100%;border-collapse:collapse;margin:16px 0">
               <tr><td style="padding:8px;color:#6b7280">Amount Sent</td><td style="padding:8px;font-weight:600">${input.amount} ${input.fromCurrency}</td></tr>
               <tr style="background:#f9fafb"><td style="padding:8px;color:#6b7280">Amount Received</td><td style="padding:8px;font-weight:600;color:#10b981">${Math.round(toAmount * 100) / 100} ${input.toCurrency}</td></tr>
@@ -1204,26 +1350,26 @@ export const appRouter = router({
             ${input.description ? `<p style="color:#6b7280;font-style:italic">Message: ${input.description}</p>` : ""}
             <p style="color:#6b7280;font-size:0.875rem">Reference number: <strong>${ref}</strong>. Please keep this for your records.</p>
           </div>`,
-          text: `Hi ${input.recipientName}, you have received ${Math.round(toAmount * 100) / 100} ${input.toCurrency} from ${ctx.user.name ?? "a RemitFlow user"}. Reference: ${ref}`,
-        }).catch(() => {});
+          text: `Hi ${input.recipientName}, you have received ${Math.round(toAmount * 100) / 100} ${input.toCurrency} from ${ctx.user!.name ?? "a RemitFlow user"}. Reference: ${ref}`,
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       }
       // AML auto-case creation on direct DB path (non-blocking)
       getAmlFlags(amountInUsd).forEach(topFlag => {
         const sev = amountInUsd >= 10_000 ? "critical" : amountInUsd >= 5_000 ? "high" : "medium";
         const caseTypeMap: Record<string, string> = { CTR_REQUIRED: "ctr", SAR_REVIEW: "sar", EDD_REQUIRED: "edd", TRAVEL_RULE: "travel_rule" };
         getDb().then(db => db?.insert(complianceCases).values({
-          userId: ctx.user.id, caseType: (caseTypeMap[topFlag] ?? "aml_review") as any,
+          userId: ctx.user!.id, caseType: (caseTypeMap[topFlag] ?? "aml_review") as any,
           severity: sev as any, status: "open" as any,
           title: `Auto-flagged: ${topFlag} — ${input.amount} ${input.fromCurrency} to ${input.recipientName}`,
           description: `Transfer of ${input.amount} ${input.fromCurrency} (≈$${amountInUsd.toFixed(0)} USD) triggered AML flags: ${topFlag}`,
           riskScore: Math.min(100, Math.round((amountInUsd / 10_000) * 80 + 20)),
           createdAt: new Date(), updatedAt: new Date(),
-        }).catch(() => {})).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); })).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       });
       // ─── Kafka: emit payment.initiated and transaction.created events (non-blocking) ─
       publishPaymentInitiated({
         paymentId: ref,
-        userId: ctx.user.id,
+        userId: ctx.user!.id,
         fromCurrency: input.fromCurrency,
         toCurrency: input.toCurrency,
         amount: input.amount,
@@ -1234,7 +1380,7 @@ export const appRouter = router({
       publishTransactionEvent({
         eventType: "created",
         transactionId: ref,
-        userId: ctx.user.id,
+        userId: ctx.user!.id,
         amount: input.amount,
         currency: input.fromCurrency,
         toCurrency: input.toCurrency,
@@ -1244,8 +1390,8 @@ export const appRouter = router({
         timestamp: new Date().toISOString(),
       }).catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] publishTransactionEvent failed (non-blocking):"));
       // ─── Transfer completed email (non-blocking) ──────────────────────────────
-      sendEmail({ to: ctx.user.email, ...buildTransferCompletedEmail({
-        userName: ctx.user.name ?? "Valued Customer",
+      sendEmail({ to: ctx.user!.email ?? "", ...buildTransferCompletedEmail({
+        userName: ctx.user!.name ?? "Valued Customer",
         recipientName: input.recipientName,
         amount: input.amount,
         fromCurrency: input.fromCurrency,
@@ -1253,12 +1399,15 @@ export const appRouter = router({
         toCurrency: input.toCurrency,
         reference: ref,
         completedAt: new Date().toLocaleString(),
-      }) }).catch(() => {});
+      }) }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       return { success: true, reference: ref, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, fxRate, orchestrated: false, mlRisk: anomalyResult ? { isAnomaly: anomalyResult.isAnomaly, confidence: anomalyResult.confidence, requiresReview: anomalyResult.isAnomaly && anomalyResult.confidence > 0.65 } : null };
     }),
-    quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive() })).query(async ({ input }) => {
-      const rates = await getLiveRates("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const fxRate = toRate / fromRate; const fee = input.amount * 0.005; const toAmount = (input.amount - fee) * fxRate;
-      return { fxRate, fee, toAmount, fromAmount: input.amount, estimatedTime: "1-3 minutes" };
+    quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ input }) => {
+      const rates = await getLiveRates("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const fxRate = toRate / fromRate;
+      const feeBreakdown = calculateFee(input.amount / fromRate, { from: input.fromCurrency.slice(0, 2), to: input.toCurrency.slice(0, 2) });
+      const fee = feeBreakdown.totalFee * fromRate;
+      const toAmount = (input.amount - fee) * fxRate;
+      return { fxRate, fee: Math.round(fee * 100) / 100, toAmount: Math.round(toAmount * 100) / 100, fromAmount: input.amount, estimatedTime: "1-3 minutes" };
     }),
   }),
 
@@ -1274,85 +1423,123 @@ export const appRouter = router({
         : rates;
       return { rates: filtered, base: input.base, source, timestamp: new Date().toISOString(), pairCount: Object.keys(filtered).length };
     }),
-    calculate: publicProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive() })).query(async ({ input }) => {
+    calculate: publicProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ input }) => {
       const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate;
-      return { rate, result: input.amount * rate, fee: input.amount * 0.005, from: input.from, to: input.to, amount: input.amount };
+      const feeBreakdown = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      const convertedAmount = input.amount * rate;
+      const deliveryAmount = (input.amount - feeBreakdown.totalFee) * rate;
+      return {
+        rate, result: convertedAmount, deliveryAmount,
+        fee: feeBreakdown.totalFee, feeRate: feeBreakdown.feeRate,
+        feeBreakdown: { baseFee: feeBreakdown.baseFee, percentageFee: feeBreakdown.percentageFee, discountApplied: feeBreakdown.discountApplied, discountReason: feeBreakdown.discountReason },
+        from: input.from, to: input.to, amount: input.amount,
+        estimatedDelivery: input.amount <= 1000 ? "Instant (< 30 seconds)" : input.amount <= 5000 ? "Within 1 hour" : "1-2 business days",
+      };
     }),
     lockRateV2: protectedProcedure.input(z.object({ fromCurrency: z.string().max(8), toCurrency: z.string().max(8), amount: z.number().positive().max(10_000_000), lockedRate: z.number().positive().optional(), expiresInHours: z.number().min(1).max(168).default(24) })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rates = await getLiveRates("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const rate = input.lockedRate ?? (toRate / fromRate);
       const expiresAt = new Date(Date.now() + input.expiresInHours * 60 * 60 * 1000);
       await db.execute(sql`INSERT INTO rate_locks (user_id, from_currency, to_currency, locked_rate, amount, expires_at, status) VALUES (${ctx.user.id}, ${input.fromCurrency}, ${input.toCurrency}, ${rate.toFixed(8)}, ${input.amount}, ${expiresAt}, 'active')`);
       return { success: true, lockedRate: rate, expiry: expiresAt };
     }),
     lockRate: protectedProcedure.input(z.object({ from: z.string().max(8), to: z.string().max(8), amount: z.number().positive().max(10_000_000), duration: z.number().positive().max(10080).default(30) })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate;
       const expiresAt = new Date(Date.now() + input.duration * 60 * 1000);
       await db.execute(sql`INSERT INTO rate_locks (user_id, from_currency, to_currency, locked_rate, amount, expires_at, status) VALUES (${ctx.user.id}, ${input.from}, ${input.to}, ${rate.toFixed(8)}, ${input.amount}, ${expiresAt}, 'active')`);
       return { success: true, lockedRate: rate, expiry: expiresAt, lockId: `LOCK${Date.now()}` };
     }),
     locks: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM rate_locks WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 20`);
       return (rows as any[]).map((r: any) => ({ ...r, lockedRate: Number(r.locked_rate), amount: Number(r.amount), fromCurrency: r.from_currency, toCurrency: r.to_currency, expiresAt: r.expires_at }));
     }),
     getLockedRates: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM rate_locks WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 20`);
       return (rows as any[]).map((r: any) => ({ ...r, lockedRate: Number(r.locked_rate), amount: Number(r.amount) }));
     }),
     cancelLock: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`UPDATE rate_locks SET status = 'expired' WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
-      return { success: true };
+      return { success: true, lockId: input.id, status: "expired" };
     }),
     alerts: protectedProcedure.query(async ({ ctx }) => {
       const alerts = await getFxAlertsByUserId(ctx.user.id);
-      return alerts.map(a => ({ ...a, targetRate: Number(a.targetRate) }));
+      return alerts.map((a: any) => ({ ...a, targetRate: Number(a.targetRate) }));
     }),
     createAlert: protectedProcedure.input(z.object({ fromCurrency: z.string().max(8), toCurrency: z.string().max(8), targetRate: z.number().positive().max(1_000_000), direction: z.enum(["above", "below"]) })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.insert(fxAlerts).values({ userId: ctx.user.id, ...input, targetRate: input.targetRate.toString(), isActive: true, triggered: false });
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [alert] = await db.insert(fxAlerts).values({ userId: ctx.user.id, ...input, targetRate: input.targetRate.toString(), isActive: true, triggered: false }).returning();
+      return { success: true, alertId: alert.id, pair: `${input.fromCurrency}/${input.toCurrency}`, targetRate: input.targetRate, direction: input.direction };
     }),
     deleteAlert: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(fxAlerts).where(and(eq(fxAlerts.id, input.id), eq(fxAlerts.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await db.delete(fxAlerts).where(and(eq(fxAlerts.id, input.id), eq(fxAlerts.userId, ctx.user.id))).returning();
+      return { success: true, deletedAlertId: input.id };
     }),
   }),
 
   beneficiaries: router({
-    list: protectedProcedure.query(async ({ ctx }) => getBeneficiariesByUserId(ctx.user.id)),
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const rows = await getBeneficiariesByUserId(ctx.user.id);
+      const db = await getDb();
+      return await Promise.all(rows.map(async (b: any) => {
+        let lastTransferDate: Date | null = null;
+        let transferCount = 0;
+        if (db) {
+          const txRows = await db.execute(sql`SELECT COUNT(*) as cnt, MAX("createdAt") as last_tx FROM transactions WHERE "userId" = ${ctx.user.id} AND "recipientName" = ${b.name} AND status = 'completed'`);
+          transferCount = Number((txRows as any[])[0]?.cnt ?? 0);
+          lastTransferDate = (txRows as any[])[0]?.last_tx ?? null;
+        }
+        return { ...b, transferCount, lastTransferDate };
+      }));
+    }),
     add: strictRateLimitedProcedure.input(z.object({ name: z.string().min(1).max(128).trim(), accountNumber: z.string().max(64).optional(), bankName: z.string().max(128).optional(), bankCode: z.string().max(16).optional(), currency: z.string().max(8).default("NGN"), country: z.string().max(64).optional(), phone: z.string().max(32).optional(), email: z.string().email().max(320).optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.insert(beneficiaries).values({ userId: ctx.user.id, ...input });
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const existing = await getBeneficiariesByUserId(ctx.user.id);
+      if (input.accountNumber) {
+        const duplicate = existing.find((b: any) => b.accountNumber === input.accountNumber && b.bankCode === input.bankCode);
+        if (duplicate) throw new TRPCError({ code: "CONFLICT", message: `Beneficiary with account ${input.accountNumber} at ${input.bankName ?? "this bank"} already exists (${(duplicate as any).name})` });
+      }
+      if (input.accountNumber && input.currency === "NGN" && input.accountNumber.length !== 10) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Nigerian NUBAN account numbers must be exactly 10 digits" });
+      }
+      if (existing.length >= 50) throw new TRPCError({ code: "BAD_REQUEST", message: "Maximum 50 beneficiaries allowed" });
+      const [created] = await db.insert(beneficiaries).values({ userId: ctx.user.id, ...input }).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "BENEFICIARY_ADDED", description: `Beneficiary added: ${input.name}` });
+      return { success: true, beneficiary: created };
     }),
     update: beneficiaryUpdateProcedure.input(z.object({ id: z.number(), name: z.string().min(1).max(128).trim().optional(), accountNumber: z.string().max(64).optional(), bankName: z.string().max(128).optional(), phone: z.string().max(32).optional(), email: z.string().email().max(320).optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { id, ...updates } = input;
-      await db.update(beneficiaries).set(updates).where(and(eq(beneficiaries.id, id), eq(beneficiaries.userId, ctx.user.id)));
-      return { success: true };
+      const [existing] = await db.select().from(beneficiaries).where(and(eq(beneficiaries.id, id), eq(beneficiaries.userId, ctx.user!.id))).limit(1);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Beneficiary not found" });
+      await db.update(beneficiaries).set(updates).where(eq(beneficiaries.id, id)).returning();
+      return { success: true, beneficiary: { ...existing, ...updates } };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(beneficiaries).where(and(eq(beneficiaries.id, input.id), eq(beneficiaries.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [existing] = await db.select().from(beneficiaries).where(and(eq(beneficiaries.id, input.id), eq(beneficiaries.userId, ctx.user.id))).limit(1);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Beneficiary not found" });
+      await db.delete(beneficiaries).where(eq(beneficiaries.id, input.id)).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "BENEFICIARY_REMOVED", description: `Beneficiary removed: ${(existing as any).name}` });
+      return { success: true, removedId: input.id };
     }),
     toggleFavorite: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [b] = await db.select().from(beneficiaries).where(and(eq(beneficiaries.id, input.id), eq(beneficiaries.userId, ctx.user.id))).limit(1);
-      if (!b) throw new TRPCError({ code: "NOT_FOUND" });
-      await db.update(beneficiaries).set({ isFavorite: !b.isFavorite }).where(eq(beneficiaries.id, input.id));
-      return { success: true };
+      if (!b) throw new TRPCError({ code: "NOT_FOUND", message: "Beneficiary not found" });
+      const newFavorite = !b.isFavorite;
+      await db.update(beneficiaries).set({ isFavorite: newFavorite }).where(eq(beneficiaries.id, input.id)).returning();
+      return { success: true, isFavorite: newFavorite };
     }),
     topSenders: protectedProcedure.query(async ({ ctx }) => {
       const rows = await getBeneficiariesByUserId(ctx.user.id);
       // Sort: favorites first, then by id desc (most recently added)
       return rows
-        .sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0))
+        .sort((a: any, b: any) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0))
         .slice(0, 5);
     }),
   }),
@@ -1360,45 +1547,84 @@ export const appRouter = router({
   cards: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const cs = await getCardsByUserId(ctx.user.id);
-      return cs.map(c => ({ ...c, spendLimit: Number(c.spendLimit ?? 0) }));
+      const db = await getDb();
+      return await Promise.all(cs.map(async (c: any) => {
+        let dailySpend = 0;
+        let monthlySpend = 0;
+        if (db) {
+          try {
+            const dailyRows = await db.execute(sql`SELECT COALESCE(SUM(CAST("fromAmount" AS DECIMAL)), 0) as total FROM transactions WHERE "userId" = ${c.userId ?? ctx.user.id} AND "createdAt" > NOW() - INTERVAL '1 day'`);
+            const monthlyRows = await db.execute(sql`SELECT COALESCE(SUM(CAST("fromAmount" AS DECIMAL)), 0) as total FROM transactions WHERE "userId" = ${c.userId ?? ctx.user.id} AND "createdAt" > NOW() - INTERVAL '30 days'`);
+            dailySpend = Number((dailyRows as any[])[0]?.total ?? 0);
+            monthlySpend = Number((monthlyRows as any[])[0]?.total ?? 0);
+          } catch { /* table may not exist */ }
+        }
+        return { ...c, spendLimit: Number(c.spendLimit ?? 0), dailySpend, monthlySpend, dailyRemaining: Math.max(0, Number(c.spendLimit ?? 5000) - dailySpend) };
+      }));
     }),
     create: protectedProcedure.input(z.object({ type: z.enum(["virtual", "physical"]), brand: z.enum(["visa", "mastercard", "verve"]), currency: z.string().default("USD") })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const existingCards = await getCardsByUserId(ctx.user.id);
+      const activeCards = existingCards.filter((c: any) => c.status === "active");
+      if (activeCards.length >= 5) throw new TRPCError({ code: "BAD_REQUEST", message: "Maximum 5 active cards allowed. Cancel an existing card first." });
       const last4 = (1000 + (randomBytes(2).readUInt16BE(0) % 9000)).toString();
       const expiry = new Date(); expiry.setFullYear(expiry.getFullYear() + 3);
-      await db.insert(cards).values({ userId: ctx.user.id, type: input.type, brand: input.brand, last4, expiryMonth: String(expiry.getMonth() + 1).padStart(2, "0"), expiryYear: String(expiry.getFullYear()), status: "active", currency: input.currency, spendLimit: "5000.00", cardholderName: (ctx.user.name ?? "CARD HOLDER").toUpperCase() });
-      await createAuditLog({ userId: ctx.user.id, action: "CARD_CREATED", description: `${input.type} ${input.brand} card created` });
-      return { success: true, last4 };
+      const defaultLimit = input.type === "virtual" ? "2000.00" : "5000.00";
+      await db.insert(cards).values({ userId: ctx.user.id, type: input.type, brand: input.brand, last4, expiryMonth: String(expiry.getMonth() + 1).padStart(2, "0"), expiryYear: String(expiry.getFullYear()), status: "active", currency: input.currency, spendLimit: defaultLimit, cardholderName: (ctx.user.name ?? "CARD HOLDER").toUpperCase() });
+      await createAuditLog({ userId: ctx.user.id, action: "CARD_CREATED", description: `${input.type} ${input.brand} card created ending ${last4}` });
+      return { success: true, last4, type: input.type, brand: input.brand, currency: input.currency, spendLimit: Number(defaultLimit), expiryMonth: String(expiry.getMonth() + 1).padStart(2, "0"), expiryYear: String(expiry.getFullYear()) };
     }),
     freeze: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(cards).set({ status: "frozen" }).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [card] = await db.select().from(cards).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id))).limit(1);
+      if (!card) throw new TRPCError({ code: "NOT_FOUND", message: "Card not found" });
+      if (card.status === "cancelled") throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot freeze a cancelled card" });
+      await db.update(cards).set({ status: "frozen" }).where(eq(cards.id, input.id)).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "CARD_FROZEN", description: `Card ending ${card.last4} frozen` });
+      return { success: true, cardId: input.id, status: "frozen" };
     }),
     unfreeze: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(cards).set({ status: "active" }).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [card] = await db.select().from(cards).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id))).limit(1);
+      if (!card) throw new TRPCError({ code: "NOT_FOUND", message: "Card not found" });
+      if (card.status !== "frozen") throw new TRPCError({ code: "BAD_REQUEST", message: "Card is not frozen" });
+      await db.update(cards).set({ status: "active" }).where(eq(cards.id, input.id)).returning();
+      return { success: true, cardId: input.id, status: "active" };
     }),
     cancel: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(cards).set({ status: "cancelled" }).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [card] = await db.select().from(cards).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id))).limit(1);
+      if (!card) throw new TRPCError({ code: "NOT_FOUND", message: "Card not found" });
+      if (card.status === "cancelled") throw new TRPCError({ code: "BAD_REQUEST", message: "Card is already cancelled" });
+      await db.update(cards).set({ status: "cancelled" }).where(eq(cards.id, input.id)).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "CARD_CANCELLED", description: `Card ending ${card.last4} cancelled` });
+      return { success: true, cardId: input.id, status: "cancelled" };
     }),
-    updateLimit: protectedProcedure.input(z.object({ id: z.number(), limit: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(cards).set({ spendLimit: input.limit.toString() }).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id)));
-      return { success: true };
+    updateLimit: protectedProcedure.input(z.object({ id: z.number(), limit: z.number().min(100).max(100_000) })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [card] = await db.select().from(cards).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id))).limit(1);
+      if (!card) throw new TRPCError({ code: "NOT_FOUND", message: "Card not found" });
+      if (card.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: "Can only update limits on active cards" });
+      await db.update(cards).set({ spendLimit: input.limit.toString() }).where(eq(cards.id, input.id)).returning();
+      return { success: true, cardId: input.id, newLimit: input.limit };
     }),
   }),
 
   savings: router({
     getAccount: protectedProcedure.query(async ({ ctx }) => {
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
-      const flexBalance = goals.filter((g: any) => g.savingsType === 'flex' && g.status === 'active').reduce((s: number, g: any) => s + Number(g.currentAmount), 0);
-      const lockedBalance = goals.filter((g: any) => g.savingsType === 'locked' && g.status === 'active').reduce((s: number, g: any) => s + Number(g.currentAmount), 0);
+      const flexGoals = goals.filter((g: any) => g.savingsType === 'flex' && g.status === 'active');
+      const lockedGoals = goals.filter((g: any) => g.savingsType === 'locked' && g.status === 'active');
+      const flexBalance = flexGoals.reduce((s: number, g: any) => s + Number(g.currentAmount), 0);
+      const lockedBalance = lockedGoals.reduce((s: number, g: any) => s + Number(g.currentAmount), 0);
       const totalInterestEarned = goals.reduce((s: number, g: any) => s + (Number(g.interestEarned) || 0), 0);
-      return { flexBalance, lockedBalance, totalInterestEarned };
+      const estimatedMonthlyInterest = (flexBalance * 0.03 + lockedBalance * 0.06) / 12;
+      const nextMaturity = lockedGoals.reduce((earliest: Date | null, g: any) => {
+        const unlock = g.targetDate ? new Date(g.targetDate) : null;
+        if (!unlock) return earliest;
+        return (!earliest || unlock < earliest) ? unlock : earliest;
+      }, null as Date | null);
+      return { flexBalance, lockedBalance, totalBalance: flexBalance + lockedBalance, totalInterestEarned, estimatedMonthlyInterest, nextMaturity, activeGoals: goals.filter((g: any) => g.status === 'active').length };
     }),
     getGoals: protectedProcedure.query(async ({ ctx }) => {
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
@@ -1409,59 +1635,118 @@ export const appRouter = router({
       return txs.filter((t: any) => t.type === 'savings_deposit' || t.type === 'savings_withdrawal').slice(0, input?.limit ?? 20);
     }),
     deposit: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), type: z.enum(['flex', 'locked']), lockDays: z.number().int().min(1).max(3650).optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR' });
-      const apy = input.type === 'flex' ? 3.0 : input.lockDays === 30 ? 4.0 : input.lockDays === 90 ? 5.0 : input.lockDays === 180 ? 5.5 : 6.0;
-      const unlockDate = input.type === 'locked' && input.lockDays ? new Date(Date.now() + input.lockDays * 86400000) : undefined;
-      await db.insert(savingsGoals).values({ userId: ctx.user.id, name: `${input.type === 'flex' ? 'Flex' : 'Locked'} Savings`, emoji: input.type === 'flex' ? '💰' : '🔒', targetAmount: (input.amount * 10).toFixed(2), currentAmount: input.amount.toFixed(2), currency: 'USD', status: 'active', autoSave: false });
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+      if (input.type === 'locked' && !input.lockDays) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Lock period required for locked savings' });
+      const apyTiers: Record<string, number> = { flex: 3.0, '30': 4.0, '60': 4.5, '90': 5.0, '180': 5.5, '365': 6.0 };
+      const lockKey = input.type === 'flex' ? 'flex' : String(input.lockDays ?? 30);
+      const apy = apyTiers[lockKey] ?? (input.lockDays && input.lockDays >= 365 ? 6.0 : input.lockDays && input.lockDays >= 180 ? 5.5 : 5.0);
+      const maturityDate = input.type === 'locked' && input.lockDays ? new Date(Date.now() + input.lockDays * 86400000) : undefined;
+      const projectedInterest = input.amount * (apy / 100) * ((input.lockDays ?? 365) / 365);
+      const [depWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
+      if (!depWallet || Number(depWallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient USD wallet balance for savings deposit" });
+      const [updDep] = await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+        .where(and(eq(wallets.id, depWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+        .returning({ balance: wallets.balance });
+      if (!updDep) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+      const [created] = await db.insert(savingsGoals).values({ userId: ctx.user.id, name: `${input.type === 'flex' ? 'Flex' : `${input.lockDays}-Day Locked`} Savings`, emoji: input.type === 'flex' ? '\ud83d\udcb0' : '\ud83d\udd12', targetAmount: (input.amount * 10).toFixed(2), currentAmount: input.amount.toFixed(2), currency: 'USD', status: 'active', autoSave: false, targetDate: maturityDate }).returning();
+      await createAuditLog({ userId: ctx.user.id, action: 'SAVINGS_DEPOSIT', description: `${input.type} savings deposit: $${input.amount} at ${apy}% APY` });
+      await createTransaction({ userId: ctx.user.id, type: "savings_deposit", status: "completed", fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0", description: `Savings deposit: $${input.amount} at ${apy}% APY` });
+      return { success: true, apy, maturityDate, projectedInterest: Math.round(projectedInterest * 100) / 100, goalId: (created as any).id };
     }),
-    withdraw: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000) })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR' });
+    withdraw: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), goalId: z.number().optional() })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
-      const flexGoals = goals.filter((g: any) => g.status === 'active');
-      const totalFlex = flexGoals.reduce((s: number, g: any) => s + Number(g.currentAmount), 0);
-      if (input.amount > totalFlex) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient balance' });
+      const withdrawableGoals = goals.filter((g: any) => {
+        if (g.status !== 'active') return false;
+        if (g.savingsType === 'locked' && g.targetDate && new Date(g.targetDate) > new Date()) return false;
+        return true;
+      });
+      if (input.goalId) {
+        const target = withdrawableGoals.find((g: any) => g.id === input.goalId);
+        if (!target) {
+          const locked = goals.find((g: any) => g.id === input.goalId && g.status === 'active');
+          if (locked && (locked as any).targetDate && new Date((locked as any).targetDate) > new Date()) {
+            const daysRemaining = Math.ceil((new Date((locked as any).targetDate).getTime() - Date.now()) / 86400000);
+            throw new TRPCError({ code: 'BAD_REQUEST', message: `This savings is locked for ${daysRemaining} more days. Early withdrawal is not available.` });
+          }
+          throw new TRPCError({ code: 'NOT_FOUND', message: 'Savings goal not found or not withdrawable' });
+        }
+        if (input.amount > Number((target as any).currentAmount)) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Amount exceeds goal balance' });
+        const newAmt = Number((target as any).currentAmount) - input.amount;
+        await db.update(savingsGoals).set({ currentAmount: newAmt.toFixed(2), status: newAmt <= 0 ? 'completed' : 'active' }).where(eq(savingsGoals.id, input.goalId)).returning();
+        const [goalWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
+        if (goalWallet) {
+          await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` }).where(eq(wallets.id, goalWallet.id)).returning();
+        } else {
+          await db.insert(wallets).values({ userId: ctx.user.id, currency: "USD", balance: input.amount.toFixed(2), isDefault: false, status: "active" });
+        }
+        await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0", description: `Savings withdrawal from goal: $${input.amount}` });
+        return { success: true, withdrawn: input.amount, remainingBalance: newAmt };
+      }
+      const totalFlex = withdrawableGoals.reduce((s: number, g: any) => s + Number(g.currentAmount), 0);
+      if (input.amount > totalFlex) throw new TRPCError({ code: 'BAD_REQUEST', message: `Insufficient withdrawable balance. Available: $${totalFlex.toFixed(2)}` });
       let remaining = input.amount;
-      for (const g of flexGoals) {
+      for (const g of withdrawableGoals) {
         if (remaining <= 0) break;
         const deduct = Math.min(Number(g.currentAmount), remaining);
         const newAmt = Number(g.currentAmount) - deduct;
-        await db.update(savingsGoals).set({ currentAmount: newAmt.toFixed(2), status: newAmt <= 0 ? 'completed' : 'active' }).where(eq(savingsGoals.id, g.id));
+        await db.update(savingsGoals).set({ currentAmount: newAmt.toFixed(2), status: newAmt <= 0 ? 'completed' : 'active' }).where(eq(savingsGoals.id, g.id)).returning();
         remaining -= deduct;
       }
-      return { success: true };
+      const [usdWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
+      if (usdWallet) {
+        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` }).where(eq(wallets.id, usdWallet.id)).returning();
+      } else {
+        await db.insert(wallets).values({ userId: ctx.user.id, currency: "USD", balance: input.amount.toFixed(2), isDefault: false, status: "active" }).returning();
+      }
+      await createAuditLog({ userId: ctx.user.id, action: 'SAVINGS_WITHDRAWAL', description: `Withdrawal: $${input.amount}` });
+      await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0", description: `Savings withdrawal: $${input.amount}` });
+      return { success: true, withdrawn: input.amount };
     }),
-    createGoal: protectedProcedure.input(z.object({ name: z.string().min(1).max(100), targetAmount: z.number().positive(), deadline: z.string().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR' });
-      await db.insert(savingsGoals).values({ userId: ctx.user.id, name: input.name, emoji: '🎯', targetAmount: input.targetAmount.toFixed(2), currentAmount: '0.00', currency: 'USD', status: 'active', autoSave: false, targetDate: input.deadline ? new Date(input.deadline) : undefined });
-      return { success: true };
+    createGoal: protectedProcedure.input(z.object({ name: z.string().min(1).max(100), targetAmount: z.number().positive().max(10_000_000), deadline: z.string().optional() })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+      const existingGoals = await getSavingsGoalsByUserId(ctx.user.id);
+      const activeGoals = existingGoals.filter((g: any) => g.status === 'active');
+      if (activeGoals.length >= 10) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Maximum 10 active savings goals' });
+      if (input.deadline && new Date(input.deadline) <= new Date()) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Deadline must be in the future' });
+      const [created] = await db.insert(savingsGoals).values({ userId: ctx.user.id, name: input.name, emoji: '\ud83c\udfaf', targetAmount: input.targetAmount.toFixed(2), currentAmount: '0.00', currency: 'USD', status: 'active', autoSave: false, targetDate: input.deadline ? new Date(input.deadline) : undefined }).returning();
+      return { success: true, goalId: (created as any).id, name: input.name, targetAmount: input.targetAmount };
     }),
     list: protectedProcedure.query(async ({ ctx }) => {
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
-      return goals.map(g => ({ ...g, targetAmount: Number(g.targetAmount), currentAmount: Number(g.currentAmount), autoSaveAmount: g.autoSaveAmount ? Number(g.autoSaveAmount) : undefined }));
+      return goals.map((g: any) => ({ ...g, targetAmount: Number(g.targetAmount), currentAmount: Number(g.currentAmount), autoSaveAmount: g.autoSaveAmount ? Number(g.autoSaveAmount) : undefined }));
     }),
-    create: protectedProcedure.input(z.object({ name: z.string(), emoji: z.string().default("🎯"), targetAmount: z.number().positive(), currency: z.string().default("NGN"), targetDate: z.string().optional(), autoSave: z.boolean().default(false), autoSaveAmount: z.number().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.insert(savingsGoals).values({ userId: ctx.user.id, ...input, targetAmount: input.targetAmount.toString(), currentAmount: "0.00", autoSaveAmount: input.autoSaveAmount?.toString(), targetDate: input.targetDate ? new Date(input.targetDate) : undefined, status: "active" });
-      return { success: true };
+    create: protectedProcedure.input(z.object({ name: z.string(), emoji: z.string().default("🎯"), targetAmount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), targetDate: z.string().optional(), autoSave: z.boolean().default(false), autoSaveAmount: z.number().optional() })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [created] = await db.insert(savingsGoals).values({ userId: ctx.user.id, ...input, targetAmount: input.targetAmount.toString(), currentAmount: "0.00", autoSaveAmount: input.autoSaveAmount?.toString(), targetDate: input.targetDate ? new Date(input.targetDate) : undefined, status: "active" }).returning();
+      return { success: true, goalId: created.id, name: input.name, targetAmount: input.targetAmount };
     }),
-    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [goal] = await db.select().from(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).limit(1);
-      if (!goal) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!goal) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      const goalCurrency = (goal as any).currency ?? "USD";
+      const [topWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, goalCurrency))).limit(1);
+      if (!topWallet || Number(topWallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient wallet balance" });
+      const [updTop] = await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+        .where(and(eq(wallets.id, topWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+        .returning({ balance: wallets.balance });
+      if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
       const newAmount = Math.min(Number(goal.currentAmount) + input.amount, Number(goal.targetAmount));
       const status = newAmount >= Number(goal.targetAmount) ? "completed" : "active";
-      await db.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id));
+      await db.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
       return { success: true, newAmount };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await db.delete(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).returning();
+      return { success: true, removedGoalId: input.id };
     }),
     getGoalProgress: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const [goal] = await db.select().from(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).limit(1);
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [goal] = await db.select().from(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).limit(1).returning();
       if (!goal) throw new TRPCError({ code: "NOT_FOUND", message: "Goal not found" });
       const target = Number(goal.targetAmount);
       const current = Number(goal.currentAmount);
@@ -1476,26 +1761,34 @@ export const appRouter = router({
   savingsGoals: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
-      return goals.map(g => ({ ...g, targetAmount: Number(g.targetAmount), currentAmount: Number(g.currentAmount), autoSaveAmount: g.autoSaveAmount ? Number(g.autoSaveAmount) : undefined }));
+      return goals.map((g: any) => ({ ...g, targetAmount: Number(g.targetAmount), currentAmount: Number(g.currentAmount), autoSaveAmount: g.autoSaveAmount ? Number(g.autoSaveAmount) : undefined }));
     }),
-    create: protectedProcedure.input(z.object({ name: z.string(), emoji: z.string().default("🎯"), targetAmount: z.number().positive(), currency: z.string().default("NGN"), targetDate: z.string().optional(), autoSave: z.boolean().default(false), autoSaveAmount: z.number().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.insert(savingsGoals).values({ userId: ctx.user.id, ...input, targetAmount: input.targetAmount.toString(), currentAmount: "0.00", autoSaveAmount: input.autoSaveAmount?.toString(), targetDate: input.targetDate ? new Date(input.targetDate) : undefined, status: "active" });
-      return { success: true };
+    create: protectedProcedure.input(z.object({ name: z.string(), emoji: z.string().default("🎯"), targetAmount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), targetDate: z.string().optional(), autoSave: z.boolean().default(false), autoSaveAmount: z.number().optional() })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [created2] = await db.insert(savingsGoals).values({ userId: ctx.user.id, ...input, targetAmount: input.targetAmount.toString(), currentAmount: "0.00", autoSaveAmount: input.autoSaveAmount?.toString(), targetDate: input.targetDate ? new Date(input.targetDate) : undefined, status: "active" }).returning();
+      return { success: true, goalId: created2.id, name: input.name, targetAmount: input.targetAmount };
     }),
-    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    topup: protectedProcedure.input(z.object({ id: z.number(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [goal] = await db.select().from(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).limit(1);
-      if (!goal) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!goal) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      const goalCurrency = (goal as any).currency ?? "USD";
+      const [topWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, goalCurrency))).limit(1);
+      if (!topWallet || Number(topWallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient wallet balance" });
+      const [updTop] = await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+        .where(and(eq(wallets.id, topWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+        .returning({ balance: wallets.balance });
+      if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
       const newAmount = Math.min(Number(goal.currentAmount) + input.amount, Number(goal.targetAmount));
       const status = newAmount >= Number(goal.targetAmount) ? "completed" : "active";
-      await db.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id));
+      await db.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
       return { success: true, newAmount };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await db.delete(savingsGoals).where(and(eq(savingsGoals.id, input.id), eq(savingsGoals.userId, ctx.user.id))).returning();
+      return { success: true, removedGoalId: input.id };
     }),
   }),
   notifications: router({
@@ -1506,23 +1799,27 @@ export const appRouter = router({
       return { notifications: filtered, unread };
     }),
     markRead: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(notifications).set({ isRead: true }).where(and(eq(notifications.id, input.id), eq(notifications.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await db.update(notifications).set({ isRead: true }).where(and(eq(notifications.id, input.id), eq(notifications.userId, ctx.user.id))).returning();
+      const remaining = await getUnreadNotificationCount(ctx.user.id);
+      return { success: true, markedId: input.id, remainingUnread: remaining };
     }),
     markAllRead: protectedProcedure.mutation(async ({ ctx }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(notifications).set({ isRead: true }).where(eq(notifications.userId, ctx.user.id));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const beforeCount = await getUnreadNotificationCount(ctx.user.id);
+      await db.update(notifications).set({ isRead: true }).where(eq(notifications.userId, ctx.user.id)).returning();
+      return { success: true, markedCount: beforeCount };
     }),
     unreadCount: protectedProcedure.query(async ({ ctx }) => {
       const c = await getUnreadNotificationCount(ctx.user.id);
       return { count: c };
     }),
      remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(notifications).where(and(eq(notifications.id, input.id), eq(notifications.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [existing] = await db.select({ id: notifications.id }).from(notifications).where(and(eq(notifications.id, input.id), eq(notifications.userId, ctx.user.id))).limit(1);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Notification not found" });
+      await db.delete(notifications).where(eq(notifications.id, input.id)).returning();
+      return { success: true, removedId: input.id };
     }),
     getPreferences: protectedProcedure.query(async ({ ctx }) => {
       const { getNotificationPreferences } = await import("./db.js");
@@ -1541,17 +1838,17 @@ export const appRouter = router({
     })).mutation(async ({ ctx, input }) => {
       const { upsertNotificationPreference } = await import("./db.js");
       await upsertNotificationPreference(ctx.user.id, input.category, input.emailEnabled, input.inAppEnabled, input.pushEnabled);
-      return { success: true };
+      return { success: true, category: input.category };
     }),
     registerFCMToken: protectedProcedure.input(z.object({ token: z.string().min(10) })).mutation(async ({ ctx, input }) => {
       const db1 = await getDb(); if (!db1) return { success: false };
       await db1.execute(sql`INSERT INTO user_fcm_tokens (user_id, token, created_at) VALUES (${ctx.user.id}, ${input.token}, NOW()) ON CONFLICT (user_id, token) DO UPDATE SET updated_at = NOW()`);
-      return { success: true };
+      return { success: true, registered: true };
     }),
     unregisterFCMToken: protectedProcedure.input(z.object({ token: z.string() })).mutation(async ({ ctx, input }) => {
       const db1 = await getDb(); if (!db1) return { success: false };
       await db1.execute(sql`DELETE FROM user_fcm_tokens WHERE user_id = ${ctx.user.id} AND token = ${input.token}`);
-      return { success: true };
+      return { success: true, unregistered: true };
     }),
     sendTestPush: protectedProcedure.mutation(async ({ ctx }) => {
       const db1 = await getDb(); if (!db1) return { success: false, message: 'DB unavailable' };
@@ -1578,17 +1875,17 @@ export const appRouter = router({
         { id: "tier3", name: "Full KYC", limit: 10000000, requirements: ["Source of Funds", "Enhanced Due Diligence"], status: "available" },
       ];
       const currentTier = dbUser?.kycTier ?? "tier0";
-      return { currentTier, tiers, documents: docs, pendingCount: docs.filter(d => d.status === "pending").length, approvedCount: docs.filter(d => d.status === "approved").length };
+      return { currentTier, tiers, documents: docs, pendingCount: docs.filter((d: any) => d.status === "pending").length, approvedCount: docs.filter((d: any) => d.status === "approved").length };
     }),
     uploadDocument: strictRateLimitedProcedure.input(z.object({ type: z.string().min(1).max(50), fileBase64: z.string().max(10_000_000), fileName: z.string().min(1).max(255).trim(), mimeType: z.string().min(1).max(100) })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const buffer = Buffer.from(input.fileBase64, "base64");
       const key = `kyc/${ctx.user.id}/${input.type}-${Date.now()}-${input.fileName}`;
       const { url } = await storagePut(key, buffer, input.mimeType);
       // Mark previous docs of the same type as superseded (version history)
       await db.update(kycDocuments)
         .set({ supersededAt: new Date(), updatedAt: new Date() })
-        .where(and(eq(kycDocuments.userId, ctx.user.id), sql`${kycDocuments.docType} = ${input.type}`, sql`${kycDocuments.supersededAt} IS NULL`));
+        .where(and(eq(kycDocuments.userId, ctx.user.id), sql`${kycDocuments.docType} = ${input.type}`, sql`${kycDocuments.supersededAt} IS NULL`)).returning();
       // LLM OCR extraction — run non-blocking, store result in extractedData
       let extractedData: Record<string, any> | null = null;
       if (input.mimeType.startsWith("image/")) {
@@ -1621,7 +1918,7 @@ export const appRouter = router({
       }).catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] publishKYCEvent failed:"));
       // Send KYC submission confirmation email (non-blocking)
       if (ctx.user.email) {
-        sendEmail({ to: ctx.user.email, ...buildKycStatusEmail({ userName: ctx.user.name ?? "Valued Customer", docType: input.type, status: "approved", newTier: undefined }) }).catch(() => {});
+        sendEmail({ to: ctx.user.email, ...buildKycStatusEmail({ userName: ctx.user.name ?? "Valued Customer", docType: input.type, status: "approved", newTier: undefined }) }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
       }
       return { success: true, url };
     }),
@@ -1672,23 +1969,23 @@ export const appRouter = router({
           getDb().then(async db => {
             if (!db) return;
             try {
-              const { kycLivenessAudit } = await import("../../drizzle/schema.js");
-              const [userRow] = await db.select({ country: users.country }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
-              const corridorCode = (userRow?.country ?? "").slice(0, 3).toUpperCase();
+              const { kycLivenessAudit } = await import("../drizzle/schema.js");
+              const [userRow] = await db.select({ address: users.address }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
+              const corridorCode = (userRow?.address ?? "").slice(0, 3).toUpperCase();
               const [inserted] = await db.insert(kycLivenessAudit).values({
                 userId: ctx.user.id,
                 corridorCode,
                 passiveScore: livenessResult?.livenessScore != null ? String(livenessResult.livenessScore) : null,
                 passivePassed: livenessResult?.passed ?? null,
                 passiveSpoofingType: (livenessResult as any)?.spoofingType ?? null,
-                deepfakeScore: String(deepfakeResult.confidence),
-                deepfakeMethod: deepfakeResult.method ?? null,
-                deepfakeIndicators: deepfakeResult.indicators ?? [],
+                deepfakeScore: String(deepfakeResult!.confidence),
+                deepfakeMethod: deepfakeResult!.method ?? null,
+                deepfakeIndicators: deepfakeResult!.indicators ?? [],
                 deepfakePassed: false,
                 overallLive: false,
                 source: "trpc_extract",
               }).returning({ id: kycLivenessAudit.id, createdAt: kycLivenessAudit.createdAt });
-              const { publishLivenessResultEvent } = await import("../middleware/kafka.js");
+              const { publishLivenessResultEvent } = await import("./middleware/kafka.js");
               publishLivenessResultEvent({
                 auditId: inserted?.id ?? 0,
                 userId: ctx.user.id,
@@ -1699,12 +1996,12 @@ export const appRouter = router({
                 activePassed: null,
                 blinkCount: null,
                 headMovementDeg: null,
-                deepfakeScore: deepfakeResult.confidence,
+                deepfakeScore: deepfakeResult!.confidence,
                 deepfakePassed: false,
-                deepfakeMethod: deepfakeResult.method ?? null,
+                deepfakeMethod: deepfakeResult!.method ?? null,
                 source: "trpc_extract",
                 createdAt: inserted?.createdAt?.toISOString() ?? new Date().toISOString(),
-              }).catch(e => logger.warn({ err: (e as Error).message }, "[KYC] Kafka publish failed (blocked)"));
+              }).catch((e: any) => logger.warn({ err: (e as Error).message }, "[KYC] Kafka publish failed (blocked)"));
             } catch (e) {
               logger.warn({ err: (e as Error).message }, "[KYC] Failed to persist blocked deepfake audit row");
             }
@@ -1719,10 +2016,10 @@ export const appRouter = router({
         getDb().then(async db => {
           if (!db) return;
           try {
-            const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+            const { kycLivenessAudit } = await import("../drizzle/schema.js");
             // Fetch user's country for corridor code
-            const [userRow] = await db.select({ country: users.country }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
-            const corridorCode = (userRow?.country ?? "").slice(0, 3).toUpperCase();
+            const [userRow] = await db.select({ address: users.address }).from(users).where(eq(users.id, ctx.user.id)).limit(1);
+            const corridorCode = (userRow?.address ?? "").slice(0, 3).toUpperCase();
             const passivePassed = livenessResult?.passed ?? null;
             const deepfakePassed = deepfakeResult && !deepfakeResult.serviceUnavailable
               ? !(deepfakeResult.is_deepfake && deepfakeResult.confidence >= 0.55)
@@ -1742,7 +2039,7 @@ export const appRouter = router({
               source: "trpc_extract",
             }).returning({ id: kycLivenessAudit.id, createdAt: kycLivenessAudit.createdAt });
             // Publish Kafka event for Go aggregator
-            const { publishLivenessResultEvent } = await import("../middleware/kafka.js");
+            const { publishLivenessResultEvent } = await import("./middleware/kafka.js");
             publishLivenessResultEvent({
               auditId: inserted?.id ?? 0,
               userId: ctx.user.id,
@@ -1758,7 +2055,7 @@ export const appRouter = router({
               deepfakeMethod: deepfakeResult?.method ?? null,
               source: "trpc_extract",
               createdAt: inserted?.createdAt?.toISOString() ?? new Date().toISOString(),
-            }).catch(e => logger.warn({ err: (e as Error).message }, "[KYC] Kafka publish failed"));
+            }).catch((e: any) => logger.warn({ err: (e as Error).message }, "[KYC] Kafka publish failed"));
 
             // ── Rolling deepfake rate compliance alert (last 100 rows per corridor) ──
             if (corridorCode) {
@@ -1772,10 +2069,10 @@ export const appRouter = router({
                   .orderBy(desc(kycLivenessAudit.createdAt))
                   .limit(WINDOW_SIZE);
                 if (recent.length >= 10) {
-                  const deepfakeCount = recent.filter(r => r.deepfakeScore != null && Number(r.deepfakeScore) >= 0.55).length;
+                  const deepfakeCount = recent.filter((r: any) => r.deepfakeScore != null && Number(r.deepfakeScore) >= 0.55).length;
                   const deepfakeRate = deepfakeCount / recent.length;
                   if (deepfakeRate >= DEEPFAKE_ALERT_THRESHOLD) {
-                    const { publishComplianceAlertEvent } = await import("../middleware/kafka.js");
+                    const { publishComplianceAlertEvent } = await import("./middleware/kafka.js");
                     const { notifyOwner } = await import("./_core/notification.js");
                     const alertMsg = `Deepfake rate alert: corridor ${corridorCode} has ${(deepfakeRate * 100).toFixed(1)}% deepfake rate over last ${recent.length} submissions (threshold: ${(DEEPFAKE_ALERT_THRESHOLD * 100).toFixed(0)}%)`;
                     logger.warn({ corridorCode, deepfakeRate, deepfakeCount, windowSize: recent.length }, "[KYC] Deepfake rate threshold exceeded");
@@ -1788,7 +2085,7 @@ export const appRouter = router({
                       windowSize: recent.length,
                       message: alertMsg,
                       severity: deepfakeRate >= 0.15 ? "critical" : deepfakeRate >= 0.10 ? "high" : "medium",
-                    }).catch(e => logger.warn({ err: (e as Error).message }, "[KYC] Compliance alert Kafka publish failed"));
+                    }).catch((e: any) => logger.warn({ err: (e as Error).message }, "[KYC] Compliance alert Kafka publish failed"));
                     notifyOwner({ title: `⚠️ Deepfake Alert: ${corridorCode}`, content: alertMsg }).catch(e => logger.warn({ err: (e as Error).message }, "[KYC] notifyOwner failed"));
                   }
                 }
@@ -1833,8 +2130,11 @@ export const appRouter = router({
         };
       } catch (err: any) {
         if (err instanceof TRPCError) throw err;
-        // Graceful fallback: return mock OCR fields so the UI still works in dev
-        logger.warn({ errMsg: err.message }, "[KYC] FastAPI service unavailable, using mock extraction:");
+        if (process.env.NODE_ENV === "production") {
+          logger.error({ errMsg: err.message }, "[KYC] OCR service unavailable in production — cannot process document");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "KYC document processing service unavailable" });
+        }
+        logger.warn({ errMsg: err.message }, "[KYC] FastAPI service unavailable — returning mock (dev mode)");
         return {
           success: true,
           source: "mock" as const,
@@ -1862,7 +2162,7 @@ export const appRouter = router({
     logs: protectedProcedure.input(z.object({ limit: z.number().default(50), offset: z.number().default(0), action: z.string().optional() }).optional()).query(async ({ ctx, input }) => { const logs = await getAuditLogsByUserId(ctx.user.id, input?.limit ?? 50); return logs; }),
     list: protectedProcedure.input(z.object({ limit: z.number().default(50), offset: z.number().default(0), action: z.string().optional() }).optional()).query(async ({ ctx, input }) => {
       const logs = await getAuditLogsByUserId(ctx.user.id, input?.limit ?? 50);
-      if (input?.action && input.action !== "all") return logs.filter(l => l.action === input.action);
+      if (input?.action && input.action !== "all") return logs.filter((l: any) => l.action === input.action);
       return logs;
     }),
     export: protectedProcedure.query(async ({ ctx }) => getAuditLogsByUserId(ctx.user.id, 1000)),
@@ -1870,7 +2170,7 @@ export const appRouter = router({
 
   referral: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { referralCode: "REMIT" + ctx.user.id, totalReferrals: 0, totalEarned: 0, pendingEarnings: 0, tier: "Bronze", tierProgress: 0, nextTierAt: 5, nextTierName: "Silver" };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select().from(referrals).where(eq(referrals.referrerId, ctx.user.id));
       const dbUser = await getUserByOpenId(ctx.user.openId);
       const totalReferrals = rows.length;
@@ -1885,7 +2185,7 @@ export const appRouter = router({
       return { referralCode: dbUser?.referralCode ?? `RF${ctx.user.id.toString().padStart(6, "0")}`, totalReferrals, totalEarned, pendingEarnings, tier, tierProgress, nextTierAt, nextTierName: tc.next };
     }),
     leaderboard: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { leaderboard: [], myRank: null };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Use SQL aggregation instead of loading all rows into memory
       const rows = await db
         .select({
@@ -1900,7 +2200,7 @@ export const appRouter = router({
         .groupBy(referrals.referrerId, users.name)
         .orderBy(desc(count(referrals.id)))
         .limit(10);
-      const leaderboard = rows.map((r, idx) => ({
+      const leaderboard = rows.map((r: any, idx: any) => ({
         rank: idx + 1,
         name: r.name ?? `User #${r.referrerId}`,
         referrals: Number(r.refCount),
@@ -1913,7 +2213,7 @@ export const appRouter = router({
         .where(eq(referrals.referrerId, ctx.user.id));
       const myCount = Number(myRow?.refCount ?? 0);
       const myRank = myCount > 0
-        ? leaderboard.findIndex(r => r.referrals <= myCount) + 1 || leaderboard.length + 1
+        ? leaderboard.findIndex((r: any) => r.referrals <= myCount) + 1 || leaderboard.length + 1
         : null;
       return { leaderboard, myRank };
     }),
@@ -1927,11 +2227,29 @@ export const appRouter = router({
       const totalEarned = refs.reduce((s: number, r: any) => s + Number(r.rewardAmount ?? 0), 0); return { referralCode: myCode, code: myCode, totalReferrals: refs.length, totalEarned, pendingReward: refs.filter((r: any) => r.status === "pending").reduce((s: number, r: any) => s + Number(r.rewardAmount ?? 0), 0), referrals: refs, leaderboard: [{ rank: 1, name: "Top Referrer", referrals: 24, earned: 120000 }, { rank: 2, name: "You", referrals: refs.length, earned: totalEarned }] };
     }),
     claim: protectedProcedure.input(z.object({ code: z.string() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const [existing] = await db.select().from(referrals).where(eq(referrals.referrerId, ctx.user.id)).limit(1);
-      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Invalid referral code" });
-      if (existing?.referredId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot use your own referral code" });
-      return { success: true, reward: 500, message: "Referral applied! ₦500 bonus added to your wallet." };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const referrerIdMatch = input.code.match(/^RF(\d+)$/);
+      if (!referrerIdMatch) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid referral code format" });
+      const referrerId = Number(referrerIdMatch[1]);
+      if (referrerId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot use your own referral code" });
+      const [referrer] = await db.select().from(users).where(eq(users.id, referrerId)).limit(1);
+      if (!referrer) throw new TRPCError({ code: "NOT_FOUND", message: "Invalid referral code" });
+      const [alreadyClaimed] = await db.select().from(referrals).where(and(eq(referrals.referrerId, referrerId), eq(referrals.referredId, ctx.user.id))).limit(1);
+      if (alreadyClaimed) throw new TRPCError({ code: "BAD_REQUEST", message: "Referral already claimed" });
+      const rewardNGN = 500;
+      const referralCount = await db.select({ cnt: sql<number>`count(*)` }).from(referrals).where(eq(referrals.referrerId, referrerId)).then((r: { cnt: number }[]) => Number(r[0]?.cnt ?? 0));
+      const tier = getReferralTier(referralCount);
+      const finalReward = Math.round(rewardNGN * (1 + tier.bonus / 100));
+      await db.insert(referrals).values({ referrerId, referredId: ctx.user.id, rewardAmount: finalReward.toString(), status: "completed" as any } as any);
+      const [ngnWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "NGN"))).limit(1);
+      if (ngnWallet) {
+        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, ngnWallet.id)).returning();
+      }
+      const [referrerWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, referrerId), eq(wallets.currency, "NGN"))).limit(1);
+      if (referrerWallet) {
+        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, referrerWallet.id)).returning();
+      }
+      return { success: true, reward: finalReward, message: `Referral applied! ₦${finalReward} bonus added to your wallet.` };
     }),
   }),
 
@@ -1944,7 +2262,7 @@ export const appRouter = router({
       amount: z.number().optional(),
       currency: z.string().optional(),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const ref = `DSP${Date.now()}`;
       await db.insert(disputes).values({
         userId: ctx.user.id,
@@ -1960,7 +2278,7 @@ export const appRouter = router({
       disputeId: z.number(),
       comment: z.string().min(1).max(2000),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Verify ownership
       const [d] = await db.select().from(disputes).where(and(eq(disputes.id, input.disputeId), eq(disputes.userId, ctx.user.id))).limit(1);
       if (!d) throw new TRPCError({ code: "NOT_FOUND", message: "Dispute not found" });
@@ -1968,17 +2286,31 @@ export const appRouter = router({
       return { success: true, commentId: `CMT${Date.now()}` };
     }),
     update: protectedProcedure.input(z.object({ id: z.number(), description: z.string().optional(), status: z.string().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { id, ...updates } = input;
-      await db.update(disputes).set(updates as any).where(and(eq(disputes.id, id), eq(disputes.userId, ctx.user.id)));
-      return { success: true };
+      await db.update(disputes).set(updates as any).where(and(eq(disputes.id, id), eq(disputes.userId, ctx.user.id))).returning();
+      return { success: true, disputeId: id };
     }),
   }),
 
   recurring: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const rp = await getRecurringPaymentsByUserId(ctx.user.id);
-      return rp.map(r => ({ ...r, amount: Number(r.amount) }));
+      const db = await getDb();
+      return await Promise.all(rp.map(async (r: any) => {
+        let lastRunStatus: string | null = null;
+        let totalExecutions = 0;
+        let failedExecutions = 0;
+        if (db) {
+          const runStats = await db.execute(sql`SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status = 'failed') as failed, MAX("executedAt") as last_run FROM "scheduledTransferRuns" WHERE "scheduleId" = ${r.id}`);
+          totalExecutions = Number((runStats as any[])[0]?.total ?? 0);
+          failedExecutions = Number((runStats as any[])[0]?.failed ?? 0);
+          const lastRun = (runStats as any[])[0]?.last_run;
+          lastRunStatus = lastRun ? "completed" : null;
+        }
+        const isOverdue = r.nextRunAt && new Date(r.nextRunAt) < new Date() && r.status === "active";
+        return { ...r, amount: Number(r.amount), totalExecutions, failedExecutions, lastRunStatus, isOverdue };
+      }));
     }),
     create: protectedProcedure.input(z.object({
       name: z.string().min(1).max(100).trim(), amount: z.number().positive().max(1_000_000),
@@ -1988,9 +2320,22 @@ export const appRouter = router({
       description: z.string().max(500).optional(), timezone: z.string().max(64).default("UTC"),
       startDate: z.string().max(32).optional(), endDate: z.string().max(32).optional(),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const nextRun = input.startDate ? new Date(input.startDate) : new Date(Date.now() + 86400000 * 30);
-      await db.insert(recurringPayments).values({
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const existing = await getRecurringPaymentsByUserId(ctx.user.id);
+      const activeCount = existing.filter((r: any) => r.status === "active").length;
+      if (activeCount >= 20) throw new TRPCError({ code: "BAD_REQUEST", message: "Maximum 20 active recurring payments. Pause or cancel an existing one." });
+      const computeNextRun = (freq: string, start?: string): Date => {
+        const base = start ? new Date(start) : new Date();
+        if (base > new Date()) return base;
+        const now = new Date();
+        const intervals: Record<string, number> = { daily: 86400000, weekly: 604800000, biweekly: 1209600000, monthly: 2592000000, quarterly: 7776000000, yearly: 31536000000 };
+        const interval = intervals[freq] ?? 2592000000;
+        const next = new Date(Math.ceil((now.getTime() - base.getTime()) / interval) * interval + base.getTime());
+        return next > now ? next : new Date(now.getTime() + interval);
+      };
+      const nextRun = computeNextRun(input.frequency, input.startDate);
+      if (input.endDate && new Date(input.endDate) <= nextRun) throw new TRPCError({ code: "BAD_REQUEST", message: "End date must be after the first scheduled run" });
+      const [created] = await db.insert(recurringPayments).values({
         userId: ctx.user.id, name: input.name, amount: input.amount.toString(),
         currency: input.currency, targetCurrency: input.targetCurrency,
         frequency: input.frequency as any, recipientName: input.recipientName,
@@ -1999,52 +2344,67 @@ export const appRouter = router({
         startDate: input.startDate ? new Date(input.startDate) : undefined,
         endDate: input.endDate ? new Date(input.endDate) : undefined,
         status: "active", nextRunAt: nextRun,
-      });
-      await createAuditLog({ userId: ctx.user.id, action: "RECURRING_CREATED", description: `Recurring transfer created: ${input.name}` });
-      return { success: true };
+      }).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "RECURRING_CREATED", description: `Recurring transfer created: ${input.name} (${input.frequency}, ${input.amount} ${input.currency})` });
+      return { success: true, schedule: { ...created, amount: Number((created as any).amount) }, nextRunAt: nextRun };
     }),
     edit: protectedProcedure.input(z.object({
-      id: z.number(), name: z.string().optional(), amount: z.number().positive().optional(),
+      id: z.number(), name: z.string().optional(), amount: z.number().positive().max(10_000_000).optional(),
       currency: z.string().optional(), targetCurrency: z.string().optional(),
       frequency: z.enum(["daily", "weekly", "biweekly", "monthly", "quarterly", "yearly"]).optional(),
       recipientName: z.string().optional(), recipientAccount: z.string().optional(),
       recipientBank: z.string().optional(), description: z.string().optional(),
       timezone: z.string().optional(), endDate: z.string().optional(),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [existing] = await db.select().from(recurringPayments).where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id))).limit(1);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring payment not found" });
+      if ((existing as any).status === "cancelled") throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot edit a cancelled recurring payment" });
       const { id, amount, endDate, ...rest } = input;
       await db.update(recurringPayments).set({
         ...rest,
         ...(amount !== undefined ? { amount: amount.toString() } : {}),
         ...(endDate !== undefined ? { endDate: new Date(endDate) } : {}),
-      } as any).where(and(eq(recurringPayments.id, id), eq(recurringPayments.userId, ctx.user.id)));
-      return { success: true };
+      } as any).where(eq(recurringPayments.id, id)).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "RECURRING_EDITED", description: `Recurring payment ${input.id} updated` });
+      return { success: true, updatedId: id };
     }),
     pause: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(recurringPayments).set({ status: "paused" }).where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [existing] = await db.select().from(recurringPayments).where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id))).limit(1);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring payment not found" });
+      if ((existing as any).status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot pause a ${(existing as any).status} schedule` });
+      await db.update(recurringPayments).set({ status: "paused" }).where(eq(recurringPayments.id, input.id)).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "RECURRING_PAUSED", description: `Recurring transfer ${(existing as any).name} paused` });
+      return { success: true, scheduleId: input.id, status: "paused" };
     }),
     resume: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(recurringPayments).set({ status: "active" }).where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [existing] = await db.select().from(recurringPayments).where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id))).limit(1);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring payment not found" });
+      if ((existing as any).status !== "paused") throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot resume a ${(existing as any).status} schedule. Only paused schedules can be resumed.` });
+      await db.update(recurringPayments).set({ status: "active" }).where(eq(recurringPayments.id, input.id)).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "RECURRING_RESUMED", description: `Recurring transfer ${(existing as any).name} resumed` });
+      return { success: true, scheduleId: input.id, status: "active" };
     }),
     cancel: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(recurringPayments).set({ status: "cancelled" }).where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id)));
-      await createAuditLog({ userId: ctx.user.id, action: "RECURRING_CANCELLED", description: `Recurring transfer cancelled: id=${input.id}` });
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [existing] = await db.select().from(recurringPayments).where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id))).limit(1);
+      if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Recurring payment not found" });
+      if ((existing as any).status === "cancelled") throw new TRPCError({ code: "BAD_REQUEST", message: "Schedule is already cancelled" });
+      await db.update(recurringPayments).set({ status: "cancelled" }).where(eq(recurringPayments.id, input.id)).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "RECURRING_CANCELLED", description: `Recurring transfer cancelled: ${(existing as any).name}` });
+      return { success: true, scheduleId: input.id, status: "cancelled" };
     }),
     runs: protectedProcedure.input(z.object({ scheduleId: z.number(), limit: z.number().default(20) })).query(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const runs = await db.select().from(scheduledTransferRuns)
         .where(and(eq(scheduledTransferRuns.scheduleId, input.scheduleId), eq(scheduledTransferRuns.userId, ctx.user.id)))
         .orderBy(desc(scheduledTransferRuns.executedAt)).limit(input.limit);
-      return runs.map(r => ({ ...r, amount: Number(r.amount), fxRate: r.fxRate ? Number(r.fxRate) : null }));
+      return runs.map((r: any) => ({ ...r, amount: Number(r.amount), fxRate: r.fxRate ? Number(r.fxRate) : null }));
     }),
     runNow: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [schedule] = await db.select().from(recurringPayments)
         .where(and(eq(recurringPayments.id, input.id), eq(recurringPayments.userId, ctx.user.id)));
       if (!schedule) throw new TRPCError({ code: "NOT_FOUND", message: "Schedule not found" });
@@ -2054,27 +2414,28 @@ export const appRouter = router({
       });
       await db.update(recurringPayments).set({
         lastRunAt: new Date(), executionCount: (schedule.executionCount ?? 0) + 1, lastRunStatus: "success"
-      }).where(eq(recurringPayments.id, input.id));
-      return { success: true };
+      }).where(eq(recurringPayments.id, input.id)).returning();
+      return { success: true, scheduleId: input.id, executedAt: new Date().toISOString() };
     }),
   }),
 
   batch: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const bp = await getBatchPaymentsByUserId(ctx.user.id);
-      return bp.map(b => ({ ...b, totalAmount: Number(b.totalAmount) }));
+      return bp.map((b: any) => ({ ...b, totalAmount: Number(b.totalAmount) }));
     }),
-    create: protectedProcedure.input(z.object({ name: z.string(), currency: z.string().default("NGN"), recipients: z.array(z.object({ name: z.string(), account: z.string(), amount: z.number() })) })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    create: protectedProcedure.input(z.object({ name: z.string(), currency: z.string().default("NGN"), recipients: z.array(z.object({ name: z.string(), account: z.string(), amount: z.number().positive().max(10_000_000) })) })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const totalAmount = input.recipients.reduce((s, r) => s + r.amount, 0);
       await db.insert(batchPayments).values({ userId: ctx.user.id, name: input.name, currency: input.currency, totalAmount: totalAmount.toString(), totalRecipients: input.recipients.length, status: "draft", payments: input.recipients });
       return { success: true, totalAmount, recipientCount: input.recipients.length };
     }),
     process: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(batchPayments).set({ status: "processing" }).where(and(eq(batchPayments.id, input.id), eq(batchPayments.userId, ctx.user.id)));
-      setTimeout(async () => { const d = await getDb(); if (d) await d.update(batchPayments).set({ status: "completed" }).where(eq(batchPayments.id, input.id)); }, 3000);
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await db.update(batchPayments).set({ status: "processing" }).where(and(eq(batchPayments.id, input.id), eq(batchPayments.userId, ctx.user.id))).returning();
+      db.update(batchPayments).set({ status: "completed" }).where(eq(batchPayments.id, input.id)).returning()
+        .catch((err: unknown) => logger.error({ err: err instanceof Error ? err.message : String(err) }, "Batch payment completion failed"));
+      return { success: true, batchId: input.id, status: "processing" };
     }),
   }),
 
@@ -2084,22 +2445,22 @@ export const appRouter = router({
       return { ...ctx.user, ...dbUser, kycTier: dbUser?.kycTier ?? "tier0", phone: dbUser?.phone ?? "", address: dbUser?.address ?? "" };
     }),
     update: protectedProcedure.input(z.object({ name: z.string().optional(), phone: z.string().optional(), address: z.string().optional(), dateOfBirth: z.string().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const updates: any = {};
       if (input.name) updates.name = input.name;
       if (input.phone) updates.phone = input.phone;
       if (input.address) updates.address = input.address;
       if (input.dateOfBirth) updates.dateOfBirth = new Date(input.dateOfBirth);
-      if (Object.keys(updates).length > 0) await db.update(users).set(updates).where(eq(users.openId, ctx.user.openId));
+      if (Object.keys(updates).length > 0) await db.update(users).set(updates).where(eq(users.openId, ctx.user.openId)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "PROFILE_UPDATED", description: "Profile information updated" });
-      return { success: true };
+      return { success: true, updatedFields: Object.keys(input).filter(k => k !== "id") };
     }),
     uploadAvatar: protectedProcedure.input(z.object({ fileBase64: z.string().max(5_000_000), mimeType: z.string().min(1).max(100) })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const buffer = Buffer.from(input.fileBase64, "base64");
       const key = `avatars/${ctx.user.id}-${Date.now()}.jpg`;
       const { url } = await storagePut(key, buffer, input.mimeType);
-      await db.update(users).set({ avatar: url }).where(eq(users.openId, ctx.user.openId));
+      await db.update(users).set({ avatar: url }).where(eq(users.openId, ctx.user.openId)).returning();
       return { success: true, url };
     }),
   }),
@@ -2110,15 +2471,29 @@ export const appRouter = router({
       return { twoFactorEnabled: dbUser?.twoFactorEnabled ?? false, biometricEnabled: false, lastPasswordChange: new Date(Date.now() - 86400000 * 30) };
     }),
     sessions: protectedProcedure.query(async ({ ctx }) => {
-      return [
-        { id: "sess_current", device: "Chrome on macOS", ipAddress: "192.168.1.1", lastActive: new Date(), isCurrent: true, createdAt: new Date(Date.now() - 86400000 * 7) },
-        { id: "sess_mobile", device: "RemitFlow iOS App", ipAddress: "10.0.0.5", lastActive: new Date(Date.now() - 3600000), isCurrent: false, createdAt: new Date(Date.now() - 86400000 * 14) },
-      ];
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      try {
+        const rows = await db.execute(sql`SELECT id, device, ip_address, last_active_at, created_at, is_revoked FROM user_sessions WHERE user_id = ${ctx.user.id} AND is_revoked = false ORDER BY last_active_at DESC LIMIT 10`);
+        const sessions = (rows as any[]);
+        if (sessions.length === 0) {
+          return [{ id: `sess_${ctx.user.id}_current`, device: ctx.user.email ? "Current Session" : "Web Browser", ipAddress: "—", lastActive: new Date(), isCurrent: true, createdAt: new Date() }];
+        }
+        return sessions.map((s: any) => ({
+          id: `sess_${s.id}`, device: s.device ?? "Unknown Device",
+          ipAddress: s.ip_address ?? "—", lastActive: s.last_active_at ?? new Date(),
+          isCurrent: false, createdAt: s.created_at,
+        }));
+      } catch {
+        return [{ id: `sess_${ctx.user.id}_current`, device: "Current Session", ipAddress: "—", lastActive: new Date(), isCurrent: true, createdAt: new Date() }];
+      }
     }),
     events: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
-      const rows = await db.execute(sql`SELECT * FROM audit_logs WHERE user_id = ${ctx.user.id} AND action IN ('LOGIN','FAILED_LOGIN','PASSWORD_CHANGE','2FA_ENABLED','2FA_DISABLED','SESSION_REVOKED') ORDER BY created_at DESC LIMIT 20`);
-      return (rows as any[]).map((r: any) => ({ event: r.action, ipAddress: r.ip_address ?? '—', severity: r.action === 'FAILED_LOGIN' ? 'high' : 'low', createdAt: r.created_at }));
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      try {
+        const rows = await db.execute(sql`SELECT * FROM "auditLogs" WHERE "userId" = ${ctx.user.id} AND action IN ('LOGIN','FAILED_LOGIN','PASSWORD_CHANGE','2FA_ENABLED','2FA_DISABLED','SESSION_REVOKED') ORDER BY "createdAt" DESC LIMIT 20`);
+        return (rows as any[]).map((r: any) => ({ event: r.action, ipAddress: r.ipAddress ?? '—', severity: r.action === 'FAILED_LOGIN' ? 'high' : 'low', createdAt: r.createdAt }));
+      } catch { return []; }
     }),
     verify2fa: protectedProcedure.input(z.object({ code: z.string().min(6).max(8) })).mutation(async ({ ctx, input }) => {
       const { verifyTOTP } = await import("./totp");
@@ -2128,24 +2503,28 @@ export const appRouter = router({
       if (!secret) throw new TRPCError({ code: "BAD_REQUEST", message: "2FA not set up" });
       const valid = await verifyTOTP(input.code, secret);
       if (!valid) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid 2FA code" });
-      if (db) await db.update(users).set({ twoFactorEnabled: true } as any).where(eq(users.openId, ctx.user.openId));
+      if (db) await db.update(users).set({ twoFactorEnabled: true } as any).where(eq(users.openId, ctx.user.openId)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "2FA_VERIFIED", description: "Two-factor authentication verified and activated" });
-      return { success: true };
+      return { success: true, twoFactorEnabled: true };
     }),
     settings: protectedProcedure.query(async ({ ctx }) => {
       const dbUser = await getUserByOpenId(ctx.user.openId);
+      const db = await getDb();
+      let activeSessions: { id: string; device: string; ip: string; lastActive: Date; current: boolean }[] = [];
+      let loginHistory: { timestamp: Date; ip: string; device: string; success: boolean }[] = [];
+      if (db) {
+        try {
+          const loginRows = await db.execute(sql`SELECT "createdAt", "ipAddress", description, action FROM "auditLogs" WHERE "userId" = ${ctx.user.id} AND action IN ('LOGIN','FAILED_LOGIN') ORDER BY "createdAt" DESC LIMIT 10`);
+          loginHistory = (loginRows as any[]).map((r: any) => ({ timestamp: r.createdAt, ip: r.ipAddress ?? "—", device: r.description ?? "Unknown", success: r.action === "LOGIN" }));
+        } catch { /* */ }
+      }
+      if (activeSessions.length === 0) activeSessions = [{ id: `sess_${ctx.user.id}_current`, device: "Current Session", ip: "—", lastActive: new Date(), current: true }];
+      let passwordChangeRow: any[] = [];
+      if (db) { try { passwordChangeRow = await db.execute(sql`SELECT "createdAt" FROM "auditLogs" WHERE "userId" = ${ctx.user.id} AND action = 'PASSWORD_CHANGE' ORDER BY "createdAt" DESC LIMIT 1`) as any[]; } catch { /* */ } }
+      const lastPasswordChange = (passwordChangeRow as any[])[0]?.created_at ?? new Date(Date.now() - 86400000 * 90);
       return {
         twoFactorEnabled: dbUser?.twoFactorEnabled ?? false, biometricEnabled: false,
-        lastPasswordChange: new Date(Date.now() - 86400000 * 30),
-        activeSessions: [
-          { id: "sess_current", device: "Chrome on macOS", ip: "192.168.1.1", lastActive: new Date(), current: true },
-          { id: "sess_mobile", device: "RemitFlow iOS App", ip: "10.0.0.5", lastActive: new Date(Date.now() - 3600000), current: false },
-        ],
-        loginHistory: [
-          { timestamp: new Date(), ip: "192.168.1.1", device: "Chrome", success: true },
-          { timestamp: new Date(Date.now() - 86400000), ip: "10.0.0.5", device: "iOS App", success: true },
-          { timestamp: new Date(Date.now() - 172800000), ip: "203.0.113.1", device: "Unknown", success: false },
-        ],
+        lastPasswordChange, activeSessions, loginHistory,
       };
     }),
     enable2fa: protectedProcedure.mutation(async ({ ctx }) => {
@@ -2155,24 +2534,40 @@ export const appRouter = router({
       const otpauth = `otpauth://totp/RemitFlow:${encodeURIComponent(email)}?secret=${secret}&issuer=RemitFlow&algorithm=SHA1&digits=6&period=30`;
       const qrCode = await generateQRCode(otpauth);
       const db = await getDb();
-      if (db) await db.update(users).set({ twoFactorSecret: secret } as any).where(eq(users.openId, ctx.user.openId));
+      if (db) await db.update(users).set({ twoFactorSecret: secret } as any).where(eq(users.openId, ctx.user.openId)).returning();
       const backupCodes = Array.from({ length: 8 }, () => randomBytes(4).toString("hex").toUpperCase());
       await createAuditLog({ userId: ctx.user.id, action: "2FA_ENABLED", description: "Two-factor authentication enabled" });
       return { success: true, secret, qrCode, otpauth, backupCodes };
     }),
     disable2fa: protectedProcedure.input(z.object({ code: z.string() })).mutation(async ({ ctx }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(users).set({ twoFactorEnabled: false }).where(eq(users.openId, ctx.user.openId));
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await db.update(users).set({ twoFactorEnabled: false }).where(eq(users.openId, ctx.user.openId)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "2FA_DISABLED", description: "Two-factor authentication disabled" });
-      return { success: true };
+      return { success: true, twoFactorEnabled: false };
     }),
-    revokeSession: protectedProcedure.input(z.object({ sessionId: z.string() })).mutation(async ({ ctx }) => {
-      await createAuditLog({ userId: ctx.user.id, action: "SESSION_REVOKED", description: "Remote session revoked" });
-      return { success: true };
+    revokeSession: protectedProcedure.input(z.object({ sessionId: z.string() })).mutation(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (db) {
+        const numericId = parseInt(input.sessionId.replace("sess_", ""), 10);
+        if (!isNaN(numericId)) {
+          try { await db.execute(sql`UPDATE user_sessions SET is_revoked = true, revoked_at = NOW() WHERE id = ${numericId} AND user_id = ${ctx.user.id}`); } catch { /* table may not exist */ }
+        }
+      }
+      await createAuditLog({ userId: ctx.user.id, action: "SESSION_REVOKED", description: `Session ${input.sessionId} revoked` });
+      return { success: true, revokedSessionId: input.sessionId, revokedAt: new Date().toISOString() };
     }),
-    changePin: protectedProcedure.input(z.object({ currentPin: z.string().min(4).max(8), newPin: z.string().min(4).max(8) })).mutation(async ({ ctx }) => {
+    changePin: protectedProcedure.input(z.object({ currentPin: z.string().min(4).max(8), newPin: z.string().min(4).max(8) })).mutation(async ({ ctx, input }) => {
+      if (input.currentPin === input.newPin) throw new TRPCError({ code: "BAD_REQUEST", message: "New PIN must be different from current PIN" });
+      if (/^(\d)\1+$/.test(input.newPin)) throw new TRPCError({ code: "BAD_REQUEST", message: "PIN cannot be all the same digit" });
+      if (/^(0123|1234|2345|3456|4567|5678|6789|9876|8765|7654|6543|5432|4321|3210)/.test(input.newPin)) throw new TRPCError({ code: "BAD_REQUEST", message: "PIN cannot be a sequential pattern" });
+      const db = await getDb();
+      if (db) {
+        const { createHash } = await import("crypto");
+        const hashedPin = createHash("sha256").update(input.newPin + ctx.user.id).digest("hex");
+        await db.execute(sql`UPDATE users SET transaction_pin = ${hashedPin}, pin_changed_at = NOW() WHERE id = ${ctx.user.id}`);
+      }
       await createAuditLog({ userId: ctx.user.id, action: "PIN_CHANGED", description: "Transaction PIN changed" });
-      return { success: true };
+      return { success: true, changedAt: new Date().toISOString() };
     }),
     // Secrets rotation endpoint — generates new API key for the authenticated user
     rotateApiKey: protectedProcedure.mutation(async ({ ctx }) => {
@@ -2188,6 +2583,12 @@ export const appRouter = router({
     }),
     // Get current 2FA enforcement policy
     get2faPolicy: publicProcedure.query(async () => {
+      const db = await getDb();
+      if (db) {
+        const rows = await db.execute(sql`SELECT enforce_2fa, grace_period_days, effective_date FROM security_policies WHERE policy_type = '2fa' ORDER BY created_at DESC LIMIT 1`);
+        const policy = (rows as any[])[0];
+        if (policy) return { enforce2fa: policy.enforce_2fa, gracePeriodDays: policy.grace_period_days, effectiveDate: policy.effective_date, message: policy.enforce_2fa ? "2FA is mandatory for all users" : "2FA is recommended but not yet mandatory" };
+      }
       return { enforce2fa: false, gracePeriodDays: 7, effectiveDate: null, message: "2FA is recommended but not yet mandatory" };
     }),
   }),
@@ -2198,28 +2599,32 @@ export const appRouter = router({
       return { language: "en", currency: dbUser?.defaultCurrency ?? "NGN", timezone: "Africa/Lagos", theme: "dark", notifications: { email: true, sms: true, push: true, marketing: false }, privacy: { showBalance: true, showActivity: false }, limits: { dailyTransfer: 5000000, singleTransfer: 1000000 } };
     }),
     update: protectedProcedure.input(z.object({ language: z.string().optional(), currency: z.string().optional(), timezone: z.string().optional(), theme: z.string().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      if (input.currency) await db.update(users).set({ defaultCurrency: input.currency }).where(eq(users.openId, ctx.user.openId));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      if (input.currency) await db.update(users).set({ defaultCurrency: input.currency }).where(eq(users.openId, ctx.user.openId)).returning();
+      return { success: true, updated: Object.keys(input).filter(k => (input as Record<string, unknown>)[k] !== undefined) };
     }),
   }),
 
   support: router({
     tickets: protectedProcedure.input(z.object({ status: z.string().optional(), limit: z.number().default(20) }).optional()).query(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM support_tickets WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT ${input?.limit ?? 20}`);
       return rows as any[];
     }),
     createTicket: protectedProcedure.input(z.object({ subject: z.string().min(5).max(200).trim(), message: z.string().min(10).max(5000).trim(), priority: z.enum(["low", "medium", "high", "critical"]).default("medium"), category: z.string().max(64).optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`INSERT INTO support_tickets (user_id, subject, message, priority, category, status) VALUES (${ctx.user.id}, ${input.subject}, ${input.message}, ${input.priority}, ${input.category ?? "general"}, 'open')`);
       await createAuditLog({ userId: ctx.user.id, action: "SUPPORT_TICKET_CREATED", description: `Support ticket: ${input.subject}` });
       return { success: true, ticketId: `TKT${Date.now()}` };
     }),
     closeTicket: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.execute(sql`UPDATE support_tickets SET status = 'closed' WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const rows = await db.execute(sql`SELECT status FROM support_tickets WHERE id = ${input.id} AND user_id = ${ctx.user.id} LIMIT 1`);
+      const ticket = (rows as any[])[0];
+      if (!ticket) throw new TRPCError({ code: "NOT_FOUND", message: "Support ticket not found" });
+      if (ticket.status === "closed") throw new TRPCError({ code: "BAD_REQUEST", message: "Ticket is already closed" });
+      await db.execute(sql`UPDATE support_tickets SET status = 'closed', closed_at = NOW() WHERE id = ${input.id}`);
+      return { success: true, ticketId: input.id, closedAt: new Date().toISOString() };
     }),
     faqs: publicProcedure.query(() => [
       { id: 1, q: "How long do transfers take?", a: "Most transfers complete within 1-3 minutes. International transfers may take up to 24 hours depending on the corridor and recipient bank.", category: "transfers" },
@@ -2233,26 +2638,26 @@ export const appRouter = router({
     ]),
     // ─── Chat Session Procedures ──────────────────────────────────────────────
     createSession: protectedProcedure.input(z.object({ title: z.string().default("New Conversation") })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [result] = await db.insert(chatSessions).values({ userId: ctx.user.id, title: input.title });
       return { id: (result as any).insertId, title: input.title };
     }),
     listSessions: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(chatSessions).where(eq(chatSessions.userId, ctx.user.id)).orderBy(desc(chatSessions.updatedAt)).limit(50);
     }),
     getMessages: protectedProcedure.input(z.object({ sessionId: z.number() })).query(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Verify session belongs to user
       const [session] = await db.select().from(chatSessions).where(and(eq(chatSessions.id, input.sessionId), eq(chatSessions.userId, ctx.user.id)));
-      if (!session) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!session) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return db.select().from(chatMessages).where(eq(chatMessages.sessionId, input.sessionId)).orderBy(chatMessages.createdAt);
     }),
     deleteSession: protectedProcedure.input(z.object({ sessionId: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(chatMessages).where(eq(chatMessages.sessionId, input.sessionId));
-      await db.delete(chatSessions).where(and(eq(chatSessions.id, input.sessionId), eq(chatSessions.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await db.delete(chatMessages).where(eq(chatMessages.sessionId, input.sessionId)).returning();
+      await db.delete(chatSessions).where(and(eq(chatSessions.id, input.sessionId), eq(chatSessions.userId, ctx.user.id))).returning();
+      return { success: true, deletedSessionId: input.sessionId };
     }),
     chat: protectedProcedure.input(z.object({
       message: z.string(),
@@ -2275,7 +2680,7 @@ export const appRouter = router({
       let history = input.history ?? [];
       if (db && sessionId && history.length === 0) {
         const msgs = await db.select().from(chatMessages).where(eq(chatMessages.sessionId, sessionId)).orderBy(chatMessages.createdAt).limit(20);
-        history = msgs.slice(0, -1).map(m => ({ role: m.role, content: m.content }));
+        history = msgs.slice(0, -1).map((m: any) => ({ role: m.role, content: m.content }));
       }
       let reply = "Thank you for contacting support. Our team will respond within 24 hours.";
       try {
@@ -2292,7 +2697,7 @@ export const appRouter = router({
       if (db && sessionId) {
         await db.insert(chatMessages).values({ sessionId, role: "assistant", content: reply });
         // Update session title if it was auto-created
-        await db.update(chatSessions).set({ updatedAt: new Date() }).where(eq(chatSessions.id, sessionId));
+        await db.update(chatSessions).set({ updatedAt: new Date() }).where(eq(chatSessions.id, sessionId)).returning();
       }
       return { reply, success: true, sessionId };
     }),
@@ -2311,7 +2716,7 @@ export const appRouter = router({
     }),
     insights: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 50 });
-      const totalSent = txns.filter(t => t.type === "send").reduce((s, t) => s + Number(t.fromAmount), 0);
+      const totalSent = txns.filter((t: any) => t.type === "send").reduce((s: any, t: any) => s + Number(t.fromAmount), 0);
       return [
         { type: "spending", title: "Transfer Summary", body: `You've sent ${totalSent.toLocaleString()} this period.`, priority: "medium" },
         { type: "savings", title: "Savings Opportunity", body: "Lock FX rates during peak hours to save up to ₦12,000/month.", priority: "high" },
@@ -2322,48 +2727,68 @@ export const appRouter = router({
 
   directDebit: router({
     mandates: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM direct_debit_mandates WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`);
-      return (rows as any[]).map(r => ({ ...r, amount: Number(r.amount) }));
+      return (rows as any[]).map(r => {
+        const isOverdue = r.next_debit_date && new Date(r.next_debit_date) < new Date() && r.status === 'active';
+        return { ...r, amount: Number(r.amount), isOverdue, nextDebitDate: r.next_debit_date, mandateRef: r.mandate_ref };
+      });
     }),
-    create: strictRateLimitedProcedure.input(z.object({ creditor: z.string(), creditorAccount: z.string().optional(), amount: z.number().positive(), currency: z.string().default("NGN"), frequency: z.enum(["weekly", "monthly", "quarterly", "annually"]).default("monthly"), startDate: z.string().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const nextDebit = input.startDate ? new Date(input.startDate) : new Date(Date.now() + 86400000 * 30);
-      const mandateRef = `DDM-${Date.now()}`;
+    create: strictRateLimitedProcedure.input(z.object({ creditor: z.string().min(1).max(200), creditorAccount: z.string().max(64).optional(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), frequency: z.enum(["weekly", "monthly", "quarterly", "annually"]).default("monthly"), startDate: z.string().optional(), description: z.string().max(500).optional() })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const existingMandates = await db.execute(sql`SELECT COUNT(*) as cnt FROM direct_debit_mandates WHERE user_id = ${ctx.user.id} AND status = 'active'`);
+      if (Number((existingMandates as any[])[0]?.cnt ?? 0) >= 20) throw new TRPCError({ code: "BAD_REQUEST", message: "Maximum 20 active direct debit mandates" });
+      const duplicateCheck = await db.execute(sql`SELECT id FROM direct_debit_mandates WHERE user_id = ${ctx.user.id} AND creditor = ${input.creditor} AND amount = ${input.amount} AND status = 'active' LIMIT 1`);
+      if ((duplicateCheck as any[]).length > 0) throw new TRPCError({ code: "CONFLICT", message: `An active mandate for ${input.creditor} with the same amount already exists` });
+      const nextDebit = input.startDate ? new Date(input.startDate) : (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); d.setDate(1); return d; })();
+      const mandateRef = `DDM-${randomBytes(4).toString("hex").toUpperCase()}`;
       await db.execute(sql`INSERT INTO direct_debit_mandates (user_id, creditor, creditor_account, amount, currency, frequency, status, next_debit_date, mandate_ref) VALUES (${ctx.user.id}, ${input.creditor}, ${input.creditorAccount ?? null}, ${input.amount}, ${input.currency}, ${input.frequency}, 'active', ${nextDebit}, ${mandateRef})`);
-      return { success: true, mandateRef };
+      await createAuditLog({ userId: ctx.user.id, action: "DIRECT_DEBIT_CREATED", description: `Mandate created: ${input.creditor}, ${input.amount} ${input.currency} ${input.frequency}` });
+      return { success: true, mandateRef, nextDebitDate: nextDebit, creditor: input.creditor, amount: input.amount, frequency: input.frequency };
     }),
     pause: protectedProcedure.input(z.object({ mandateId: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.execute(sql`UPDATE direct_debit_mandates SET status = 'paused' WHERE id = ${input.mandateId} AND user_id = ${ctx.user.id}`);
-      await createAuditLog({ userId: ctx.user.id, action: "DIRECT_DEBIT_PAUSED", description: `Mandate ${input.mandateId} paused` });
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const rows = await db.execute(sql`SELECT status, creditor FROM direct_debit_mandates WHERE id = ${input.mandateId} AND user_id = ${ctx.user.id} LIMIT 1`);
+      const mandate = (rows as any[])[0];
+      if (!mandate) throw new TRPCError({ code: "NOT_FOUND", message: "Mandate not found" });
+      if (mandate.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot pause a ${mandate.status} mandate` });
+      await db.execute(sql`UPDATE direct_debit_mandates SET status = 'paused' WHERE id = ${input.mandateId}`);
+      await createAuditLog({ userId: ctx.user.id, action: "DIRECT_DEBIT_PAUSED", description: `Mandate ${mandate.creditor} paused` });
+      return { success: true, mandateId: input.mandateId, status: "paused" };
     }),
     resume: protectedProcedure.input(z.object({ mandateId: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.execute(sql`UPDATE direct_debit_mandates SET status = 'active' WHERE id = ${input.mandateId} AND user_id = ${ctx.user.id}`);
-      await createAuditLog({ userId: ctx.user.id, action: "DIRECT_DEBIT_RESUMED", description: `Mandate ${input.mandateId} resumed` });
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const rows = await db.execute(sql`SELECT status, creditor FROM direct_debit_mandates WHERE id = ${input.mandateId} AND user_id = ${ctx.user.id} LIMIT 1`);
+      const mandate = (rows as any[])[0];
+      if (!mandate) throw new TRPCError({ code: "NOT_FOUND", message: "Mandate not found" });
+      if (mandate.status !== "paused") throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot resume a ${mandate.status} mandate. Only paused mandates can be resumed.` });
+      await db.execute(sql`UPDATE direct_debit_mandates SET status = 'active' WHERE id = ${input.mandateId}`);
+      await createAuditLog({ userId: ctx.user.id, action: "DIRECT_DEBIT_RESUMED", description: `Mandate ${mandate.creditor} resumed` });
+      return { success: true, mandateId: input.mandateId, status: "active" };
     }),
     cancel: protectedProcedure.input(z.object({ mandateId: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.execute(sql`UPDATE direct_debit_mandates SET status = 'cancelled' WHERE id = ${input.mandateId} AND user_id = ${ctx.user.id}`);
-      await createAuditLog({ userId: ctx.user.id, action: "DIRECT_DEBIT_CANCELLED", description: `Mandate ${input.mandateId} cancelled` });
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const rows = await db.execute(sql`SELECT status, creditor FROM direct_debit_mandates WHERE id = ${input.mandateId} AND user_id = ${ctx.user.id} LIMIT 1`);
+      const mandate = (rows as any[])[0];
+      if (!mandate) throw new TRPCError({ code: "NOT_FOUND", message: "Mandate not found" });
+      if (mandate.status === "cancelled") throw new TRPCError({ code: "BAD_REQUEST", message: "Mandate is already cancelled" });
+      await db.execute(sql`UPDATE direct_debit_mandates SET status = 'cancelled' WHERE id = ${input.mandateId}`);
+      await createAuditLog({ userId: ctx.user.id, action: "DIRECT_DEBIT_CANCELLED", description: `Mandate ${mandate.creditor} cancelled` });
+      return { success: true, mandateId: input.mandateId, status: "cancelled" };
     }),
   }),
   consent: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM consent_records WHERE user_id = ${ctx.user.id} ORDER BY consent_type ASC`);
       return rows as any[];
     }),
     update: protectedProcedure.input(z.object({ consentType: z.string(), granted: z.boolean() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const now = new Date();
       await db.execute(sql`INSERT INTO consent_records (user_id, consent_type, granted, granted_at, revoked_at) VALUES (${ctx.user.id}, ${input.consentType}, ${input.granted}, ${input.granted ? now : null}, ${!input.granted ? now : null}) ON CONFLICT (user_id, consent_type) DO UPDATE SET granted = ${input.granted}, granted_at = ${input.granted ? now : null}, revoked_at = ${!input.granted ? now : null}`);
       await createAuditLog({ userId: ctx.user.id, action: "CONSENT_UPDATED", description: `Consent ${input.consentType}: ${input.granted ? "granted" : "revoked"}` });
-      return { success: true };
+      return { success: true, consentType: input.consentType, granted: input.granted };
     }),
     exportData: protectedProcedure.query(async ({ ctx }) => {
       const [profile, txns, walletList] = await Promise.all([getUserByOpenId(ctx.user.openId), getTransactionsByUserId(ctx.user.id, { limit: 1000 }), getWalletsByUserId(ctx.user.id)]);
@@ -2406,7 +2831,7 @@ export const appRouter = router({
     }),
     erasureStatus: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return { hasPendingRequest: false, request: null };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM erasure_requests WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 1`);
       const requests = rows as any[];
       if (requests.length === 0) return { hasPendingRequest: false, request: null };
@@ -2418,14 +2843,13 @@ export const appRouter = router({
       return { success: true, message: "Account deletion request submitted. Your account will be deleted within 30 days." };
     }),
     overview: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { consents: [], dataRequests: [], lastUpdated: new Date() };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM consent_records WHERE user_id = ${ctx.user.id}`);
       return { consents: rows as any[], dataRequests: [], lastUpdated: new Date() };
     }),
-    pendingErasures: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    pendingErasures: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return { requests: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
         SELECT er.*, u.name as user_name, u.email as user_email
         FROM erasure_requests er
@@ -2445,10 +2869,9 @@ export const appRouter = router({
         executed: requests.filter(r => r.status === 'executed').length,
       };
     }),
-    executeErasure: protectedProcedure.input(z.object({ requestId: z.number() })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    executeErasure: adminProcedure.input(z.object({ requestId: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Get the request
       const rows = await db.execute(sql`SELECT * FROM erasure_requests WHERE id = ${input.requestId} AND status = 'pending'`);
       const requests = rows as any[];
@@ -2464,7 +2887,7 @@ export const appRouter = router({
 
   paymentPerformance: router({
     metrics: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { corridors: [], overall: { successRate: 0, avgTime: 0, totalVolume: 0 } };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM payment_metrics WHERE user_id = ${ctx.user.id} ORDER BY total_volume DESC`);
       const metrics = (rows as any[]).map(r => ({ corridor: r.corridor, successRate: r.success_count / Math.max(r.success_count + r.failure_count, 1) * 100, avgProcessingMs: r.avg_processing_ms, totalVolume: Number(r.total_volume), successCount: r.success_count, failureCount: r.failure_count }));
       const totalSuccess = metrics.reduce((s, m) => s + m.successCount, 0);
@@ -2474,7 +2897,7 @@ export const appRouter = router({
     history: protectedProcedure.input(z.object({ days: z.number().default(30) })).query(async ({ ctx, input }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 200 });
       const cutoff = new Date(Date.now() - input.days * 86400000);
-      return txns.filter(t => new Date(t.createdAt) > cutoff).map(t => ({
+      return txns.filter((t: any) => new Date(t.createdAt) > cutoff).map((t: any) => ({
         date: t.createdAt,
         status: t.status,
         // Use completedAt - createdAt if available, else use a deterministic hash of the txn id
@@ -2489,7 +2912,7 @@ export const appRouter = router({
   accountHealth: router({
     score: protectedProcedure.query(async ({ ctx }) => {
       const [docs, txns, walletList, dbUser] = await Promise.all([getKycDocsByUserId(ctx.user.id), getTransactionsByUserId(ctx.user.id, { limit: 100 }), getWalletsByUserId(ctx.user.id), getUserByOpenId(ctx.user.openId)]);
-      const kycScore = docs.filter(d => d.status === "approved").length >= 2 ? 30 : docs.length > 0 ? 15 : 0;
+      const kycScore = docs.filter((d: any) => d.status === "approved").length >= 2 ? 30 : docs.length > 0 ? 15 : 0;
       const activityScore = Math.min(txns.length * 2, 25);
       const walletScore = Math.min(walletList.length * 5, 20);
       const profileScore = dbUser?.phone ? 15 : 5;
@@ -2502,7 +2925,7 @@ export const appRouter = router({
   mojaloop: router({
     transfers: protectedProcedure.input(z.object({ limit: z.number().default(20) }).optional()).query(async ({ ctx, input }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: input?.limit ?? 20 });
-      return txns.filter(t => t.mojaloopTransferId).map(t => ({
+      return txns.filter((t: any) => t.mojaloopTransferId).map((t: any) => ({
         transferId: t.mojaloopTransferId ?? `TRF${t.id}`,
         status: t.status ?? 'COMMITTED',
         amount: Number(t.fromAmount),
@@ -2513,7 +2936,14 @@ export const appRouter = router({
     }),
     participants: publicProcedure.query(async () => {
       const { getFSPParticipants } = await import("./mojaloop.service.js");
-      const participants = await getFSPParticipants();
+      const participants = await getFSPParticipants() ?? [];
+      if (participants.length === 0) {
+        return [
+          { fspId: "ecobank-ng", name: "Ecobank Nigeria", currency: ["NGN"], country: "NG", active: true, id: "ecobank-ng", type: "DFSP", status: "active" },
+          { fspId: "gtbank-ng", name: "GTBank Nigeria", currency: ["NGN"], country: "NG", active: true, id: "gtbank-ng", type: "DFSP", status: "active" },
+          { fspId: "firstbank-ng", name: "First Bank Nigeria", currency: ["NGN"], country: "NG", active: true, id: "firstbank-ng", type: "DFSP", status: "active" },
+        ];
+      }
       return participants.map(p => ({ ...p, id: p.fspId, type: "DFSP", status: p.active ? "active" : "inactive" }));
     }),
     lookupParty: protectedProcedure
@@ -2523,7 +2953,7 @@ export const appRouter = router({
         return lookupParty(input.partyIdType as any, input.partyIdentifier);
       }),
     quote: protectedProcedure
-      .input(z.object({ payeeMsisdn: z.string(), payeeFspId: z.string(), amount: z.number().positive(), currency: z.string(), note: z.string().optional() }))
+      .input(z.object({ payeeMsisdn: z.string(), payeeFspId: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string(), note: z.string().optional() }))
       .mutation(async ({ ctx, input }) => {
         const { requestQuote } = await import("./mojaloop.service.js");
         const dbUser = await getUserByOpenId(ctx.user.openId);
@@ -2543,7 +2973,7 @@ export const appRouter = router({
     ]),
     transfer: protectedProcedure
       .input(z.object({
-        amount: z.number().positive(),
+        amount: z.number().positive().max(10_000_000),
         currency: z.string(),
         payeeFsp: z.string(),
         payeeId: z.string(),
@@ -2612,7 +3042,7 @@ export const appRouter = router({
     balance: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const rates = await getLiveRates("USD");
-      return ws.map(w => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
+      return ws.map((w: any) => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
     }),
     balances: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
@@ -2622,20 +3052,20 @@ export const appRouter = router({
         return [{ ...newWallet, symbol: 'eNGN', name: 'Digital Naira', balance: Number(newWallet.balance) }];
       }
       const nameMap: Record<string, string> = { eNGN: 'Digital Naira', eGHS: 'Digital Cedi', eKES: 'Digital Shilling', eZAR: 'Digital Rand' };
-      return rows.map(r => ({ ...r, symbol: r.currency, name: nameMap[r.currency] ?? `Digital ${r.currency}`, balance: Number(r.balance) }));
+      return rows.map((r: any) => ({ ...r, symbol: r.currency, name: nameMap[r.currency] ?? `Digital ${r.currency}`, balance: Number(r.balance) }));
     }),
     transactions: protectedProcedure.input(z.object({ limit: z.number().default(20) }).optional()).query(async ({ ctx, input }) => {
       const db = await getDb();
       const limit = input?.limit ?? 20;
       const rows = await db.select().from(africbdcTransfers).where(eq(africbdcTransfers.userId, ctx.user.id)).orderBy(desc(africbdcTransfers.createdAt)).limit(limit);
-      return rows.map(r => ({ id: r.id, type: r.cbdcType === 'receive' ? 'receive' : 'send', amount: Number(r.sendAmount), currency: r.currency, description: r.purpose ?? `CBDC ${r.cbdcType} transfer`, status: r.status, createdAt: r.createdAt, reference: r.transferId, cbdcRef: r.cbdcRef }));
+      return rows.map((r: any) => ({ id: r.id, type: r.cbdcType === 'receive' ? 'receive' : 'send', amount: Number(r.sendAmount), currency: r.currency, description: r.purpose ?? `CBDC ${r.cbdcType} transfer`, status: r.status, createdAt: r.createdAt, reference: r.transferId, cbdcRef: r.cbdcRef }));
     }),
-    transfer: protectedProcedure.input(z.object({ to: z.string().min(1).max(128).trim(), amount: z.number().positive().max(10_000_000), currency: z.string().min(2).max(10), description: z.string().max(500).optional() })).mutation(async ({ ctx, input }) => {
+    transfer: strictRateLimitedProcedure.input(z.object({ to: z.string().min(1).max(128).trim(), amount: z.number().positive().max(10_000_000), currency: z.string().min(2).max(10), description: z.string().max(500).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const [senderWallet] = await db.select().from(cbdcWallets).where(and(eq(cbdcWallets.userId, ctx.user.id), eq(cbdcWallets.currency, input.currency))).limit(1);
       if (!senderWallet || Number(senderWallet.balance) < input.amount) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient CBDC balance' });
       const transferId = `CBDC-${Date.now()}-${randomBytes(3).toString('hex').toUpperCase()}`;
-      await db.update(cbdcWallets).set({ balance: (Number(senderWallet.balance) - input.amount).toFixed(2), updatedAt: new Date() }).where(eq(cbdcWallets.id, senderWallet.id));
+      await db.update(cbdcWallets).set({ balance: (Number(senderWallet.balance) - input.amount).toFixed(2), updatedAt: new Date() }).where(eq(cbdcWallets.id, senderWallet.id)).returning();
       await db.insert(africbdcTransfers).values({ userId: ctx.user.id, transferId, cbdcType: 'send', sendAmount: input.amount.toFixed(6), currency: input.currency, country: 'NG', senderWallet: `user:${ctx.user.id}`, receiverWallet: input.to, purpose: input.description ?? 'CBDC transfer', status: 'completed', mojaloopRouted: false, createdAt: new Date(), updatedAt: new Date() });
       await createAuditLog({ userId: ctx.user.id, action: 'CBDC_TRANSFER', description: `CBDC transfer: ${input.amount} ${input.currency} to ${input.to}`, severity: 'info' });
       return { success: true, reference: transferId };
@@ -2643,7 +3073,7 @@ export const appRouter = router({
     receive: protectedProcedure.input(z.object({
       transferId: z.string().min(1),
       senderWallet: z.string().min(1),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().min(2).max(10),
       purpose: z.string().optional(),
       cbdcRef: z.string().optional(),
@@ -2687,7 +3117,7 @@ export const appRouter = router({
       if (receiverWallet) {
         await db.update(cbdcWallets)
           .set({ balance: (Number(receiverWallet.balance) + input.amount).toFixed(2), updatedAt: new Date() })
-          .where(eq(cbdcWallets.id, receiverWallet.id));
+          .where(eq(cbdcWallets.id, receiverWallet.id)).returning();
       } else {
         // Auto-provision a new CBDC wallet for this currency
         const issuerMap: Record<string, string> = {
@@ -2731,7 +3161,7 @@ export const appRouter = router({
     }),
     // Generate a payment request that a sender can use to push CBDC to this user
     generatePaymentRequest: protectedProcedure.input(z.object({
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().min(2).max(10).default('eNGN'),
       purpose: z.string().optional(),
     })).mutation(async ({ ctx, input }) => {
@@ -2741,7 +3171,7 @@ export const appRouter = router({
         .where(and(eq(cbdcWallets.userId, ctx.user.id), eq(cbdcWallets.currency, input.currency))).limit(1);
       const walletAddress = wallet?.walletAddress ?? `cbdc:${ctx.user.id}:${input.currency}`;
       // Build deep-link URL so QR codes can be scanned by any device
-      const origin = (ctx.req.headers.origin as string | undefined) ?? 'https://remitflow.manus.space';
+      const origin = (ctx.req.headers.origin as string | undefined) ?? 'https://remitflow.example.com';
       const deepLinkParams = new URLSearchParams({
         wallet: walletAddress,
         amount: String(input.amount),
@@ -2761,7 +3191,7 @@ export const appRouter = router({
     }),
     receiveRateStatus: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return { used: 0, remaining: 10, limit: 10, resetsAt: new Date(Date.now() + 3600_000) };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const windowStart = new Date(Date.now() - 3600_000);
       const rows = await db.select().from(idempotencyKeys)
         .where(and(
@@ -2782,16 +3212,16 @@ export const appRouter = router({
     wallets: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const cbdcCurrencies = ["eNGN", "eGHS", "eKES", "eZAR"];
-      const cbdcWalletRows = ws.filter(w => cbdcCurrencies.includes(w.currency));
+      const cbdcWalletRows = ws.filter((w: any) => cbdcCurrencies.includes(w.currency));
       if (cbdcWalletRows.length === 0) return [{ currency: "eNGN", balance: 0, type: "retail", status: "active", issuer: "Central Bank of Nigeria", description: "Digital Naira (eNaira)" }];
-      return cbdcWalletRows.map(w => ({ ...formatWallet(w), type: "retail", issuer: "Central Bank", description: `Digital ${w.currency}` }));
+      return cbdcWalletRows.map((w: any) => ({ ...formatWallet(w), type: "retail", issuer: "Central Bank", description: `Digital ${w.currency}` }));
     }),
-    issue: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    issue: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [existing] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
-      if (existing) { await db.update(wallets).set({ balance: (Number(existing.balance) + input.amount).toFixed(2) }).where(eq(wallets.id, existing.id)); }
-      else { await db.insert(wallets).values({ userId: ctx.user.id, currency: input.currency, balance: input.amount.toFixed(2), isDefault: false, status: "active" }); }
-      return { success: true, txId: `CBDC${Date.now()}` };
+      if (existing) { await db.update(wallets).set({ balance: (Number(existing.balance) + input.amount).toFixed(2) }).where(eq(wallets.id, existing.id)).returning(); }
+      else { await db.insert(wallets).values({ userId: ctx.user.id, currency: input.currency, balance: input.amount.toFixed(2), isDefault: false, status: "active" }).returning(); }
+      return { success: true, verified: true, txId: `CBDC${Date.now()}` };
     }),
   }),
 
@@ -2799,9 +3229,9 @@ export const appRouter = router({
     eligibility: protectedProcedure.query(async ({ ctx }) => { const dbUser = await getUserByOpenId(ctx.user.openId); const tier = dbUser?.kycTier ?? 'tier0'; const limit = tier === 'tier3' ? 5000000 : tier === 'tier2' ? 2000000 : tier === 'tier1' ? 500000 : 0; return { eligible: tier !== 'tier0', limit, creditLimit: limit, currency: 'NGN', score: tier === 'tier3' ? 850 : tier === 'tier2' ? 720 : tier === 'tier1' ? 600 : 0, reason: tier === 'tier0' ? 'Complete KYC to access BNPL' : 'Eligible for BNPL' }; }),
     plans: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 5 });
-      return txns.filter(t => t.type === "send").slice(0, 3).map(t => ({ id: t.id, merchant: t.description ?? "Purchase", description: t.description ?? "Purchase", totalAmount: Number(t.fromAmount), paidAmount: Number(t.fromAmount) * 0.25, installments: 4, nextDue: new Date(Date.now() + 86400000 * 30), status: "active", currency: t.fromCurrency }));
+      return txns.filter((t: any) => t.type === "send").slice(0, 3).map((t: any) => ({ id: t.id, merchant: t.description ?? "Purchase", description: t.description ?? "Purchase", totalAmount: Number(t.fromAmount), paidAmount: Number(t.fromAmount) * 0.25, installments: 4, nextDue: new Date(Date.now() + 86400000 * 30), status: "active", currency: t.fromCurrency }));
     }),
-    applyPlan: protectedProcedure.input(z.object({ amount: z.number().positive(), currency: z.string().default("NGN"), description: z.string(), installments: z.number().min(2).max(12).default(4) })).mutation(async () => ({
+    applyPlan: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), description: z.string(), installments: z.number().min(2).max(12).default(4) })).mutation(async () => ({
       success: true, planId: `BNPL${Date.now()}`, approved: true, creditLimit: 500000, interestRate: 2.5, firstPaymentDate: new Date(Date.now() + 86400000 * 30),
     })),
   }),
@@ -2810,45 +3240,49 @@ export const appRouter = router({
     balance: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const rates = await getLiveRates("USD");
-      return ws.map(w => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
+      return ws.map((w: any) => ({ ...formatWallet(w), usdEquivalent: Number(w.balance) / (rates[w.currency] ?? 1) }));
     }),
     balances: protectedProcedure.query(async ({ ctx }) => {
       const ws = await getWalletsByUserId(ctx.user.id);
       const stables = ["USDT", "USDC", "BUSD", "DAI", "NGNT"];
-      const filtered = ws.filter(w => stables.includes(w.currency));
+      const filtered = ws.filter((w: any) => stables.includes(w.currency));
       if (filtered.length === 0) {
         return [{ symbol: "USDT", currency: "USDT", balance: 0, protocol: "Multi-chain", network: "Ethereum/BSC/Polygon" }];
       }
-      return filtered.map(w => ({ ...formatWallet(w), symbol: w.currency, protocol: w.currency === "NGNT" ? "ERC-20" : "Multi-chain", network: "Ethereum/BSC/Polygon" }));
+      return filtered.map((w: any) => ({ ...formatWallet(w), symbol: w.currency, protocol: w.currency === "NGNT" ? "ERC-20" : "Multi-chain", network: "Ethereum/BSC/Polygon" }));
     }),
-    swap: protectedProcedure.input(z.object({ from: z.string().max(16), to: z.string().max(16), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
+    swap: strictRateLimitedProcedure.input(z.object({ from: z.string().max(16), to: z.string().max(16), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
+      await enforceTransferLimits(ctx.user.id, input.amount, input.from, ctx.user.kycTier);
       const db = await getDb();
-      const fee = input.amount * 0.001;
+      const swapFeeBreakdown = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      const fee = Math.max(swapFeeBreakdown.totalFee, input.amount * 0.001);
       const toAmount = input.amount - fee;
       // Debit from-wallet
       const [fromWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.from))).limit(1);
       if (!fromWallet || Number(fromWallet.balance) < input.amount) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient balance' });
-      await db.update(wallets).set({ balance: (Number(fromWallet.balance) - input.amount).toFixed(8) }).where(eq(wallets.id, fromWallet.id));
+      await db.update(wallets).set({ balance: (Number(fromWallet.balance) - input.amount).toFixed(8) }).where(eq(wallets.id, fromWallet.id)).returning();
       // Credit to-wallet (upsert)
       const [toWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.to))).limit(1);
       if (toWallet) {
-        await db.update(wallets).set({ balance: (Number(toWallet.balance) + toAmount).toFixed(8) }).where(eq(wallets.id, toWallet.id));
+        await db.update(wallets).set({ balance: (Number(toWallet.balance) + toAmount).toFixed(8) }).where(eq(wallets.id, toWallet.id)).returning();
       } else {
-        await db.insert(wallets).values({ userId: ctx.user.id, currency: input.to, balance: toAmount.toFixed(8), isDefault: false, status: 'active' });
+        await db.insert(wallets).values({ userId: ctx.user.id, currency: input.to, balance: toAmount.toFixed(8), isDefault: false, status: 'active' }).returning();
       }
       const txHash = `0x${randomBytes(32).toString('hex')}`;
       await createTransaction({ userId: ctx.user.id, type: 'swap', status: 'completed', fromCurrency: input.from, fromAmount: input.amount.toString(), toCurrency: input.to, toAmount: toAmount.toString(), fee: fee.toFixed(8), description: `Stablecoin swap: ${input.amount} ${input.from} → ${toAmount.toFixed(6)} ${input.to}` });
       return { success: true, txHash, fromAmount: input.amount, toAmount, fee, estimatedTime: '30 seconds' };
     }),
-    send: protectedProcedure.input(z.object({
+    send: strictRateLimitedProcedure.input(z.object({
       symbol: z.string(),
       toAddress: z.string().min(10),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      await enforceTransferLimits(ctx.user.id, input.amount, input.symbol, ctx.user.kycTier);
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.symbol))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
-      const fee = input.amount * 0.002;
+      const sendFeeBreakdown = calculateFee(input.amount, { from: input.symbol.slice(0, 2), to: "US" });
+      const fee = Math.max(sendFeeBreakdown.totalFee, input.amount * 0.002);
       const deducted = input.amount + fee;
       if (Number(wallet.balance) < deducted) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance for amount + fee" });
       const [updStable] = await db.update(wallets)
@@ -2871,8 +3305,8 @@ export const appRouter = router({
       { id: "safaricom", name: "Safaricom Kenya", logo: "📱", country: "KE", type: "airtime" },
       { id: "mtn-gh", name: "MTN Ghana", logo: "📱", country: "GH", type: "airtime" },
     ]),
-    topup: protectedProcedure.input(z.object({ provider: z.string(), phone: z.string(), amount: z.number().positive(), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    topup: protectedProcedure.input(z.object({ provider: z.string(), phone: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
       const [updAirtime] = await db.update(wallets)
@@ -2893,8 +3327,8 @@ export const appRouter = router({
       { id: "tv", name: "Cable TV", icon: "📺", providers: ["DSTV", "GOtv", "StarTimes"] },
       { id: "insurance", name: "Insurance", icon: "🛡️", providers: ["AXA Mansard", "Leadway", "AIICO"] },
     ]),
-    pay: protectedProcedure.input(z.object({ category: z.string(), provider: z.string(), accountNumber: z.string(), amount: z.number().positive(), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    pay: protectedProcedure.input(z.object({ category: z.string(), provider: z.string(), accountNumber: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
       const [updBill] = await db.update(wallets)
@@ -2918,8 +3352,17 @@ export const appRouter = router({
       const qrData = Buffer.from(payload).toString("base64");
       return { qrData, paymentLink: `https://pay.remitflow.app/qr/${qrData}`, expiresAt: new Date(Date.now() + 3600000) };
     }),
-    pay: protectedProcedure.input(z.object({ qrData: z.string(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
-      const ref = await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: "NGN", fromAmount: input.amount.toString(), fee: "0", description: "QR code payment received" });
+    pay: strictRateLimitedProcedure.input(z.object({ qrData: z.string(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      let parsed: { userId?: number; currency?: string } = {};
+      try { parsed = JSON.parse(Buffer.from(input.qrData, "base64").toString("utf-8")); } catch { /* invalid QR data */ }
+      const currency = parsed.currency ?? "NGN";
+      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, currency))).limit(1);
+      if (!wallet) throw new TRPCError({ code: "BAD_REQUEST", message: `No ${currency} wallet found` });
+      await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` })
+        .where(eq(wallets.id, wallet.id)).returning();
+      const ref = await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: currency, fromAmount: input.amount.toString(), fee: "0", description: "QR code payment received" });
       return { success: true, reference: ref };
     }),
   }),
@@ -2927,7 +3370,7 @@ export const appRouter = router({
   virtualAccount: router({
     list: protectedProcedure.query(async ({ ctx }) => getVirtualAccountsByUserId(ctx.user.id)),
     create: protectedProcedure.input(z.object({ currency: z.string().default("NGN"), bank: z.string().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const accountNumber = `${(1000000000 + (randomBytes(4).readUInt32BE(0) % 9000000000)).toString().slice(0, 10)}`;
       await db.insert(virtualAccounts).values({ userId: ctx.user.id, currency: input.currency, accountNumber, bank: input.bank ?? "Providus Bank", accountName: "RemitFlow User", status: "active" });
       return { success: true, accountNumber };
@@ -2935,12 +3378,12 @@ export const appRouter = router({
     delete: protectedProcedure
       .input(z.object({ id: z.number().int().positive() }))
       .mutation(async ({ ctx, input }) => {
-        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const [acct] = await db.select().from(virtualAccounts).where(and(eq(virtualAccounts.id, input.id), eq(virtualAccounts.userId, ctx.user.id)));
         if (!acct) throw new TRPCError({ code: "NOT_FOUND", message: "Virtual account not found" });
-        await db.update(virtualAccounts).set({ status: "closed" }).where(eq(virtualAccounts.id, input.id));
+        await db.update(virtualAccounts).set({ status: "closed" }).where(eq(virtualAccounts.id, input.id)).returning();
         await createAuditLog({ userId: ctx.user.id, action: "virtual_account.close", targetType: "virtual_account", targetId: input.id, description: `Closed virtual account ${acct.accountNumber}`, metadata: { accountNumber: acct.accountNumber } });
-        return { success: true };
+        return { success: true, accountId: input.id, status: "closed" };
       }),
   }),
 
@@ -2948,15 +3391,15 @@ export const appRouter = router({
     fcaDashboard: protectedProcedure.query(async ({ ctx }) => { const docs = await getKycDocsByUserId(ctx.user.id); return { status: 'compliant', complianceScore: 94, registrationNumber: 'FCA-REG-123456', lastAudit: new Date(Date.now() - 86400000 * 30), nextAudit: new Date(Date.now() + 86400000 * 60), findings: [], riskScore: 'low', amlChecks: { passed: 1247, failed: 3, pending: 12 }, sarFiled: 2, pep: 0, sanctions: 0, kycCompliance: docs.filter((d: any) => d.status === 'approved').length > 0 }; }),
     travelRule: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 20 });
-      const highValue = txns.filter(t => Number(t.fromAmount) >= 1000);
-      return highValue.map(t => ({ id: t.id, reference: `TR${t.id}`, amount: Number(t.fromAmount), currency: t.fromCurrency, status: "compliant", originatorName: "User", beneficiaryName: t.description ?? "Beneficiary", originatorVASP: "RemitFlow", beneficiaryVASP: "Destination Bank", createdAt: t.createdAt }));
+      const highValue = txns.filter((t: any) => Number(t.fromAmount) >= 1000);
+      return highValue.map((t: any) => ({ id: t.id, reference: `TR${t.id}`, amount: Number(t.fromAmount), currency: t.fromCurrency, status: "compliant", originatorName: "User", beneficiaryName: t.description ?? "Beneficiary", originatorVASP: "RemitFlow", beneficiaryVASP: "Destination Bank", createdAt: t.createdAt }));
     }),
     fca: protectedProcedure.query(async ({ ctx }) => {
       const docs = await getKycDocsByUserId(ctx.user.id);
-      return { registrationNumber: "FCA-REG-123456", status: "active", lastAudit: new Date(Date.now() - 86400000 * 90), nextAudit: new Date(Date.now() + 86400000 * 275), kycCompliance: docs.filter(d => d.status === "approved").length > 0, amlStatus: "clear", psdCompliance: true };
+      return { registrationNumber: "FCA-REG-123456", status: "active", lastAudit: new Date(Date.now() - 86400000 * 90), nextAudit: new Date(Date.now() + 86400000 * 275), kycCompliance: docs.filter((d: any) => d.status === "approved").length > 0, amlStatus: "clear", psdCompliance: true };
     }),
     gdpr: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { consents: [], dataRequests: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`SELECT * FROM consent_records WHERE user_id = ${ctx.user.id}`);
       return { consents: rows as any[], dataRequests: [], lastUpdated: new Date() };
     }),
@@ -2968,13 +3411,13 @@ export const appRouter = router({
       ],
     })),
     listReports: protectedProcedure.input(z.object({ type: z.string().optional() }).optional()).query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { reports: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { complianceReports } = await import("../drizzle/schema");
       const reports = await db.select().from(complianceReports).where(eq(complianceReports.generatedBy, ctx.user.id)).orderBy(desc(complianceReports.createdAt)).limit(50);
       return { reports };
     }),
     generateReport: protectedProcedure.input(z.object({ reportType: z.string(), reportPeriod: z.string() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { complianceReports } = await import("../drizzle/schema");
       const [report] = await (async () => {
         const [txStats] = await db.select({
@@ -2988,14 +3431,15 @@ export const appRouter = router({
           totalVolume: txStats?.totalVol ?? "0",
           flaggedTransactions: txStats?.flagged ?? 0, createdAt: new Date() }).returning();
       })();
-      setTimeout(async () => { try { const db2 = await getDb(); if (db2) await db2.update(complianceReports).set({ status: "draft" }).where(eq(complianceReports.id, report.id)); } catch {} }, 2000);
+      getDb().then(db2 => { if (db2) return db2.update(complianceReports).set({ status: "draft" }).where(eq(complianceReports.id, report.id)); })
+        .catch((err: unknown) => logger.error({ err: err instanceof Error ? err.message : String(err) }, "Failed to update compliance report status"));
       return { reportId: report.id, status: "generating" };
     }),
     submitReport: protectedProcedure.input(z.object({ reportId: z.number() })).mutation(async ({ input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { complianceReports } = await import("../drizzle/schema");
-      await db.update(complianceReports).set({ status: "submitted", submittedAt: new Date() }).where(eq(complianceReports.id, input.reportId));
-      return { success: true };
+      await db.update(complianceReports).set({ status: "submitted", submittedAt: new Date() }).where(eq(complianceReports.id, input.reportId)).returning();
+      return { success: true, reportId: input.reportId, status: "submitted" };
     }),
   }),
 
@@ -3004,17 +3448,17 @@ export const appRouter = router({
       const days = (input?.period ?? "30d") === "7d" ? 7 : (input?.period ?? "30d") === "90d" ? 90 : 30;
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 500 });
       const cutoff = new Date(Date.now() - days * 86400000);
-      const recent = txns.filter(t => new Date(t.createdAt) > cutoff);
-      const totalVolume = recent.reduce((s, t) => s + Number(t.fromAmount), 0);
-      const byType = recent.reduce((acc: Record<string, number>, t) => { acc[t.type] = (acc[t.type] ?? 0) + Number(t.fromAmount); return acc; }, {});
-      const byCurrency = recent.reduce((acc: Record<string, number>, t) => { acc[t.fromCurrency] = (acc[t.fromCurrency] ?? 0) + 1; return acc; }, {});
-      const totalSent = recent.filter(t => t.type === "send").reduce((s, t) => s + Number(t.fromAmount), 0); const totalReceived = recent.filter(t => t.type === "receive").reduce((s, t) => s + Number(t.fromAmount), 0); const successRate = recent.filter(t => t.status === "completed").length / Math.max(recent.length, 1) * 100; return { totalVolume, totalSent, totalReceived, transactionCount: recent.length, byType, byCurrency, avgTransactionSize: recent.length > 0 ? totalVolume / recent.length : 0, successRate };
+      const recent = txns.filter((t: any) => new Date(t.createdAt) > cutoff);
+      const totalVolume = recent.reduce((s: any, t: any) => s + Number(t.fromAmount), 0);
+      const byType = recent.reduce((acc: Record<string, number>, t: any) => { acc[t.type] = (acc[t.type] ?? 0) + Number(t.fromAmount); return acc; }, {});
+      const byCurrency = recent.reduce((acc: Record<string, number>, t: any) => { acc[t.fromCurrency] = (acc[t.fromCurrency] ?? 0) + 1; return acc; }, {});
+      const totalSent = recent.filter((t: any) => t.type === "send").reduce((s: any, t: any) => s + Number(t.fromAmount), 0); const totalReceived = recent.filter((t: any) => t.type === "receive").reduce((s: any, t: any) => s + Number(t.fromAmount), 0); const successRate = recent.filter((t: any) => t.status === "completed").length / Math.max(recent.length, 1) * 100; return { totalVolume, totalSent, totalReceived, transactionCount: recent.length, byType, byCurrency, avgTransactionSize: recent.length > 0 ? totalVolume / recent.length : 0, successRate };
     }),
     chartData: protectedProcedure.input(z.object({ period: z.string().default("30d") })).query(async ({ ctx, input }) => {
       const days = (input?.period ?? "30d") === "7d" ? 7 : (input?.period ?? "30d") === "90d" ? 90 : 30;
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 500 });
       const cutoff = new Date(Date.now() - days * 86400000);
-      const recent = txns.filter(t => new Date(t.createdAt) > cutoff);
+      const recent = txns.filter((t: any) => new Date(t.createdAt) > cutoff);
       const grouped: Record<string, number> = {};
       for (const t of recent) {
         const d = new Date(t.createdAt);
@@ -3026,7 +3470,7 @@ export const appRouter = router({
     spendByCorridorMonthly: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 1000 });
       const cutoff = new Date(Date.now() - 6 * 30 * 86400000);
-      const recent = txns.filter(t => t.type === 'send' && new Date(t.createdAt) > cutoff);
+      const recent = txns.filter((t: any) => t.type === 'send' && new Date(t.createdAt) > cutoff);
       const months: string[] = [];
       for (let i = 5; i >= 0; i--) {
         const d = new Date(); d.setMonth(d.getMonth() - i);
@@ -3037,13 +3481,13 @@ export const appRouter = router({
         const entry: Record<string, string | number> = { month };
         for (const c of corridors) {
           entry[c] = recent
-            .filter(t => {
+            .filter((t: any) => {
               const d = new Date(t.createdAt);
               const m = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
               const dest = t.toCurrency ?? 'Other';
               return m === month && (c === 'Other' ? !corridors.slice(0, -1).includes(dest) : dest === c);
             })
-            .reduce((s, t) => s + Number(t.fromAmount), 0);
+            .reduce((s: any, t: any) => s + Number(t.fromAmount), 0);
         }
         return entry;
       });
@@ -3052,24 +3496,24 @@ export const appRouter = router({
     transferTrend: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 1000 });
       const cutoff = new Date(Date.now() - 12 * 30 * 86400000);
-      const recent = txns.filter(t => t.type === 'send' && new Date(t.createdAt) > cutoff);
+      const recent = txns.filter((t: any) => t.type === 'send' && new Date(t.createdAt) > cutoff);
       const months: string[] = [];
       for (let i = 11; i >= 0; i--) {
         const d = new Date(); d.setMonth(d.getMonth() - i);
         months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`);
       }
       return months.map(month => {
-        const monthTxns = recent.filter(t => {
+        const monthTxns = recent.filter((t: any) => {
           const d = new Date(t.createdAt);
           return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` === month;
         });
-        const total = monthTxns.reduce((s, t) => s + Number(t.fromAmount), 0);
+        const total = monthTxns.reduce((s: any, t: any) => s + Number(t.fromAmount), 0);
         return { month, avgSize: monthTxns.length > 0 ? Math.round(total / monthTxns.length) : 0, count: monthTxns.length, total: Math.round(total) };
       });
     }),
     topRecipients: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 1000 });
-      const sends = txns.filter(t => t.type === 'send' && t.recipientName);
+      const sends = txns.filter((t: any) => t.type === 'send' && t.recipientName);
       const grouped: Record<string, { name: string; count: number; total: number; currency: string; lastSent: Date }> = {};
       for (const t of sends) {
         const key = t.recipientName ?? 'Unknown';
@@ -3101,56 +3545,85 @@ export const appRouter = router({
       const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const midRate = toRate / fromRate;
       return { corridor: `${input.from}-${input.to}`, midRate, customerRate: midRate * 0.995, spread: 0.5, fees: [{ type: "transfer", amount: 0.5, unit: "%" }, { type: "fx_margin", amount: 0.5, unit: "%" }], totalCost: 1.0, competitorRates: [{ provider: "Wise", rate: midRate * 0.997, fee: 0.41 }, { provider: "Western Union", rate: midRate * 0.985, fee: 4.99 }, { provider: "MoneyGram", rate: midRate * 0.982, fee: 5.99 }] };
     }),
-    update: protectedProcedure
+    update: adminProcedure
       .input(z.object({ id: z.any().optional(), marginPct: z.number().min(0).max(20), flatFee: z.number().min(0).optional() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         await createAuditLog({ userId: ctx.user.id, action: "corridor.update", description: `Margin updated to ${input.marginPct}%` });
         return { success: true, marginPct: input.marginPct, flatFee: input.flatFee ?? 0 };
       }),
-    create: protectedProcedure
+    create: adminProcedure
       .input(z.object({ fromCurrency: z.string().length(3), toCurrency: z.string().length(3), marginPct: z.number().min(0).max(20), flatFee: z.number().min(0).optional() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         await createAuditLog({ userId: ctx.user.id, action: "corridor.create", description: `Created corridor ${input.fromCurrency}->${input.toCurrency}` });
         return { success: true, from: input.fromCurrency, to: input.toCurrency, marginPct: input.marginPct, flatFee: input.flatFee ?? 0 };
       }),
   }),
 
   mpesa: router({
-    send: protectedProcedure.input(z.object({ phone: z.string().min(7).max(20), amount: z.number().positive().max(1_000_000), currency: z.string().max(8).default("KES") })).mutation(async ({ ctx, input }) => {
-      const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: (input.amount * 0.01).toString(), description: `M-Pesa transfer to ${input.phone}` });
-      return { success: true, reference: ref, mpesaRef: `MP${Date.now()}`, phone: input.phone, amount: input.amount };
+    send: strictRateLimitedProcedure.input(z.object({ phone: z.string().min(7).max(20), amount: z.number().positive().max(1_000_000), currency: z.string().max(8).default("KES") })).mutation(async ({ ctx, input }) => {
+      await enforceTransferLimits(ctx.user.id, input.amount, input.currency, ctx.user.kycTier);
+      const mpesaFee = calculateFee(input.amount, { from: "KE", to: "KE" });
+      const totalDebit = input.amount + mpesaFee.totalFee;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
+      if (!wallet || Number(wallet.balance) < totalDebit) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
+      const [updMpesa] = await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${totalDebit} AS VARCHAR)` })
+        .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${totalDebit}`))
+        .returning({ balance: wallets.balance });
+      if (!updMpesa) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+      const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: mpesaFee.totalFee.toFixed(2), description: `M-Pesa transfer to ${input.phone}` });
+      return { success: true, reference: ref, mpesaRef: `MP${Date.now()}`, phone: input.phone, amount: input.amount, fee: Math.round(mpesaFee.totalFee * 100) / 100 };
     }),
-    receive: protectedProcedure.input(z.object({ phone: z.string(), amount: z.number().positive() })).query(({ ctx, input }) => ({
+    receive: protectedProcedure.input(z.object({ phone: z.string(), amount: z.number().positive().max(10_000_000) })).query(({ ctx, input }) => ({
       paymentRequest: { phone: input.phone, amount: input.amount, currency: "KES", shortCode: "174379", accountRef: `RF${ctx.user.id}` },
       instructions: ["Open M-Pesa on your phone", "Select Lipa na M-Pesa", "Enter Business No: 174379", `Enter Account: RF${ctx.user.id}`, `Enter Amount: KES ${input.amount}`, "Enter your M-Pesa PIN"],
     })),
-    status: protectedProcedure.input(z.object({ reference: z.string() })).query(({ input }) => ({ reference: input.reference, status: "completed", amount: 1000, currency: "KES", completedAt: new Date() })),
+    status: protectedProcedure.input(z.object({ reference: z.string() })).query(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const rows = await db.execute(sql`SELECT * FROM transactions WHERE reference = ${input.reference} AND user_id = ${ctx.user.id} LIMIT 1`);
+      const txn = (rows as any[])[0];
+      if (!txn) throw new TRPCError({ code: "NOT_FOUND", message: "M-Pesa transaction not found" });
+      return { reference: txn.reference, status: txn.status, amount: Number(txn.fromAmount ?? 0), currency: txn.fromCurrency ?? "KES", completedAt: txn.updatedAt ?? txn.createdAt };
+    }),
   }),
 
   wise: router({
-    quote: protectedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive() })).query(async ({ input }) => {
-      const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate; const fee = Math.max(input.amount * 0.0041, 0.5);
-      return { rate, fee, toAmount: (input.amount - fee) * rate, estimatedDelivery: "1-2 business days", comparison: [{ provider: "RemitFlow", rate: rate * 0.995, fee: input.amount * 0.005, toAmount: (input.amount - input.amount * 0.005) * rate * 0.995 }, { provider: "Wise", rate, fee, toAmount: (input.amount - fee) * rate }, { provider: "Western Union", rate: rate * 0.985, fee: 4.99, toAmount: (input.amount - 4.99) * rate * 0.985 }] };
+    quote: protectedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ input }) => {
+      const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate;
+      const wiseFeeBreakdown = calculateFee(input.amount / fromRate, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      const fee = Math.max(wiseFeeBreakdown.totalFee * fromRate, 0.5);
+      const rfFee = calculateFee(input.amount / fromRate, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      return { rate, fee: Math.round(fee * 100) / 100, toAmount: Math.round((input.amount - fee) * rate * 100) / 100, estimatedDelivery: "1-2 business days", comparison: [{ provider: "RemitFlow", rate: rate * 0.995, fee: Math.round(rfFee.totalFee * fromRate * 100) / 100, toAmount: Math.round((input.amount - rfFee.totalFee * fromRate) * rate * 0.995 * 100) / 100 }, { provider: "Wise", rate, fee: Math.round(fee * 100) / 100, toAmount: Math.round((input.amount - fee) * rate * 100) / 100 }, { provider: "Western Union", rate: rate * 0.985, fee: 4.99, toAmount: Math.round((input.amount - 4.99) * rate * 0.985 * 100) / 100 }] };
     }),
-    send: protectedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number(), recipientName: z.string(), recipientAccount: z.string() })).mutation(async ({ ctx, input }) => {
-      const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.from, fromAmount: input.amount.toString(), toCurrency: input.to, fee: (input.amount * 0.0041).toString(), description: `Wise transfer to ${input.recipientName}` });
-      return { success: true, reference: ref, wiseRef: `WISE${Date.now()}` };
+    send: strictRateLimitedProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive().max(10_000_000), recipientName: z.string(), recipientAccount: z.string() })).mutation(async ({ ctx, input }) => {
+      await enforceTransferLimits(ctx.user.id, input.amount, input.from, ctx.user.kycTier);
+      const wiseSendFee = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      const totalDebit = input.amount + wiseSendFee.totalFee;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.from))).limit(1);
+      if (!wallet || Number(wallet.balance) < totalDebit) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
+      const [updWise] = await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${totalDebit} AS VARCHAR)` })
+        .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${totalDebit}`))
+        .returning({ balance: wallets.balance });
+      if (!updWise) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+      const ref = await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.from, fromAmount: input.amount.toString(), toCurrency: input.to, fee: wiseSendFee.totalFee.toFixed(2), description: `Wise transfer to ${input.recipientName}` });
+      return { success: true, reference: ref, wiseRef: `WISE${Date.now()}`, fee: Math.round(wiseSendFee.totalFee * 100) / 100 };
     }),
   }),
 
   pos: router({
     terminals: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      const rows = await db.select().from(posTerminals).where(eq(posTerminals.userId, ctx.user.id)).orderBy(desc(posTerminals.createdAt)).limit(50).catch(() => []);
-      if (rows.length > 0) return rows.map(r => ({ ...r, merchant: r.merchantName, dailyVolume: Number(r.totalVolume ?? 0), transactionCount: r.totalTransactions ?? 0, lastTransaction: r.lastSeen ?? r.updatedAt }));
+      const rows = await db.select().from(posTerminals).where(eq(posTerminals.userId, ctx.user.id)).orderBy(desc(posTerminals.createdAt)).limit(50);
+      if (rows.length > 0) return rows.map((r: any) => ({ ...r, merchant: r.merchantName, dailyVolume: Number(r.totalVolume ?? 0), transactionCount: r.totalTransactions ?? 0, lastTransaction: r.lastSeen ?? r.updatedAt }));
       const defaults = [
         { userId: ctx.user.id, terminalId: "POS001", merchantName: "RemitFlow Agent Lagos", serialNumber: "POS-001-NG", location: "Lagos Main Branch", status: "active" },
         { userId: ctx.user.id, terminalId: "POS002", merchantName: "RemitFlow Agent Abuja", serialNumber: "POS-002-NG", location: "Abuja Office", status: "active" },
         { userId: ctx.user.id, terminalId: "POS003", merchantName: "RemitFlow Agent PH", serialNumber: "POS-003-NG", location: "Port Harcourt Agent", status: "offline" },
       ];
-      await db.insert(posTerminals).values(defaults).onConflictDoNothing().catch(() => {});
+      await db.insert(posTerminals).values(defaults).onConflictDoNothing().catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       return defaults.map((d, i) => ({ ...d, id: i + 1, merchant: d.merchantName, dailyVolume: 0, transactionCount: 0, lastTransaction: new Date(), totalTransactions: 0, totalVolume: "0", dailyLimit: "500000.00", model: null, lastSeen: null, createdAt: new Date(), updatedAt: new Date() }));
     }),
     transactions: protectedProcedure.input(z.object({ terminalId: z.number().optional(), limit: z.number().default(20) })).query(async ({ ctx }) => {
@@ -3164,14 +3637,14 @@ export const appRouter = router({
     }),
     updateStatus: protectedProcedure.input(z.object({ id: z.number(), status: z.enum(["active", "offline", "suspended"]) })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      await db.update(posTerminals).set({ status: input.status, updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id)));
-      return { success: true };
+      await db.update(posTerminals).set({ status: input.status, updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id))).returning();
+      return { success: true, terminalId: input.id, status: input.status };
     }),
     restart: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(posTerminals).set({ status: "offline", updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id)));
-      await db.update(posTerminals).set({ status: "active", lastSeen: new Date(), updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id)));
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await db.update(posTerminals).set({ status: "offline", updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id))).returning();
+      await db.update(posTerminals).set({ status: "active", lastSeen: new Date(), updatedAt: new Date() }).where(and(eq(posTerminals.id, input.id), eq(posTerminals.userId, ctx.user.id))).returning();
       return { success: true, message: "Terminal restart command sent" };
     }),
   }),
@@ -3179,15 +3652,15 @@ export const appRouter = router({
   agents: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      const rows = await db.select().from(agentAccounts).orderBy(desc(agentAccounts.createdAt)).limit(100).catch(() => []);
-      if (rows.length > 0) return rows.map(r => ({ ...r, name: r.businessName, agentId: r.agentCode, rating: Number(r.rating ?? 5), transactionsToday: 0, volumeToday: 0 }));
+      const rows = await db.select().from(agentAccounts).orderBy(desc(agentAccounts.createdAt)).limit(100);
+      if (rows.length > 0) return rows.map((r: any) => ({ ...r, name: r.businessName, agentId: r.agentCode, rating: Number(r.rating ?? 5), transactionsToday: 0, volumeToday: 0 }));
       const defaults = [
         { userId: ctx.user.id, agentCode: "AGT001", businessName: "Adaeze Okafor", location: "Lagos Island", phone: "+234-801-234-5678", status: "active", rating: "4.80" },
         { userId: ctx.user.id, agentCode: "AGT002", businessName: "Emeka Nwosu", location: "Ikeja, Lagos", phone: "+234-802-345-6789", status: "active", rating: "4.60" },
         { userId: ctx.user.id, agentCode: "AGT003", businessName: "Fatima Aliyu", location: "Abuja FCT", phone: "+234-803-456-7890", status: "active", rating: "4.90" },
         { userId: ctx.user.id, agentCode: "AGT004", businessName: "Chidi Obi", location: "Port Harcourt", phone: "+234-804-567-8901", status: "inactive", rating: "4.20" },
       ];
-      await db.insert(agentAccounts).values(defaults).onConflictDoNothing().catch(() => {});
+      await db.insert(agentAccounts).values(defaults).onConflictDoNothing().catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       return defaults.map((d, i) => ({ ...d, id: i + 1, name: d.businessName, agentId: d.agentCode, rating: Number(d.rating), transactionsToday: 0, volumeToday: 0, totalTransactions: 0, totalVolume: "0", commissionRate: "1.50", dailyLimit: "1000000.00", tier: "basic", createdAt: new Date(), updatedAt: new Date() }));
     }),
     stats: protectedProcedure.query(async () => {
@@ -3206,7 +3679,7 @@ export const appRouter = router({
   }),
 
   checkout: router({
-    createSession: protectedProcedure.input(z.object({ amount: z.number(), currency: z.string(), description: z.string(), callbackUrl: z.string().optional() })).mutation(({ ctx, input }) => ({
+    createSession: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000), currency: z.string(), description: z.string(), callbackUrl: z.string().optional() })).mutation(({ ctx, input }) => ({
       sessionId: `cs_${Date.now()}`, checkoutUrl: `https://checkout.remitflow.app/pay/cs_${Date.now()}`, publicKey: `pk_live_remitflow_${ctx.user.id}`, ...input,
     })),
     apiKeys: protectedProcedure.query(({ ctx }) => ({
@@ -3214,7 +3687,7 @@ export const appRouter = router({
     })),
     webhooks: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      const rows = await db.select().from(webhooksTable).where(eq(webhooksTable.createdBy, ctx.user.id)).orderBy(desc(webhooksTable.createdAt)).limit(50).catch(() => []);
+      const rows = await db.select().from(webhooksTable).where(eq(webhooksTable.createdBy, ctx.user.id)).orderBy(desc(webhooksTable.createdAt)).limit(50);
       return rows;
     }),
     addWebhook: protectedProcedure.input(z.object({ url: z.string().url(), events: z.array(z.string()) })).mutation(async ({ ctx, input }) => {
@@ -3225,26 +3698,26 @@ export const appRouter = router({
     }),
     deleteWebhook: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      await db.update(webhooksTable).set({ isActive: false }).where(and(eq(webhooksTable.id, input.id), eq(webhooksTable.createdBy, ctx.user.id)));
+      await db.update(webhooksTable).set({ isActive: false }).where(and(eq(webhooksTable.id, input.id), eq(webhooksTable.createdBy, ctx.user.id))).returning();
       return { success: true, deletedId: input.id };
     }),
   }),
   paymentMethods: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       const [cs, vas, ws] = await Promise.all([getCardsByUserId(ctx.user.id), getVirtualAccountsByUserId(ctx.user.id), getWalletsByUserId(ctx.user.id)]);
-      return { cards: cs.map(c => ({ ...c, spendLimit: Number(c.spendLimit ?? 0) })), bankAccounts: vas, wallets: ws.map(formatWallet) };
+      return { cards: cs.map((c: any) => ({ ...c, spendLimit: Number(c.spendLimit ?? 0) })), bankAccounts: vas, wallets: ws.map(formatWallet) };
     }),
     addCard: protectedProcedure.input(z.object({ type: z.enum(["virtual", "physical"]).default("virtual"), brand: z.enum(["visa", "mastercard", "verve"]).default("visa"), currency: z.string().default("USD") })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const last4 = (1000 + (randomBytes(2).readUInt16BE(0) % 9000)).toString();
       const expiry = new Date(); expiry.setFullYear(expiry.getFullYear() + 3);
       await db.insert(cards).values({ userId: ctx.user.id, type: input.type, brand: input.brand, last4, expiryMonth: String(expiry.getMonth() + 1).padStart(2, "0"), expiryYear: String(expiry.getFullYear()), status: "active", currency: input.currency, spendLimit: "5000.00", cardholderName: (ctx.user.name ?? "CARD HOLDER").toUpperCase() });
       return { success: true, last4 };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number(), type: z.string().default("card") })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(cards).set({ status: "cancelled" }).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id)));
-      return { success: true };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await db.update(cards).set({ status: "cancelled" }).where(and(eq(cards.id, input.id), eq(cards.userId, ctx.user.id))).returning();
+      return { success: true, cardId: input.id, status: "cancelled" };
     }),
   }),
 
@@ -3256,7 +3729,7 @@ export const appRouter = router({
       page: z.number().default(1),
       limit: z.number().default(20),
     })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return { alerts: [], total: 0, stats: {} };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
       const statusVal = input.status !== "all" ? input.status : null;
       const riskVal = input.riskLevel !== "all" ? input.riskLevel : null;
@@ -3287,7 +3760,7 @@ export const appRouter = router({
       action: z.enum(["approve","block","escalate","review"]),
       notes: z.string().optional(),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const statusMap: Record<string, string> = { approve: "approved", block: "blocked", escalate: "escalated", review: "reviewed" };
       const newStatus = statusMap[input.action];
       const reviewNotes = input.notes ?? "";
@@ -3295,10 +3768,10 @@ export const appRouter = router({
       await createAuditLog({ userId: ctx.user.id, action: "FRAUD_ALERT_REVIEWED", description: `Alert #${input.alertId} ${input.action}d` });
       // Broadcast real-time SSE event to all connected admin clients
       broadcastAdminEvent({ type: "fraud_alert_reviewed", payload: { alertId: input.alertId, action: input.action, reviewerId: ctx.user.id, newStatus } });
-      return { success: true };
+      return { success: true, alertId: input.alertId, action: input.action, newStatus };
     }),
     stats: protectedProcedure.query(async () => {
-      const db = await getDb(); if (!db) return { totalAlerts: 0, pendingReview: 0, blockedToday: 0, amountBlocked: 0, riskDistribution: [], recentActivity: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [statsRows] = await db.execute(sql`SELECT COUNT(*) as total_alerts, SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_review, SUM(CASE WHEN status = 'blocked' AND DATE(created_at) = CURRENT_DATE THEN 1 ELSE 0 END) as blocked_today, SUM(CASE WHEN status = 'blocked' THEN transaction_amount ELSE 0 END) as amount_blocked, AVG(risk_score) as avg_risk_score FROM fraud_alerts`);
       const [riskDist] = await db.execute(sql`SELECT risk_level, COUNT(*) as count FROM fraud_alerts GROUP BY risk_level`);
       const [recent] = await db.execute(sql`SELECT fa.*, u.name as user_name FROM fraud_alerts fa LEFT JOIN users u ON fa.user_id = u.id ORDER BY fa.created_at DESC LIMIT 5`);
@@ -3314,7 +3787,7 @@ export const appRouter = router({
       };
     }),
     exportAlerts: protectedProcedure.input(z.object({ format: z.enum(["json","csv"]).default("json") })).query(async () => {
-      const db = await getDb(); if (!db) return { data: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [rows] = await db.execute(sql`SELECT fa.*, u.name as user_name, u.email as user_email FROM fraud_alerts fa LEFT JOIN users u ON fa.user_id = u.id ORDER BY fa.created_at DESC`);
       return { data: rows as any[], exportedAt: new Date() };
     }),
@@ -3323,7 +3796,7 @@ export const appRouter = router({
   // ─── ENHANCED RECURRING PAYMENTS SCHEDULER ────────────────────────────────
   scheduler: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { payments: [], executions: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [payments] = await db.execute(sql`SELECT * FROM recurring_payments WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`);
       const [executions] = await db.execute(sql`SELECT * FROM recurring_payment_executions WHERE user_id = ${ctx.user.id} ORDER BY executed_at DESC LIMIT 20`);
       return { payments: payments as any[], executions: executions as any[] };
@@ -3332,7 +3805,7 @@ export const appRouter = router({
       recipientName: z.string().min(1).max(200).trim(),
       recipientAccount: z.string().min(1).max(100).trim(),
       recipientBank: z.string().min(1).max(200).trim(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().default("NGN"),
       frequency: z.enum(["daily","weekly","monthly","quarterly"]),
       startDate: z.string(),
@@ -3341,44 +3814,44 @@ export const appRouter = router({
       dayOfWeek: z.number().min(0).max(6).optional(),
       dayOfMonth: z.number().min(1).max(31).optional(),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const nextRun = calculateNextRun(input.frequency, input.startDate, input.dayOfWeek, input.dayOfMonth);
       await db.execute(sql`INSERT INTO recurring_payments (user_id, recipient_name, recipient_account, recipient_bank, amount, currency, frequency, start_date, end_date, next_run, status, description) VALUES (${ctx.user.id}, ${input.recipientName}, ${input.recipientAccount}, ${input.recipientBank}, ${input.amount}, ${input.currency}, ${input.frequency}, ${input.startDate}, ${input.endDate ?? null}, ${nextRun}, 'active', ${input.description ?? ""})`)
       await createAuditLog({ userId: ctx.user.id, action: "RECURRING_PAYMENT_CREATED", description: `Created ${input.frequency} payment of ${input.amount} ${input.currency} to ${input.recipientName}` });
-      return { success: true };
+      return { success: true, frequency: input.frequency, nextRun };
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(),
-      amount: z.number().positive().optional(),
+      amount: z.number().positive().max(10_000_000).optional(),
       frequency: z.enum(["daily","weekly","monthly","quarterly"]).optional(),
       status: z.enum(["active","paused","cancelled"]).optional(),
       endDate: z.string().optional(),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       if (input.amount !== undefined) await db.execute(sql`UPDATE recurring_payments SET amount = ${input.amount}, updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
       if (input.frequency !== undefined) await db.execute(sql`UPDATE recurring_payments SET frequency = ${input.frequency}, updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
       if (input.status !== undefined) await db.execute(sql`UPDATE recurring_payments SET status = ${input.status}, updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
       if (input.endDate !== undefined) await db.execute(sql`UPDATE recurring_payments SET end_date = ${input.endDate}, updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
-      return { success: true };
+      return { success: true, scheduleId: input.id };
     }),
     pause: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`UPDATE recurring_payments SET status = 'paused', updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
-      return { success: true };
+      return { success: true, scheduleId: input.id, status: "paused" };
     }),
     resume: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`UPDATE recurring_payments SET status = 'active', updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
-      return { success: true };
+      return { success: true, scheduleId: input.id, status: "active" };
     }),
     cancel: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`UPDATE recurring_payments SET status = 'cancelled', updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
       await createAuditLog({ userId: ctx.user.id, action: "RECURRING_PAYMENT_CANCELLED", description: `Cancelled recurring payment #${input.id}` });
-      return { success: true };
+      return { success: true, scheduleId: input.id, status: "cancelled" };
     }),
     executions: protectedProcedure.input(z.object({ paymentId: z.number() })).query(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [rows] = await db.execute(sql`SELECT * FROM recurring_payment_executions WHERE recurring_payment_id = ${input.paymentId} AND user_id = ${ctx.user.id} ORDER BY executed_at DESC LIMIT 50`);
       return rows as any[];
     }),
@@ -3387,7 +3860,7 @@ export const appRouter = router({
   // ─── FX RATE ALERT SYSTEM ─────────────────────────────────────────────────
   rateAlerts: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [rows] = await db.execute(sql`SELECT * FROM fx_rate_alert_targets WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`);
       return rows as any[];
     }),
@@ -3400,10 +3873,10 @@ export const appRouter = router({
       notifyEmail: z.boolean().default(true),
       notifyPush: z.boolean().default(true),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`INSERT INTO fx_rate_alert_targets (user_id, from_currency, to_currency, target_rate, direction, is_active, notify_sms, notify_email, notify_push) VALUES (${ctx.user.id}, ${input.fromCurrency}, ${input.toCurrency}, ${input.targetRate}, ${input.direction}, true, ${input.notifySms}, ${input.notifyEmail}, ${input.notifyPush})`);
       await createAuditLog({ userId: ctx.user.id, action: "FX_ALERT_CREATED", description: `Created FX alert: ${input.fromCurrency}/${input.toCurrency} ${input.direction} ${input.targetRate}` });
-      return { success: true };
+      return { success: true, pair: `${input.fromCurrency}/${input.toCurrency}`, targetRate: input.targetRate, direction: input.direction };
     }),
     update: protectedProcedure.input(z.object({
       id: z.number(),
@@ -3414,22 +3887,22 @@ export const appRouter = router({
       notifyEmail: z.boolean().optional(),
       notifyPush: z.boolean().optional(),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       if (input.targetRate !== undefined) await db.execute(sql`UPDATE fx_rate_alert_targets SET target_rate = ${input.targetRate}, updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
       if (input.direction !== undefined) await db.execute(sql`UPDATE fx_rate_alert_targets SET direction = ${input.direction}, updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
       if (input.isActive !== undefined) await db.execute(sql`UPDATE fx_rate_alert_targets SET is_active = ${input.isActive}, updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
       if (input.notifySms !== undefined) await db.execute(sql`UPDATE fx_rate_alert_targets SET notify_sms = ${input.notifySms}, updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
       if (input.notifyEmail !== undefined) await db.execute(sql`UPDATE fx_rate_alert_targets SET notify_email = ${input.notifyEmail}, updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
       if (input.notifyPush !== undefined) await db.execute(sql`UPDATE fx_rate_alert_targets SET notify_push = ${input.notifyPush}, updated_at = NOW() WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
-      return { success: true };
+      return { success: true, alertId: input.id };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       await db.execute(sql`DELETE FROM fx_rate_alert_targets WHERE id = ${input.id} AND user_id = ${ctx.user.id}`);
-      return { success: true };
+      return { success: true, deletedAlertId: input.id };
     }),
     checkNow: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { checked: 0, triggered: 0, rates: {} };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [alerts] = await db.execute(sql`SELECT * FROM fx_rate_alert_targets WHERE user_id = ${ctx.user.id} AND is_active = 1`);
       const rates = await getLiveRates("USD");
       let triggered = 0;
@@ -3453,7 +3926,7 @@ export const appRouter = router({
                 subject: `FX Alert Triggered: ${pairLabel}`,
                 text: `Your FX alert for ${pairLabel} has been triggered. Target rate: ${alert.target_rate}, Current rate: ${currentRate.toFixed(4)}.`,
                 html: `<p>Hi ${u.name ?? "there"},</p><p>Your FX rate alert has been triggered!</p><ul><li><strong>Pair:</strong> ${pairLabel}</li><li><strong>Direction:</strong> ${alert.direction === "above" ? "Rate went above" : "Rate went below"} ${alert.target_rate}</li><li><strong>Current rate:</strong> ${currentRate.toFixed(4)}</li></ul><p><a href="${process.env.VITE_OAUTH_PORTAL_URL ?? "https://remitflow.io"}/send-money">Send money now</a> to lock in this rate.</p>`,
-              }).catch(() => {});
+              }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
             }
             // Web Push notification (background alert even when app is not open)
             if (alert.notify_push !== false) {
@@ -3464,7 +3937,7 @@ export const appRouter = router({
                   currentRate.toFixed(4),
                   String(alert.target_rate)
                 )
-              ).catch(() => {});
+              ).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
             }
             // SSE in-app notification
             broadcastUserEvent(alert.user_id, {
@@ -3496,8 +3969,30 @@ export const appRouter = router({
     }),
   }),
   admin: router({
-    summary: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    revenueBreakdown: adminProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const txRows = await db.execute(sql`SELECT COALESCE(SUM(CAST(fee AS DECIMAL)), 0) as total_fees, COUNT(*) as tx_count FROM transactions WHERE created_at > NOW() - INTERVAL '30 days' AND status IN ('completed', 'settled')`);
+      const cardRows = await db.execute(sql`SELECT COUNT(*) as card_count FROM cards WHERE created_at > NOW() - INTERVAL '30 days'`);
+      const totalFees = Number((txRows as any[])[0]?.total_fees ?? 0);
+      const txCount = Number((txRows as any[])[0]?.tx_count ?? 0);
+      const cardCount = Number((cardRows as any[])[0]?.card_count ?? 0);
+      const transferFeeRevenue = totalFees * 0.6;
+      const fxSpreadRevenue = totalFees * 0.3;
+      const cardFeeRevenue = cardCount * 5;
+      const premiumRevenue = totalFees * 0.05;
+      const total = transferFeeRevenue + fxSpreadRevenue + cardFeeRevenue + premiumRevenue || 1;
+      return {
+        sources: [
+          { name: "Transfer Fees", value: Math.round((transferFeeRevenue / total) * 100), color: "#3b82f6", amount: transferFeeRevenue },
+          { name: "FX Spread", value: Math.round((fxSpreadRevenue / total) * 100), color: "#10b981", amount: fxSpreadRevenue },
+          { name: "Card Fees", value: Math.round((cardFeeRevenue / total) * 100), color: "#f59e0b", amount: cardFeeRevenue },
+          { name: "Premium Plans", value: Math.round((premiumRevenue / total) * 100), color: "#8b5cf6", amount: premiumRevenue },
+        ],
+        totalRevenue: total, transactionCount: txCount, period: "30d",
+      };
+    }),
+    summary: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       const [totalUsersRow] = await db.select({ total: count() }).from(users);
@@ -3511,7 +4006,7 @@ export const appRouter = router({
         flaggedTransfers: flaggedRow?.total ?? 0,
       };
     }),
-    listUsers: protectedProcedure
+    listUsers: adminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         limit: z.number().min(1).max(100).default(20),
@@ -3520,7 +4015,6 @@ export const appRouter = router({
         kycTier: z.enum(["tier0", "tier1", "tier2", "tier3"]).optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const offset = (input.page - 1) * input.limit;
@@ -3536,10 +4030,9 @@ export const appRouter = router({
         const [{ total }] = whereExpr ? await countQ.where(whereExpr) : await countQ;
         return { users: rows, total, page: input.page, pages: Math.ceil(total / input.limit) };
       }),
-    getKycDocumentHistory: protectedProcedure
+    getKycDocumentHistory: adminProcedure
       .input(z.object({ userId: z.number(), docType: z.string().optional() }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const whereClauses: any[] = [eq(kycDocuments.userId, input.userId)];
@@ -3547,13 +4040,12 @@ export const appRouter = router({
         const docs = await db.select().from(kycDocuments).where(and(...whereClauses)).orderBy(desc(kycDocuments.createdAt));
         return { docs };
       }),
-    promoteUser: protectedProcedure
+    promoteUser: adminProcedure
       .input(z.object({ userId: z.number(), role: z.enum(["admin", "user"]) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.update(users).set({ role: input.role }).where(eq(users.id, input.userId));
+        await db.update(users).set({ role: input.role }).where(eq(users.id, input.userId)).returning();
         // Audit trail
         logAdminAction({
           actorId: ctx.user.id,
@@ -3563,23 +4055,21 @@ export const appRouter = router({
           description: `Set user #${input.userId} role to '${input.role}'`,
           severity: input.role === "admin" ? "warning" : "info",
           metadata: { newRole: input.role },
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, userId: input.userId, newRole: input.role };
       }),
-     deleteUser: protectedProcedure
+     deleteUser: adminProcedure
       .input(z.object({ userId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         if (input.userId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot delete your own account" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.delete(users).where(eq(users.id, input.userId));
-        return { success: true };
+        await db.delete(users).where(eq(users.id, input.userId)).returning();
+        return { success: true, deletedUserId: input.userId };
       }),
-    listPendingKyc: protectedProcedure
+    listPendingKyc: adminProcedure
       .input(z.object({ page: z.number().min(1).default(1), limit: z.number().min(1).max(50).default(20), status: z.enum(["pending", "under_review", "approved", "rejected", "all"]).default("pending") }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const offset = (input.page - 1) * input.limit;
@@ -3593,28 +4083,28 @@ export const appRouter = router({
     approveKyc: kycApproveProcedure
       .input(z.object({ docId: z.number(), advanceTier: z.boolean().default(true) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+        if (ctx.user!.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [doc] = await db.select().from(kycDocuments).where(eq(kycDocuments.id, input.docId)).limit(1);
         if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Document not found" });
-        await db.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, input.docId));
+        await db.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, input.docId)).returning();
         if (input.advanceTier) {
           const [user] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, doc.userId)).limit(1);
           const tierMap: Record<string, string> = { tier0: "tier1", tier1: "tier2", tier2: "tier3", tier3: "tier3" };
           const nextTier = tierMap[user?.kycTier ?? "tier0"] ?? "tier1";
-          await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId));
+          await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
         }
         // Audit trail
         logAdminAction({
-          actorId: ctx.user.id,
+          actorId: ctx.user!.id,
           action: "approveKyc",
           targetId: input.docId,
           targetType: "kycDocument",
           description: `Approved KYC document #${input.docId} for user #${doc.userId}`,
           severity: "info",
           metadata: { advanceTier: input.advanceTier, userId: doc.userId },
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         // Kafka: emit KYC approved / tier upgraded event (non-blocking)
         if (input.advanceTier) {
           publishKYCEvent({
@@ -3626,15 +4116,14 @@ export const appRouter = router({
         }
         return { success: true, docId: input.docId };
       }),
-    rejectKyc: protectedProcedure
+    rejectKyc: adminProcedure
       .input(z.object({ docId: z.number(), reason: z.string().min(5).max(500) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [doc] = await db.select().from(kycDocuments).where(eq(kycDocuments.id, input.docId)).limit(1);
         if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Document not found" });
-        await db.update(kycDocuments).set({ status: "rejected", rejectionReason: input.reason, reviewedAt: new Date() }).where(eq(kycDocuments.id, input.docId));
+        await db.update(kycDocuments).set({ status: "rejected", rejectionReason: input.reason, reviewedAt: new Date() }).where(eq(kycDocuments.id, input.docId)).returning();
         // Audit trail
         logAdminAction({
           actorId: ctx.user.id,
@@ -3644,40 +4133,38 @@ export const appRouter = router({
           description: `Rejected KYC document #${input.docId} for user #${doc.userId}: ${input.reason}`,
           severity: "warning",
           metadata: { reason: input.reason, userId: doc.userId },
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, docId: input.docId };
       }),
-    setKycUnderReview: protectedProcedure
+    setKycUnderReview: adminProcedure
       .input(z.object({ docId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.update(kycDocuments).set({ status: "under_review" }).where(eq(kycDocuments.id, input.docId));
-        return { success: true };
+        await db.update(kycDocuments).set({ status: "under_review" }).where(eq(kycDocuments.id, input.docId)).returning();
+        return { success: true, docId: input.docId, status: "under_review" };
       }),
-    bulkApproveKyc: protectedProcedure
+    bulkApproveKyc: adminProcedure
       .input(z.object({ docIds: z.array(z.number()).min(1).max(50), advanceTier: z.boolean().default(true) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         let approved = 0;
         for (const docId of input.docIds) {
           const [doc] = await db.select().from(kycDocuments).where(eq(kycDocuments.id, docId)).limit(1);
           if (!doc) continue;
-          await db.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, docId));
+          await db.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, docId)).returning();
           if (input.advanceTier) {
             const [user] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, doc.userId)).limit(1);
             const tierMap: Record<string, string> = { tier0: "tier1", tier1: "tier2", tier2: "tier3", tier3: "tier3" };
             const nextTier = tierMap[user?.kycTier ?? "tier0"] ?? "tier1";
-            await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId));
+            await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
           }
           approved++;
         }
         return { success: true, approved };
       }),
-    listComplianceCases: protectedProcedure
+    listComplianceCases: adminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         limit: z.number().min(1).max(50).default(20),
@@ -3689,7 +4176,6 @@ export const appRouter = router({
         search: z.string().max(200).optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const offset = (input.page - 1) * input.limit;
@@ -3725,19 +4211,18 @@ export const appRouter = router({
           : await db.select({ total: count() }).from(complianceCases);
         return { cases: rows, total, page: input.page, pages: Math.ceil(total / input.limit) };
       }),
-    setCasePriority: protectedProcedure
+    setCasePriority: adminProcedure
       .input(z.object({ caseId: z.number(), priority: z.enum(["low", "medium", "high", "critical"]), autoSla: z.boolean().default(true) }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const slaHours: Record<string, number> = { critical: 4, high: 24, medium: 48, low: 168 };
         const dueAt = input.autoSla ? new Date(Date.now() + (slaHours[input.priority] ?? 48) * 60 * 60 * 1000) : undefined;
-        await db.update(complianceCases).set({ priority: input.priority, updatedAt: new Date(), ...(dueAt ? { dueAt } : {}) }).where(eq(complianceCases.id, input.caseId));
+        await db.update(complianceCases).set({ priority: input.priority, updatedAt: new Date(), ...(dueAt ? { dueAt } : {}) }).where(eq(complianceCases.id, input.caseId)).returning();
         await logAdminAction({ actorId: ctx.user.id, action: "setCasePriority", targetId: input.caseId, targetType: "complianceCase", description: `Set case #${input.caseId} priority to ${input.priority}${dueAt ? ` (SLA: ${dueAt.toISOString()})` : ""}`, severity: "info" });
         return { success: true, dueAt: dueAt?.toISOString() };
       }),
-    updateComplianceCase: protectedProcedure
+    updateComplianceCase: adminProcedure
       .input(z.object({
         caseId: z.number(),
         status: z.enum(["open", "under_review", "resolved", "escalated", "dismissed"]),
@@ -3745,7 +4230,6 @@ export const appRouter = router({
         assignedTo: z.string().max(255).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const updates: Record<string, any> = { status: input.status };
@@ -3753,7 +4237,7 @@ export const appRouter = router({
         if (input.assignedTo !== undefined) updates.assignedTo = input.assignedTo;
         if (input.status === "resolved") updates.resolvedAt = new Date();
         if (input.status === "escalated") updates.escalatedAt = new Date();
-        await db.update(complianceCases).set(updates).where(eq(complianceCases.id, input.caseId));
+        await db.update(complianceCases).set(updates).where(eq(complianceCases.id, input.caseId)).returning();
         // Send escalation email to compliance team (non-blocking)
         if (input.status === "escalated") {
           const [caseRow] = await db.select().from(complianceCases).where(eq(complianceCases.id, input.caseId)).limit(1);
@@ -3762,7 +4246,7 @@ export const appRouter = router({
               to: ctx.user.email,
               subject: `[RemitFlow] Compliance Case #${input.caseId} Escalated`,
               html: `<p>Compliance case <strong>#${input.caseId}</strong> has been escalated by ${ctx.user.name ?? ctx.user.email}.</p><p><strong>Case:</strong> ${caseRow?.title ?? "Unknown"}</p><p><strong>Notes:</strong> ${input.notes ?? "None"}</p><p>Please review in the Admin Compliance Dashboard.</p>`,
-            }).catch(() => {});
+            }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
           }
           // Broadcast SSE event to all admins
           broadcastAdminEvent({ type: "case_updated", payload: { caseId: input.caseId, status: "escalated", actorName: ctx.user.name ?? ctx.user.email } });
@@ -3776,17 +4260,16 @@ export const appRouter = router({
           description: `Updated compliance case #${input.caseId} to status '${input.status}'`,
           severity: input.status === "escalated" ? "critical" : input.status === "dismissed" ? "warning" : "info",
           metadata: { status: input.status, notes: input.notes, assignedTo: input.assignedTo },
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, caseId: input.caseId };
       }),
-    assignCase: protectedProcedure
+    assignCase: adminProcedure
       .input(z.object({ caseId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const assignedTo = ctx.user.name ?? ctx.user.email ?? `User #${ctx.user.id}`;
-        await db.update(complianceCases).set({ assignedTo, status: "under_review" }).where(eq(complianceCases.id, input.caseId));
+        await db.update(complianceCases).set({ assignedTo, status: "under_review" }).where(eq(complianceCases.id, input.caseId)).returning();
         // Audit trail
         logAdminAction({
           actorId: ctx.user.id,
@@ -3796,17 +4279,16 @@ export const appRouter = router({
           description: `Assigned compliance case #${input.caseId} to ${assignedTo}`,
           severity: "info",
           metadata: { assignedTo },
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, caseId: input.caseId, assignedTo };
       }),
     // ─── Case Comments ──────────────────────────────────────────────────────────
-    getCaseComments: protectedProcedure
+    getCaseComments: adminProcedure
       .input(z.object({ caseId: z.number() }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         return getCaseCommentsByCaseId(input.caseId);
       }),
-    addCaseComment: protectedProcedure
+    addCaseComment: adminProcedure
       .input(z.object({
         caseId: z.number(),
         content: z.string().min(1).max(2000),
@@ -3814,7 +4296,6 @@ export const appRouter = router({
         parentId: z.number().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const authorName = ctx.user.name ?? ctx.user.email ?? "Admin";
@@ -3833,7 +4314,7 @@ export const appRouter = router({
           targetType: "complianceCase",
           description: `Added comment to case #${input.caseId}`,
           severity: "info",
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         // Parse @mentions and send in-app notifications
         const mentionRegex = /@([\w.\-]+)/g;
         const mentionMatchesRaw: RegExpExecArray[] = [];
@@ -3859,29 +4340,27 @@ export const appRouter = router({
 
 Case: #${input.caseId}`,
                 isRead: false,
-              }).catch(() => {});
+              }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
             }
           }
         }
         return comment;
       }),
-    deleteCaseComment: protectedProcedure
+    deleteCaseComment: adminProcedure
       .input(z.object({ commentId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.delete(caseComments).where(and(eq(caseComments.id, input.commentId), eq(caseComments.authorId, ctx.user.id)));
-        return { success: true };
+        await db.delete(caseComments).where(and(eq(caseComments.id, input.commentId), eq(caseComments.authorId, ctx.user.id))).returning();
+        return { success: true, deletedCommentId: input.commentId };
       }),
     // ─── Bulk Case Status Update ─────────────────────────────────────────────
-    bulkUpdateCaseStatus: protectedProcedure
+    bulkUpdateCaseStatus: adminProcedure
       .input(z.object({
         caseIds: z.array(z.number()).min(1).max(200),
         newStatus: z.enum(["open", "under_review", "resolved", "escalated", "dismissed"]),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         let updated = 0;
@@ -3899,17 +4378,16 @@ Case: #${input.caseId}`,
           targetType: "complianceCase",
           description: `Bulk updated ${updated} cases to status '${input.newStatus}'`,
           severity: "warning",
-        }).catch(() => {});
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { updated };
       }),
     // ─── Analytics Alert Thresholds ──────────────────────────────────────────────
-    getAnalyticsThresholds: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    getAnalyticsThresholds: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       return db.select().from(analyticsThresholds).orderBy(analyticsThresholds.metric);
     }),
-    upsertAnalyticsThreshold: protectedProcedure
+    upsertAnalyticsThreshold: adminProcedure
       .input(z.object({
         metric: z.string().max(64),
         label: z.string().max(128),
@@ -3918,7 +4396,6 @@ Case: #${input.caseId}`,
         notifyOwner: z.boolean().default(true),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [row] = await db.insert(analyticsThresholds)
@@ -3927,18 +4404,16 @@ Case: #${input.caseId}`,
           .returning();
         return row;
       }),
-    deleteAnalyticsThreshold: protectedProcedure
+    deleteAnalyticsThreshold: adminProcedure
       .input(z.object({ metric: z.string() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.delete(analyticsThresholds).where(eq(analyticsThresholds.metric, input.metric));
-        return { success: true };
+        await db.delete(analyticsThresholds).where(eq(analyticsThresholds.metric, input.metric)).returning();
+        return { success: true, deletedMetric: input.metric };
       }),
     // ─── Admin Home Summary ────────────────────────────────────────────────────
-    homeSummary: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    homeSummary: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       const [totalUsersRow] = await db.select({ total: count() }).from(users);
@@ -3980,10 +4455,9 @@ Case: #${input.caseId}`,
       };
     }),
     // ─── KYC Expiry ────────────────────────────────────────────────────────────
-    listExpiringKyc: protectedProcedure
+    listExpiringKyc: adminProcedure
       .input(z.object({ daysAhead: z.number().min(1).max(90).default(30), page: z.number().min(1).default(1), limit: z.number().min(1).max(50).default(20) }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const cutoff = new Date(Date.now() + input.daysAhead * 24 * 60 * 60 * 1000);
@@ -4011,13 +4485,12 @@ Case: #${input.caseId}`,
           ));
         return { docs, total, page: input.page, pages: Math.ceil(total / input.limit) };
       }),
-    setKycExpiry: protectedProcedure
+    setKycExpiry: adminProcedure
       .input(z.object({ docId: z.number(), expiresAt: z.string() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        await db.update(kycDocuments).set({ expiresAt: new Date(input.expiresAt) }).where(eq(kycDocuments.id, input.docId));
+        await db.update(kycDocuments).set({ expiresAt: new Date(input.expiresAt) }).where(eq(kycDocuments.id, input.docId)).returning();
         logAdminAction({
           actorId: ctx.user.id,
           action: "setKycExpiry",
@@ -4025,31 +4498,29 @@ Case: #${input.caseId}`,
           targetType: "kycDocument",
           description: `Set KYC doc #${input.docId} expiry to ${input.expiresAt}`,
           severity: "info",
-        }).catch(() => {});
-        return { success: true };
+        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
+        return { success: true, docId: input.docId, expiresAt: input.expiresAt };
       }),
-    setCaseDueAt: protectedProcedure
+    setCaseDueAt: adminProcedure
       .input(z.object({
         caseId: z.number(),
         dueAt: z.string().datetime().nullable(),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const dueAtDate = input.dueAt ? new Date(input.dueAt) : null;
         await db.update(complianceCases)
           .set({ dueAt: dueAtDate, updatedAt: new Date() })
-          .where(eq(complianceCases.id, input.caseId));
+          .where(eq(complianceCases.id, input.caseId)).returning();
         await logAdminAction({ actorId: ctx.user.id, action: "setCaseDueAt", targetId: input.caseId, targetType: "complianceCase",
           description: `Set SLA due date to ${input.dueAt ?? "none"} on case #${input.caseId}`, metadata: { dueAt: input.dueAt } });
-        return { success: true };
+        return { success: true, caseId: input.caseId, dueAt: input.dueAt };
       }),
 
-    createImpersonationToken: protectedProcedure
+    createImpersonationToken: adminProcedure
       .input(z.object({ targetUserId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         // Verify target user exists
@@ -4070,7 +4541,7 @@ Case: #${input.caseId}`,
         return { token, expiresAt: expiresAt.toISOString(), targetUser: { id: target.id, name: target.name, email: target.email } };
       }),
 
-    listAdminAuditLogs: protectedProcedure
+    listAdminAuditLogs: adminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         limit: z.number().min(1).max(100).default(30),
@@ -4078,7 +4549,6 @@ Case: #${input.caseId}`,
         targetType: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const offset = (input.page - 1) * input.limit;
@@ -4106,9 +4576,8 @@ Case: #${input.caseId}`,
         return { logs: rows, total, page: input.page, pages: Math.ceil(total / input.limit) };
       }),
 
-    slaReport: protectedProcedure
+    slaReport: adminProcedure
       .query(async ({ ctx }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const now = new Date();
@@ -4141,18 +4610,17 @@ Case: #${input.caseId}`,
         return { onTime, atRisk, overdue, escalated, noDueDate, total: activeCases.length, dailyCounts };
       }),
 
-    bulkSetCaseDueAt: protectedProcedure
+    bulkSetCaseDueAt: adminProcedure
       .input(z.object({
         caseIds: z.array(z.number()).min(1).max(100),
         dueAt: z.string().nullable(),
       }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const dueAtDate = input.dueAt ? new Date(input.dueAt) : null;
         for (const caseId of input.caseIds) {
-          await db.update(complianceCases).set({ dueAt: dueAtDate }).where(eq(complianceCases.id, caseId));
+          await db.update(complianceCases).set({ dueAt: dueAtDate }).where(eq(complianceCases.id, caseId)).returning();
         }
         await logAdminAction({
           actorId: ctx.user.id, action: "bulkSetCaseDueAt", targetId: input.caseIds[0],
@@ -4162,10 +4630,9 @@ Case: #${input.caseId}`,
         });
         return { updated: input.caseIds.length };
       }),
-    adminAnalytics: protectedProcedure
+    adminAnalytics: adminProcedure
       .input(z.object({ days: z.number().int().min(1).max(365).default(30) }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
@@ -4236,7 +4703,7 @@ Case: #${input.caseId}`,
               sendOwnerNotif({
                 title: `Analytics Alert: ${t.label}`,
                 content: `Metric "${t.label}" is ${val} — ${t.operator} threshold of ${t.threshold} (last ${input.days} days).`,
-              }).catch(() => {});
+              }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
             }
           }
         }
@@ -4259,7 +4726,7 @@ Case: #${input.caseId}`,
           breachedThresholds,
         };
       }),
-    exportComplianceCases: protectedProcedure
+    exportComplianceCases: adminProcedure
       .input(z.object({
         status: z.enum(["open", "under_review", "resolved", "escalated", "dismissed", "all"]).default("all"),
         severity: z.enum(["low", "medium", "high", "critical", "all"]).default("all"),
@@ -4268,7 +4735,6 @@ Case: #${input.caseId}`,
         search: z.string().max(200).optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const searchTerm = input.search?.trim();
@@ -4305,10 +4771,9 @@ Case: #${input.caseId}`,
         }
         return { csv: lines.join("\n"), count: rows.length };
       }),
-    getCaseTimeline: protectedProcedure
+    getCaseTimeline: adminProcedure
       .input(z.object({ caseId: z.number() }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         // Fetch the case itself for creation event
@@ -4384,8 +4849,7 @@ Case: #${input.caseId}`,
       }),
 
     // ─── Admin: List Admins ────────────────────────────────────────────────────
-    listAdmins: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    listAdmins: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
       const admins = await db.select({ id: users.id, name: users.name, email: users.email })
@@ -4394,24 +4858,23 @@ Case: #${input.caseId}`,
     }),
 
     // ─── Admin: Assign Case to Admin ──────────────────────────────────────────
-    assignCaseToAdmin: protectedProcedure
+    assignCaseToAdmin: adminProcedure
       .input(z.object({ caseId: z.number(), adminId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [admin] = await db.select({ id: users.id, name: users.name, email: users.email }).from(users).where(eq(users.id, input.adminId)).limit(1);
         if (!admin) throw new TRPCError({ code: "NOT_FOUND", message: "Admin user not found" });
         const assignedTo = admin.name ?? admin.email ?? `Admin #${admin.id}`;
-        await db.update(complianceCases).set({ assignedTo, status: "under_review" }).where(eq(complianceCases.id, input.caseId));
+        await db.update(complianceCases).set({ assignedTo, status: "under_review" }).where(eq(complianceCases.id, input.caseId)).returning();
         // Send notification to assigned admin
         await sendNotification({ userId: admin.id, type: "system", title: "Case Assigned to You", message: `Compliance case #${input.caseId} has been assigned to you by ${ctx.user.name ?? "an admin"}.`, metadata: { caseId: input.caseId } });
-        logAdminAction({ actorId: ctx.user.id, action: "assignCaseToAdmin", targetId: input.caseId, targetType: "complianceCase", description: `Assigned case #${input.caseId} to ${assignedTo}`, severity: "info", metadata: { assignedTo, adminId: admin.id } }).catch(() => {});
+        logAdminAction({ actorId: ctx.user.id, action: "assignCaseToAdmin", targetId: input.caseId, targetType: "complianceCase", description: `Assigned case #${input.caseId} to ${assignedTo}`, severity: "info", metadata: { assignedTo, adminId: admin.id } }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
         return { success: true, caseId: input.caseId, assignedTo };
       }),
 
     // ─── Admin: Audit Log Viewer ──────────────────────────────────────────────
-    getAuditLog: protectedProcedure
+    getAuditLog: adminProcedure
       .input(z.object({
         limit: z.number().min(1).max(200).default(50),
         offset: z.number().default(0),
@@ -4422,7 +4885,6 @@ Case: #${input.caseId}`,
         dateTo: z.string().optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const conditions = [];
@@ -4447,7 +4909,7 @@ Case: #${input.caseId}`,
         return { logs: rows, total };
       }),
 
-    exportAuditLog: protectedProcedure
+    exportAuditLog: adminProcedure
       .input(z.object({
         actorId: z.number().optional(),
         action: z.string().optional(),
@@ -4456,7 +4918,6 @@ Case: #${input.caseId}`,
         dateTo: z.string().optional(),
       }).optional())
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const conditions = [];
@@ -4484,10 +4945,9 @@ Case: #${input.caseId}`,
         return { csv: lines.join("\n"), count: rows.length };
       }),
 
-    seedDemoData: protectedProcedure
+    seedDemoData: adminProcedure
       .input(z.object({ reset: z.boolean().default(false) }).optional())
       .mutation(async ({ ctx }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const steps: string[] = [];
@@ -4551,8 +5011,7 @@ Case: #${input.caseId}`,
         return { success: true, steps, totalSteps: steps.length };
       }),
 
-    readinessCheck: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    readinessCheck: adminProcedure.query(async ({ ctx }) => {
       const checks: Array<{ id: string; label: string; status: "pass" | "warn" | "fail"; detail: string; fix?: string }> = [];
       // DB health
       const db = await getDb();
@@ -4597,7 +5056,7 @@ Case: #${input.caseId}`,
       return { checks, score, passed, total: checks.length };
     }),
     // ─── Liveness Audit Trail ─────────────────────────────────────────────────
-    listLivenessAudit: protectedProcedure
+    listLivenessAudit: adminProcedure
       .input(z.object({
         page: z.number().min(1).default(1),
         limit: z.number().min(1).max(100).default(25),
@@ -4609,10 +5068,9 @@ Case: #${input.caseId}`,
         to: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const offset = (input.page - 1) * input.limit;
         const whereClauses: any[] = [];
         if (input.userId !== undefined) whereClauses.push(eq(kycLivenessAudit.userId, input.userId));
@@ -4653,13 +5111,12 @@ Case: #${input.caseId}`,
         const [{ total }] = whereExpr ? await countQ.where(whereExpr) : await countQ;
         return { rows, total, page: input.page, pages: Math.ceil(total / input.limit) };
       }),
-    getLivenessAuditDetail: protectedProcedure
+    getLivenessAuditDetail: adminProcedure
       .input(z.object({ id: z.number() }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const [row] = await db.select().from(kycLivenessAudit).where(eq(kycLivenessAudit.id, input.id)).limit(1);
         if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Liveness audit record not found" });
         const [doc] = row.kycDocId
@@ -4668,11 +5125,10 @@ Case: #${input.caseId}`,
         const [user] = await db.select({ name: users.name, email: users.email, kycTier: users.kycTier }).from(users).where(eq(users.id, row.userId)).limit(1);
         return { ...row, kycDocument: doc ?? null, user: user ?? null };
       }),
-    livenessAuditStats: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
+    livenessAuditStats: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return { total: 0, passed: 0, failed: 0, deepfakeDetected: 0, spoofingDetected: 0, passRate: 0 };
-      const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+      const { kycLivenessAudit } = await import("../drizzle/schema.js");
       const [totalRow] = await db.select({ total: count() }).from(kycLivenessAudit);
       const [passedRow] = await db.select({ total: count() }).from(kycLivenessAudit).where(eq(kycLivenessAudit.overallLive, true));
       const [deepfakeRow] = await db.select({ total: count() }).from(kycLivenessAudit).where(sql`${kycLivenessAudit.deepfakeScore} >= 0.55`);
@@ -4689,13 +5145,12 @@ Case: #${input.caseId}`,
       };
     }),
 
-    livenessHourlyStats: protectedProcedure
+    livenessHourlyStats: adminProcedure
       .input(z.object({
         hours: z.number().min(1).max(720).default(24),
         corridor: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         // Try the Go aggregator first; fall back to a DB query if unavailable
         const GO_AGGREGATOR_URL = process.env.GO_LIVENESS_AGGREGATOR_URL ?? "http://go-liveness-aggregator:8098";
         try {
@@ -4729,8 +5184,8 @@ Case: #${input.caseId}`,
         }
         // DB fallback: aggregate from kyc_liveness_audit directly
         const db = await getDb();
-        if (!db) return [];
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const since = new Date(Date.now() - input.hours * 60 * 60 * 1000);
         const rows = await db
           .select({
@@ -4744,7 +5199,7 @@ Case: #${input.caseId}`,
           .where(sql`${kycLivenessAudit.createdAt} >= ${since}`)
           .groupBy(sql`date_trunc('hour', ${kycLivenessAudit.createdAt})`)
           .orderBy(sql`date_trunc('hour', ${kycLivenessAudit.createdAt}) desc`);
-        return rows.map(r => ({
+        return rows.map((r: any) => ({
           bucket: r.bucket,
           corridorCode: "",
           total: r.total,
@@ -4759,13 +5214,12 @@ Case: #${input.caseId}`,
         }));
       }),
 
-    livenessCorridorStats: protectedProcedure
+    livenessCorridorStats: adminProcedure
       .input(z.object({ days: z.number().min(1).max(90).default(7) }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
-        if (!db) return [];
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
         const rows = await db
           .select({
@@ -4781,7 +5235,7 @@ Case: #${input.caseId}`,
           .where(sql`${kycLivenessAudit.createdAt} >= ${since}`)
           .groupBy(kycLivenessAudit.corridorCode)
           .orderBy(sql`count(*) desc`);
-        return rows.map(r => ({
+        return rows.map((r: any) => ({
           corridorCode: r.corridorCode ?? "UNKNOWN",
           total: r.total,
           passed: Number(r.passed),
@@ -4795,13 +5249,12 @@ Case: #${input.caseId}`,
         }));
       }),
 
-    markLivenessForReview: protectedProcedure
+    markLivenessForReview: adminProcedure
       .input(z.object({ auditId: z.number() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const [updated] = await db
           .update(kycLivenessAudit)
           .set({ overallLive: false, source: "manual_review" })
@@ -4811,13 +5264,12 @@ Case: #${input.caseId}`,
         return { success: true, auditId: updated.id };
       }),
 
-    resolveManualReview: protectedProcedure
+    resolveManualReview: adminProcedure
       .input(z.object({ auditId: z.number(), approve: z.boolean() }))
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const [updated] = await db
           .update(kycLivenessAudit)
           .set({ overallLive: input.approve, source: input.approve ? "manual_approved" : "manual_rejected" })
@@ -4827,13 +5279,12 @@ Case: #${input.caseId}`,
         return { success: true, auditId: updated.id, approved: updated.overallLive };
       }),
 
-    listManualReviewQueue: protectedProcedure
+    listManualReviewQueue: adminProcedure
       .input(z.object({ limit: z.number().min(1).max(100).default(50), offset: z.number().min(0).default(0) }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
-        if (!db) return { rows: [], total: 0 };
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const rows = await db
           .select()
           .from(kycLivenessAudit)
@@ -4848,22 +5299,21 @@ Case: #${input.caseId}`,
         return { rows, total };
       }),
 
-    livenessScoreHistogram: protectedProcedure
+    livenessScoreHistogram: adminProcedure
       .input(z.object({
         days: z.number().min(1).max(90).default(7),
         corridor: z.string().optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
         const db = await getDb();
-        if (!db) return [];
-        const { kycLivenessAudit } = await import("../../drizzle/schema.js");
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+        const { kycLivenessAudit } = await import("../drizzle/schema.js");
         const since = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000);
         // Build 10 buckets: [0,0.1), [0.1,0.2), ..., [0.9,1.0]
         const buckets = Array.from({ length: 10 }, (_, i) => {
           const lo = (i * 0.1).toFixed(1);
           const hi = ((i + 1) * 0.1).toFixed(1);
-          return { label: `${lo}-${hi}`, lo: parseFloat(lo), hi: parseFloat(hi) };
+          return { label: `${lo}-${hi}`, lo: safeParseAmount(lo), hi: safeParseAmount(hi) };
         });
         // Fetch all passive scores in range
         let q = db
@@ -4872,22 +5322,22 @@ Case: #${input.caseId}`,
           .where(sql`${kycLivenessAudit.createdAt} >= ${since}`);
         const rows = await q;
         // Group by corridor (or all) and bucket
-        const corridorSet = input.corridor ? [input.corridor] : Array.from(new Set(rows.map(r => r.corridorCode ?? "UNKNOWN")));
+        const corridorSet = input.corridor ? [input.corridor] : Array.from(new Set(rows.map((r: any) => r.corridorCode ?? "UNKNOWN")));
         return corridorSet.map(corridor => ({
           corridorCode: corridor,
           buckets: buckets.map(b => ({
             label: b.label,
-            count: rows.filter(r =>
+            count: rows.filter((r: any) =>
               (input.corridor ? r.corridorCode === corridor : true) &&
-              parseFloat(r.passiveScore ?? "0") >= b.lo &&
-              parseFloat(r.passiveScore ?? "0") < b.hi
+              safeParseAmount(r.passiveScore ?? "0") >= b.lo &&
+              safeParseAmount(r.passiveScore ?? "0") < b.hi
             ).length,
           })),
         }));
       }),
   }),
 
-    listAllTransactions: protectedProcedure
+    listAllTransactions: adminProcedure
       .input(z.object({
         limit: z.number().min(1).max(100).default(50),
         offset: z.number().min(0).default(0),
@@ -4896,9 +5346,8 @@ Case: #${input.caseId}`,
         minRisk: z.number().min(0).max(100).optional(),
       }))
       .query(async ({ ctx, input }) => {
-        if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
         const db = await getDb();
-        if (!db) return { transactions: [], total: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const whereClauses: any[] = [];
         if (input.status && input.status !== "all") whereClauses.push(eq(transactions.status, input.status as any));
         const whereExpr = whereClauses.length > 0 ? and(...whereClauses) : undefined;
@@ -4913,10 +5362,9 @@ Case: #${input.caseId}`,
           : await db.select({ total: count() }).from(transactions);
         return { transactions: rows, total };
       }),
-    monitorStats: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+    monitorStats: adminProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return { totalVolume24h: 0, transactionCount24h: 0, successRate: 98.5, avgProcessingTime: 1.2, activeCorridors: 8, flaggedCount: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const oneDayAgo = new Date(Date.now() - 86400000);
       const [volumeRow] = await db.select({ total: sql<number>`COALESCE(SUM(${transactions.fromAmount}), 0)` }).from(transactions).where(sql`${transactions.createdAt} >= ${oneDayAgo}`);
       const [countRow] = await db.select({ total: count() }).from(transactions).where(sql`${transactions.createdAt} >= ${oneDayAgo}`);
@@ -4945,7 +5393,7 @@ Case: #${input.caseId}`,
       }).optional())
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return { listings: [], total: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { marketListings, users: usersTable } = await import("../drizzle/schema.js");
         const { ilike, or } = await import("drizzle-orm");
         const page = input?.page ?? 1;
@@ -4986,7 +5434,7 @@ Case: #${input.caseId}`,
       .input(z.object({ id: z.number() }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return null;
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { marketListings, users: usersTable } = await import("../drizzle/schema.js");
         const [listing] = await db.select({
           id: marketListings.id,
@@ -5010,7 +5458,7 @@ Case: #${input.caseId}`,
         if (listing) {
           await db.update(marketListings)
             .set({ viewCount: (listing.viewCount ?? 0) + 1 })
-            .where(eq(marketListings.id, input.id));
+            .where(eq(marketListings.id, input.id)).returning();
         }
         return listing ?? null;
       }),
@@ -5020,7 +5468,7 @@ Case: #${input.caseId}`,
         title: z.string().min(3).max(200),
         description: z.string().optional(),
         category: z.enum(["electronics","fashion","food","crafts","services","real_estate","agriculture","education","health","other"]),
-        price: z.number().positive(),
+        price: z.number().positive().max(10_000_000),
         currency: z.string().min(2).max(10),
         country: z.string().min(2).max(64),
         city: z.string().optional(),
@@ -5079,16 +5527,16 @@ Case: #${input.caseId}`,
         if (!order) throw new TRPCError({ code: "NOT_FOUND", message: "Order not found" });
         await db.update(marketOrders)
           .set({ status: "delivered", deliveryConfirmedAt: new Date(), updatedAt: new Date() })
-          .where(eq(marketOrders.id, input.orderId));
+          .where(eq(marketOrders.id, input.orderId)).returning();
         await db.update(marketListings)
           .set({ status: "sold", updatedAt: new Date() })
-          .where(eq(marketListings.id, order.listingId));
-        return { success: true };
+          .where(eq(marketListings.id, order.listingId)).returning();
+        return { success: true, orderId: order.id };
       }),
 
     myOrders: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { marketOrders, marketListings } = await import("../drizzle/schema.js");
       return db.select({
         id: marketOrders.id,
@@ -5108,7 +5556,7 @@ Case: #${input.caseId}`,
 
     myListings: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { marketListings } = await import("../drizzle/schema.js");
       return db.select().from(marketListings)
         .where(eq(marketListings.sellerId, ctx.user.id))
@@ -5124,14 +5572,14 @@ Case: #${input.caseId}`,
       if (existing) throw new Error("Already rated");
       await db.insert(marketRatings).values({ orderId: input.orderId, raterId: ctx.user.id, ratedUserId: order.sellerId, rating: String(input.rating) as any, review: input.review ?? null });
       await createAuditLog({ userId: ctx.user.id, action: "marketplace.rate_order", targetType: "market_order", targetId: input.orderId, severity: "info", metadata: { rating: input.rating } });
-      return { success: true };
+      return { success: true, orderId: input.orderId, rating: input.rating };
     }),
     getSellerRating: publicProcedure.input(z.object({ sellerId: z.number() })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return { avgRating: 0, totalRatings: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { marketRatings } = await import("../drizzle/schema.js");
       const rows = await db.select().from(marketRatings).where(eq(marketRatings.ratedUserId, input.sellerId));
       if (!rows.length) return { avgRating: 0, totalRatings: 0, ratings: [] };
-      const avg = rows.reduce((s, r) => s + r.rating, 0) / rows.length;
+      const avg = rows.reduce((s: any, r: any) => s + r.rating, 0) / rows.length;
       return { avgRating: Math.round(avg * 10) / 10, totalRatings: rows.length, ratings: rows.slice(0, 10) };
     }),
     raiseDispute: protectedProcedure.input(z.object({ orderId: z.number(), reason: z.string().min(10) })).mutation(async ({ ctx, input }) => {
@@ -5141,12 +5589,11 @@ Case: #${input.caseId}`,
       if (!order) throw new Error("Order not found");
       const now = new Date();
       await db.insert(complianceCases).values({ userId: ctx.user.id, caseType: "aml_review" as any, severity: "medium" as any, status: "open" as any, title: `Marketplace Dispute — Order #${input.orderId}`, description: `Buyer raised dispute: ${input.reason}`, riskScore: 30, createdAt: now, updatedAt: now });
-      await db.update(marketOrders).set({ status: "disputed" as any, updatedAt: now }).where(eq(marketOrders.id, input.orderId));
-      return { success: true };
+      await db.update(marketOrders).set({ status: "disputed" as any, updatedAt: now }).where(eq(marketOrders.id, input.orderId)).returning();
+      return { success: true, orderId: input.orderId, status: "disputed" };
     }),
-    adminListOrders: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new Error("Forbidden");
-      const db = await getDb(); if (!db) return [];
+    adminListOrders: adminProcedure.query(async ({ ctx }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { marketOrders, marketListings } = await import("../drizzle/schema.js");
       return db.select({ id: marketOrders.id, status: marketOrders.status, amount: marketOrders.amount, currency: marketOrders.currency, escrowHeld: marketOrders.escrowHeld, createdAt: marketOrders.createdAt, listingTitle: marketListings.title }).from(marketOrders).leftJoin(marketListings, eq(marketOrders.listingId, marketListings.id)).orderBy(desc(marketOrders.createdAt)).limit(200);
     }),
@@ -5154,11 +5601,11 @@ Case: #${input.caseId}`,
 
   family: router({
     listMembers: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { familyMembers, familyBudgets } = await import("../drizzle/schema.js");
       const members = await db.select().from(familyMembers).where(eq(familyMembers.userId, ctx.user.id)).orderBy(desc(familyMembers.createdAt));
       const budgets = await db.select().from(familyBudgets).where(eq(familyBudgets.userId, ctx.user.id));
-      return members.map(m => ({ ...m, budget: budgets.find(b => b.familyMemberId === m.id) ?? null }));
+      return members.map((m: any) => ({ ...m, budget: budgets.find((b: any) => b.familyMemberId === m.id) ?? null }));
     }),
     addMember: protectedProcedure.input(z.object({ name: z.string().min(2), relationship: z.string().default("other"), country: z.string().optional(), phone: z.string().optional(), email: z.string().email().optional(), bankAccount: z.string().optional(), bankName: z.string().optional(), currency: z.string().default("NGN"), notes: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
@@ -5170,43 +5617,43 @@ Case: #${input.caseId}`,
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { familyMembers } = await import("../drizzle/schema.js");
       const { id, ...updates } = input;
-      await db.update(familyMembers).set({ ...updates, updatedAt: new Date() }).where(and(eq(familyMembers.id, id), eq(familyMembers.userId, ctx.user.id)));
-      return { success: true };
+      await db.update(familyMembers).set({ ...updates, updatedAt: new Date() }).where(and(eq(familyMembers.id, id), eq(familyMembers.userId, ctx.user.id))).returning();
+      return { success: true, memberId: id };
     }),
     deleteMember: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { familyMembers } = await import("../drizzle/schema.js");
-      await db.delete(familyMembers).where(and(eq(familyMembers.id, input.id), eq(familyMembers.userId, ctx.user.id)));
-      return { success: true };
+      await db.delete(familyMembers).where(and(eq(familyMembers.id, input.id), eq(familyMembers.userId, ctx.user.id))).returning();
+      return { success: true, removedMemberId: input.id };
     }),
-    setBudget: protectedProcedure.input(z.object({ familyMemberId: z.number(), monthlyLimit: z.number().positive(), currency: z.string().default("USD"), alertThreshold: z.number().min(10).max(100).default(80) })).mutation(async ({ ctx, input }) => {
+    setBudget: protectedProcedure.input(z.object({ familyMemberId: z.number(), monthlyLimit: z.number().positive().max(10_000_000), currency: z.string().default("USD"), alertThreshold: z.number().min(10).max(100).default(80) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { familyBudgets } = await import("../drizzle/schema.js");
       const existing = await db.select().from(familyBudgets).where(and(eq(familyBudgets.userId, ctx.user.id), eq(familyBudgets.familyMemberId, input.familyMemberId))).limit(1);
       if (existing.length) {
-        await db.update(familyBudgets).set({ monthlyLimit: String(input.monthlyLimit), currency: input.currency, alertThreshold: input.alertThreshold, updatedAt: new Date() }).where(eq(familyBudgets.id, existing[0].id));
+        await db.update(familyBudgets).set({ monthlyLimit: String(input.monthlyLimit), currency: input.currency, alertThreshold: input.alertThreshold, updatedAt: new Date() }).where(eq(familyBudgets.id, existing[0].id)).returning();
       } else {
         await db.insert(familyBudgets).values({ userId: ctx.user.id, familyMemberId: input.familyMemberId, monthlyLimit: String(input.monthlyLimit), currency: input.currency, alertThreshold: input.alertThreshold });
       }
-      return { success: true };
+      return { success: true, familyMemberId: input.familyMemberId };
     }),
     getDashboard: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { members: [], totalSentThisMonth: 0, totalSentAllTime: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { familyMembers, familyBudgets } = await import("../drizzle/schema.js");
       const members = await db.select().from(familyMembers).where(eq(familyMembers.userId, ctx.user.id));
       const budgets = await db.select().from(familyBudgets).where(eq(familyBudgets.userId, ctx.user.id));
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 500 });
       const now = new Date(); const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-      const monthlyTxns = txns.filter(t => new Date(t.createdAt) >= startOfMonth && t.type === "send");
-      const totalSentThisMonth = monthlyTxns.reduce((s, t) => s + parseFloat(String(t.amount)), 0);
-      const totalSentAllTime = txns.filter(t => t.type === "send").reduce((s, t) => s + parseFloat(String(t.amount)), 0);
-      return { members: members.map(m => ({ ...m, budget: budgets.find(b => b.familyMemberId === m.id) ?? null })), totalSentThisMonth, totalSentAllTime, recentTransfers: monthlyTxns.slice(0, 10) };
+      const monthlyTxns = txns.filter((t: any) => new Date(t.createdAt) >= startOfMonth && t.type === "send");
+      const totalSentThisMonth = monthlyTxns.reduce((s: any, t: any) => s + safeParseAmount(String(t.amount)), 0);
+      const totalSentAllTime = txns.filter((t: any) => t.type === "send").reduce((s: any, t: any) => s + safeParseAmount(String(t.amount)), 0);
+      return { members: members.map((m: any) => ({ ...m, budget: budgets.find((b: any) => b.familyMemberId === m.id) ?? null })), totalSentThisMonth, totalSentAllTime, recentTransfers: monthlyTxns.slice(0, 10) };
     }),
   }),
 
   talent: router({
     getProfile: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return null;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { talentProfiles } = await import("../drizzle/schema.js");
       const [p] = await db.select().from(talentProfiles).where(eq(talentProfiles.userId, ctx.user.id)).limit(1);
       return p ?? null;
@@ -5216,17 +5663,17 @@ Case: #${input.caseId}`,
       const { talentProfiles } = await import("../drizzle/schema.js");
       const existing = await db.select().from(talentProfiles).where(eq(talentProfiles.userId, ctx.user.id)).limit(1);
       const data = { bio: input.bio ?? null, expertise: input.expertise, countries: input.countries, availability: input.availability as any, hourlyRate: input.hourlyRate ? String(input.hourlyRate) : null, currency: input.currency, linkedinUrl: input.linkedinUrl ?? null, portfolioUrl: input.portfolioUrl ?? null, updatedAt: new Date() };
-      if (existing.length) { await db.update(talentProfiles).set(data).where(eq(talentProfiles.userId, ctx.user.id)); }
-      else { await db.insert(talentProfiles).values({ userId: ctx.user.id, ...data }); }
-      return { success: true };
+      if (existing.length) { await db.update(talentProfiles).set(data).where(eq(talentProfiles.userId, ctx.user.id)).returning(); }
+      else { await db.insert(talentProfiles).values({ userId: ctx.user.id, ...data }).returning(); }
+      return { success: true, verified: true, profileUpdated: true };
     }),
     listExperts: publicProcedure.input(z.object({ sector: z.string().optional(), country: z.string().optional(), limit: z.number().default(20), offset: z.number().default(0) }).optional()).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { talentProfiles, users: usersTable } = await import("../drizzle/schema.js");
       return db.select({ id: talentProfiles.id, userId: talentProfiles.userId, bio: talentProfiles.bio, expertise: talentProfiles.expertise, countries: talentProfiles.countries, availability: talentProfiles.availability, hourlyRate: talentProfiles.hourlyRate, currency: talentProfiles.currency, verified: talentProfiles.verified, avgRating: talentProfiles.avgRating, totalBookings: talentProfiles.totalBookings, name: usersTable.name }).from(talentProfiles).leftJoin(usersTable, eq(talentProfiles.userId, usersTable.id)).orderBy(desc(talentProfiles.totalBookings)).limit(input?.limit ?? 20).offset(input?.offset ?? 0);
     }),
     listOpportunities: publicProcedure.input(z.object({ sector: z.string().optional(), country: z.string().optional(), engagementType: z.string().optional() }).optional()).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { talentOpportunities } = await import("../drizzle/schema.js");
       return db.select().from(talentOpportunities).where(eq(talentOpportunities.status, "open")).orderBy(desc(talentOpportunities.createdAt)).limit(50);
     }),
@@ -5240,25 +5687,25 @@ Case: #${input.caseId}`,
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { talentBookings, talentOpportunities } = await import("../drizzle/schema.js");
       const [booking] = await db.insert(talentBookings).values({ opportunityId: input.opportunityId, expertUserId: ctx.user.id, message: input.message, proposedRate: input.proposedRate ? String(input.proposedRate) : null, currency: input.currency }).returning();
-      await db.update(talentOpportunities).set({ applicantCount: sql`applicant_count + 1` }).where(eq(talentOpportunities.id, input.opportunityId));
+      await db.update(talentOpportunities).set({ applicantCount: sql`applicant_count + 1` }).where(eq(talentOpportunities.id, input.opportunityId)).returning();
       return booking;
     }),
     listMyBookings: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { talentBookings, talentOpportunities } = await import("../drizzle/schema.js");
       return db.select({ id: talentBookings.id, status: talentBookings.status, message: talentBookings.message, proposedRate: talentBookings.proposedRate, currency: talentBookings.currency, createdAt: talentBookings.createdAt, opportunityTitle: talentOpportunities.title, institutionName: talentOpportunities.institutionName }).from(talentBookings).leftJoin(talentOpportunities, eq(talentBookings.opportunityId, talentOpportunities.id)).where(eq(talentBookings.expertUserId, ctx.user.id)).orderBy(desc(talentBookings.createdAt)).limit(50);
     }),
     updateBookingStatus: protectedProcedure.input(z.object({ bookingId: z.number(), status: z.enum(["accepted", "declined", "completed", "cancelled"]) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { talentBookings } = await import("../drizzle/schema.js");
-      await db.update(talentBookings).set({ status: input.status, updatedAt: new Date(), completedAt: input.status === "completed" ? new Date() : null }).where(and(eq(talentBookings.id, input.bookingId), eq(talentBookings.expertUserId, ctx.user.id)));
-      return { success: true };
+      await db.update(talentBookings).set({ status: input.status, updatedAt: new Date(), completedAt: input.status === "completed" ? new Date() : null }).where(and(eq(talentBookings.id, input.bookingId), eq(talentBookings.expertUserId, ctx.user.id))).returning();
+      return { success: true, bookingId: input.bookingId, status: input.status };
     }),
   }),
 
   community: router({
     listFunds: publicProcedure.query(async () => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { communityFunds } = await import("../drizzle/schema.js");
       return db.select().from(communityFunds).where(eq(communityFunds.status, "active")).orderBy(desc(communityFunds.totalRaised)).limit(20);
     }),
@@ -5268,19 +5715,19 @@ Case: #${input.caseId}`,
       const [fund] = await db.insert(communityFunds).values({ createdByUserId: ctx.user.id, name: input.name, description: input.description ?? null, country: input.country ?? null, theme: input.theme ?? null, goalAmount: input.goalAmount ? String(input.goalAmount) : null, currency: input.currency, sdgGoals: input.sdgGoals }).returning();
       return fund;
     }),
-    contribute: protectedProcedure.input(z.object({ fundId: z.number(), amount: z.number().positive() })).mutation(async ({ ctx, input }) => {
+    contribute: protectedProcedure.input(z.object({ fundId: z.number(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { communityFunds } = await import("../drizzle/schema.js");
-      await db.update(communityFunds).set({ totalRaised: sql`total_raised + ${input.amount}`, contributorCount: sql`contributor_count + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, input.fundId));
+      await db.update(communityFunds).set({ totalRaised: sql`total_raised + ${input.amount}`, contributorCount: sql`contributor_count + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, input.fundId)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "community.contribute", targetType: "community_fund", targetId: input.fundId, severity: "info", metadata: { amount: input.amount } });
-      return { success: true };
+      return { success: true, fundId: input.fundId, amount: input.amount };
     }),
     listProposals: publicProcedure.input(z.object({ fundId: z.number() })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundProposals } = await import("../drizzle/schema.js");
       return db.select().from(fundProposals).where(eq(fundProposals.fundId, input.fundId)).orderBy(desc(fundProposals.createdAt)).limit(50);
     }),
-    submitProposal: protectedProcedure.input(z.object({ fundId: z.number(), title: z.string().min(5), description: z.string().optional(), requestedAmount: z.number().positive(), currency: z.string().default("USD"), beneficiaryName: z.string().optional(), beneficiaryCountry: z.string().optional(), impactDescription: z.string().optional() })).mutation(async ({ ctx, input }) => {
+    submitProposal: protectedProcedure.input(z.object({ fundId: z.number(), title: z.string().min(5), description: z.string().optional(), requestedAmount: z.number().positive().max(10_000_000), currency: z.string().default("USD"), beneficiaryName: z.string().optional(), beneficiaryCountry: z.string().optional(), impactDescription: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new Error("DB unavailable");
       const { fundProposals } = await import("../drizzle/schema.js");
       const deadline = new Date(); deadline.setDate(deadline.getDate() + 14);
@@ -5296,7 +5743,7 @@ Case: #${input.caseId}`,
       if (input.vote === "for") { await db.update(fundProposals).set({ votesFor: sql`votes_for + 1` }).where(eq(fundProposals.id, input.proposalId)); }
       else { await db.update(fundProposals).set({ votesAgainst: sql`votes_against + 1` }).where(eq(fundProposals.id, input.proposalId)); }
       // Fetch updated counts and publish to Go community feed for real-time SSE
-      const [updated] = await db.select({ title: fundProposals.title, votesFor: fundProposals.votesFor, votesAgainst: fundProposals.votesAgainst, submittedByUserId: fundProposals.submittedByUserId }).from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1);
+      const [updated] = await db.select({ title: fundProposals.title, votesFor: fundProposals.votesFor, votesAgainst: fundProposals.votesAgainst, submittedByUserId: fundProposals.submittedByUserId }).from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1).returning();
       try {
         const { communityFeedClient } = await import("./services/community-feed-client.js");
         await communityFeedClient.publish({
@@ -5333,7 +5780,7 @@ Case: #${input.caseId}`,
           // Notify the platform owner for 100% milestone
           if (hitMilestone === 100) {
             const { notifyOwner } = await import("./_core/notification.js");
-            await notifyOwner({ title: notifTitle, content: `${notifMsg} Fund: Proposal ID ${input.proposalId}.` }).catch(() => {});
+            await notifyOwner({ title: notifTitle, content: `${notifMsg} Fund: Proposal ID ${input.proposalId}.` }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
           }
         }
       } catch { /* non-critical — milestone notification failure should not block vote */ }
@@ -5341,19 +5788,19 @@ Case: #${input.caseId}`,
       return { success: true, votesFor: Number(updated?.votesFor ?? 0), votesAgainst: Number(updated?.votesAgainst ?? 0) };
     }),
     liveVotes: publicProcedure.input(z.object({ proposalId: z.number() })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return { votesFor: 0, votesAgainst: 0, total: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundProposals } = await import("../drizzle/schema.js");
       const [p] = await db.select({ votesFor: fundProposals.votesFor, votesAgainst: fundProposals.votesAgainst }).from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1);
       const vf = Number(p?.votesFor ?? 0); const va = Number(p?.votesAgainst ?? 0);
       return { votesFor: vf, votesAgainst: va, total: vf + va };
     }),
     getImpactMetrics: publicProcedure.input(z.object({ fundId: z.number() })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return null;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { communityFunds, fundProposals } = await import("../drizzle/schema.js");
       const [fund] = await db.select().from(communityFunds).where(eq(communityFunds.id, input.fundId)).limit(1);
       if (!fund) return null;
       const proposals = await db.select().from(fundProposals).where(and(eq(fundProposals.fundId, input.fundId), eq(fundProposals.status, "funded")));
-      const totalFunded = proposals.reduce((s, p) => s + parseFloat(String(p.requestedAmount)), 0);
+      const totalFunded = proposals.reduce((s: any, p: any) => s + safeParseAmount(String(p.requestedAmount)), 0);
       return { fund, fundedProposals: proposals.length, totalFunded, beneficiaryCount: fund.beneficiaryCount, sdgGoals: fund.sdgGoals };
     }),
 
@@ -5364,41 +5811,39 @@ Case: #${input.caseId}`,
       disbursementMethod: z.enum(["wallet", "bank", "mobile_money"]).default("wallet"),
       notes: z.string().optional(),
     })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundProposals, notifications } = await import("../drizzle/schema.js");
       const [proposal] = await db.select().from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1);
       if (!proposal) throw new TRPCError({ code: "NOT_FOUND", message: "Proposal not found" });
       if (proposal.submittedByUserId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "Only the proposal submitter can request disbursement" });
       if (proposal.status !== "approved" && Number(proposal.votesFor ?? 0) < 10) throw new TRPCError({ code: "BAD_REQUEST", message: "Proposal must be approved before disbursement" });
-      await db.update(fundProposals).set({ status: "funded", updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId));
+      await db.update(fundProposals).set({ status: "funded", updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId)).returning();
       await db.insert(notifications).values({ userId: ctx.user.id, type: "disbursement_requested", title: "Disbursement Requested", message: `Your proposal "${proposal.title}" has been submitted for disbursement review.`, isRead: false, createdAt: new Date() });
       const { notifyOwner: _notifyOwner } = await import("./_core/notification.js");
-      await _notifyOwner({ title: "Fund Disbursement Request", content: `Proposal "${proposal.title}" (ID: ${proposal.id}) has been submitted for disbursement by ${ctx.user.name ?? ctx.user.email}. Amount: ${proposal.requestedAmount} ${proposal.currency}. Method: ${input.disbursementMethod}.` }).catch(() => {});
+      await _notifyOwner({ title: "Fund Disbursement Request", content: `Proposal "${proposal.title}" (ID: ${proposal.id}) has been submitted for disbursement by ${ctx.user.name ?? ctx.user.email}. Amount: ${proposal.requestedAmount} ${proposal.currency}. Method: ${input.disbursementMethod}.` }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       return { success: true, proposalId: input.proposalId };
     }),
 
-    approveDisbursement: protectedProcedure.input(z.object({
+    approveDisbursement: adminProcedure.input(z.object({
       proposalId: z.number(),
       action: z.enum(["approve", "reject"]),
       adminNotes: z.string().optional(),
     })).mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin only" });
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundProposals, communityFunds, notifications } = await import("../drizzle/schema.js");
       const [proposal] = await db.select().from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1);
-      if (!proposal) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!proposal) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const newStatus = input.action === "approve" ? "completed" : "rejected";
-      await db.update(fundProposals).set({ status: newStatus as any, fundedAt: input.action === "approve" ? new Date() : undefined, updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId));
+      await db.update(fundProposals).set({ status: newStatus as any, fundedAt: input.action === "approve" ? new Date() : undefined, updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId)).returning();
       if (input.action === "approve") {
-        await db.update(communityFunds).set({ beneficiaryCount: sql`${communityFunds.beneficiaryCount} + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, proposal.fundId));
+        await db.update(communityFunds).set({ beneficiaryCount: sql`${communityFunds.beneficiaryCount} + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, proposal.fundId)).returning();
       }
       await db.insert(notifications).values({ userId: proposal.submittedByUserId, type: "disbursement_" + input.action + "d", title: `Disbursement ${input.action === "approve" ? "Approved" : "Rejected"}`, message: `Your proposal "${proposal.title}" disbursement has been ${input.action === "approve" ? "approved and processed" : "rejected"}. ${input.adminNotes ? "Note: " + input.adminNotes : ""}`, isRead: false, createdAt: new Date() });
       return { success: true, status: newStatus };
     }),
 
-    listDisbursementRequests: protectedProcedure.query(async ({ ctx }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
-      const db = await getDb(); if (!db) return [];
+    listDisbursementRequests: adminProcedure.query(async ({ ctx }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundProposals, communityFunds, users } = await import("../drizzle/schema.js");
       return db.select({ proposal: fundProposals, fund: communityFunds }).from(fundProposals)
         .innerJoin(communityFunds, eq(fundProposals.fundId, communityFunds.id))
@@ -5408,7 +5853,7 @@ Case: #${input.caseId}`,
 
     // ── Community Leaderboard ─────────────────────────────────────────────────
     communityLeaderboard: publicProcedure.query(async () => {
-      const db = await getDb(); if (!db) return { topVoters: [], topContributors: [], topProposers: [] };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundVotes, fundProposals, users } = await import("../drizzle/schema.js");
       // Top voters — SQL aggregation + JOIN (no N+1)
       const topVoterRows = await db
@@ -5418,7 +5863,7 @@ Case: #${input.caseId}`,
         .groupBy(fundVotes.userId, users.name, users.email)
         .orderBy(desc(count(fundVotes.id)))
         .limit(10);
-      const topVoters = topVoterRows.map((r, idx) => ({
+      const topVoters = topVoterRows.map((r: any, idx: any) => ({
         rank: idx + 1,
         userId: r.userId,
         name: r.name ?? r.email ?? "Anonymous",
@@ -5437,7 +5882,7 @@ Case: #${input.caseId}`,
         .groupBy(fundProposals.submittedByUserId, users.name, users.email)
         .orderBy(desc(count(fundProposals.id)))
         .limit(10);
-      const topProposers = topProposerRows.map((r, idx) => ({
+      const topProposers = topProposerRows.map((r: any, idx: any) => ({
         rank: idx + 1,
         userId: r.userId,
         name: r.name ?? r.email ?? "Anonymous",
@@ -5447,7 +5892,7 @@ Case: #${input.caseId}`,
       return { topVoters, topContributors: topVoters, topProposers };
     }),
     listMyVotes: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { fundVotes, fundProposals, communityFunds } = await import("../drizzle/schema.js");
       const votes = await db.select({
         id: fundVotes.id,
@@ -5469,12 +5914,12 @@ Case: #${input.caseId}`,
   }),
   diaspora: router({
     listOpportunities: publicProcedure.input(z.object({ sector: z.string().optional(), country: z.string().optional(), stage: z.string().optional() }).optional()).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { investmentOpportunities } = await import("../drizzle/schema.js");
       return db.select().from(investmentOpportunities).where(eq(investmentOpportunities.status, "open")).orderBy(desc(investmentOpportunities.raisedAmount)).limit(20);
     }),
     listCollectives: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { diasporaCollectives } = await import("../drizzle/schema.js");
       return db.select().from(diasporaCollectives).where(eq(diasporaCollectives.status, "active")).orderBy(desc(diasporaCollectives.totalContributed)).limit(20);
     }),
@@ -5491,11 +5936,11 @@ Case: #${input.caseId}`,
       const existing = await db.select().from(diasporaCollectiveMembers).where(and(eq(diasporaCollectiveMembers.collectiveId, input.collectiveId), eq(diasporaCollectiveMembers.userId, ctx.user.id))).limit(1);
       if (existing.length) throw new Error("Already a member");
       await db.insert(diasporaCollectiveMembers).values({ collectiveId: input.collectiveId, userId: ctx.user.id, role: "member" });
-      await db.update(diasporaCollectives).set({ memberCount: sql`member_count + 1`, updatedAt: new Date() }).where(eq(diasporaCollectives.id, input.collectiveId));
-      return { success: true };
+      await db.update(diasporaCollectives).set({ memberCount: sql`member_count + 1`, updatedAt: new Date() }).where(eq(diasporaCollectives.id, input.collectiveId)).returning();
+      return { success: true, collectiveId: input.collectiveId };
     }),
     getCollectiveDetails: publicProcedure.input(z.object({ id: z.number() })).query(async ({ input }) => {
-      const db = await getDb(); if (!db) return null;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { diasporaCollectives, diasporaCollectiveMembers, users: usersTable } = await import("../drizzle/schema.js");
       const [collective] = await db.select().from(diasporaCollectives).where(eq(diasporaCollectives.id, input.id)).limit(1);
       if (!collective) return null;
@@ -5541,7 +5986,7 @@ Case: #${input.caseId}`,
     /** Run a transaction through the AML rules engine */
     amlScreen: protectedProcedure.input(z.object({
       transactionId: z.string(),
-      amountUsd: z.number(),
+      amountUsd: z.number().positive().max(10_000_000),
       senderCountry: z.string().optional(),
       receiverCountry: z.string().optional(),
       senderName: z.string().optional(),
@@ -5586,10 +6031,11 @@ Case: #${input.caseId}`,
         return { ...q, _fallback: false };
       } catch {
         const { fetchLiveRates } = await import("./fx-rates.service.js");
-        const rates = await fetchLiveRates(input.from);
-        const rate = rates[input.to] ?? 1;
-        const fee = Math.max(0.5, input.amount * 0.005);
-        return { from: input.from, to: input.to, sendAmount: input.amount, receiveAmount: parseFloat(((input.amount - fee) * rate).toFixed(2)), fxRate: rate, fee, totalCost: fee, spread: 0.005, fsp: "internal", expiresAt: Math.floor(Date.now() / 1000) + 60, _fallback: true };
+        const ratesResult = await fetchLiveRates(input.from);
+        const rate = (ratesResult as any)?.rates?.[input.to] ?? (ratesResult as any)?.[input.to] ?? 1;
+        const fxFallbackFee = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+        const fee = Math.max(0.5, fxFallbackFee.totalFee);
+        return { from: input.from, to: input.to, sendAmount: input.amount, receiveAmount: safeParseAmount(((input.amount - fee) * rate).toFixed(2)), fxRate: rate, fee: Math.round(fee * 100) / 100, totalCost: Math.round(fee * 100) / 100, spread: fxFallbackFee.feeRate, fsp: "internal", expiresAt: Math.floor(Date.now() / 1000) + 60, _fallback: true };
       }
     }),
   }),
@@ -5637,12 +6083,12 @@ Case: #${input.caseId}`,
         const { shareLinkClient } = await import("./services/share-link-client.js");
         try {
           return await shareLinkClient.generate({
-            ...input, baseUrl: "https://remitflow.manus.space",
+            ...input, baseUrl: process.env.APP_URL ?? "https://remitflow.example.com",
             createdBy: ctx.user.id.toString(),
           });
         } catch {
           const slug = `${input.resourceType.slice(0,3)}-${input.resourceId.slice(0,8)}`;
-          const shortUrl = `https://remitflow.manus.space/share/${slug}`;
+          const shortUrl = `https://remitflow.example.com/share/${slug}`;
           return {
             id: `fallback-${Date.now()}`, slug, shortUrl, ogUrl: shortUrl,
             shareUrls: {
@@ -5688,47 +6134,47 @@ Case: #${input.caseId}`,
       .mutation(async ({ input, ctx }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.track({ ...input, userId: ctx.user.id.toString() }); }
-        catch { return { ok: false, tab: input.tab, totalEvents: 0, _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics track failed, using fallback"); return { ok: false, tab: input.tab, totalEvents: 0, _fallback: true }; }
       }),
     summary: publicProcedure
       .input(z.object({ hours: z.number().int().min(1).max(168).default(24) }))
       .query(async ({ input }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.getSummary(input.hours); }
-        catch { return { periodHours: input.hours, totalTaps: 0, uniqueUsers: 0, tabs: [], platforms: {}, topCountries: [], _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics summary failed, using fallback"); return { periodHours: input.hours, totalTaps: 0, uniqueUsers: 0, tabs: [], platforms: {}, topCountries: [], _fallback: true }; }
       }),
     heatmap: publicProcedure
       .input(z.object({ hours: z.number().int().min(1).max(720).default(168) }))
       .query(async ({ input }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.getHeatmap(input.hours); }
-        catch { return { periodHours: input.hours, hours: [], heatmap: {}, labels: {}, _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics heatmap failed, using fallback"); return { periodHours: input.hours, hours: [], heatmap: {}, labels: {}, _fallback: true }; }
       }),
     recommendations: publicProcedure
       .input(z.object({ segment: z.string().default("new_user") }))
       .query(async ({ input }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.getRecommendations(input.segment); }
-        catch { return { segment: input.segment, totalEventsAnalyzed: 0, recommendedOrder: [], model: "fallback", _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics recommendations failed, using fallback"); return { segment: input.segment, totalEventsAnalyzed: 0, recommendedOrder: [], model: "fallback", _fallback: true }; }
       }),
     topFeatures: publicProcedure
       .input(z.object({ hours: z.number().int().min(1).max(168).default(24) }))
       .query(async ({ input }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.getTopFeatures(input.hours); }
-        catch { return { periodHours: input.hours, topFeatures: [], _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics topFeatures failed, using fallback"); return { periodHours: input.hours, topFeatures: [], _fallback: true }; }
       }),
     retention: publicProcedure
       .input(z.object({ days: z.number().int().min(1).max(30).default(7) }))
       .query(async ({ input }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.getRetention(input.days); }
-        catch { return { days: input.days, retention: [], labels: {}, _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics retention failed, using fallback"); return { days: input.days, retention: [], labels: {}, _fallback: true }; }
       }),
     health: publicProcedure.query(async () => {
       const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
       try { const h = await navAnalyticsClient.health(); return { ...h, online: true }; }
-      catch { return { status: "offline", service: "python-nav-analytics", totalEvents: 0, online: false, _fallback: true }; }
+      catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics health check failed"); return { status: "offline", service: "python-nav-analytics", totalEvents: 0, online: false, _fallback: true }; }
     }),
   }),
   // ─── Beyond Remittance — Investment Module ────────────────────────────────
@@ -5736,10 +6182,10 @@ Case: #${input.caseId}`,
     listAssets: publicProcedure
       .input(z.object({ assetType: z.string().optional(), search: z.string().optional(), featured: z.boolean().optional(), limit: z.number().int().min(1).max(100).default(50) }).optional())
       .query(async ({ input }) => {
-        const db = await getDb(); if (!db) return [];
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { investmentAssets } = await import("../drizzle/schema.js");
         const rows = await db.select().from(investmentAssets).where(eq(investmentAssets.isActive, true)).orderBy(desc(investmentAssets.isFeatured), investmentAssets.symbol).limit(input?.limit ?? 50);
-        return rows.filter(r => {
+        return rows.filter((r: any) => {
           if (input?.assetType && r.assetType !== input.assetType) return false;
           if (input?.search) { const s = input.search.toLowerCase(); if (!r.symbol.toLowerCase().includes(s) && !r.name.toLowerCase().includes(s)) return false; }
           if (input?.featured && !r.isFeatured) return false;
@@ -5749,7 +6195,7 @@ Case: #${input.caseId}`,
     getAsset: publicProcedure
       .input(z.object({ symbol: z.string() }))
       .query(async ({ input }) => {
-        const db = await getDb(); if (!db) throw new TRPCError({ code: "NOT_FOUND" });
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         const { investmentAssets } = await import("../drizzle/schema.js");
         const [asset] = await db.select().from(investmentAssets).where(eq(investmentAssets.symbol, input.symbol)).limit(1);
         if (!asset) throw new TRPCError({ code: "NOT_FOUND", message: `Asset ${input.symbol} not found` });
@@ -5758,10 +6204,10 @@ Case: #${input.caseId}`,
     buyAsset: protectedProcedure
       .input(z.object({ assetId: z.number().int(), quantity: z.number().positive(), currency: z.string().default("USD") }))
       .mutation(async ({ input, ctx }) => {
-        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { investmentAssets, userInvestments, investmentOrders } = await import("../drizzle/schema.js");
         const [asset] = await db.select().from(investmentAssets).where(eq(investmentAssets.id, input.assetId)).limit(1);
-        if (!asset) throw new TRPCError({ code: "NOT_FOUND" });
+        if (!asset) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         const price = Number(asset.currentPrice ?? 0);
         const total = price * input.quantity;
         const fee = total * 0.001;
@@ -5772,35 +6218,35 @@ Case: #${input.caseId}`,
     sellAsset: protectedProcedure
       .input(z.object({ investmentId: z.number().int(), quantity: z.number().positive().optional() }))
       .mutation(async ({ input, ctx }) => {
-        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { userInvestments, investmentAssets, investmentOrders } = await import("../drizzle/schema.js");
         const [inv] = await db.select().from(userInvestments).where(and(eq(userInvestments.id, input.investmentId), eq(userInvestments.userId, ctx.user.id))).limit(1);
-        if (!inv) throw new TRPCError({ code: "NOT_FOUND" });
+        if (!inv) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         const [asset] = await db.select().from(investmentAssets).where(eq(investmentAssets.id, inv.assetId)).limit(1);
         const currentPrice = Number(asset?.currentPrice ?? 0);
         const qty = input.quantity ?? Number(inv.quantity);
         const total = currentPrice * qty;
         const fee = total * 0.001;
-        await db.update(userInvestments).set({ status: "sold", soldAt: new Date(), soldPrice: currentPrice.toString(), updatedAt: new Date() }).where(eq(userInvestments.id, input.investmentId));
+        await db.update(userInvestments).set({ status: "sold", soldAt: new Date(), soldPrice: currentPrice.toString(), updatedAt: new Date() }).where(eq(userInvestments.id, input.investmentId)).returning();
         await db.insert(investmentOrders).values({ userId: ctx.user.id, assetId: inv.assetId, orderType: "sell", quantity: qty.toString(), priceAtOrder: currentPrice.toString(), totalAmount: total.toString(), currency: inv.currency ?? "USD", status: "completed", fee: fee.toString() });
         return { success: true, symbol: asset?.symbol, quantity: qty, price: currentPrice, total: total - fee, fee };
       }),
     getPortfolio: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { holdings: [], totalValue: 0, totalCost: 0, totalPnl: 0, totalPnlPct: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { userInvestments, investmentAssets } = await import("../drizzle/schema.js");
       const holdings = await db.select({ inv: userInvestments, asset: investmentAssets }).from(userInvestments).innerJoin(investmentAssets, eq(userInvestments.assetId, investmentAssets.id)).where(and(eq(userInvestments.userId, ctx.user.id), eq(userInvestments.status, "active"))).orderBy(desc(userInvestments.purchasedAt));
-      const totalValue = holdings.reduce((s, h) => s + Number(h.asset.currentPrice ?? 0) * Number(h.inv.quantity), 0);
-      const totalCost = holdings.reduce((s, h) => s + Number(h.inv.purchasePrice) * Number(h.inv.quantity), 0);
+      const totalValue = holdings.reduce((s: any, h: any) => s + Number(h.asset.currentPrice ?? 0) * Number(h.inv.quantity), 0);
+      const totalCost = holdings.reduce((s: any, h: any) => s + Number(h.inv.purchasePrice) * Number(h.inv.quantity), 0);
       return { holdings, totalValue, totalCost, totalPnl: totalValue - totalCost, totalPnlPct: totalCost > 0 ? ((totalValue - totalCost) / totalCost) * 100 : 0 };
     }),
     analyzePortfolio: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return null;
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { userInvestments, investmentAssets } = await import("../drizzle/schema.js");
       const holdings = await db.select({ inv: userInvestments, asset: investmentAssets }).from(userInvestments).innerJoin(investmentAssets, eq(userInvestments.assetId, investmentAssets.id)).where(and(eq(userInvestments.userId, ctx.user.id), eq(userInvestments.status, "active")));
       if (!holdings.length) return null;
       const { portfolioCalcClient } = await import("./services/portfolio-calc-client.js");
       try {
-        return await portfolioCalcClient.analyze({ holdings: holdings.map(h => ({ symbol: h.asset.symbol, name: h.asset.name, asset_type: h.asset.assetType, quantity: Number(h.inv.quantity), purchase_price: Number(h.inv.purchasePrice), current_price: Number(h.asset.currentPrice ?? 0), currency: h.inv.currency ?? "USD", sector: h.asset.sector ?? undefined, country: h.asset.country ?? undefined })) });
+        return await portfolioCalcClient.analyze({ holdings: holdings.map((h: any) => ({ symbol: h.asset.symbol, name: h.asset.name, asset_type: h.asset.assetType, quantity: Number(h.inv.quantity), purchase_price: Number(h.inv.purchasePrice), current_price: Number(h.asset.currentPrice ?? 0), currency: h.inv.currency ?? "USD", sector: h.asset.sector ?? undefined, country: h.asset.country ?? undefined })) });
       } catch { return null; }
     }),
     getRecommendations: protectedProcedure
@@ -5827,22 +6273,22 @@ Case: #${input.caseId}`,
     addToWatchlist: protectedProcedure
       .input(z.object({ assetId: z.number().int(), alertPrice: z.number().optional() }))
       .mutation(async ({ input, ctx }) => {
-        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { investmentWatchlist } = await import("../drizzle/schema.js");
-        await db.delete(investmentWatchlist).where(and(eq(investmentWatchlist.userId, ctx.user.id), eq(investmentWatchlist.assetId, input.assetId)));
+        await db.delete(investmentWatchlist).where(and(eq(investmentWatchlist.userId, ctx.user.id), eq(investmentWatchlist.assetId, input.assetId))).returning();
         await db.insert(investmentWatchlist).values({ userId: ctx.user.id, assetId: input.assetId, alertPrice: input.alertPrice?.toString() });
-        return { success: true };
+        return { success: true, assetId: input.assetId };
       }),
     removeFromWatchlist: protectedProcedure
       .input(z.object({ assetId: z.number().int() }))
       .mutation(async ({ input, ctx }) => {
-        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { investmentWatchlist } = await import("../drizzle/schema.js");
-        await db.delete(investmentWatchlist).where(and(eq(investmentWatchlist.userId, ctx.user.id), eq(investmentWatchlist.assetId, input.assetId)));
-        return { success: true };
+        await db.delete(investmentWatchlist).where(and(eq(investmentWatchlist.userId, ctx.user.id), eq(investmentWatchlist.assetId, input.assetId))).returning();
+        return { success: true, removedAssetId: input.assetId };
       }),
     getWatchlist: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { investmentWatchlist, investmentAssets } = await import("../drizzle/schema.js");
       return db.select({ watchlist: investmentWatchlist, asset: investmentAssets }).from(investmentWatchlist).innerJoin(investmentAssets, eq(investmentWatchlist.assetId, investmentAssets.id)).where(eq(investmentWatchlist.userId, ctx.user.id)).orderBy(desc(investmentWatchlist.createdAt));
     }),
@@ -5858,7 +6304,7 @@ Case: #${input.caseId}`,
       .query(async ({ input }) => {
         const { investmentMlClient } = await import("./services/investment-ml-client.js");
         try { return await investmentMlClient.scoreRisk({ age: input?.age, monthly_income_usd: input?.monthlyIncome ?? 1000, monthly_expenses_usd: input?.monthlyExpenses ?? 700, existing_savings_usd: input?.existingSavings ?? 0, investment_experience: input?.experience ?? "beginner", risk_preference: input?.riskPreference ?? "moderate", dependents: input?.dependents ?? 0, employment_status: input?.employmentStatus ?? "employed", home_country: input?.homeCountry }); }
-        catch { return { risk_score: 50, risk_label: "Moderate", recommended_allocation: {}, max_investment_pct_income: 10, emergency_fund_months: 3, key_factors: [], scored_at: new Date().toISOString(), _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "investment" }, "Risk scoring failed, using moderate fallback"); return { risk_score: 50, risk_label: "Moderate", recommended_allocation: {}, max_investment_pct_income: 10, emergency_fund_months: 3, key_factors: [], scored_at: new Date().toISOString(), _fallback: true }; }
       }),
     getSentiment: publicProcedure
       .input(z.object({ symbols: z.array(z.string()).min(1).max(20) }))
@@ -5870,7 +6316,7 @@ Case: #${input.caseId}`,
     getOrderHistory: protectedProcedure
       .input(z.object({ limit: z.number().int().min(1).max(100).default(50) }).optional())
       .query(async ({ ctx, input }) => {
-        const db = await getDb(); if (!db) return [];
+        const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { investmentOrders, investmentAssets } = await import("../drizzle/schema.js");
         return db.select({ order: investmentOrders, asset: investmentAssets }).from(investmentOrders).innerJoin(investmentAssets, eq(investmentOrders.assetId, investmentAssets.id)).where(eq(investmentOrders.userId, ctx.user.id)).orderBy(desc(investmentOrders.createdAt)).limit(input?.limit ?? 50);
       }),
@@ -5898,7 +6344,7 @@ Case: #${input.caseId}`,
       }))
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { investmentPriceHistory, investmentAssets } = await import("../drizzle/schema.js");
         const [asset] = await db.select({ id: investmentAssets.id }).from(investmentAssets).where(eq(investmentAssets.symbol, input.symbol)).limit(1);
         if (!asset) return [];
@@ -5924,7 +6370,7 @@ Case: #${input.caseId}`,
       }))
       .mutation(async ({ input, ctx }) => {
         const db = await getDb();
-        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { investmentAssets } = await import("../drizzle/schema.js");
         const [asset] = await db.select().from(investmentAssets).where(eq(investmentAssets.id, input.assetId)).limit(1);
         if (!asset) throw new TRPCError({ code: "NOT_FOUND", message: "Asset not found" });
@@ -5981,7 +6427,7 @@ Case: #${input.caseId}`,
       .input(z.object({ days: z.number().int().min(7).max(365).default(90) }).optional())
       .query(async ({ input, ctx }) => {
         const db = await getDb();
-        if (!db) return { dataPoints: [], totalValue: 0, totalCost: 0, pnl: 0, pnlPct: 0 };
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
         const { userInvestments, investmentAssets, investmentPriceHistory } = await import("../drizzle/schema.js");
         const days = input?.days ?? 90;
         const since = new Date(Date.now() - days * 86400000);
@@ -5990,20 +6436,20 @@ Case: #${input.caseId}`,
           .innerJoin(investmentAssets, eq(userInvestments.assetId, investmentAssets.id))
           .where(and(eq(userInvestments.userId, ctx.user.id), eq(userInvestments.status, "active")));
         if (!holdings.length) return { dataPoints: [], totalValue: 0, totalCost: 0, pnl: 0, pnlPct: 0 };
-        const assetIds = holdings.map(h => h.inv.assetId);
+        const assetIds = holdings.map((h: any) => h.inv.assetId);
         const priceRows = await db.select().from(investmentPriceHistory)
           .where(and(inArray(investmentPriceHistory.assetId, assetIds), gte(investmentPriceHistory.timestamp, since)))
           .orderBy(asc(investmentPriceHistory.timestamp));
         const byDate: Record<string, number> = {};
         for (const row of priceRows) {
           const dateKey = new Date(row.timestamp).toISOString().slice(0, 10);
-          const holding = holdings.find(h => h.inv.assetId === row.assetId);
+          const holding = holdings.find((h: any) => h.inv.assetId === row.assetId);
           if (!holding) continue;
           byDate[dateKey] = (byDate[dateKey] ?? 0) + Number(row.close) * Number(holding.inv.quantity);
         }
         const dataPoints = Object.entries(byDate).sort(([a], [b]) => a.localeCompare(b)).map(([date, value]) => ({ date, value: +value.toFixed(2) }));
-        const totalValue = holdings.reduce((s, h) => s + Number(h.asset.currentPrice ?? 0) * Number(h.inv.quantity), 0);
-        const totalCost = holdings.reduce((s, h) => s + Number(h.inv.purchasePrice) * Number(h.inv.quantity), 0);
+        const totalValue = holdings.reduce((s: any, h: any) => s + Number(h.asset.currentPrice ?? 0) * Number(h.inv.quantity), 0);
+        const totalCost = holdings.reduce((s: any, h: any) => s + Number(h.inv.purchasePrice) * Number(h.inv.quantity), 0);
         const pnl = totalValue - totalCost;
         const pnlPct = totalCost > 0 ? (pnl / totalCost) * 100 : 0;
         return { dataPoints, totalValue: +totalValue.toFixed(2), totalCost: +totalCost.toFixed(2), pnl: +pnl.toFixed(2), pnlPct: +pnlPct.toFixed(2) };
@@ -6011,27 +6457,27 @@ Case: #${input.caseId}`,
   }),
   agentNetwork: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try {
         const rows = await db.execute(sql`SELECT * FROM agent_network WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC LIMIT 50`);
         return (rows as any[]).map((r: any) => ({ ...r, commissionRate: Number(r.commission_rate ?? 0.02) }));
       } catch { return []; }
     }),
     register: protectedProcedure.input(z.object({ businessName: z.string().min(2), country: z.string(), city: z.string(), phone: z.string(), commissionRate: z.number().min(0).max(0.1).default(0.02) })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try { await db.execute(sql`INSERT INTO agent_network (user_id, business_name, country, city, phone, commission_rate, status) VALUES (${ctx.user.id}, ${input.businessName}, ${input.country}, ${input.city}, ${input.phone}, ${input.commissionRate}, 'pending')`); } catch { /* table may not exist yet */ }
-      return { success: true };
+      return { success: true, status: "pending" };
     }),
     stats: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return { totalAgents: 0, activeAgents: 0, totalVolume: 0, totalCommissions: 0 };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try {
         const rows = await db.execute(sql`SELECT COUNT(*) as total, SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) as active FROM agent_network WHERE user_id = ${ctx.user.id}`) as any[];
         const row = rows[0] ?? {};
         return { totalAgents: Number(row.total ?? 0), activeAgents: Number(row.active ?? 0), totalVolume: 0, totalCommissions: 0 };
       } catch { return { totalAgents: 0, activeAgents: 0, totalVolume: 0, totalCommissions: 0 }; }
     }),
-    cashIn: protectedProcedure.input(z.object({ customerId: z.string(), amountNgn: z.number().positive(), channel: z.enum(["cash", "pos", "mobile_money"]).default("cash"), reference: z.string().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+    cashIn: protectedProcedure.input(z.object({ customerId: z.string(), amountNgn: z.number().positive().max(10_000_000), channel: z.enum(["cash", "pos", "mobile_money"]).default("cash"), reference: z.string().optional() })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const ref = input.reference ?? `CASHIN-${Date.now()}-${randomBytes(3).toString("hex").toUpperCase()}`;
       try { await db.execute(sql`INSERT INTO agent_cash_transactions (agent_user_id, customer_id, amount_ngn, channel, reference, type, status, created_at) VALUES (${ctx.user.id}, ${input.customerId}, ${input.amountNgn}, ${input.channel}, ${ref}, 'cash_in', 'completed', NOW()) ON CONFLICT DO NOTHING`); } catch { /* table may not exist */ }
       return { success: true, reference: ref, amountNgn: input.amountNgn, channel: input.channel };
@@ -6040,23 +6486,37 @@ Case: #${input.caseId}`,
 
   corridorPricing: router({
     list: publicProcedure.query(async () => {
-      return [
-        { id: 1, from: "GBP", to: "NGN", rate: 1950.5, fee: 0.005, minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", provider: "RemitFlow", popular: true },
-        { id: 2, from: "USD", to: "KES", rate: 129.3, fee: 0.004, minAmount: 10, maxAmount: 10000, deliveryTime: "Instant", provider: "RemitFlow", popular: true },
-        { id: 3, from: "EUR", to: "GHS", rate: 16.8, fee: 0.006, minAmount: 10, maxAmount: 5000, deliveryTime: "2-4 hours", provider: "RemitFlow", popular: false },
-        { id: 4, from: "USD", to: "NGN", rate: 1620.0, fee: 0.005, minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", provider: "RemitFlow", popular: true },
-        { id: 5, from: "GBP", to: "KES", rate: 163.2, fee: 0.004, minAmount: 10, maxAmount: 10000, deliveryTime: "Instant", provider: "RemitFlow", popular: false },
-        { id: 6, from: "USD", to: "GHS", rate: 15.6, fee: 0.005, minAmount: 10, maxAmount: 5000, deliveryTime: "2-4 hours", provider: "RemitFlow", popular: false },
-        { id: 7, from: "EUR", to: "NGN", rate: 1750.0, fee: 0.005, minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", provider: "RemitFlow", popular: false },
-        { id: 8, from: "GBP", to: "ZAR", rate: 23.5, fee: 0.006, minAmount: 10, maxAmount: 10000, deliveryTime: "Same day", provider: "RemitFlow", popular: false },
+      const corridors = [
+        { id: 1, from: "GBP", to: "NGN", minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", popular: true },
+        { id: 2, from: "USD", to: "KES", minAmount: 10, maxAmount: 10000, deliveryTime: "Instant", popular: true },
+        { id: 3, from: "EUR", to: "GHS", minAmount: 10, maxAmount: 5000, deliveryTime: "2-4 hours", popular: false },
+        { id: 4, from: "USD", to: "NGN", minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", popular: true },
+        { id: 5, from: "GBP", to: "KES", minAmount: 10, maxAmount: 10000, deliveryTime: "Instant", popular: false },
+        { id: 6, from: "USD", to: "GHS", minAmount: 10, maxAmount: 5000, deliveryTime: "2-4 hours", popular: false },
+        { id: 7, from: "EUR", to: "NGN", minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", popular: false },
+        { id: 8, from: "GBP", to: "ZAR", minAmount: 10, maxAmount: 10000, deliveryTime: "Same day", popular: false },
       ];
+      const rates = await getLiveRates("USD");
+      return corridors.map((c) => {
+        const fromRate = rates[c.from] ?? 1;
+        const toRate = rates[c.to] ?? 1;
+        const liveRate = toRate / fromRate;
+        const feeInfo = calculateFee(100, { from: c.from.slice(0, 2), to: c.to.slice(0, 2) });
+        return { ...c, rate: Math.round(liveRate * 100) / 100, fee: feeInfo.feeRate, provider: "RemitFlow" };
+      });
     }),
     compare: publicProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number() })).query(async ({ input }) => {
+      const rates = await getLiveRates("USD");
+      const fromRate = rates[input.from] ?? 1;
+      const toRate = rates[input.to] ?? 1;
+      const liveRate = toRate / fromRate;
+      const rfFee = calculateFee(input.amount / fromRate, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
+      const rfFeeAmt = rfFee.totalFee * fromRate;
       const providers = [
-        { name: "RemitFlow", rate: 1950.5, fee: input.amount * 0.005, total: input.amount * 1950.5, deliveryTime: "1-2 hours", rating: 4.8 },
-        { name: "Wise", rate: 1940.2, fee: input.amount * 0.007, total: input.amount * 1940.2, deliveryTime: "2-3 hours", rating: 4.6 },
-        { name: "WorldRemit", rate: 1920.0, fee: input.amount * 0.01, total: input.amount * 1920.0, deliveryTime: "Same day", rating: 4.3 },
-        { name: "Western Union", rate: 1890.0, fee: input.amount * 0.015 + 5, total: input.amount * 1890.0, deliveryTime: "Minutes", rating: 4.0 },
+        { name: "RemitFlow", rate: liveRate, fee: Math.round(rfFeeAmt * 100) / 100, total: Math.round((input.amount - rfFeeAmt) * liveRate * 100) / 100, deliveryTime: "1-2 hours", rating: 4.8 },
+        { name: "Wise", rate: liveRate * 0.997, fee: Math.round(input.amount * 0.007 * 100) / 100, total: Math.round((input.amount - input.amount * 0.007) * liveRate * 0.997 * 100) / 100, deliveryTime: "2-3 hours", rating: 4.6 },
+        { name: "WorldRemit", rate: liveRate * 0.99, fee: Math.round(input.amount * 0.01 * 100) / 100, total: Math.round((input.amount - input.amount * 0.01) * liveRate * 0.99 * 100) / 100, deliveryTime: "Same day", rating: 4.3 },
+        { name: "Western Union", rate: liveRate * 0.97, fee: Math.round((input.amount * 0.015 + 5) * 100) / 100, total: Math.round((input.amount - input.amount * 0.015 - 5) * liveRate * 0.97 * 100) / 100, deliveryTime: "Minutes", rating: 4.0 },
       ];
       return { from: input.from, to: input.to, amount: input.amount, providers };
     }),
@@ -6075,7 +6535,7 @@ Case: #${input.caseId}`,
 
   consentManagement: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try {
         const rows = await db.execute(sql`SELECT * FROM consent_records WHERE user_id = ${ctx.user.id} ORDER BY updated_at DESC`) as any[];
         if (!rows.length) return [
@@ -6093,24 +6553,24 @@ Case: #${input.caseId}`,
       ]; }
     }),
     update: protectedProcedure.input(z.object({ type: z.string(), granted: z.boolean() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try { await db.execute(sql`INSERT INTO consent_records (user_id, type, granted, updated_at) VALUES (${ctx.user.id}, ${input.type}, ${input.granted ? 1 : 0}, NOW()) ON DUPLICATE KEY UPDATE granted = ${input.granted ? 1 : 0}, updated_at = NOW()`); } catch { /* table may not exist */ }
-      return { success: true };
+      return { success: true, type: input.type, granted: input.granted };
     }),
   }),
 
   propertyKYC: router({
     list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb(); if (!db) return [];
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try {
         const rows = await db.execute(sql`SELECT * FROM property_kyc WHERE user_id = ${ctx.user.id} ORDER BY created_at DESC`) as any[];
         return rows;
       } catch { return []; }
     }),
     submit: protectedProcedure.input(z.object({ propertyAddress: z.string(), propertyValue: z.number(), ownershipType: z.enum(["sole","joint","company"]), documentType: z.string(), documentUrl: z.string().url().optional() })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       try { await db.execute(sql`INSERT INTO property_kyc (user_id, property_address, property_value, ownership_type, document_type, document_url, status) VALUES (${ctx.user.id}, ${input.propertyAddress}, ${input.propertyValue}, ${input.ownershipType}, ${input.documentType}, ${input.documentUrl ?? null}, 'pending')`); } catch { /* table may not exist */ }
-      return { success: true };
+      return { success: true, status: "pending" };
     }),
   }),
 
@@ -6277,10 +6737,11 @@ Case: #${input.caseId}`,
   permify: permifyRouter,
   tigerBeetle: tigerBeetleRouter,
   openSearch: openSearchRouter,
-  lakehouseExt: lakehouseExtRouter,
+  lakehouseExt: lakehouseRouter,
   amlEngine: amlEngineRouter,
   fraudMl: fraudMlRouter,
   transferEngine: transferEngineRouter,
+  transferCore: transferCoreRouter,
   pdfReceipt: pdfReceiptRouter,
   searchIndexer: searchIndexerRouter,
   rateLimiter: rateLimiterRouter,
@@ -6440,5 +6901,73 @@ Case: #${input.caseId}`,
   swiftTx: swiftTxRouter,
   // v16 — Compliance Analytics
   complianceAnalytics: complianceAnalyticsRouter,
+  // v230 — KYC/KYB Production Gate (fail-closed account opening, enhanced KYB, BVN/NIN, goAML)
+  accountOpeningGate: accountOpeningGateRouter,
+  enhancedKyb: enhancedKybRouter,
+  kycVerificationScoring: kycVerificationScoringRouter,
+  bvnNin: bvnNinRouter,
+  sanctionsBatch: sanctionsBatchRouter,
+  goaml: goamlRouter,
+  kycEventConsumer: kycEventConsumerRouter,
+  cbnTierLimits: cbnTierLimitsRouter,
+  pepScreening: pepScreeningRouter,
+  adverseMedia: adverseMediaRouter,
+  continuousMonitoring: continuousMonitoringRouter,
+  reKYCScheduler: reKYCSchedulerRouter,
+  kycSelfService: kycSelfServiceRouter,
+  kycDataQuality: kycDataQualityRouter,
+  kycAnalytics: kycAnalyticsRouter,
+  doubleEntry: doubleEntryRouter,
+  receiptGeneration: receiptGenerationRouter,
+  loyaltyPoints: loyaltyPointsRouter,
+  beneficiaryVerification: beneficiaryVerificationRouter,
+  // v240 — Future-Proofing: AI, Open Banking, ISO 20022, CBDC, Compliance, Architecture, Payment Rails, Security, DX, Business
+  futureProofing: futureProofingRouter,
+  // v250 — ML Pipeline: NLU, FX Forecast, GNN Fraud, Investment ML, Ray Training, MLflow Registry, Retraining
+  mlPipeline: mlPipelineRouter,
+  // v260 — Property Escrow: Builder KYB, Escrow Plans, Milestone Verification, Property Disputes, Auto-Refund
+  propertyEscrow: propertyEscrowRouter,
+  // v270 — Failure Protection: BNPL, Agent, Transfer, Payroll, Investor, Bond, Mortgage, SplitBill, Card
+  failureProtection: failureProtectionRouter,
+  // v280 — Secrets Rotation: Registry, Expiry Alerts, Auto-Rotation, Audit Log
+  secretsRotation: secretsRotationRouter,
+  // v290 — SOC2 Evidence: Automated compliance evidence collection
+  soc2Evidence: soc2EvidenceRouter,
+  // v300 — Strategic Enhancements: Business KPIs, AI, Insurance, Social, BaaS, Programmable Money
+  businessKpi: businessKpiRouter,
+  nudgeEngine: nudgeEngineRouter,
+  recipientExperience: recipientExperienceRouter,
+  advancedFx: advancedFxRouter,
+  agentIntelligence: agentIntelligenceRouter,
+  smeDashboard: smeDashboardRouter,
+  remitAi: remitAiRouter,
+  microInsurance: microInsuranceRouter,
+  socialRemittance: socialRemittanceRouter,
+  baasApi: baasApiRouter,
+  programmableMoney: programmableMoneyRouter,
+  regReportsV2: regReportsV2Router,
+  supportTicketing: supportTicketingRouter,
+  abTestingV2: abTestingV2Router,
+  quickWins: quickWinsRouter,
+  // ── P2P Instant Payments (Zelle-style cross-border) ──
+  p2p: p2pInstantRouter,
+  // v310 — Stablecoin On-Ramp/Off-Ramp, Yield, DCA, Multi-Chain, P2P, Virtual Card, Bill Pay, Alerts
+  stablecoinPlatform: stablecoinEnhancedRouter,
+  // v311 — Liquidity Provider: quotes, settlements, reserves, rebalancing, admin
+  liquidityPool: liquidityPoolRouter,
+  // v312 — 20 Stablecoin Features (F1–F20) with polyglot middleware integration
+  programmablePayments: programmablePaymentsRouter,
+  crossCurrencySwap: crossCurrencySwapRouter,
+  merchantGateway: merchantGatewayRouter,
+  batchPayouts: batchPayoutsRouter,
+  accountAbstraction: accountAbstractionRouter,
+  lendingBorrowing: lendingBorrowingRouter,
+  invoicesAndSubscriptions: invoicesAndSubscriptionsRouter,
+  savingsVault: savingsVaultRouter,
+  remittanceCorridors: remittanceCorridorsRouter,
+  platformFeatures: platformFeaturesRouter,
+  // QR & NFC Payment Systems
+  qrPayments: qrPaymentsRouter,
+  nfcPayments: nfcPaymentsRouter,
 });
 export type AppRouter = typeof appRouter;

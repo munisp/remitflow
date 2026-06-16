@@ -7,8 +7,10 @@ import { Input } from "@/components/ui/input";
 import { Loader2, RefreshCw, Zap, Users, FileText, CheckCircle2, Clock } from "lucide-react";
 import { toast } from "sonner";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function CocoIndexPage() {
+  const { t } = useTranslation();
   const [txBatchSize, setTxBatchSize] = useState("100");
   const [benefBatchSize, setBenefBatchSize] = useState("200");
   const [fullResult, setFullResult] = useState<any>(null);

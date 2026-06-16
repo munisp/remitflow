@@ -1,8 +1,9 @@
 import type { Express } from "express";
 import { ENV } from "./env";
+import { logger } from "./logger";
 export function registerStorageProxy(app: Express) {
   app.get("/manus-storage/*", async (req, res) => {
-    const key = req.params[0];
+    const key = (req.params as Record<string, string>)[0];
     if (!key) {
       res.status(400).send("Missing storage key");
       return;
@@ -22,7 +23,7 @@ export function registerStorageProxy(app: Express) {
       });
       if (!forgeResp.ok) {
         const body = await forgeResp.text().catch(() => "");
-        console.error(`[StorageProxy] forge error: ${forgeResp.status} ${body}`);
+        logger.error({ status: forgeResp.status, body }, "[StorageProxy] forge error");
         res.status(502).send("Storage backend error");
         return;
       }
@@ -34,7 +35,7 @@ export function registerStorageProxy(app: Express) {
       res.set("Cache-Control", "no-store");
       res.redirect(307, url);
     } catch (err) {
-      console.error("[StorageProxy] failed:", err);
+      logger.error({ err: err instanceof Error ? err.message : String(err) }, "[StorageProxy] failed");
       res.status(502).send("Storage proxy error");
     }
   });

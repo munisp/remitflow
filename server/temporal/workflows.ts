@@ -43,6 +43,9 @@ const {
   livenessCheckActivity,
   sanctionsScreeningActivity,
   kycDecisionActivity,
+  verificationScoringActivity,
+  riskAssessmentActivity,
+  slaBreachCheckActivity,
 } = proxyActivities<typeof Activities>({
   startToCloseTimeout: "2 minutes",
   retry: {
@@ -168,7 +171,7 @@ export async function TransferWorkflow(input: TransferWorkflowInput): Promise<Tr
 }
 
 // ============================================================================
-// KYCVerificationWorkflow — 5-step pipeline with manual review gate
+// KYCVerificationWorkflow — 7-step pipeline with manual review gate
 // ============================================================================
 
 export interface KYCWorkflowInput {
@@ -184,7 +187,14 @@ export interface KYCWorkflowResult {
   decision: "APPROVED" | "REJECTED" | "MANUAL_REVIEW" | "TIMEOUT";
   reason: string;
   livenessScore?: number;
+  passiveLivenessScore?: number;
+  activeLiveness?: boolean;
+  deepfakeScore?: number;
+  deepfakeMethod?: string;
+  deepfakeIndicators?: string[];
   extractedName?: string;
+  verificationScore?: number;
+  riskCategory?: string;
 }
 
 export async function KYCVerificationWorkflow(input: KYCWorkflowInput): Promise<KYCWorkflowResult> {
@@ -216,7 +226,7 @@ export async function KYCVerificationWorkflow(input: KYCWorkflowInput): Promise<
   // ── Step 4: Sanctions screening ───────────────────────────────────────────
   const sanctions = await sanctionsScreeningActivity(input, extractedName);
 
-  // ── Step 5: KYC decision ──────────────────────────────────────────────────
+  // ── Step 5: Auto-decision ──────────────────────────────────────────────────
   const decision = await kycDecisionActivity(
     input,
     verification.authentic,
@@ -224,6 +234,31 @@ export async function KYCVerificationWorkflow(input: KYCWorkflowInput): Promise<
     sanctions.clear,
     verification.issues
   );
+
+  // ── Step 6: Verification scoring ──────────────────────────────────────────
+  const verificationScore = await verificationScoringActivity({
+    userId: input.userId,
+    documentVerified: verification.authentic,
+    livenessScore: liveness.score ?? 0,
+    sanctionsClear: sanctions.clear,
+    decision: decision.decision,
+  });
+
+  // ── Step 7: Risk assessment ───────────────────────────────────────────────
+  const riskAssessment = await riskAssessmentActivity({
+    userId: input.userId,
+    extractedName,
+    country: input.country,
+    verificationScore: verificationScore.score,
+  });
+
+  // ── SLA breach check (non-blocking) ───────────────────────────────────────
+  await slaBreachCheckActivity({
+    userId: input.userId,
+    kycDocId: input.kycDocId,
+    startedAt: new Date().toISOString(),
+    kycLevel: riskAssessment.requiredLevel ?? "standard",
+  }).catch(() => {});
 
   // If manual review required, wait up to 72 hours for analyst signal
   if (decision.decision === "MANUAL_REVIEW") {
@@ -247,12 +282,14 @@ export async function KYCVerificationWorkflow(input: KYCWorkflowInput): Promise<
     decision: decision.decision,
     reason: decision.reason,
     livenessScore: liveness.score,
-    passiveLivenessScore: liveness.passiveLivenessScore,
-    activeLiveness: liveness.activeLiveness,
-    deepfakeScore: liveness.deepfakeScore,
-    deepfakeMethod: liveness.deepfakeMethod,
+    passiveLivenessScore: liveness.passiveLivenessScore ?? undefined,
+    activeLiveness: liveness.activeLiveness?.passed ?? undefined,
+    deepfakeScore: liveness.deepfakeScore ?? undefined,
+    deepfakeMethod: liveness.deepfakeMethod ?? undefined,
     deepfakeIndicators: liveness.deepfakeIndicators,
     extractedName,
+    verificationScore: verificationScore.score,
+    riskCategory: riskAssessment.category,
   };
 }
 

@@ -45,7 +45,7 @@ function LeaderRow({ rank, name, score, label }: { rank: number; name: string; s
 
 export default function CommunityLeaderboard() {
   const { t } = useTranslation();
-  const { data, isLoading } = trpc.community.communityLeaderboard.useQuery();
+  const { data, isLoading, isError } = trpc.community.communityLeaderboard.useQuery();
 
   return (
 
@@ -65,8 +65,8 @@ export default function CommunityLeaderboard() {
       {/* Stats row */}
       <div className="grid grid-cols-3 gap-4">
         {[
-          { icon: ThumbsUp, label: "Total Votes Cast", value: data?.topVoters.reduce((s, v) => s + v.votes, 0) ?? 0, color: "text-blue-600 bg-blue-50" },
-          { icon: FileText, label: "Proposals Funded", value: data?.topProposers.reduce((s, p) => s + p.funded, 0) ?? 0, color: "text-green-600 bg-green-50" },
+          { icon: ThumbsUp, label: "Total Votes Cast", value: data?.topVoters.reduce((s: any, v: any) => s + v.votes, 0) ?? 0, color: "text-blue-600 bg-blue-50" },
+          { icon: FileText, label: "Proposals Funded", value: data?.topProposers.reduce((s: any, p: any) => s + p.funded, 0) ?? 0, color: "text-green-600 bg-green-50" },
           { icon: Users, label: "Active Members", value: (data?.topVoters.length ?? 0) + (data?.topProposers.length ?? 0), color: "text-purple-600 bg-purple-50" },
         ].map((stat) => (
           <Card key={stat.label}>
@@ -117,7 +117,7 @@ export default function CommunityLeaderboard() {
                   <p>No votes cast yet. Be the first!</p>
                 </div>
               ) : (
-                data?.topVoters.map((v, i) => (
+                data?.topVoters.map((v: any, i: any) => (
                   <LeaderRow key={v.userId} rank={i + 1} name={v.name} score={v.votes} label={`${v.votes} vote${v.votes !== 1 ? "s" : ""} cast`} />
                 ))
               )}
@@ -145,7 +145,7 @@ export default function CommunityLeaderboard() {
                   <p>No proposals submitted yet.</p>
                 </div>
               ) : (
-                data?.topProposers.map((p, i) => (
+                data?.topProposers.map((p: any, i: any) => (
                   <LeaderRow key={p.userId} rank={i + 1} name={p.name} score={p.funded} label={`${p.funded} funded / ${p.total} total proposals`} />
                 ))
               )}
@@ -173,7 +173,7 @@ export default function CommunityLeaderboard() {
                   <p>No contributions yet. Start contributing!</p>
                 </div>
               ) : (
-                data?.topContributors.map((c, i) => (
+                data?.topContributors.map((c: any, i: any) => (
                   <LeaderRow key={c.userId} rank={i + 1} name={c.name} score={c.votes} label="community engagement score" />
                 ))
               )}

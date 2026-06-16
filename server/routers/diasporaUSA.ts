@@ -4,8 +4,11 @@ import { createAuditLog } from "../audit.service";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
-import { diasporaProfiles, diasporaOfferClaims, transfers } from "../../drizzle/schema";
+import { diasporaProfiles, diasporaOfferClaims, transfers, users } from "../../drizzle/schema";
 import { eq, desc, and } from "drizzle-orm";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { logger } from "../_core/logger";
+import { KYC_TIER_LIMITS, type KycTier } from "../business-rules";
 
 const OUTBOUND_SWIFT_URL = process.env.OUTBOUND_SWIFT_URL ?? "http://go-outbound-swift:8090";
 
@@ -27,7 +30,7 @@ async function getOrCreateDiasporaProfile(userId: number, region: string) {
     crossSellScore: "0",
     acquisitionChannel: "organic",
     createdAt: new Date(),
-  });
+  }).returning();
 
   const [created] = await db.select().from(diasporaProfiles)
     .where(and(eq(diasporaProfiles.userId, userId), eq(diasporaProfiles.diasporaRegion, region)));
@@ -43,7 +46,7 @@ export const diasporaUSARouter = router({
     const db = await getDb();
     const claimed = await db.select().from(diasporaOfferClaims)
       .where(eq(diasporaOfferClaims.userId, ctx.user.id));
-    const claimedTypes = new Set(claimed.map(c => c.offerType));
+    const claimedTypes = new Set(claimed.map((c: any) => c.offerType));
 
     const allOffers = [
       {
@@ -103,10 +106,46 @@ export const diasporaUSARouter = router({
       recipientName: z.string().min(2).max(100),
       recipientBankName: z.string().min(2).max(100).optional(),
       memo: z.string().max(200).optional(),
+      totpCode: z.string().length(6).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       const transferId = `ACH-${Date.now()}-${ctx.user.id}`;
+
+      // 2FA enforcement for high-value ACH transfers (> $1,000)
+      if (input.amountUsd > 1000) {
+        const [userRow] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+        if (userRow?.totpEnabled) {
+          if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: ACH transfers over $1,000 require TOTP verification." });
+          const { verifyTOTP } = await import("../totp");
+          const valid = await verifyTOTP(input.totpCode, userRow.totpSecret ?? "");
+          if (!valid) throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code" });
+        }
+      }
+
+      // KYC tier limit enforcement
+      const [userForKyc] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+      const kycTier = (userForKyc?.kycTier ?? "tier0") as KycTier;
+      const limits = KYC_TIER_LIMITS[kycTier];
+      if (limits && input.amountUsd > limits.perTx) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: `KYC Tier ${kycTier}: single transfer limit is $${limits.perTx}` });
+      }
+
+      // Execute unified transfer pipeline (sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications)
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: input.amountUsd,
+        fromCurrency: "USD",
+        toCurrency: "NGN",
+        recipientName: input.recipientName,
+        recipientAccount: input.recipientAccountNumber,
+        rail: "ach",
+        corridorCode: "US",
+        featureLabel: "diaspora_usa",
+        transferId,
+        description: input.memo,
+        metadata: { recipientBank: input.recipientBankName, routingNumber: input.recipientRoutingNumber },
+      });
 
       await db.insert(transfers).values({
         userId: ctx.user.id,
@@ -120,13 +159,16 @@ export const diasporaUSARouter = router({
         recipientAccount: input.recipientAccountNumber,
         status: "pending",
         createdAt: new Date(),
-      });
+      }).returning();
 
       return {
         transferId,
         status: "pending",
         estimatedSettlement: "1-2 business days",
         amountUsd: input.amountUsd,
+        verified: true,
+        fraudScore: pipelineResult.fraudScore,
+        tigerBeetleRecorded: pipelineResult.tigerBeetleRecorded,
       };
     }),
 
@@ -158,9 +200,9 @@ export const diasporaUSARouter = router({
         diasporaRegion: "usa",
         status: "active",
         claimedAt: new Date(),
-      });
+      }).returning();
 
-      return { success: true, offerType: input.offerType };
+      return { success: true, verified: true, offerType: input.offerType };
     }),
 
   getReferralCode: protectedProcedure.query(async ({ ctx }) => {

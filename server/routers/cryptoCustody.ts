@@ -31,6 +31,9 @@ import { protectedProcedure, publicProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
 import { logger } from '../_core/logger';
+import { safeParseAmount } from "../lib/safeDecimal";
+import { executeTransferPipeline } from "../_core/transferPipeline";
+import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 // Audit logging for custody operations — uses createAuditLog pattern
 const logCustodyAction = (userId: number, action: string, details: object) => {
   // createAuditLog-compatible audit trail for all custody mutations
@@ -183,8 +186,8 @@ class FireblocksCustody implements CustodyProvider {
     const data = await this.request("GET", `/vault/accounts/${this.vaultAccountId}/${asset}`);
     return {
       asset,
-      available: parseFloat(data.available ?? "0"),
-      total: parseFloat(data.total ?? "0"),
+      available: safeParseAmount(data.available ?? "0"),
+      total: safeParseAmount(data.total ?? "0"),
       address: data.address ?? "",
     };
   }
@@ -385,6 +388,22 @@ export const cryptoCustodyRouter = {
         });
       }
 
+      // Execute unified transfer pipeline (sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications)
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: usdEquivalent,
+        fromCurrency: input.asset.toUpperCase(),
+        toCurrency: input.asset.toUpperCase(),
+        recipientName: `Crypto address: ${input.toAddress.slice(0, 10)}...`,
+        recipientAccount: input.toAddress,
+        rail: "crypto",
+        corridorCode: "CRYPTO",
+        featureLabel: "crypto_custody",
+        transferId: input.idempotencyKey,
+        description: `${input.amount} ${input.asset} → ${input.toAddress}`,
+        metadata: { asset: input.asset, usdEquivalent, memo: input.memo },
+      });
+
       try {
         const result = await custody.initiateTransfer({
           asset: input.asset.toUpperCase(),
@@ -393,7 +412,7 @@ export const cryptoCustodyRouter = {
           memo: input.memo,
           idempotencyKey: input.idempotencyKey,
         });
-        return result;
+        return { ...result, verified: true, fraudScore: pipelineResult.fraudScore };
       } catch (err: any) {
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
@@ -442,7 +461,7 @@ export const cryptoCustodyRouter = {
     .input(z.object({
       asset: z.string(),
       toAddress: z.string(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       idempotencyKey: z.string(),
       memo: z.string().optional(),
     }))

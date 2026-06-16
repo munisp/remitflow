@@ -12,8 +12,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Link } from "wouter";
 import { Shield, TrendingUp, AlertCircle, CheckCircle2, ArrowUpRight, DollarSign, Calendar, Clock } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 export default function TransferLimitsV2Page() {
+  const { t } = useTranslation();
   const [increaseOpen, setIncreaseOpen] = useState(false);
   const [increaseForm, setIncreaseForm] = useState({ reason: "", requestedDailyLimit: "", requestedMonthlyLimit: "" });
   const { data: limits, isLoading } = trpc.v99.transferLimitsV2.getMyLimits.useQuery();

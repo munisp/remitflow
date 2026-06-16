@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { ArrowLeftRight, TrendingUp, RefreshCw, Tag, Calculator, Clock, Info } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const CURRENCIES = [
   { code: "USD", flag: "🇺🇸", name: "US Dollar" },
@@ -36,6 +37,7 @@ function getCurrencyMeta(code: string) {
 }
 
 export default function LiveFXCalculator() {
+  const { t } = useTranslation();
   const [fromCurrency, setFromCurrency] = useState("USD");
   const [toCurrency, setToCurrency] = useState("NGN");
   const [sendAmount, setSendAmount] = useState("100");

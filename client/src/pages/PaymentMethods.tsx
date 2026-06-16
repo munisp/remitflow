@@ -13,7 +13,7 @@ import { useTranslation } from 'react-i18next';
 export default function PaymentMethods() {
   const { t } = useTranslation();
   
-  const { data: methods, refetch } = trpc.paymentMethods.list.useQuery();
+  const { data: methods, refetch, isError } = trpc.paymentMethods.list.useQuery();
   const addMutation = trpc.paymentMethods.addCard.useMutation({ onSuccess: () => { toast.success("Payment method added!"); refetch(); setOpen(false); } });
   const removeMutation = trpc.paymentMethods.remove.useMutation({ onSuccess: () => { toast.success("Removed"); refetch(); } });
   const [open, setOpen] = useState(false);

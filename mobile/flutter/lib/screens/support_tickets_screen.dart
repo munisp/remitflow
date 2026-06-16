@@ -1,71 +1,99 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/api_service.dart';
 
-class SupportTicketsScreen extends ConsumerStatefulWidget {
+class SupportTicketsScreen extends StatefulWidget {
   const SupportTicketsScreen({super.key});
   @override
-  ConsumerState<SupportTicketsScreen> createState() => _SupportTicketsScreenState();
+  State<SupportTicketsScreen> createState() => _SupportTicketsScreenState();
 }
-class _SupportTicketsScreenState extends ConsumerState<SupportTicketsScreen> {
-  bool _isLoading = true;
-  List<dynamic> _items = [];
+
+class _SupportTicketsScreenState extends State<SupportTicketsScreen> {
+  bool _loading = true;
+  Map<String, dynamic>? _data;
   String? _error;
-  
+
   @override
-  void initState() { super.initState(); _load(); }
-  
-  Future<void> _load() async {
-    setState(() { _isLoading = true; _error = null; });
-    try {
-      final api = ref.read(apiServiceProvider);
-      final result = await api.get('/trpc/supportTickets.list');
-      setState(() { _items = result['result']['data'] ?? []; _isLoading = false; });
-    } catch (e) { setState(() { _error = e.toString(); _isLoading = false; }); }
+  void initState() {
+    super.initState();
+    _loadData();
   }
-  
+
+  Future<void> _loadData() async {
+    setState(() => _loading = true);
+    try {
+      final api = ApiService();
+      final result = await api.get('/support-tickets');
+      setState(() { _data = result; _loading = false; });
+    } catch (e) {
+      setState(() { _error = e.toString(); _loading = false; });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F23),
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF1A1A2E),
-        title: const Text('Support Tickets', style: TextStyle(color: Color(0xFFE2E8F0), fontWeight: FontWeight.w700)),
-        iconTheme: const IconThemeData(color: Color(0xFFE2E8F0)),
-        actions: [
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
-        ],
-      ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFF6C63FF)))
-          : _error != null
-              ? Center(child: Text(_error!, style: const TextStyle(color: Colors.red)))
-              : _items.isEmpty
-                  ? const Center(child: Text('No support tickets yet', style: TextStyle(color: Color(0xFF94A3B8))))
-                  : ListView.builder(
-                      padding: const EdgeInsets.all(16),
-                      itemCount: _items.length,
-                      itemBuilder: (context, index) {
-                        final item = _items[index];
-                        return Card(
-                          color: const Color(0xFF1A1A2E),
-                          margin: const EdgeInsets.only(bottom: 12),
-                          child: ListTile(
-                            title: Text(item['subject']?.toString() ?? 'Ticket ${index + 1}',
-                                style: const TextStyle(color: Color(0xFFE2E8F0), fontWeight: FontWeight.w600)),
-                            subtitle: Text(item['status']?.toString() ?? item['priority']?.toString() ?? '',
-                                style: const TextStyle(color: Color(0xFF94A3B8))),
-                            trailing: const Icon(Icons.chevron_right, color: Color(0xFF6C63FF)),
-                          ),
-                        );
-                      },
+      appBar: AppBar(title: const Text('Support Tickets'), elevation: 0),
+      body: RefreshIndicator(
+        onRefresh: _loadData,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : _error != null
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.error_outline, size: 48, color: Colors.red),
+                        const SizedBox(height: 16),
+                        Text('Error: $_error', textAlign: TextAlign.center),
+                        const SizedBox(height: 16),
+                        ElevatedButton(onPressed: _loadData, child: const Text('Retry')),
+                      ],
                     ),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: const Color(0xFF6C63FF),
-        onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Feature coming soon'))),
-        child: const Icon(Icons.add, color: Colors.white),
+                  )
+                : _buildContent(),
       ),
+    );
+  }
+
+  Widget _buildContent() {
+    if (_data == null) {
+      return const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.inbox_outlined, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Text('No data available', style: TextStyle(fontSize: 16, color: Colors.grey)),
+          ],
+        ),
+      );
+    }
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Support Tickets', style: Theme.of(context).textTheme.headlineSmall),
+                const SizedBox(height: 8),
+                ..._data!.entries.map((e) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(e.key, style: const TextStyle(color: Colors.grey)),
+                      Flexible(child: Text('${e.value}', textAlign: TextAlign.end, style: const TextStyle(fontWeight: FontWeight.w500))),
+                    ],
+                  ),
+                )),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

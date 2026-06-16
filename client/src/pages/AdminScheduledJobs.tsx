@@ -15,6 +15,7 @@ import {
   XCircle, Activity, Calendar, Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 type Job = {
   task_uid: string;
@@ -139,6 +140,7 @@ function LogsDialog({ job, onClose }: { job: Job; onClose: () => void }) {
 }
 
 export default function AdminScheduledJobs() {
+  const { t } = useTranslation();
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const utils = trpc.useUtils();
 

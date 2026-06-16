@@ -1,0 +1,126 @@
+# RemitFlow — Chaos Experiment: Database Failures
+# ═══════════════════════════════════════════════════════════════════════════════
+# Validates platform behavior during database outages and slow queries.
+# Financial platforms must handle DB issues without losing transactions.
+#
+# Hypothesis: DB connection loss should trigger queued retries.
+# Slow queries should hit timeouts without cascading failures.
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: remitflow-db-connection-loss
+  namespace: remitflow
+  labels:
+    chaos.litmus.io/category: database
+spec:
+  engineState: active
+  appinfo:
+    appns: remitflow
+    applabel: app=pgbouncer
+    appkind: deployment
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-delete
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "30"
+            - name: CHAOS_INTERVAL
+              value: "30"
+            - name: FORCE
+              value: "true"
+            - name: TARGET_PODS
+              value: "1"
+        probe:
+          - name: api-returns-503
+            type: httpProbe
+            httpProbe/inputs:
+              url: "http://remitflow-api:5000/api/trpc/systemHealth.getStatus"
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+            mode: EOT
+            runProperties:
+              probeTimeout: 30
+              interval: 5
+              retry: 5
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: remitflow-redis-failure
+  namespace: remitflow
+  labels:
+    chaos.litmus.io/category: cache
+spec:
+  engineState: active
+  appinfo:
+    appns: remitflow
+    applabel: app=redis-cache
+    appkind: deployment
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: pod-delete
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "60"
+            - name: CHAOS_INTERVAL
+              value: "60"
+            - name: FORCE
+              value: "true"
+        probe:
+          - name: api-survives-without-cache
+            type: httpProbe
+            httpProbe/inputs:
+              url: "http://remitflow-api:5000/api/trpc/fx.rates?input=%7B%22json%22%3A%7B%22from%22%3A%22USD%22%2C%22to%22%3A%22NGN%22%7D%7D"
+              method:
+                get:
+                  criteria: "=="
+                  responseCode: "200"
+            mode: Continuous
+            runProperties:
+              probeTimeout: 10
+              interval: 5
+---
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosEngine
+metadata:
+  name: remitflow-disk-fill
+  namespace: remitflow
+  labels:
+    chaos.litmus.io/category: storage
+spec:
+  engineState: active
+  appinfo:
+    appns: remitflow
+    applabel: app=remitflow-api
+    appkind: deployment
+  chaosServiceAccount: litmus-admin
+  experiments:
+    - name: disk-fill
+      spec:
+        components:
+          env:
+            - name: TOTAL_CHAOS_DURATION
+              value: "60"
+            - name: FILL_PERCENTAGE
+              value: "80"
+            - name: EPHEMERAL_STORAGE_MEBIBYTES
+              value: "256"
+        probe:
+          - name: api-logs-warning
+            type: cmdProbe
+            cmdProbe/inputs:
+              command: "kubectl logs -l app=remitflow-api -n remitflow --tail=100 | grep -c 'disk'"
+              comparator:
+                type: int
+                criteria: ">="
+                value: "1"
+            mode: EOT
+            runProperties:
+              probeTimeout: 10

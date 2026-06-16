@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useState, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
@@ -402,6 +403,7 @@ function SellBondDialog({ subscription, onSuccess }: { subscription: any; onSucc
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function DiasporaBondMarket() {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("marketplace");
   const [selectedBond, setSelectedBond] = useState<any>(null);
   const [subscribeOpen, setSubscribeOpen] = useState(false);
@@ -415,7 +417,7 @@ export default function DiasporaBondMarket() {
 
   const fillBuyOrder = trpc.diasporaBond.fillBuyOrder.useMutation({
     onSuccess: (data) => {
-      toast.success("Bond purchased!", { description: `Ref: ${data.buyerSubscriptionRef} · Settlement T+2` });
+      toast.success("Bond purchased!", { description: `Ref: ${(data as any).buyerSubscriptionRef} · Settlement T+2` });
       setBuyingOrderId(null);
       refetchPortfolio();
       refetchSecondary();

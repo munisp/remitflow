@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Search, ArrowRight, User, CreditCard, Users } from "lucide-react";
 import { Link } from "wouter";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 function useDebounce(value: string, delay: number) {
   const [debounced, setDebounced] = useState(value);
@@ -18,6 +19,7 @@ function useDebounce(value: string, delay: number) {
 }
 
 export default function GlobalSearch() {
+  const { t } = useTranslation();
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useDebounce("", 400);
 
@@ -27,7 +29,7 @@ export default function GlobalSearch() {
     setDebouncedQuery(v);
   }
 
-  const { data: results, isLoading } = trpc.globalSearch.search.useQuery(
+  const { data: results, isLoading, isError } = trpc.globalSearch.search.useQuery(
     { query: debouncedQuery, types: ["transactions", "beneficiaries", "users"] },
     { enabled: debouncedQuery.length >= 2 }
   );

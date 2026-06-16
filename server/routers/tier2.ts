@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { checkPolicy } from "../security.pbac";
 import { getDb, createAuditLog } from "../db";
 import {
@@ -34,6 +34,7 @@ import {
   payrollCompanies,
   payrollRuns,
 } from "../../drizzle/schema";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -70,7 +71,7 @@ export const invoiceFinancingRouter = router({
       invoiceNumber:    z.string().min(3),
       debtorName:       z.string().min(2),
       debtorCountry:    z.string().length(2).optional(),
-      invoiceAmountUsd: z.number().positive(),
+      invoiceAmountUsd: z.number().positive().max(10_000_000),
       advanceRatePct:   z.number().min(50).max(90).default(80),
       invoiceDocUrl:    z.string().url().optional(),
       invoiceDueDate:   z.string(), // ISO date
@@ -134,16 +135,15 @@ export const invoiceFinancingRouter = router({
     }),
 
   // Admin: approve and fund
-  adminFund: protectedProcedure
+  adminFund: adminProcedure
     .input(z.object({ applicationId: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const [app] = await db
         .select()
         .from(invoiceFinancingApplications)
         .where(eq(invoiceFinancingApplications.id, input.applicationId));
-      if (!app) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!app) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (app.status !== "pending_review") throw new TRPCError({ code: "BAD_REQUEST", message: `Application is ${app.status}` });
 
       const fundingRef = `IF-${Date.now()}`;
@@ -159,7 +159,7 @@ export const invoiceFinancingRouter = router({
   repay: protectedProcedure
     .input(z.object({
       applicationId: z.number(),
-      amountUsd:     z.number().positive(),
+      amountUsd:     z.number().positive().max(10_000_000),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -167,7 +167,7 @@ export const invoiceFinancingRouter = router({
         .select()
         .from(invoiceFinancingApplications)
         .where(and(eq(invoiceFinancingApplications.id, input.applicationId), eq(invoiceFinancingApplications.applicantId, ctx.user.id)));
-      if (!app) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!app) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (app.status !== "funded") throw new TRPCError({ code: "BAD_REQUEST", message: "Application is not in funded state" });
 
       const [repayment] = await db
@@ -211,9 +211,9 @@ export const letterOfCreditRouter = router({
       beneficiaryBank:    z.string().optional(),
       lcType:             z.enum(["sight", "usance", "standby", "revolving"]).default("sight"),
       currency:           z.string().length(3).default("USD"),
-      amountUsd:          z.number().positive(),
+      amountUsd:          z.number().positive().max(10_000_000),
       expiryDate:         z.string(), // ISO date
-      description:        z.string().optional(),
+      description:        z.string().max(2000).optional(),
       requiredDocuments:  z.array(z.string()).default([]),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -282,7 +282,7 @@ export const letterOfCreditRouter = router({
         .select()
         .from(lettersOfCredit)
         .where(and(eq(lettersOfCredit.id, input.lcId), eq(lettersOfCredit.applicantId, ctx.user.id)));
-      if (!lc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!lc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [doc] = await db
         .insert(lcDocuments)
@@ -305,7 +305,7 @@ export const letterOfCreditRouter = router({
         .select()
         .from(lettersOfCredit)
         .where(and(eq(lettersOfCredit.id, input.lcId), eq(lettersOfCredit.applicantId, ctx.user.id)));
-      if (!lc) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!lc) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const documents = await db
         .select()
         .from(lcDocuments)
@@ -314,17 +314,16 @@ export const letterOfCreditRouter = router({
     }),
 
   // Admin: issue LC
-  adminIssue: protectedProcedure
+  adminIssue: adminProcedure
     .input(z.object({ lcId: z.number() }))
     .mutation(async ({ ctx, input }) => {
-      if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
       const db = await getDb();
       const [updated] = await db
         .update(lettersOfCredit)
         .set({ status: "issued", issuedAt: new Date(), updatedAt: new Date() })
         .where(eq(lettersOfCredit.id, input.lcId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 });
@@ -336,7 +335,7 @@ export const multiEntityTreasuryRouter = router({
   createGroup: protectedProcedure
     .input(z.object({
       name:         z.string().min(2),
-      description:  z.string().optional(),
+      description:  z.string().max(2000).optional(),
       baseCurrency: z.string().length(3).default("USD"),
     }))
     .mutation(async ({ ctx, input }) => {
@@ -378,7 +377,7 @@ export const multiEntityTreasuryRouter = router({
         .select()
         .from(entityGroups)
         .where(and(eq(entityGroups.id, input.groupId), eq(entityGroups.ownerId, ctx.user.id)));
-      if (!group) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!group) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [member] = await db
         .insert(entityGroupMembers)
@@ -393,7 +392,7 @@ export const multiEntityTreasuryRouter = router({
       groupId:       z.number(),
       fromCompanyId: z.number(),
       toCompanyId:   z.number(),
-      amountUsd:     z.number().positive(),
+      amountUsd:     z.number().positive().max(10_000_000),
       fromCurrency:  z.string().length(3),
       toCurrency:    z.string().length(3),
       purpose:       z.string().optional(),
@@ -406,7 +405,7 @@ export const multiEntityTreasuryRouter = router({
         .select()
         .from(entityGroups)
         .where(and(eq(entityGroups.id, input.groupId), eq(entityGroups.ownerId, ctx.user.id)));
-      if (!group) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!group) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Call Go treasury netting engine for FX rate
       const fxResult = await callTreasuryEngine("/fx-rate", {
@@ -445,7 +444,7 @@ export const multiEntityTreasuryRouter = router({
         .set({ status: "approved", approvedBy: ctx.user.id, approvedAt: new Date(), updatedAt: new Date() })
         .where(eq(intercompanyTransfers.id, input.transferId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -473,10 +472,10 @@ export const multiEntityTreasuryRouter = router({
 
       const result = await callTreasuryEngine("/net", {
         group_id:  input.groupId,
-        transfers: transfers.map(t => ({
+        transfers: transfers.map((t: any) => ({
           from_company_id: t.fromCompanyId,
           to_company_id:   t.toCompanyId,
-          amount_usd:      parseFloat(t.amountUsd),
+          amount_usd:      safeParseAmount(t.amountUsd),
           from_currency:   t.fromCurrency,
           to_currency:     t.toCurrency,
         })),
@@ -506,7 +505,7 @@ export const payrollTaxFilingRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       // Get payroll run data if provided
       let runData = null;
@@ -523,11 +522,11 @@ export const payrollTaxFilingRouter = router({
         jurisdiction:    input.jurisdiction,
         period_start:    input.periodStart,
         period_end:      input.periodEnd,
-        total_gross_usd: runData ? parseFloat(runData.totalGrossUsd ?? "0") : 0,
+        total_gross_usd: runData ? safeParseAmount(runData.totalGrossUsd ?? "0") : 0,
         employee_count:  runData ? (runData.totalEmployees ?? 0) : 0,
       });
 
-      const totalGross = runData ? parseFloat(runData.totalGrossUsd ?? "0") : 0;
+      const totalGross = runData ? safeParseAmount(runData.totalGrossUsd ?? "0") : 0;
       const totalTax = taxResult?.total_tax_usd ?? totalGross * 0.075;
       const totalPension = taxResult?.total_pension_usd ?? totalGross * 0.08;
 
@@ -570,7 +569,7 @@ export const payrollTaxFilingRouter = router({
         })
         .where(eq(payrollTaxFilings.id, input.filingId))
         .returning();
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;
     }),
 
@@ -583,7 +582,7 @@ export const payrollTaxFilingRouter = router({
         .select()
         .from(payrollCompanies)
         .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
-      if (!company) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!company) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return db
         .select()
         .from(payrollTaxFilings)
@@ -630,10 +629,10 @@ export const businessSavingsRouter = router({
       if (!product) throw new TRPCError({ code: "NOT_FOUND", message: "Savings product not found" });
 
       // Business rules
-      if (input.principalUsd < parseFloat(product.minDepositUsd)) {
+      if (input.principalUsd < safeParseAmount(product.minDepositUsd)) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Minimum deposit is $${product.minDepositUsd}` });
       }
-      if (input.principalUsd > parseFloat(product.maxDepositUsd)) {
+      if (input.principalUsd > safeParseAmount(product.maxDepositUsd)) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Maximum deposit is $${product.maxDepositUsd}` });
       }
 
@@ -665,7 +664,7 @@ export const businessSavingsRouter = router({
         amountUsd:   input.principalUsd.toFixed(2),
         description: "Initial deposit",
         balanceAfter: input.principalUsd.toFixed(2),
-      });
+      }).returning();
 
       return { account, product };
     }),
@@ -693,7 +692,7 @@ export const businessSavingsRouter = router({
         .select()
         .from(businessSavingsAccounts)
         .where(and(eq(businessSavingsAccounts.id, input.accountId), eq(businessSavingsAccounts.ownerId, ctx.user.id)));
-      if (!account) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!account) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const [product] = await db
         .select()
@@ -707,8 +706,8 @@ export const businessSavingsRouter = router({
         .orderBy(desc(businessSavingsTxns.createdAt));
 
       // Calculate projected interest
-      const principal = parseFloat(account.principalUsd);
-      const annualRate = parseFloat(product?.annualRatePct ?? "0") / 100;
+      const principal = safeParseAmount(account.principalUsd);
+      const annualRate = safeParseAmount(product?.annualRatePct ?? "0") / 100;
       const daysElapsed = Math.ceil((Date.now() - account.startDate.getTime()) / (1000 * 60 * 60 * 24));
       const projectedInterest = principal * annualRate * (daysElapsed / 365);
 
@@ -719,7 +718,7 @@ export const businessSavingsRouter = router({
   withdraw: protectedProcedure
     .input(z.object({
       accountId: z.number(),
-      amountUsd: z.number().positive(),
+      amountUsd: z.number().positive().max(10_000_000),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -727,10 +726,10 @@ export const businessSavingsRouter = router({
         .select()
         .from(businessSavingsAccounts)
         .where(and(eq(businessSavingsAccounts.id, input.accountId), eq(businessSavingsAccounts.ownerId, ctx.user.id)));
-      if (!account) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!account) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (account.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: "Account is not active" });
 
-      const currentBalance = parseFloat(account.currentBalanceUsd);
+      const currentBalance = safeParseAmount(account.currentBalanceUsd);
       if (input.amountUsd > currentBalance) {
         throw new TRPCError({ code: "BAD_REQUEST", message: `Insufficient balance. Available: $${currentBalance.toFixed(2)}` });
       }
@@ -765,7 +764,7 @@ export const businessSavingsRouter = router({
         amountUsd:    input.amountUsd.toFixed(2),
         description:  penalty > 0 ? `Withdrawal (early penalty: $${penalty.toFixed(2)})` : "Withdrawal",
         balanceAfter: newBalance.toFixed(2),
-      });
+      }).returning();
 
       return { netWithdrawal, penalty, newBalance };
     }),

@@ -293,12 +293,40 @@ async fn health() -> HttpResponse {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("crypto_guard=info".parse().unwrap()),
         )
         .init();
+
+    // PostgreSQL audit logging connection
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    match tokio_postgres::connect(&db_url, tokio_postgres::NoTls).await {
+        Ok((client, connection)) => {
+            tokio::spawn(async move { let _ = connection.await; });
+            let _ = client.execute(
+                "CREATE TABLE IF NOT EXISTS rust_crypto_guard_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    payload JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )", &[]).await;
+            info!("PostgreSQL connected for audit logging");
+        }
+        Err(e) => {
+            warn!("PostgreSQL unavailable ({}), audit logging disabled", e);
+        }
+    }
 
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8081".to_string())
@@ -329,6 +357,8 @@ mod tests {
     use super::*;
     use actix_web::{test, App};
     use base64::Engine;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
     #[actix_web::test]
     async fn test_validate_jpeg_magic_bytes() {

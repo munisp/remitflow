@@ -9,8 +9,10 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "sonner";
 import { Scale, Play, CheckCircle2, AlertTriangle, Clock, DollarSign, RefreshCw, FileText, TrendingUp } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function ReconciliationV2Page() {
+  const { t } = useTranslation();
   const [fromDate, setFromDate] = useState(() => {
     const d = new Date();
     d.setDate(d.getDate() - 1);
@@ -20,8 +22,8 @@ export default function ReconciliationV2Page() {
 
   const { data: history, refetch: refetchHistory } = trpc.v99.reconciliationV2.history.useQuery({ limit: 10 });
 
-  const runMutation = trpc.v99.reconciliationV2.runCheck.useMutation({
-    onSuccess: (data) => {
+  const runMutation = trpc.v99.reconciliationV2.run.useMutation({
+    onSuccess: (data: { status: string; discrepancies: { type: string; severity: string; message: string }[] }) => {
       if (data.status === "clean") {
         toast.success("Reconciliation complete — no discrepancies found!");
       } else {
@@ -29,7 +31,7 @@ export default function ReconciliationV2Page() {
       }
       refetchHistory();
     },
-    onError: (e) => toast.error(e.message),
+    onError: (e: { message: string }) => toast.error(e.message),
   });
 
   const handleRun = () => {
@@ -122,7 +124,7 @@ export default function ReconciliationV2Page() {
             {result.discrepancies.length > 0 && (
               <div className="space-y-2">
                 <p className="font-semibold text-sm">Discrepancies:</p>
-                {result.discrepancies.map((d, i) => (
+                {result.discrepancies.map((d: { type: string; severity: string; message: string; count?: number }, i: number) => (
                   <div key={i} className="flex items-start gap-2 bg-white/60 rounded-lg p-3 text-sm">
                     <AlertTriangle className={`h-4 w-4 mt-0.5 flex-shrink-0 ${d.severity === "high" ? "text-red-600" : "text-amber-600"}`} />
                     <div>
@@ -162,7 +164,7 @@ export default function ReconciliationV2Page() {
                     </tr>
                   </thead>
                   <tbody>
-                    {history.map((run) => (
+                    {history.map((run: any) => (
                       <tr key={run.id} className="border-b last:border-0 hover:bg-muted/30">
                         <td className="p-3">{new Date(run.runAt).toLocaleDateString()}</td>
                         <td className="p-3 text-right">{run.txCount.toLocaleString()}</td>

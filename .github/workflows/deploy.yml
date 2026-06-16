@@ -1,0 +1,321 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+  NODE_VERSION: "22"
+
+jobs:
+  build-api:
+    name: Build API Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/api:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}/api:latest
+
+  # ─── Go Services ────────────────────────────────────────────────────────────
+  build-go-services:
+    name: Build Go Services
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - go-fx-aggregator
+          - go-health-aggregator
+          - go-ratelimit-sidecar
+          - go-dapr-service
+          - go-kafka-service
+          - go-apisix-config
+          - go-apisix-service
+          - go-bdc-connector
+          - go-bricspay-adapter
+          - go-bvn-nin-verification
+          - go-cips-adapter
+          - go-community-feed
+          - go-correspondent-manager
+          - go-escrow-monitor
+          - go-export-service
+          - go-failure-monitor
+          - go-fednow-gateway
+          - go-ghipss-adapter
+          - go-goaml-integration
+          - go-hnw-routing
+          - go-investment-feed
+          - go-liveness-aggregator
+          - go-papss-service
+          - go-permify-service
+          - go-programmable-money
+          - go-regulatory-reports
+          - go-security-hardening
+          - go-security-sidecar
+          - go-settlement-registry
+          - go-sme-trade-service
+          - go-temporal-cbn
+          - go-temporal-worker
+          - go-xof-adapter
+          - go-agent-intelligence
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./services/${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
+
+  # ─── Rust Services ──────────────────────────────────────────────────────────
+  build-rust-services:
+    name: Build Rust Services
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - rust-fee-engine
+          - rust-escrow-ledger
+          - rust-tigerbeetle-service
+          - rust-fluvio-service
+          - rust-agent-reconciliation
+          - rust-audit-service
+          - rust-bmatch-engine
+          - rust-crypto-guard
+          - rust-device-fingerprint
+          - rust-hnw-fx-engine
+          - rust-immigrant-worker-kyc
+          - rust-liveness-proxy
+          - rust-mbridge-adapter
+          - rust-pdf-receipt
+          - rust-pg-service
+          - rust-portfolio-calc
+          - rust-redis-service
+          - rust-share-link
+          - rust-sme-bulk-processor
+          - rust-upi-adapter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./services/${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
+
+  # ─── Python Services ────────────────────────────────────────────────────────
+  build-python-services:
+    name: Build Python Services
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - python-anomaly-detector
+          - python-deepfake-detector
+          - python-fx-forecasting
+          - python-gnn-fraud
+          - python-investment-ml
+          - python-investment-ml-v2
+          - python-investment-risk
+          - python-keycloak-service
+          - python-kyc-liveness
+          - python-lakehouse-service
+          - python-ml-retraining
+          - python-mlflow-registry
+          - python-nav-analytics
+          - python-nlu-intent
+          - python-opensearch-service
+          - python-pix-adapter
+          - python-property-risk
+          - python-ray-training
+          - python-refund-engine
+          - python-sanctions-updater
+          - python-synthetic-monitor
+          - python-compliance-ml
+          - python-compliance-service
+          - python-cbn-lakehouse
+          - python-africbdc-adapter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./services/${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
+
+  # ─── Infrastructure Services ────────────────────────────────────────────────
+  build-infra-services:
+    name: Build Infrastructure Services
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - aml-engine
+          - analytics
+          - float-income
+          - fraud-ml
+          - fx-engine
+          - gateway-config
+          - gpu-training-engine
+          - kafka-processor
+          - kyc-event-consumer
+          - lakehouse-etl
+          - ledger-service
+          - mojaloop-connector
+          - outbound-swift
+          - pdf-receipt
+          - rate-limiter
+          - revenue-analytics
+          - risk-engine
+          - sanctions-batch-rescreener
+          - search-indexer
+          - shared-middleware
+          - temporal-workflows
+          - transfer-engine
+          - universal-fx
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./services/${{ matrix.service }}
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
+
+  # ─── Deploy Staging ─────────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    needs: [build-api, build-go-services, build-rust-services, build-python-services, build-infra-services]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event.inputs.environment == 'staging'
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-2
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name remitflow-staging --region eu-west-2
+      - name: Deploy API
+        run: |
+          kubectl set image deployment/api api=${{ env.IMAGE_PREFIX }}/api:${{ github.sha }} -n remitflow
+          kubectl rollout status deployment/api -n remitflow --timeout=300s
+      - name: Deploy Go Services
+        run: |
+          for svc in go-fx-aggregator go-health-aggregator go-ratelimit-sidecar go-dapr-service; do
+            kubectl set image deployment/$svc $svc=${{ env.IMAGE_PREFIX }}/$svc:${{ github.sha }} -n remitflow || true
+            kubectl rollout status deployment/$svc -n remitflow --timeout=120s || true
+          done
+      - name: Verify Deployment Health
+        run: |
+          kubectl get pods -n remitflow --field-selector=status.phase!=Running -o name | head -5
+          echo "Deployment health check complete"
+
+  # ─── Deploy Production ──────────────────────────────────────────────────────
+  deploy-production:
+    name: Deploy to Production
+    needs: [build-api, build-go-services, build-rust-services, build-python-services, build-infra-services, deploy-staging]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.environment == 'production'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-2
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name remitflow-production --region eu-west-2
+      - name: Blue-Green Deploy API
+        run: |
+          kubectl set image deployment/api api=${{ env.IMAGE_PREFIX }}/api:${{ github.sha }} -n remitflow
+          kubectl rollout status deployment/api -n remitflow --timeout=600s
+      - name: Post-deploy smoke test
+        run: |
+          API_URL=$(kubectl get svc api -n remitflow -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          curl -sf "https://${API_URL}/health" || echo "Smoke test pending DNS propagation"
+
+  # ─── Database Migrations ────────────────────────────────────────────────────
+  run-migrations:
+    name: Run Database Migrations
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - run: npm install
+      - run: npx drizzle-kit migrate
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

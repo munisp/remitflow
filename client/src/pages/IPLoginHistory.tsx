@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { Shield, MapPin, AlertTriangle, CheckCircle, Ban } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const RISK_COLORS: Record<string, string> = {
   low: "text-green-500",
@@ -12,6 +13,7 @@ const RISK_COLORS: Record<string, string> = {
 };
 
 export default function IPLoginHistory() {
+  const { t } = useTranslation();
 
   const { data: history, refetch } = trpc.v98.ipLogin.getHistory.useQuery({ limit: 50 });
   const { data: suspicious } = trpc.v98.ipLogin.getSuspicious.useQuery({ limit: 20 });
@@ -44,7 +46,7 @@ export default function IPLoginHistory() {
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
-              {suspicious.map((s) => (
+              {suspicious.map((s: any) => (
                 <div key={s.id} className="flex items-center justify-between p-2 bg-white dark:bg-red-950/50 rounded border border-red-200 dark:border-red-800">
                   <div className="flex items-center gap-3">
                     <AlertTriangle className="h-4 w-4 text-red-500 flex-shrink-0" />
@@ -109,7 +111,7 @@ export default function IPLoginHistory() {
                   </tr>
                 </thead>
                 <tbody>
-                  {history.map((entry) => (
+                  {history.map((entry: any) => (
                     <tr key={entry.id} className="border-b hover:bg-muted/30 transition-colors">
                       <td className="py-2 pr-3 font-mono text-xs">
                         <div className="flex items-center gap-1">

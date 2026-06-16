@@ -29,6 +29,7 @@ import {  Clock,
   Activity,
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 interface CronJob {
   id: string;
@@ -212,12 +213,13 @@ function formatNextRun(iso: string): string {
 }
 
 export default function CronJobsAdmin() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const { data: dbJobs = [], isLoading } = trpc.cronJobs.list.useQuery();
   const { data: stats } = trpc.cronJobs.getStats.useQuery();
 
   // Merge DB jobs with static display config
-  const jobs = dbJobs.length > 0 ? dbJobs.map(j => {
+  const jobs = dbJobs.length > 0 ? dbJobs.map((j: any) => {
     const staticJob = CRON_JOBS.find(s => s.id === j.id);
     return { ...j, icon: staticJob?.icon ?? Activity, scheduleHuman: staticJob?.scheduleHuman ?? j.schedule, enabled: j.status === 'active' };
   }) : CRON_JOBS.map(j => ({ ...j, enabled: true, lastRunStatus: j.lastRunStatus as any }));
@@ -235,9 +237,9 @@ export default function CronJobsAdmin() {
   const toggleJob = (id: string) => toggleMutation.mutate({ id });
   const runNow = (id: string) => triggerMutation.mutate({ id });
 
-  const enabledCount = Number(stats?.active ?? jobs.filter((j) => j.enabled).length);
-  const errorJobs = Number(stats?.error ?? jobs.filter((j) => j.lastRunStatus === 'error').length);
-  const totalRuns = Number(stats?.totalRuns ?? jobs.reduce((s, j) => s + (j.runCount ?? 0), 0));
+  const enabledCount = Number(stats?.active ?? jobs.filter((j: any) => j.enabled).length);
+  const errorJobs = Number(stats?.error ?? jobs.filter((j: any) => j.lastRunStatus === 'error').length);
+  const totalRuns = Number(stats?.totalRuns ?? jobs.reduce((s: any, j: any) => s + (j.runCount ?? 0), 0));
 
   return (
     <div className="p-6 space-y-6">
@@ -282,9 +284,9 @@ export default function CronJobsAdmin() {
 
       {/* Job List */}
       <div className="space-y-3">
-        {jobs.map((job) => {
+        {jobs.map((job: any) => {
           const Icon = job.icon;
-          const statusCfg = job.lastRunStatus ? STATUS_CONFIG[job.lastRunStatus] : null;
+          const statusCfg = job.lastRunStatus ? STATUS_CONFIG[job.lastRunStatus as keyof typeof STATUS_CONFIG] : null;
           const StatusIcon = statusCfg?.icon;
 
           return (

@@ -17,6 +17,7 @@ import { notifyOwner } from "./_core/notification";
 import { sendPushToUser } from "./pushNotifications";
 import { ENV } from "./_core/env";
 import { logger } from './_core/logger';
+import { safeParseAmount } from "./lib/safeDecimal";
 
 // ─── Transactional email helper (Resend) ──────────────────────────────────────
 async function sendTransactionalEmail(opts: {
@@ -243,8 +244,8 @@ export function registerStripeWebhook(app: Express) {
           // ── Investment purchase fulfillment ──────────────────────────────
           if (orderType === "investment_buy") {
             const assetId = parseInt(session.metadata?.asset_id ?? "0");
-            const quantity = parseFloat(session.metadata?.quantity ?? "0");
-            const priceAtOrder = parseFloat(session.metadata?.price_at_order ?? "0");
+            const quantity = safeParseAmount(session.metadata?.quantity ?? "0");
+            const priceAtOrder = safeParseAmount(session.metadata?.price_at_order ?? "0");
             const currency = session.metadata?.currency ?? "USD";
             const amountPaid = (session.amount_total ?? 0) / 100;
 
@@ -314,7 +315,7 @@ export function registerStripeWebhook(app: Express) {
             const amountPaid = (session.amount_total ?? 0) / 100;
             if (amountPaid > 0) {
               // Atomic: balance update + transaction record in one DB transaction
-              await db.transaction(async (tx) => {
+              await db.transaction(async (tx: any) => {
                 const walletRows = await tx
                   .select()
                   .from(wallets)

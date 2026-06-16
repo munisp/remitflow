@@ -10,6 +10,7 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Star, Gift, Trophy, Zap, Award, TrendingUp } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const TIER_COLORS: Record<string, string> = {
   Bronze: "text-orange-600",
@@ -26,6 +27,7 @@ const TIER_BG: Record<string, string> = {
 };
 
 export default function LoyaltyRewardsV2Page() {
+  const { t } = useTranslation();
   const [redeemDialog, setRedeemDialog] = useState(false);
   const [redemptionType, setRedemptionType] = useState<"cashback"|"fee_waiver"|"gift_card">("cashback");
   const [pointsToRedeem, setPointsToRedeem] = useState("500");
@@ -139,7 +141,7 @@ export default function LoyaltyRewardsV2Page() {
         <CardHeader><CardTitle>Points History</CardTitle></CardHeader>
         <CardContent>
           <div className="space-y-2">
-            {(history ?? []).map(h => (
+            {(history ?? []).map((h: any) => (
               <div key={h.id} className="flex items-center justify-between p-3 border rounded-lg">
                 <div>
                   <p className="font-medium text-sm">{h.description}</p>

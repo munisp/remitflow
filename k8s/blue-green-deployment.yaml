@@ -1,0 +1,319 @@
+# ─── RemitFlow Blue/Green Deployment with Canary ────────────────────────────────
+#
+# Strategy:
+# 1. Deploy "green" version alongside current "blue"
+# 2. Run health checks and smoke tests against green
+# 3. Gradually shift traffic (10% → 25% → 50% → 100%)
+# 4. If any stage fails, automatic rollback to blue
+#
+# Usage:
+#   kubectl apply -f k8s/blue-green-deployment.yaml
+#   ./scripts/deploy-canary.sh v2.0.0  # Triggers canary rollout
+#
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remitflow
+  labels:
+    istio-injection: enabled
+
+---
+# ─── Blue (Current Stable) ──────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remitflow-api-blue
+  namespace: remitflow
+  labels:
+    app: remitflow-api
+    version: blue
+    track: stable
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: remitflow-api
+      version: blue
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: remitflow-api
+        version: blue
+        track: stable
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: remitflow-api
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: api
+          image: registry.remitflow.com/api:stable
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-db-credentials
+                  key: url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-redis-credentials
+                  key: url
+            - name: PCI_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-pci
+                  key: master-key
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            failureThreshold: 30
+
+---
+# ─── Green (Canary / New Version) ───────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remitflow-api-green
+  namespace: remitflow
+  labels:
+    app: remitflow-api
+    version: green
+    track: canary
+spec:
+  replicas: 0  # Scaled up during canary deployment
+  selector:
+    matchLabels:
+      app: remitflow-api
+      version: green
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: remitflow-api
+        version: green
+        track: canary
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3000"
+    spec:
+      serviceAccountName: remitflow-api
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: api
+          image: registry.remitflow.com/api:canary  # Updated by deploy script
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-db-credentials
+                  key: url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-redis-credentials
+                  key: url
+            - name: PCI_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-pci
+                  key: master-key
+            - name: CANARY
+              value: "true"
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 3
+
+---
+# ─── Service (routes to both blue + green) ──────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: remitflow-api
+  namespace: remitflow
+spec:
+  selector:
+    app: remitflow-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+  type: ClusterIP
+
+---
+# ─── Istio VirtualService (traffic splitting) ───────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: remitflow-api
+  namespace: remitflow
+spec:
+  hosts:
+    - remitflow-api
+    - api.remitflow.com
+  http:
+    - route:
+        - destination:
+            host: remitflow-api
+            subset: stable
+          weight: 100
+        - destination:
+            host: remitflow-api
+            subset: canary
+          weight: 0
+      retries:
+        attempts: 3
+        perTryTimeout: 5s
+      timeout: 30s
+
+---
+# ─── Istio DestinationRule (subsets) ─────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: remitflow-api
+  namespace: remitflow
+spec:
+  host: remitflow-api
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        h2UpgradePolicy: UPGRADE
+        maxRequestsPerConnection: 100
+    outlierDetection:
+      consecutive5xxErrors: 3
+      interval: 10s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+  subsets:
+    - name: stable
+      labels:
+        track: stable
+    - name: canary
+      labels:
+        track: canary
+
+---
+# ─── HPA ────────────────────────────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: remitflow-api-blue
+  namespace: remitflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: remitflow-api-blue
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 3
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+
+---
+# ─── PodDisruptionBudget ─────────────────────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: remitflow-api-pdb
+  namespace: remitflow
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: remitflow-api
+      track: stable

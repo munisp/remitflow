@@ -58,7 +58,7 @@ export const featureFlagsRouter = router({
     }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Ensure platform flags are seeded
       await seedPlatformFlags(db);
@@ -88,7 +88,7 @@ export const featureFlagsRouter = router({
       }
 
       return rows
-        .filter(f => {
+        .filter((f: any) => {
           if (input?.category && f.category !== input.category) return false;
           if (input?.search) {
             const s = input.search.toLowerCase();
@@ -96,7 +96,7 @@ export const featureFlagsRouter = router({
           }
           return true;
         })
-        .map(f => ({
+        .map((f: any) => ({
           ...f,
           effectiveEnabled: userOverrides[f.id] ?? tenantOverrides[f.id] ?? f.defaultEnabled,
           tenantOverride: tenantOverrides[f.id] ?? null,
@@ -109,7 +109,7 @@ export const featureFlagsRouter = router({
     .input(z.object({ key: z.string(), tenantId: z.number().optional() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { enabled: true }; // fail open
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" }); // fail open
 
       const [flag] = await db.select().from(featureFlags).where(eq(featureFlags.key, input.key)).limit(1);
       if (!flag) return { enabled: true }; // unknown flags default to enabled
@@ -146,15 +146,17 @@ export const featureFlagsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(featureFlags)
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [_row] = await db.update(featureFlags)
         .set({
           defaultEnabled: input.enabled,
           ...(input.rolloutPct !== undefined ? { rolloutPct: input.rolloutPct } : {}),
           updatedAt: new Date(),
         })
-        .where(eq(featureFlags.id, input.flagId));
-      return { success: true };
+        .where(eq(featureFlags.id, input.flagId))
+        .returning();
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Feature flag not found" });
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Admin: set tenant-level override
@@ -163,28 +165,30 @@ export const featureFlagsRouter = router({
       tenantId: z.number(),
       flagId: z.number(),
       enabled: z.boolean(),
-      reason: z.string().optional(),
+      reason: z.string().max(2000).optional(),
       expiresAt: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Upsert
       const existing = await db.select().from(tenantFeatureFlags)
         .where(and(eq(tenantFeatureFlags.tenantId, input.tenantId), eq(tenantFeatureFlags.flagId, input.flagId)))
         .limit(1);
+      let _row: any;
       if (existing.length > 0) {
-        await db.update(tenantFeatureFlags)
+        [_row] = await db.update(tenantFeatureFlags)
           .set({ enabled: input.enabled, reason: input.reason ?? null, overriddenBy: ctx.user.id, updatedAt: new Date(), expiresAt: input.expiresAt ? new Date(input.expiresAt) : null })
-          .where(eq(tenantFeatureFlags.id, existing[0].id));
+          .where(eq(tenantFeatureFlags.id, existing[0].id)).returning();
       } else {
-        await db.insert(tenantFeatureFlags).values({
+        [_row] = await db.insert(tenantFeatureFlags).values({
           tenantId: input.tenantId, flagId: input.flagId, enabled: input.enabled,
           reason: input.reason ?? null, overriddenBy: ctx.user.id,
           expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
-        });
+        }).returning();
       }
-      return { success: true };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Admin: remove tenant override (revert to global default)
@@ -192,10 +196,12 @@ export const featureFlagsRouter = router({
     .input(z.object({ tenantId: z.number(), flagId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(tenantFeatureFlags)
-        .where(and(eq(tenantFeatureFlags.tenantId, input.tenantId), eq(tenantFeatureFlags.flagId, input.flagId)));
-      return { success: true };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const deleted = await db.delete(tenantFeatureFlags)
+        .where(and(eq(tenantFeatureFlags.tenantId, input.tenantId), eq(tenantFeatureFlags.flagId, input.flagId)))
+        .returning();
+      if (deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Tenant override not found" });
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Admin: set user-level override (beta access, early access)
@@ -203,15 +209,17 @@ export const featureFlagsRouter = router({
     .input(z.object({ userId: z.number(), flagId: z.number(), enabled: z.boolean() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const existing = await db.select().from(userFeatureFlags)
         .where(and(eq(userFeatureFlags.userId, input.userId), eq(userFeatureFlags.flagId, input.flagId))).limit(1);
+      let _row: any;
       if (existing.length > 0) {
-        await db.update(userFeatureFlags).set({ enabled: input.enabled }).where(eq(userFeatureFlags.id, existing[0].id));
+        [_row] = await db.update(userFeatureFlags).set({ enabled: input.enabled }).where(eq(userFeatureFlags.id, existing[0].id)).returning();
       } else {
-        await db.insert(userFeatureFlags).values({ userId: input.userId, flagId: input.flagId, enabled: input.enabled });
+        [_row] = await db.insert(userFeatureFlags).values({ userId: input.userId, flagId: input.flagId, enabled: input.enabled }).returning();
       }
-      return { success: true };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Admin: create or update a custom flag
@@ -220,7 +228,7 @@ export const featureFlagsRouter = router({
       id: z.number().optional(),
       key: z.string().min(2).max(100),
       name: z.string().min(2).max(255),
-      description: z.string().optional(),
+      description: z.string().max(2000).optional(),
       scope: z.enum(["global", "tenant", "user"]).default("global"),
       defaultEnabled: z.boolean().default(true),
       rolloutPct: z.number().min(0).max(100).default(100),
@@ -229,12 +237,13 @@ export const featureFlagsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       if (input.id) {
-        await db.update(featureFlags).set({ ...input, updatedAt: new Date() }).where(eq(featureFlags.id, input.id));
+        const [_row] = await db.update(featureFlags).set({ ...input, updatedAt: new Date() }).where(eq(featureFlags.id, input.id)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         return { id: input.id };
       } else {
-        const [row] = await db.insert(featureFlags).values({ ...input }).returning({ id: featureFlags.id });
+        const [row] = await db.insert(featureFlags).values({ ...input }).returning({ id: featureFlags.id }).returning();
         return { id: row.id };
       }
     }),
@@ -244,9 +253,10 @@ export const featureFlagsRouter = router({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(featureFlags).where(eq(featureFlags.id, input.id));
-      return { success: true };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const _deleted = await db.delete(featureFlags).where(eq(featureFlags.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Get categories for filter UI
@@ -441,7 +451,7 @@ export const featureFlagsRouter = router({
         if (membership.length > 0) {
           tenantId = membership[0].tenantId;
           const [t] = await db.select({ plan: tenants.plan })
-            .from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+            .from(tenants).where(eq(tenants.id, tenantId!)).limit(1);
           if (t) tenantPlan = t.plan;
         }
       } catch { /* no tenant — use defaults */ }
@@ -515,7 +525,7 @@ export const tenantsRouter = router({
     }).optional())
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.select().from(tenants).orderBy(desc(tenants.createdAt)).limit(input?.limit ?? 20).offset(input?.offset ?? 0);
       const total = await db.select({ count: sql<number>`count(*)` }).from(tenants);
       return { tenants: rows, total: Number(total[0]?.count ?? 0) };
@@ -525,9 +535,9 @@ export const tenantsRouter = router({
     .input(z.object({ id: z.number() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [tenant] = await db.select().from(tenants).where(eq(tenants.id, input.id)).limit(1);
-      if (!tenant) throw new TRPCError({ code: "NOT_FOUND" });
+      if (!tenant) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const members = await db.select().from(tenantUsers).where(eq(tenantUsers.tenantId, input.id));
       const flags = await db.select().from(tenantFeatureFlags).where(eq(tenantFeatureFlags.tenantId, input.id));
       const wlConfig = await db.select().from(whiteLabelConfigs).where(eq(whiteLabelConfigs.tenantId, input.id)).limit(1);
@@ -549,15 +559,15 @@ export const tenantsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const [row] = await db.insert(tenants).values({ ...input, status: "trial" }).returning({ id: tenants.id });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [row] = await db.insert(tenants).values({ ...input, status: "trial" }).returning({ id: tenants.id }).returning();
       return { id: row.id };
     }),
 
   update: adminProcedure
     .input(z.object({
       id: z.number(),
-      name: z.string().optional(),
+      name: z.string().max(2000).optional(),
       plan: z.enum(["starter", "growth", "enterprise", "white_label"]).optional(),
       status: z.enum(["active", "suspended", "trial", "churned"]).optional(),
       brandName: z.string().optional(),
@@ -576,68 +586,79 @@ export const tenantsRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { id, ...data } = input;
-      await db.update(tenants).set({ ...data, updatedAt: new Date() }).where(eq(tenants.id, id));
-      return { success: true };
+      const [_row] = await db.update(tenants).set({ ...data, updatedAt: new Date() }).where(eq(tenants.id, id)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   suspend: adminProcedure
-    .input(z.object({ id: z.number(), reason: z.string().optional() }))
+    .input(z.object({ id: z.number(), reason: z.string().max(2000).optional() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(tenants).set({ status: "suspended", updatedAt: new Date() }).where(eq(tenants.id, input.id));
-      return { success: true };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [_row] = await db.update(tenants).set({ status: "suspended", updatedAt: new Date() }).where(eq(tenants.id, input.id)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   activate: adminProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.update(tenants).set({ status: "active", updatedAt: new Date() }).where(eq(tenants.id, input.id));
-      return { success: true };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [_row] = await db.update(tenants).set({ status: "active", updatedAt: new Date() }).where(eq(tenants.id, input.id)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   delete: adminProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(tenants).where(eq(tenants.id, input.id));
-      return { success: true };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const _deleted = await db.delete(tenants).where(eq(tenants.id, input.id)).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   addMember: adminProcedure
     .input(z.object({ tenantId: z.number(), userId: z.number(), role: z.enum(["member", "admin", "owner"]).default("member") }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.insert(tenantUsers).values(input).onConflictDoNothing();
-      return { success: true };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await db.insert(tenantUsers).values(input).onConflictDoNothing().returning();
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   removeMember: adminProcedure
     .input(z.object({ tenantId: z.number(), userId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      await db.delete(tenantUsers)
-        .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.userId)));
-      return { success: true };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const _deleted = await db.delete(tenantUsers)
+        .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.userId))).returning();
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Stats for admin dashboard
   stats: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { total: 0, active: 0, trial: 0, enterprise: 0 };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db.select({ status: tenants.status, plan: tenants.plan, count: sql<number>`count(*)` })
       .from(tenants).groupBy(tenants.status, tenants.plan);
-    const total = rows.reduce((s, r) => s + Number(r.count), 0);
-    const active = rows.filter(r => r.status === "active").reduce((s, r) => s + Number(r.count), 0);
-    const trial = rows.filter(r => r.status === "trial").reduce((s, r) => s + Number(r.count), 0);
-    const enterprise = rows.filter(r => r.plan === "enterprise" || r.plan === "white_label").reduce((s, r) => s + Number(r.count), 0);
+    const total = rows.reduce((s: any, r: any) => s + Number(r.count), 0);
+    const active = rows.filter((r: any) => r.status === "active").reduce((s: any, r: any) => s + Number(r.count), 0);
+    const trial = rows.filter((r: any) => r.status === "trial").reduce((s: any, r: any) => s + Number(r.count), 0);
+    const enterprise = rows.filter((r: any) => r.plan === "enterprise" || r.plan === "white_label").reduce((s: any, r: any) => s + Number(r.count), 0);
     return { total, active, trial, enterprise };
   }),
 });
@@ -648,7 +669,7 @@ export const whiteLabelRouter = router({
     .input(z.object({ tenantId: z.number() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [config] = await db.select().from(whiteLabelConfigs).where(eq(whiteLabelConfigs.tenantId, input.tenantId)).limit(1);
       const [tenant] = await db.select().from(tenants).where(eq(tenants.id, input.tenantId)).limit(1);
       return { config: config ?? null, tenant: tenant ?? null };
@@ -682,7 +703,7 @@ export const whiteLabelRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { tenantId, brandName, logoUrl, faviconUrl, primaryColor, secondaryColor, accentColor, supportEmail, customDomain, ...configData } = input;
 
       // Update tenant branding
@@ -695,16 +716,18 @@ export const whiteLabelRouter = router({
       if (accentColor !== undefined) brandingUpdate.accentColor = accentColor;
       if (supportEmail !== undefined) brandingUpdate.supportEmail = supportEmail;
       if (customDomain !== undefined) brandingUpdate.customDomain = customDomain;
-      await db.update(tenants).set(brandingUpdate).where(eq(tenants.id, tenantId));
+      await db.update(tenants).set(brandingUpdate).where(eq(tenants.id, tenantId)).returning();
 
       // Upsert white-label config
       const [existing] = await db.select().from(whiteLabelConfigs).where(eq(whiteLabelConfigs.tenantId, tenantId)).limit(1);
+      let _row: any;
       if (existing) {
-        await db.update(whiteLabelConfigs).set({ ...configData, updatedAt: new Date() }).where(eq(whiteLabelConfigs.id, existing.id));
+        [_row] = await db.update(whiteLabelConfigs).set({ ...configData, updatedAt: new Date() }).where(eq(whiteLabelConfigs.id, existing.id)).returning();
       } else {
-        await db.insert(whiteLabelConfigs).values({ tenantId, ...configData });
+        await db.insert(whiteLabelConfigs).values({ tenantId, ...configData }).returning();
       }
-      return { success: true };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // Get effective branding for a given slug/domain (used by frontend on load)
@@ -712,7 +735,7 @@ export const whiteLabelRouter = router({
     .input(z.object({ slug: z.string().optional(), domain: z.string().optional() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       let query;
       if (input.slug) {
         query = db.select().from(tenants).where(eq(tenants.slug, input.slug)).limit(1);
@@ -747,7 +770,7 @@ async function seedPlatformFlags(db: Awaited<ReturnType<typeof getDb>>) {
       await db.insert(featureFlags).values({
         key: f.key, name: f.name, description: f.description,
         scope: "global", defaultEnabled: true, rolloutPct: 100, category: f.category,
-      }).onConflictDoNothing();
+      }).onConflictDoNothing().returning();
     } catch { /* already exists */ }
   }
 }

@@ -15,11 +15,134 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+# ── PostgreSQL persistence ──────────────────────────────────────────────
+import psycopg2
+import psycopg2.extras
+from contextlib import contextmanager
+import signal
+import atexit
+
+_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+_db_pool = None
+
+def _get_db():
+    global _db_pool
+    if _db_pool is None:
+        _db_pool = psycopg2.connect(_DB_URL)
+        _db_pool.autocommit = True
+        with _db_pool.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS investment_ml_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_investment_ml_updated
+                    ON investment_ml_state(updated_at);
+                CREATE TABLE IF NOT EXISTS investment_ml_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    payload JSONB NOT NULL DEFAULT '{}',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_investment_ml_events_type
+                    ON investment_ml_events(event_type, created_at);
+            """)
+    return _db_pool
+
+def db_upsert(record_id: str, data: dict):
+    conn = _get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO investment_ml_state (id, data, updated_at)
+               VALUES (%s, %s, NOW())
+               ON CONFLICT (id) DO UPDATE SET data = %s, updated_at = NOW()""",
+            (record_id, psycopg2.extras.Json(data), psycopg2.extras.Json(data))
+        )
+
+def db_get(record_id: str) -> dict | None:
+    conn = _get_db()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute("SELECT data FROM investment_ml_state WHERE id = %s", (record_id,))
+        row = cur.fetchone()
+        return row["data"] if row else None
+
+def db_list(limit: int = 100) -> list[dict]:
+    conn = _get_db()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT data FROM investment_ml_state ORDER BY updated_at DESC LIMIT %s",
+            (limit,)
+        )
+        return [row["data"] for row in cur.fetchall()]
+
+def db_log_event(event_type: str, payload: dict):
+    conn = _get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO investment_ml_events (event_type, payload) VALUES (%s, %s)",
+            (event_type, psycopg2.extras.Json(payload))
+        )
+# ── End PostgreSQL persistence ──────────────────────────────────────────
+
+
 app = FastAPI(
     title="RemitFlow Investment ML Engine",
     version="1.0.0",
     description="AI-driven investment recommendations for diaspora investors",
 )
+
+@app.get("/metrics")
+async def _prometheus_metrics():
+    uptime = _time_mod.time() - _PROCESS_START_TIME
+    return Response(
+        content=(
+            f"# HELP pod_uptime_seconds Time since process started\n"
+            f"# TYPE pod_uptime_seconds gauge\n"
+            f'pod_uptime_seconds{{service="python-investment-ml"}} {uptime:.1f}\n'
+            f"# HELP pod_ready Whether pod is ready\n"
+            f"# TYPE pod_ready gauge\n"
+            f'pod_ready{{service="python-investment-ml"}} 1\n'
+        ),
+        media_type="text/plain; version=0.0.4",
+    )
+
+
+# Graceful shutdown handling
+_shutdown_flag = False
+
+def _handle_shutdown(signum, frame):
+    global _shutdown_flag
+    _shutdown_flag = True
+    logging.getLogger("python-investment-ml").info(f"Received signal {signum}, initiating graceful shutdown...")
+    _emit_lifecycle_event("pod.shutdown.initiated", signal=signum)
+
+signal.signal(signal.SIGTERM, _handle_shutdown)
+signal.signal(signal.SIGINT, _handle_shutdown)
+
+# ── Pod Lifecycle Observability ─────────────────────────────────────────
+import time as _time_mod
+_PROCESS_START_TIME = _time_mod.time()
+_LIFECYCLE_LOGGER = logging.getLogger("pod-lifecycle")
+
+def _emit_lifecycle_event(event_type: str, **kwargs):
+    """Emit structured JSON lifecycle event for OpenSearch/Fluentd ingestion."""
+    import json as _json
+    payload = {
+        "event": event_type,
+        "service": "python-investment-ml",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+        **kwargs
+    }
+    _LIFECYCLE_LOGGER.info(_json.dumps(payload))
+
+
+@app.on_event("shutdown")
+async def _on_shutdown():
+    logging.getLogger("python-investment-ml").info("FastAPI shutdown event — cleaning up resources")
+
 
 app.add_middleware(
     CORSMiddleware,

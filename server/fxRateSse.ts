@@ -67,10 +67,16 @@ export function setInitialRates(rates: Record<string, number>): void {
   lastRates = rates;
 }
 
+const MAX_SSE_CLIENTS = parseInt(process.env.MAX_SSE_CLIENTS || "1000", 10);
+
 /**
  * Express handler for GET /api/sse/fx-rates
  */
 export function fxRateSseHandler(req: Request, res: Response): void {
+  if (sseClients.size >= MAX_SSE_CLIENTS) {
+    res.status(503).json({ error: "Too many SSE connections" });
+    return;
+  }
   // SSE headers — HTTP/1.1 compatible (no HTTP/2 push)
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache, no-transform");

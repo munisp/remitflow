@@ -1,68 +1,61 @@
-import React from 'react';
-import { View, Text, ScrollView, TouchableOpacity, StyleSheet, ActivityIndicator, RefreshControl } from 'react-native';
-import { useNavigation } from '@react-navigation/native';
-import { trpc } from '../services/trpc';
-import { useAuth } from '../contexts/AuthContext';
+import React, { useEffect, useState } from 'react';
+import { View, Text, ScrollView, RefreshControl, StyleSheet, ActivityIndicator, TouchableOpacity } from 'react-native';
+
+const API_BASE = process.env.API_URL || 'http://localhost:3001';
 
 export default function ReferralDashboardScreen() {
-  const navigation = useNavigation<any>();
-  const { user } = useAuth();
-  const [refreshing, setRefreshing] = React.useState(false);
-  const { data, isLoading, refetch } = (trpc as any)?.['referral']?.['getDashboard']?.useQuery?.() ?? { data: null, isLoading: false, refetch: () => {} };
-  const onRefresh = async () => {
-    setRefreshing(true);
-    await refetch?.();
-    setRefreshing(false);
+  const [data, setData] = useState<Record<string, unknown> | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const loadData = async () => {
+    try {
+      setError(null);
+      const res = await fetch(`${API_BASE}/api/trpc/referral-dashboard`);
+      const json = await res.json();
+      setData(json.result?.data ?? json);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load');
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
   };
-  const items: any[] = Array.isArray(data) ? data : (data ? [data] : []);
+
+  useEffect(() => { loadData(); }, []);
+
+  if (loading) return <View style={styles.center}><ActivityIndicator size="large" color="#6366f1" /></View>;
+  if (error) return (
+    <View style={styles.center}>
+      <Text style={styles.errorText}>{error}</Text>
+      <TouchableOpacity style={styles.retryBtn} onPress={loadData}><Text style={styles.retryText}>Retry</Text></TouchableOpacity>
+    </View>
+  );
+
   return (
-    <ScrollView
-      style={styles.container}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#6366f1" />}
-    >
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backBtn}>
-          <Text style={styles.backText}>← Back</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>Referral Dashboard</Text>
-        {user && <Text style={styles.subtitle}>Logged in as {user.name ?? user.email}</Text>}
-      </View>
-      {isLoading ? (
-        <ActivityIndicator color="#6366f1" size="large" style={{ marginTop: 40 }} />
-      ) : items.length === 0 ? (
-        <View style={styles.empty}>
-          <Text style={styles.emptyIcon}>📭</Text>
-          <Text style={styles.emptyText}>No data available</Text>
-          <Text style={styles.emptySubtext}>Pull down to refresh</Text>
+    <ScrollView style={styles.container} refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadData(); }} />}>
+      <Text style={styles.title}>Referral Dashboard</Text>
+      {data && Object.entries(data).map(([key, value]) => (
+        <View key={key} style={styles.row}>
+          <Text style={styles.label}>{key}</Text>
+          <Text style={styles.value}>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</Text>
         </View>
-      ) : (
-        items.slice(0, 20).map((item, idx) => (
-          <View key={item?.id ?? idx} style={styles.card}>
-            <Text style={styles.cardTitle}>{item?.name ?? item?.title ?? item?.id ?? `Item ${idx + 1}`}</Text>
-            {item?.status && <Text style={styles.badge}>{item.status}</Text>}
-            {item?.amount && <Text style={styles.amount}>${Number(item.amount).toLocaleString()}</Text>}
-            {item?.createdAt && <Text style={styles.date}>{new Date(item.createdAt).toLocaleDateString()}</Text>}
-          </View>
-        ))
-      )}
-      <View style={{ height: 32 }} />
+      ))}
+      {!data && <Text style={styles.emptyText}>No data available</Text>}
     </ScrollView>
   );
 }
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0f172a' },
-  header: { padding: 24, paddingBottom: 16 },
-  backBtn: { marginBottom: 12 },
-  backText: { color: '#6366f1', fontSize: 16 },
-  title: { fontSize: 24, fontWeight: 'bold', color: '#fff', marginBottom: 4 },
-  subtitle: { fontSize: 13, color: '#94a3b8' },
-  card: { backgroundColor: '#1e293b', marginHorizontal: 16, marginBottom: 10, borderRadius: 12, padding: 16 },
-  cardTitle: { fontSize: 15, fontWeight: '600', color: '#fff', marginBottom: 4 },
-  badge: { fontSize: 12, color: '#6366f1', backgroundColor: '#1e1b4b', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 6, alignSelf: 'flex-start', marginBottom: 4 },
-  amount: { fontSize: 18, fontWeight: 'bold', color: '#10b981' },
-  date: { fontSize: 12, color: '#64748b', marginTop: 4 },
-  empty: { alignItems: 'center', paddingTop: 80 },
-  emptyIcon: { fontSize: 48, marginBottom: 16 },
-  emptyText: { fontSize: 18, fontWeight: 'bold', color: '#fff', marginBottom: 8 },
-  emptySubtext: { fontSize: 14, color: '#64748b' },
+  container: { flex: 1, backgroundColor: '#f9fafb', padding: 16 },
+  center: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f9fafb' },
+  title: { fontSize: 24, fontWeight: '700', color: '#111827', marginBottom: 16 },
+  row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: '#e5e7eb' },
+  label: { fontSize: 14, color: '#6b7280' },
+  value: { fontSize: 14, fontWeight: '500', color: '#111827', maxWidth: '60%', textAlign: 'right' },
+  errorText: { fontSize: 16, color: '#ef4444', marginBottom: 16 },
+  retryBtn: { backgroundColor: '#6366f1', paddingHorizontal: 24, paddingVertical: 12, borderRadius: 8 },
+  retryText: { color: '#fff', fontWeight: '600' },
+  emptyText: { fontSize: 16, color: '#9ca3af', textAlign: 'center', marginTop: 48 },
 });

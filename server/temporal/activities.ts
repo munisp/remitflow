@@ -678,3 +678,128 @@ export async function executeRecurringPaymentActivity(
     return { success: false, error };
   }
 }
+
+// ============================================================================
+// KYC Verification Scoring Activity
+// ============================================================================
+
+export interface VerificationScoringInput {
+  userId: number;
+  documentVerified: boolean;
+  livenessScore: number;
+  sanctionsClear: boolean;
+  decision: string;
+}
+
+export async function verificationScoringActivity(
+  input: VerificationScoringInput
+): Promise<{ score: number; category: string; autoApprovable: boolean }> {
+  log.info("Computing verification score", { userId: input.userId });
+
+  let score = 0;
+
+  // Document verification: 30 points
+  if (input.documentVerified) score += 30;
+
+  // Liveness score: up to 30 points
+  score += Math.round(input.livenessScore * 30);
+
+  // Sanctions clear: 20 points
+  if (input.sanctionsClear) score += 20;
+
+  // Decision alignment: 20 points
+  if (input.decision === "APPROVED") score += 20;
+  else if (input.decision === "MANUAL_REVIEW") score += 10;
+
+  const category = score >= 75 ? "low" : score >= 50 ? "medium" : score >= 25 ? "high" : "critical";
+  const autoApprovable = score >= 80 && input.documentVerified && input.livenessScore >= 0.8 && input.sanctionsClear;
+
+  log.info("Verification score computed", { userId: input.userId, score, category, autoApprovable });
+  return { score, category, autoApprovable };
+}
+
+// ============================================================================
+// KYC Risk Assessment Activity
+// ============================================================================
+
+export interface RiskAssessmentInput {
+  userId: number;
+  extractedName: string;
+  country: string;
+  verificationScore: number;
+}
+
+const HIGH_RISK_COUNTRIES = new Set([
+  "AF", "IR", "IQ", "KP", "LY", "ML", "MM", "SO", "SS", "SY", "YE",
+]);
+
+export async function riskAssessmentActivity(
+  input: RiskAssessmentInput
+): Promise<{ category: string; score: number; requiredLevel: string; factors: string[] }> {
+  log.info("Computing risk assessment", { userId: input.userId });
+
+  let riskScore = 0;
+  const factors: string[] = [];
+
+  // Country risk
+  if (HIGH_RISK_COUNTRIES.has(input.country)) {
+    riskScore += 25;
+    factors.push("high_risk_country");
+  }
+
+  // Low verification score
+  if (input.verificationScore < 50) {
+    riskScore += 20;
+    factors.push("low_verification_score");
+  }
+
+  // Determine risk category
+  const category = riskScore < 25 ? "low" : riskScore < 50 ? "medium" : riskScore < 75 ? "high" : "critical";
+
+  // Determine required KYC level based on risk
+  let requiredLevel = "standard";
+  if (category === "high" || category === "critical") requiredLevel = "enhanced";
+  if (riskScore >= 75) requiredLevel = "full_edd";
+
+  log.info("Risk assessment complete", { userId: input.userId, category, riskScore });
+  return { category, score: riskScore, requiredLevel, factors };
+}
+
+// ============================================================================
+// SLA Breach Check Activity
+// ============================================================================
+
+export interface SLABreachCheckInput {
+  userId: number;
+  kycDocId: number;
+  startedAt: string;
+  kycLevel: string;
+}
+
+const SLA_HOURS: Record<string, number> = {
+  basic: 2,
+  standard: 24,
+  enhanced: 48,
+  full_edd: 72,
+};
+
+export async function slaBreachCheckActivity(
+  input: SLABreachCheckInput
+): Promise<{ breached: boolean; hoursElapsed: number; slaHours: number }> {
+  const slaHours = SLA_HOURS[input.kycLevel] ?? 24;
+  const startedAt = new Date(input.startedAt);
+  const now = new Date();
+  const hoursElapsed = (now.getTime() - startedAt.getTime()) / 3_600_000;
+  const breached = hoursElapsed > slaHours;
+
+  if (breached) {
+    log.warn("KYC SLA breached", {
+      userId: input.userId,
+      kycDocId: input.kycDocId,
+      hoursElapsed: Math.round(hoursElapsed * 10) / 10,
+      slaHours,
+    });
+  }
+
+  return { breached, hoursElapsed: Math.round(hoursElapsed * 10) / 10, slaHours };
+}

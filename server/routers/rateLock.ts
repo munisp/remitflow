@@ -1,165 +1,228 @@
 /**
- * Rate Lock / Forward Contract Router
- * Allows users to lock in a current FX rate for a future transfer (up to 30 days).
+ * Rate Lock Router — DB-backed
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Allows users to lock an FX rate for a configurable duration before executing
+ * a transfer. Prevents rate slippage between quote and execution.
+ *
+ * Uses the `rate_locks` table in PostgreSQL via Drizzle ORM — no in-memory state.
+ * - Lock rate for 30s, 60s, or 5m (configurable)
+ * - One active lock per user per corridor
+ * - Auto-expire stale locks via SQL WHERE clause
+ * - Rate lock audit trail
  */
-import { router, protectedProcedure, rateLimitedProcedure } from "../_core/trpc.js";
+
 import { z } from "zod";
-import { getDb } from "../db.js";
-import { rateLocks } from "../../drizzle/schema.js";
-import { eq, and, desc } from "drizzle-orm";
-import { sendEmail } from "../email.service.js";
+import { router, protectedProcedure } from "../_core/trpc";
+import { randomBytes } from "crypto";
+import { logger } from "../_core/logger";
+import { getDb, createAuditLog } from "../db";
+import { rateLocks } from "../../drizzle/schema";
+import { eq, and, gt, sql } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 
-/** Simulate a live FX rate lookup (replace with real provider in production) */
-async function getLiveRate(from: string, to: string): Promise<number> {
-  // Fallback rates for common corridors (production: call Wise/OFX/Currencybeacon API)
-  const rates: Record<string, number> = {
-    "USD_NGN": 1580, "USD_GHS": 15.8, "USD_KES": 128, "USD_ZAR": 18.5,
-    "USD_UGX": 3750, "USD_TZS": 2580, "USD_XOF": 610, "USD_XAF": 610,
-    "GBP_NGN": 2010, "GBP_GHS": 20.1, "GBP_KES": 163, "EUR_NGN": 1720,
-    "EUR_GHS": 17.2, "EUR_KES": 138, "CAD_NGN": 1160, "AUD_NGN": 1040,
-  };
-  const key = `${from}_${to}`;
-  const reverseKey = `${to}_${from}`;
-  if (rates[key]) return rates[key];
-  if (rates[reverseKey]) return 1 / rates[reverseKey];
-  // Default: 1:1 for unknown pairs
-  return 1.0;
-}
-
 export const rateLockRouter = router({
-  /** Lock the current FX rate for a future transfer */
-  lock: rateLimitedProcedure
-    .input(
-      z.object({
-        fromCurrency: z.string().length(3),
-        toCurrency: z.string().length(3),
-        amount: z.number().positive(),
-        lockDays: z.number().int().min(1).max(30).default(7),
-      })
-    )
+  lock: protectedProcedure
+    .input(z.object({
+      fromCurrency: z.string().length(3),
+      toCurrency: z.string().length(3),
+      amount: z.number().positive().max(10_000_000),
+      rate: z.number().positive(),
+      durationSeconds: z.number().min(15).max(300).default(60),
+    }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
 
-      const rate = await getLiveRate(input.fromCurrency, input.toCurrency);
-      const expiresAt = new Date(Date.now() + input.lockDays * 86_400_000);
+      // Check for existing active lock on same corridor
+      const existing = await db.select().from(rateLocks)
+        .where(and(
+          eq(rateLocks.userId, ctx.user.id),
+          eq(rateLocks.fromCurrency, input.fromCurrency),
+          eq(rateLocks.toCurrency, input.toCurrency),
+          eq(rateLocks.status, "active"),
+          gt(rateLocks.expiresAt, new Date()),
+        ))
+        .limit(1);
 
-      const [row] = await db
-        .insert(rateLocks)
-        .values({
-          userId: ctx.user.id,
-          fromCurrency: input.fromCurrency,
-          toCurrency: input.toCurrency,
-          lockedRate: rate.toFixed(8),
-          amount: input.amount.toString(),
-          expiresAt,
-          status: "active",
-        })
-        .returning();
-
-      // Send confirmation email
-      const user = ctx.user as { email?: string; name?: string };
-      if (user.email) {
-        await sendEmail({
-          to: user.email,
-          subject: `Rate Locked: ${input.fromCurrency}/${input.toCurrency} @ ${rate.toFixed(4)}`,
-          html: `
-            <div style="font-family:sans-serif;max-width:600px;margin:auto">
-              <h2 style="color:#1a56db">Rate Lock Confirmed</h2>
-              <p>Hi ${user.name ?? "there"},</p>
-              <p>Your exchange rate has been locked:</p>
-              <table style="width:100%;border-collapse:collapse">
-                <tr><td style="padding:8px;border:1px solid #e5e7eb">Pair</td><td style="padding:8px;border:1px solid #e5e7eb"><strong>${input.fromCurrency} → ${input.toCurrency}</strong></td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb">Locked Rate</td><td style="padding:8px;border:1px solid #e5e7eb"><strong>${rate.toFixed(4)}</strong></td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb">Amount</td><td style="padding:8px;border:1px solid #e5e7eb"><strong>${input.fromCurrency} ${input.amount.toFixed(2)}</strong></td></tr>
-                <tr><td style="padding:8px;border:1px solid #e5e7eb">Expires</td><td style="padding:8px;border:1px solid #e5e7eb"><strong>${expiresAt.toLocaleDateString()}</strong></td></tr>
-              </table>
-              <p style="color:#6b7280;font-size:0.85rem">Use this rate within ${input.lockDays} days to complete your transfer.</p>
-            </div>`,
-          text: `Rate Lock: ${input.fromCurrency}/${input.toCurrency} @ ${rate.toFixed(4)}. Expires: ${expiresAt.toLocaleDateString()}.`,
-        });
+      if (existing.length > 0) {
+        const lock = existing[0];
+        return {
+          lockId: lock.id,
+          rate: Number(lock.lockedRate),
+          expiresAt: lock.expiresAt?.toISOString() ?? "",
+          existingLock: true,
+        };
       }
 
-      return row;
+      const expiresAt = new Date(Date.now() + input.durationSeconds * 1000);
+      const [row] = await db.insert(rateLocks).values({
+        userId: ctx.user.id,
+        fromCurrency: input.fromCurrency,
+        toCurrency: input.toCurrency,
+        lockedRate: input.rate.toString(),
+        amount: input.amount.toString(),
+        expiresAt,
+        status: "active",
+      }).returning();
+
+      logger.info({ lockId: row.id, userId: ctx.user.id, pair: `${input.fromCurrency}/${input.toCurrency}`, rate: input.rate }, "Rate locked");
+      await createAuditLog({ userId: ctx.user.id, action: "RATE_LOCK_CREATED", metadata: { lockId: row.id, rate: input.rate, corridor: `${input.fromCurrency}/${input.toCurrency}` } });
+
+      return {
+        lockId: row.id,
+        rate: Number(row.lockedRate),
+        expiresAt: row.expiresAt?.toISOString() ?? "",
+        existingLock: false,
+      };
     }),
 
-  /** List all rate locks for the current user */
   list: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
-    // Auto-expire stale locks
-    await db
-      .update(rateLocks)
-      .set({ status: "expired" })
-      .where(
-        and(
-          eq(rateLocks.userId, ctx.user.id),
-          eq(rateLocks.status, "active")
-        )
-      );
-    return db
-      .select()
-      .from(rateLocks)
-      .where(eq(rateLocks.userId, ctx.user.id))
-      .orderBy(desc(rateLocks.createdAt))
-      .limit(50);
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+    const now = new Date();
+    const rows = await db.select().from(rateLocks)
+      .where(and(
+        eq(rateLocks.userId, ctx.user.id),
+        eq(rateLocks.status, "active"),
+        gt(rateLocks.expiresAt, now),
+      ));
+    return rows.map((l: typeof rows[number]) => ({
+      lockId: l.id,
+      rate: Number(l.lockedRate),
+      fromCurrency: l.fromCurrency,
+      toCurrency: l.toCurrency,
+      amount: Number(l.amount),
+      expiresAt: l.expiresAt?.toISOString() ?? "",
+      remainingSeconds: Math.max(0, Math.floor(((l.expiresAt?.getTime() ?? 0) - now.getTime()) / 1000)),
+    }));
   }),
 
-  /** Cancel / expire a rate lock */
   cancel: protectedProcedure
-    .input(z.object({ id: z.number().int().positive() }))
+    .input(z.object({ lockId: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const [row] = await db
-        .update(rateLocks)
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      const [updated] = await db.update(rateLocks)
         .set({ status: "expired" })
-        .where(and(eq(rateLocks.id, input.id), eq(rateLocks.userId, ctx.user.id)))
+        .where(and(eq(rateLocks.id, input.lockId), eq(rateLocks.userId, ctx.user.id)))
         .returning();
-      if (!row) throw new TRPCError({ code: "NOT_FOUND" });
-      return row;
+      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Lock not found" });
+      return { lockId: updated.id, status: "cancelled" };
     }),
 
-  /** Use a rate lock (mark as used when initiating a transfer) */
-  use: protectedProcedure
-    .input(z.object({ id: z.number().int().positive() }))
-    .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR" });
-      const [existing] = await db
-        .select()
-        .from(rateLocks)
-        .where(and(eq(rateLocks.id, input.id), eq(rateLocks.userId, ctx.user.id)));
-      if (!existing) throw new TRPCError({ code: "NOT_FOUND" });
-      if (existing.status !== "active") throw new TRPCError({ code: "BAD_REQUEST", message: "Rate lock is not active" });
-      if (existing.expiresAt && new Date(existing.expiresAt) < new Date()) {
-        await db.update(rateLocks).set({ status: "expired" }).where(eq(rateLocks.id, input.id));
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Rate lock has expired" });
-      }
-      const [row] = await db
-        .update(rateLocks)
-        .set({ status: "used" })
-        .where(eq(rateLocks.id, input.id))
-        .returning();
-      return row;
-    }),
-
-  /** Get current live rate preview (no lock) */
   preview: protectedProcedure
-    .input(z.object({ fromCurrency: z.string().length(3), toCurrency: z.string().length(3), amount: z.number().positive() }))
+    .input(z.object({
+      fromCurrency: z.string().length(3),
+      toCurrency: z.string().length(3),
+      amount: z.number().positive().max(10_000_000),
+    }))
     .query(async ({ input }) => {
-      const rate = await getLiveRate(input.fromCurrency, input.toCurrency);
-      const toAmount = input.amount * rate;
+      const db = await getDb();
+      // Fetch the latest rate from fxRateCache if available
+      let rate = 1.0;
+      if (db) {
+        const rateRows = await db.execute(
+          sql`SELECT rate FROM "fxRateCache" WHERE "fromCurrency" = ${input.fromCurrency} AND "toCurrency" = ${input.toCurrency} ORDER BY "updatedAt" DESC LIMIT 1`
+        );
+        const rateRow = (rateRows as unknown as Array<Record<string, unknown>>)[0];
+        if (rateRow?.rate) rate = Number(rateRow.rate);
+      }
       return {
         fromCurrency: input.fromCurrency,
         toCurrency: input.toCurrency,
-        rate,
-        fromAmount: input.amount,
-        toAmount,
-        fee: input.amount * 0.005, // 0.5% fee
-        netToAmount: toAmount,
-        rateValidUntil: new Date(Date.now() + 60_000), // 1 minute
+        amount: input.amount,
+        indicativeRate: rate,
+        convertedAmount: input.amount * rate,
+        validFor: 60,
+      };
+    }),
+
+  lockRate: protectedProcedure
+    .input(z.object({
+      fromCurrency: z.string().length(3),
+      toCurrency: z.string().length(3),
+      amount: z.number().positive().max(10_000_000),
+      rate: z.number().positive(),
+      durationSeconds: z.number().min(15).max(300).default(60),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+
+      // Reuse existing active lock on same corridor
+      const existing = await db.select().from(rateLocks)
+        .where(and(
+          eq(rateLocks.userId, ctx.user.id),
+          eq(rateLocks.fromCurrency, input.fromCurrency),
+          eq(rateLocks.toCurrency, input.toCurrency),
+          eq(rateLocks.status, "active"),
+          gt(rateLocks.expiresAt, new Date()),
+        ))
+        .limit(1);
+
+      if (existing.length > 0) {
+        return { lockId: existing[0].id, rate: Number(existing[0].lockedRate), expiresAt: existing[0].expiresAt?.toISOString() ?? "", existingLock: true };
+      }
+
+      const expiresAt = new Date(Date.now() + input.durationSeconds * 1000);
+      const [row] = await db.insert(rateLocks).values({
+        userId: ctx.user.id,
+        fromCurrency: input.fromCurrency,
+        toCurrency: input.toCurrency,
+        lockedRate: input.rate.toString(),
+        amount: input.amount.toString(),
+        expiresAt,
+        status: "active",
+      }).returning();
+
+      logger.info({ lockId: row.id, userId: ctx.user.id, pair: `${input.fromCurrency}/${input.toCurrency}` }, "Rate locked");
+      return { lockId: row.id, rate: Number(row.lockedRate), expiresAt: row.expiresAt?.toISOString() ?? "", existingLock: false };
+    }),
+
+  useRateLock: protectedProcedure
+    .input(z.object({ lockId: z.number().int().positive() }))
+    .mutation(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      const rows = await db.select().from(rateLocks).where(eq(rateLocks.id, input.lockId)).limit(1);
+      const lock = rows[0];
+      if (!lock) return { valid: false, reason: "Lock not found" };
+      if (lock.status !== "active") return { valid: false, reason: "Lock already used or expired" };
+      if (lock.expiresAt && lock.expiresAt < new Date()) {
+        await db.update(rateLocks).set({ status: "expired" }).where(eq(rateLocks.id, input.lockId)).returning();
+        return { valid: false, reason: "Lock expired" };
+      }
+      await db.update(rateLocks).set({ status: "used" as typeof lock.status }).where(eq(rateLocks.id, input.lockId)).returning();
+      await createAuditLog({ userId: ctx.user.id, action: "RATE_LOCK_USED", metadata: { lockId: input.lockId, rate: Number(lock.lockedRate) } });
+      return {
+        valid: true,
+        rate: Number(lock.lockedRate),
+        amount: Number(lock.amount),
+        fromCurrency: lock.fromCurrency,
+        toCurrency: lock.toCurrency,
+      };
+    }),
+
+  getLock: protectedProcedure
+    .input(z.object({ lockId: z.number().int().positive() }))
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+      const rows = await db.select().from(rateLocks).where(eq(rateLocks.id, input.lockId)).limit(1);
+      const lock = rows[0];
+      if (!lock) return { found: false };
+      const now = new Date();
+      return {
+        found: true,
+        lockId: lock.id,
+        rate: Number(lock.lockedRate),
+        fromCurrency: lock.fromCurrency,
+        toCurrency: lock.toCurrency,
+        amount: Number(lock.amount),
+        expiresAt: lock.expiresAt?.toISOString() ?? "",
+        expired: lock.expiresAt ? lock.expiresAt < now : true,
+        used: lock.status !== "active",
+        remainingSeconds: lock.expiresAt ? Math.max(0, Math.floor((lock.expiresAt.getTime() - now.getTime()) / 1000)) : 0,
       };
     }),
 });

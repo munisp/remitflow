@@ -34,13 +34,14 @@ export function getRedisClient(): Redis | null {
   if (_connectionFailed) return null;
   if (_redis && _redis.status === "ready") return _redis;
   try {
-    _redis = new Redis(REDIS_URL, {
-      password: REDIS_PASSWORD,
+    const opts: Record<string, unknown> = {
       maxRetriesPerRequest: 2,
       enableReadyCheck: true,
       lazyConnect: true,
-      retryStrategy: (times) => times > 3 ? null : Math.min(times * 100, 2000),
-    });
+      retryStrategy: (times: number) => times > 3 ? null : Math.min(times * 100, 2000),
+    };
+    if (REDIS_PASSWORD) opts.password = REDIS_PASSWORD;
+    _redis = new Redis(REDIS_URL, opts);
     _redis.on("connect", () => logger.info({ data: REDIS_URL }, '[Redis] Connected to'));
     _redis.on("error", (err) => {
       if (!_connectionFailed) {
@@ -48,6 +49,7 @@ export function getRedisClient(): Redis | null {
         logger.warn({ data: err.message }, '[Redis] Connection failed — degraded mode:');
       }
     });
+    _redis.on("ready", () => { _connectionFailed = false; });
     _redis.connect().catch(() => { _connectionFailed = true; });
     return _redis;
   } catch (err) {

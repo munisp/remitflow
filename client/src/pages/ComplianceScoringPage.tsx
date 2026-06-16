@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { Shield, Search, AlertTriangle, CheckCircle, XCircle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const RISK_COLORS: Record<string, { bg: string; text: string; bar: string }> = {
   low: { bg: "bg-green-500/10 border-green-500/30", text: "text-green-400", bar: "bg-green-500" },
@@ -17,6 +18,7 @@ const RISK_COLORS: Record<string, { bg: string; text: string; bar: string }> = {
 };
 
 export default function ComplianceScoringPage() {
+  const { t } = useTranslation();
   const [userId, setUserId] = useState("");
   const [queriedUserId, setQueriedUserId] = useState<number | null>(null);
   const [casesStatus, setCasesStatus] = useState("all");
@@ -149,7 +151,7 @@ export default function ComplianceScoringPage() {
                     <CheckCircle className="w-8 h-8 mx-auto mb-2 text-green-400 opacity-50" />
                     No compliance cases found
                   </td></tr>
-                ) : (casesQuery.data?.cases ?? []).map((c) => (
+                ) : (casesQuery.data?.cases ?? []).map((c: any) => (
                   <tr key={c.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                     <td className="p-3 font-mono text-xs text-muted-foreground">#{c.id}</td>
                     <td className="p-3 text-sm">User #{c.userId}</td>

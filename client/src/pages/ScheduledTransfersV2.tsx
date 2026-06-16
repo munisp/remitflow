@@ -11,11 +11,13 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { toast } from "sonner";
 import { Plus, Clock, Play, Pause, Trash2, Calendar, RefreshCw, Tag, CalendarClock } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const FREQUENCIES = ["once", "daily", "weekly", "monthly"] as const;
 const CURRENCIES = ["USD", "GBP", "EUR", "NGN", "KES", "GHS", "ZAR", "UGX", "TZS"];
 
 export default function ScheduledTransfersV2() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [createOpen, setCreateOpen] = useState(false);
   const [form, setForm] = useState({

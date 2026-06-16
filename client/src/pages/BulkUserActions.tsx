@@ -11,8 +11,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import { Users, Download, Ban, CheckCircle, History } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function BulkUserActions() {
+  const { t } = useTranslation();
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [idsInput, setIdsInput] = useState("");
   const [suspendReason, setSuspendReason] = useState("");
@@ -217,7 +219,7 @@ export default function BulkUserActions() {
                       </tr>
                     </thead>
                     <tbody>
-                      {log.map((entry) => (
+                      {log.map((entry: any) => (
                         <tr key={entry.id} className="border-b hover:bg-muted/30 transition-colors">
                           <td className="py-2 pr-3">
                             <Badge variant={entry.action === "suspend" ? "destructive" : entry.action === "export_csv" ? "outline" : "default"} className="text-xs">

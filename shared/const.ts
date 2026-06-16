@@ -1,7 +1,7 @@
 // ─── Auth & Session ───────────────────────────────────────────────────────────
 export const COOKIE_NAME = "app_session_id";
-export const ONE_YEAR_MS = 1000 * 60 * 60 * 24 * 7; // 7 days (was 1 year — reduced for security: OWASP A07)
-export const SESSION_EXPIRY_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+export const SESSION_EXPIRY_MS = 1000 * 60 * 60 * 24 * 7; // 7 days (OWASP A07)
+export const ONE_YEAR_MS = SESSION_EXPIRY_MS; // alias kept for backward compat — actually 7 days
 export const IMPERSONATION_EXPIRY_MS = 1000 * 60 * 15; // 15 minutes
 export const AXIOS_TIMEOUT_MS = 30_000;
 export const UNAUTHED_ERR_MSG = "Please login (10001)";

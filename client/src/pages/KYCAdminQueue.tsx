@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CheckCircle2, XCircle, Clock, AlertTriangle, Search, RefreshCw, Eye, FileText, User, Shield } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from 'react-i18next';
 
 const TIER_LABELS: Record<string, string> = { tier1: "Tier 1 (Basic)", tier2: "Tier 2 (Enhanced)", tier3: "Tier 3 (Full)" };
 const STATUS_CONFIG: Record<string, { color: string; icon: any; label: string }> = {
@@ -22,6 +23,7 @@ const STATUS_CONFIG: Record<string, { color: string; icon: any; label: string }>
 };
 
 export default function KYCAdminQueue() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState("pending");
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<any>(null);

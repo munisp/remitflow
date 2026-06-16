@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import React, { useState } from 'react';
 import { format } from 'date-fns';
@@ -63,6 +64,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 
 const StripePaymentHistory: React.FC = () => {
+  const { t } = useTranslation();
   // State for filters and pagination
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState<string>('all');
@@ -116,7 +118,7 @@ const StripePaymentHistory: React.FC = () => {
     if (!historyData?.items) return;
     
     const headers = ['Date', 'Amount', 'Currency', 'Status', 'Method', 'Description', 'Stripe ID'];
-    const rows = historyData.items.map(item => [
+    const rows = historyData.items.map((item: any) => [
       format(new Date(item.createdAt), 'yyyy-MM-dd HH:mm'),
       item.amount,
       item.currency.toUpperCase(),
@@ -128,7 +130,7 @@ const StripePaymentHistory: React.FC = () => {
 
     const csvContent = [
       headers.join(','),
-      ...rows.map(row => row.join(','))
+      ...rows.map((row: any) => row.join(','))
     ].join('\n');
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -318,7 +320,7 @@ const StripePaymentHistory: React.FC = () => {
                   </TableCell>
                 </TableRow>
               ) : (
-                historyData?.items.map((payment) => (
+                historyData?.items.map((payment: any) => (
                   <TableRow key={payment.sessionId ?? payment.id} className="border-slate-800 hover:bg-slate-800/30 transition-colors">
                     <TableCell className="text-slate-300">
                       {format(new Date(payment.createdAt), 'MMM dd, yyyy HH:mm')}

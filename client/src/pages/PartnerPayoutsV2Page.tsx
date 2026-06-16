@@ -10,8 +10,10 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { CheckCircle, XCircle, DollarSign, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function PartnerPayoutsV2Page() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<"pending" | "history">("pending");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [rejectDialog, setRejectDialog] = useState<{ id: number } | null>(null);
@@ -137,7 +139,7 @@ export default function PartnerPayoutsV2Page() {
                   <tr className="border-b border-border text-muted-foreground">
                     <th className="p-3 text-left w-8"><input type="checkbox" className="rounded"
                       checked={selectedIds.length === pending.length && pending.length > 0}
-                      onChange={(e) => setSelectedIds(e.target.checked ? pending.map((p) => p.id) : [])} /></th>
+                      onChange={(e) => setSelectedIds(e.target.checked ? pending.map((p: any) => p.id) : [])} /></th>
                     <th className="p-3 text-left">ID</th><th className="p-3 text-left">Reference</th>
                     <th className="p-3 text-left">Revenue</th><th className="p-3 text-left">Share %</th>
                     <th className="p-3 text-left">Status</th><th className="p-3 text-left">Date</th>
@@ -147,7 +149,7 @@ export default function PartnerPayoutsV2Page() {
                 <tbody>
                   {pending.length === 0 ? (
                     <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">No pending payouts</td></tr>
-                  ) : pending.map((p) => <PayoutRow key={p.id} p={p} showActions={true} />)}
+                  ) : pending.map((p: any) => <PayoutRow key={p.id} p={p} showActions={true} />)}
                 </tbody>
               </table>
             </div>
@@ -182,7 +184,7 @@ export default function PartnerPayoutsV2Page() {
                 <tbody>
                   {history.length === 0 ? (
                     <tr><td colSpan={6} className="p-8 text-center text-muted-foreground">No history found</td></tr>
-                  ) : history.map((p) => <PayoutRow key={p.id} p={p} showActions={false} />)}
+                  ) : history.map((p: any) => <PayoutRow key={p.id} p={p} showActions={false} />)}
                 </tbody>
               </table>
             </div>

@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { Bell, BellOff, Check, CheckCheck, Trash2 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const TYPE_COLORS: Record<string, string> = {
   system: "bg-blue-500/20 text-blue-400",
@@ -15,6 +16,7 @@ const TYPE_COLORS: Record<string, string> = {
 };
 
 export default function NotificationCenterV2Page() {
+  const { t } = useTranslation();
   const allQuery = trpc.v89.notificationCenterV2.getAll.useQuery({ limit: 50, offset: 0 });
   const unreadQuery = trpc.v89.notificationCenterV2.getUnreadCount.useQuery();
 
@@ -63,7 +65,7 @@ export default function NotificationCenterV2Page() {
               <p className="font-medium">No notifications</p>
               <p className="text-sm mt-1">You're all caught up!</p>
             </div>
-          ) : notifications.map((n) => (
+          ) : notifications.map((n: any) => (
             <div key={n.id} className={`flex items-start gap-4 p-4 hover:bg-muted/20 transition-colors ${!n.isRead ? "bg-primary/5" : ""}`}>
               <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${!n.isRead ? "bg-primary" : "bg-transparent"}`} />
               <div className="flex-1 min-w-0">

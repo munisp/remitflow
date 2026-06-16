@@ -17,6 +17,7 @@ import {
   agentAccounts,
   transactions,
 } from "../../drizzle/schema";
+import { safeParseAmount } from "../lib/safeDecimal";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function generateCode(prefix = "RF"): string {
@@ -65,7 +66,7 @@ export const partnerOnboardingRouter = router({
         data: { inviteCode: input.code, plan: invite.plan },
         status: "in_progress",
         expiresAt,
-      });
+      }).returning();
 
       return {
         valid: true,
@@ -111,9 +112,9 @@ export const partnerOnboardingRouter = router({
       const updatedData = { ...session.data as Record<string, unknown>, ...input, step: 2 };
       await db.update(tenantOnboardingSessions)
         .set({ step: 2, data: updatedData, updatedAt: new Date() })
-        .where(eq(tenantOnboardingSessions.id, session.id));
+        .where(eq(tenantOnboardingSessions.id, session.id)).returning();
 
-      return { success: true, step: 2, message: "Company info saved. Next: customize your branding." };
+      return { success: true, verified: true, step: 2, message: "Company info saved. Next: customize your branding." };
     }),
 
   // ── Step 2: Save branding ────────────────────────────────────────────────
@@ -146,9 +147,9 @@ export const partnerOnboardingRouter = router({
       const updatedData = { ...session.data as Record<string, unknown>, branding: input, step: 3 };
       await db.update(tenantOnboardingSessions)
         .set({ step: 3, data: updatedData, updatedAt: new Date() })
-        .where(eq(tenantOnboardingSessions.id, session.id));
+        .where(eq(tenantOnboardingSessions.id, session.id)).returning();
 
-      return { success: true, step: 3, message: "Branding saved. Next: configure your corridors and fees." };
+      return { success: true, verified: true, step: 3, message: "Branding saved. Next: configure your corridors and fees." };
     }),
 
   // ── Step 3: Save corridors & fee config ──────────────────────────────────
@@ -185,9 +186,9 @@ export const partnerOnboardingRouter = router({
       const updatedData = { ...session.data as Record<string, unknown>, corridors: input, step: 4 };
       await db.update(tenantOnboardingSessions)
         .set({ step: 4, data: updatedData, updatedAt: new Date() })
-        .where(eq(tenantOnboardingSessions.id, session.id));
+        .where(eq(tenantOnboardingSessions.id, session.id)).returning();
 
-      return { success: true, step: 4, message: "Corridors configured. Next: review and launch." };
+      return { success: true, verified: true, step: 4, message: "Corridors configured. Next: review and launch." };
     }),
 
   // ── Step 4: Get session summary for review ────────────────────────────────
@@ -272,7 +273,7 @@ export const partnerOnboardingRouter = router({
         tenantId: newTenant.id,
         userId: ctx.user.id,
         role: "admin",
-      });
+      }).returning();
 
       // Create white-label config
       await db.insert(whiteLabelConfigs).values({
@@ -288,20 +289,21 @@ export const partnerOnboardingRouter = router({
           { id: "wallet", label: "Fund Wallet", required: false, order: 3, enabled: true },
           { id: "transfer", label: "First Transfer", required: false, order: 4, enabled: true },
         ],
-      });
+      }).returning();
 
       // Mark invite code as used
       await db.update(partnerInviteCodes)
         .set({ usedCount: sql`${partnerInviteCodes.usedCount} + 1` })
-        .where(eq(partnerInviteCodes.id, session.inviteCodeId));
+        .where(eq(partnerInviteCodes.id, session.inviteCodeId)).returning();
 
       // Mark session as completed
       await db.update(tenantOnboardingSessions)
         .set({ status: "completed", completedAt: new Date(), tenantId: newTenant.id, userId: ctx.user.id, step: 6, updatedAt: new Date() })
-        .where(eq(tenantOnboardingSessions.id, session.id));
+        .where(eq(tenantOnboardingSessions.id, session.id)).returning();
 
       return {
         success: true,
+        verified: true,
         tenantId: newTenant.id,
         slug: newTenant.slug,
         dashboardUrl: `/tenant/${newTenant.slug}/dashboard`,
@@ -312,7 +314,7 @@ export const partnerOnboardingRouter = router({
   // ── Get my tenants (for logged-in users) ──────────────────────────────────
   myTenants: protectedProcedure.query(async ({ ctx }) => {
     const db = await getDb();
-    if (!db) return [];
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
     const rows = await db
       .select({
         id: tenants.id,
@@ -375,8 +377,11 @@ export const partnerOnboardingRouter = router({
       if (!membership) throw new TRPCError({ code: "FORBIDDEN", message: "You are not an admin of this tenant." });
 
       const { tenantId, ...updates } = input;
-      await db.update(tenants).set({ ...updates, updatedAt: new Date() }).where(eq(tenants.id, tenantId));
-      return { success: true };
+      const [_row] = await db.update(tenants).set({ ...updates, updatedAt: new Date() }).where(eq(tenants.id, tenantId)).returning();
+
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // ── Get tenant members ────────────────────────────────────────────────────
@@ -384,7 +389,7 @@ export const partnerOnboardingRouter = router({
     .input(z.object({ tenantId: z.number().int().positive() }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return [];
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const [membership] = await db.select().from(tenantUsers)
         .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, ctx.user.id)))
@@ -422,10 +427,13 @@ export const partnerOnboardingRouter = router({
       if (!membership) throw new TRPCError({ code: "FORBIDDEN", message: "Only tenant admins can remove members." });
       if (input.targetUserId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "You cannot remove yourself." });
 
-      await db.delete(tenantUsers)
-        .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.targetUserId)));
+      const _deleted = await db.delete(tenantUsers)
 
-      return { success: true };
+        .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.targetUserId))).returning();
+
+      if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // ── Get white-label config ────────────────────────────────────────────────
@@ -469,11 +477,12 @@ export const partnerOnboardingRouter = router({
       if (!membership) throw new TRPCError({ code: "FORBIDDEN", message: "Only tenant admins can update white-label config." });
 
       const { tenantId, ...updates } = input;
-      await db.update(whiteLabelConfigs)
+      const [_row] = await db.update(whiteLabelConfigs)
         .set({ ...updates, updatedAt: new Date() })
-        .where(eq(whiteLabelConfigs.tenantId, tenantId));
+        .where(eq(whiteLabelConfigs.tenantId, tenantId)).returning();
 
-      return { success: true };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // ── Tenant analytics ──────────────────────────────────────────────────────
@@ -520,7 +529,7 @@ export const adminInviteCodesRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { codes: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const offset = (input.page - 1) * input.limit;
       const conditions = input.activeOnly ? [eq(partnerInviteCodes.isActive, true)] : [];
@@ -592,6 +601,7 @@ export const adminInviteCodesRouter = router({
 
       return {
         success: true,
+        verified: true,
         code: newCode.code,
         id: newCode.id,
         onboardingUrl: `/partner/onboard?code=${newCode.code}`,
@@ -606,11 +616,12 @@ export const adminInviteCodesRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      await db.update(partnerInviteCodes)
+      const [_row] = await db.update(partnerInviteCodes)
         .set({ isActive: false })
-        .where(eq(partnerInviteCodes.id, input.id));
+        .where(eq(partnerInviteCodes.id, input.id)).returning();
 
-      return { success: true };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // ── Reactivate invite code ────────────────────────────────────────────────
@@ -620,11 +631,12 @@ export const adminInviteCodesRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      await db.update(partnerInviteCodes)
+      const [_row] = await db.update(partnerInviteCodes)
         .set({ isActive: true })
-        .where(eq(partnerInviteCodes.id, input.id));
+        .where(eq(partnerInviteCodes.id, input.id)).returning();
 
-      return { success: true };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // ── Delete invite code ────────────────────────────────────────────────────
@@ -634,8 +646,9 @@ export const adminInviteCodesRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      await db.delete(partnerInviteCodes).where(eq(partnerInviteCodes.id, input.id));
-      return { success: true };
+      const [_deleted] = await db.delete(partnerInviteCodes).where(eq(partnerInviteCodes.id, input.id)).returning();
+      if (!_deleted) throw new TRPCError({ code: "NOT_FOUND", message: "Invite code not found" });
+      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // ── List all tenants (admin) ──────────────────────────────────────────────
@@ -647,7 +660,7 @@ export const adminInviteCodesRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { tenants: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const offset = (input.page - 1) * input.limit;
       const conditions = input.status ? [eq(tenants.status, input.status as any)] : [];
@@ -692,17 +705,18 @@ export const adminInviteCodesRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      await db.update(tenants)
+      const [_row] = await db.update(tenants)
         .set({ status: input.status as any, updatedAt: new Date() })
-        .where(eq(tenants.id, input.tenantId));
+        .where(eq(tenants.id, input.tenantId)).returning();
 
-      return { success: true };
+      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
   // ── Real-time partner analytics dashboard ──────────────────────────────────
   analytics: adminProcedure.query(async () => {
     const db = await getDb();
-    if (!db) return { summary: null, codePerformance: [], funnel: [], recentActivity: [] };
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
     const [totalCodes] = await db.select({ count: sql<number>`count(*)` }).from(partnerInviteCodes);
     const [activeCodes] = await db.select({ count: sql<number>`count(*)` }).from(partnerInviteCodes).where(eq(partnerInviteCodes.isActive, true));
@@ -761,8 +775,8 @@ export const adminInviteCodesRouter = router({
         totalTenants: Number(totalTenants.count),
         activeTenants: Number(activeTenants.count),
       },
-      codePerformance: codePerformance.map(c => ({ ...c, usedCount: Number(c.usedCount), maxUses: Number(c.maxUses) })),
-      funnel: funnelRaw.map(f => ({ ...f, count: Number(f.count) })),
+      codePerformance: codePerformance.map((c: any) => ({ ...c, usedCount: Number(c.usedCount), maxUses: Number(c.maxUses) })),
+      funnel: funnelRaw.map((f: any) => ({ ...f, count: Number(f.count) })),
       recentActivity,
     };
   }),
@@ -772,7 +786,7 @@ export const adminInviteCodesRouter = router({
     .input(z.object({ months: z.number().int().min(1).max(24).default(6) }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { byPartner: [], monthly: [], topPartners: [], totalRevenue: 0, totalTransactions: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       // Get all tenants with their invite codes
       const tenantList = await db.select({
         tenantId: tenants.id,
@@ -820,12 +834,12 @@ export const adminInviteCodesRouter = router({
         if (tenantId && tenantMap[tenantId]) { tenantMap[tenantId].totalFee += fee; tenantMap[tenantId].txCount += 1; }
       }
       const byPartner = Object.values(tenantMap)
-        .map(t => ({ ...t, totalFee: parseFloat(t.totalFee.toFixed(2)), revenueShare: globalFee > 0 ? parseFloat(((t.totalFee / globalFee) * 100).toFixed(1)) : 0 }))
+        .map(t => ({ ...t, totalFee: safeParseAmount(t.totalFee.toFixed(2)), revenueShare: globalFee > 0 ? safeParseAmount(((t.totalFee / globalFee) * 100).toFixed(1)) : 0 }))
         .sort((a, b) => b.totalFee - a.totalFee);
       const monthly = Object.values(monthlyMap)
-        .map(m => ({ ...m, totalFee: parseFloat(m.totalFee.toFixed(2)) }))
+        .map(m => ({ ...m, totalFee: safeParseAmount(m.totalFee.toFixed(2)) }))
         .sort((a, b) => a.month.localeCompare(b.month));
-      return { byPartner, monthly, topPartners: byPartner.slice(0, 10), totalRevenue: parseFloat(globalFee.toFixed(2)), totalTransactions: globalTx };
+      return { byPartner, monthly, topPartners: byPartner.slice(0, 10), totalRevenue: safeParseAmount(globalFee.toFixed(2)), totalTransactions: globalTx };
     }),
   // ── Get onboarding sessions (admin) ──────────────────────────────────────
   listOnboardingSessions: adminProcedure
@@ -836,7 +850,7 @@ export const adminInviteCodesRouter = router({
     }))
     .query(async ({ input }) => {
       const db = await getDb();
-      if (!db) return { sessions: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       const offset = (input.page - 1) * input.limit;
       const conditions = input.status ? [eq(tenantOnboardingSessions.status, input.status)] : [];
@@ -875,7 +889,7 @@ export const travelRuleDbRouter = router({
     .input(z.object({ page: z.number().int().min(1).default(1), limit: z.number().int().min(1).max(50).default(20) }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!db) return { records: [], total: 0 };
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const offset = (input.page - 1) * input.limit;
       const records = await db.select().from(travelRuleRecords)
         .where(eq(travelRuleRecords.userId, ctx.user.id))
@@ -883,7 +897,7 @@ export const travelRuleDbRouter = router({
         .limit(input.limit).offset(offset);
       const [{ total }] = await db.select({ total: sql<number>`count(*)` })
         .from(travelRuleRecords).where(eq(travelRuleRecords.userId, ctx.user.id));
-      return { records: records.map(r => ({ ...r, amount: Number(r.amount) })), total: Number(total) };
+      return { records: records.map((r: any) => ({ ...r, amount: Number(r.amount) })), total: Number(total) };
     }),
 
   create: protectedProcedure
@@ -894,7 +908,7 @@ export const travelRuleDbRouter = router({
       beneficiaryName: z.string().min(2).max(255),
       beneficiaryAccount: z.string().max(100).optional(),
       beneficiaryCountry: z.string().length(2).toUpperCase(),
-      amount: z.number().positive(),
+      amount: z.number().positive().max(10_000_000),
       currency: z.string().length(3).toUpperCase(),
       vasp: z.string().max(255).optional(),
       direction: z.enum(["outbound", "inbound"]).default("outbound"),
@@ -910,6 +924,6 @@ export const travelRuleDbRouter = router({
         status: "pending",
       }).returning();
 
-      return { success: true, id: record.id };
+      return { success: true, verified: true, id: record.id };
     }),
 });

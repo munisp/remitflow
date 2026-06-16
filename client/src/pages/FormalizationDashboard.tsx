@@ -8,8 +8,10 @@ import { Badge } from "@/components/ui/badge";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { TrendingUp, Users, DollarSign, Loader2 } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function FormalizationDashboard() {
+  const { t } = useTranslation();
   const { isAuthenticated } = useAuth();
   const [cohortSize, setCohortSize] = useState("1000");
   const [channel, setChannel] = useState<"cash"|"mobile"|"account">("cash");
@@ -22,6 +24,7 @@ export default function FormalizationDashboard() {
     months_observed:parseInt(months)||6,
     incentive_offered:incentive,
   });
+  const isError = formalQuery.isError;
 
   if (!isAuthenticated) return <div className="flex items-center justify-center min-h-screen"><p className="text-muted-foreground">Please log in.</p></div>;
 

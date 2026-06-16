@@ -91,7 +91,7 @@ export default function Analytics() {
 
   const overviewPeriod = selectedMonths <= 1 ? "7d" : selectedMonths <= 3 ? "30d" : "90d";
 
-  const { data: overview, isLoading: loadingOverview } = trpc.analytics.overview.useQuery({ period: overviewPeriod });
+  const { data: overview, isLoading: loadingOverview, isError } = trpc.analytics.overview.useQuery({ period: overviewPeriod });
   const { data: corridorData, isLoading: loadingCorridor } = trpc.analytics.spendByCorridorMonthly.useQuery();
   const { data: trendData, isLoading: loadingTrend } = trpc.analytics.transferTrend.useQuery();
   const { data: topRecipients, isLoading: loadingRecipients } = trpc.analytics.topRecipients.useQuery();

@@ -17,7 +17,7 @@ export default function AuditLogs() {
   const { t } = useTranslation();
   const [search, setSearch] = useState("");
   const [action, setAction] = useState("all");
-  const { data: logs = [], isLoading } = trpc.audit.list.useQuery({ limit: 100 });
+  const { data: logs = [], isLoading, isError } = trpc.audit.list.useQuery({ limit: 100 });
   const logList = (Array.isArray(logs) ? logs : []).filter((l: any) => {
     const matchSearch = !search || (l.action ?? "").toLowerCase().includes(search.toLowerCase()) || (l.description ?? "").toLowerCase().includes(search.toLowerCase());
     const matchAction = action === "all" || (l.action ?? "").startsWith(action.toUpperCase());

@@ -4,7 +4,7 @@
 package main
 
 import (
-"bytes"
+	"bytes"
 "context"
 "encoding/json"
 "fmt"
@@ -14,6 +14,11 @@ import (
 "os"
 "sync"
 "time"
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
+	"os/signal"
+	"syscall"
 )
 
 var (
@@ -91,22 +96,27 @@ rateExpiry  = make(map[string]time.Time)
 )
 
 func getLiveFXRate(corridorCode string) (float64, error) {
-rateCacheMu.RLock()
-if exp, ok := rateExpiry[corridorCode]; ok && time.Now().Before(exp) {
-:= rateCache[corridorCode]
-lock()
- rate, nil
-}
-rateCacheMu.RUnlock()
-if corridor, ok := corridorRegistry[corridorCode]; ok {
-:= (rand.Float64()*0.004 - 0.002)
-:= corridor.FxRateNGN * (1 + spread)
-= rate
-[corridorCode] = time.Now().Add(60 * time.Second)
-lock()
- rate, nil
-}
-return 0, fmt.Errorf("corridor %s not found", corridorCode)
+	rateCacheMu.RLock()
+	if exp, ok := rateExpiry[corridorCode]; ok && time.Now().Before(exp) {
+		rate := rateCache[corridorCode]
+		rateCacheMu.RUnlock()
+		return rate, nil
+	}
+	rateCacheMu.RUnlock()
+	if corridor, ok := corridorRegistry[corridorCode]; ok {
+		spread := (rand.Float64()*0.004 - 0.002)
+		rate := corridor.FxRateNGN * (1 + spread)
+		rateCacheMu.Lock()
+		rateCache[corridorCode] = rate
+		rateExpiry[corridorCode] = time.Now().Add(60 * time.Second)
+		rateCacheMu.Unlock()
+		// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
+		if db != nil {
+			go func() { _ = dbLogEvent("getLiveFXRate", map[string]string{"service": "go-xof-adapter"}) }()
+		}
+		return rate, nil
+	}
+	return 0, fmt.Errorf("corridor %s not found", corridorCode)
 }
 
 func publishKafkaEvent(topic string, event interface{}) (int64, error) {
@@ -119,19 +129,19 @@ req.Header.Set("Content-Type", "application/json")
 client := &http.Client{}
 resp, err := client.Do(req)
 if err != nil {
- 0, err
-}
-defer resp.Body.Close()
-return time.Now().UnixNano(), nil
+		return 0, err
+	}
+	defer resp.Body.Close()
+	return time.Now().UnixNano(), nil
 }
 
 func recordTigerBeetleEntry(userID int, amountNGN float64, corridorCode string) (int64, error) {
-entryID := time.Now().UnixNano()
-payload := map[string]interface{}{
-try_id": entryID, "user_id": userID,
-t": amountNGN, "currency": "NGN",
-corridorCode, "type": "xof_outbound",
-}
+	entryID := time.Now().UnixNano()
+	payload := map[string]interface{}{
+		"entry_id": entryID, "user_id": userID,
+		"amount": amountNGN, "currency": "NGN",
+		"corridor": corridorCode, "type": "xof_outbound",
+	}
 body, _ := json.Marshal(payload)
 ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 defer cancel()
@@ -140,161 +150,341 @@ req.Header.Set("Content-Type", "application/json")
 client := &http.Client{}
 resp, err := client.Do(req)
 if err != nil {
- entryID, nil
-}
-defer resp.Body.Close()
-return entryID, nil
+		return entryID, nil
+	}
+	defer resp.Body.Close()
+	return entryID, nil
 }
 
 func indexOpenSearch(transferID string, doc map[string]interface{}) {
-body, _ := json.Marshal(doc)
-url := fmt.Sprintf("%s/xof-transfers/_doc/%s", openSearchURL, transferID)
-req, _ := http.NewRequest("PUT", url, bytes.NewReader(body))
-req.Header.Set("Content-Type", "application/json")
-client := &http.Client{Timeout: 5 * time.Second}
-client.Do(req)
+	body, _ := json.Marshal(doc)
+	url := fmt.Sprintf("%s/xof-transfers/_doc/%s", openSearchURL, transferID)
+	req, _ := http.NewRequest("PUT", url, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 5 * time.Second}
+	client.Do(req) //nolint:errcheck
 }
 
 func handleQuote(w http.ResponseWriter, r *http.Request) {
-if r.Method != http.MethodPost {
-"Method not allowed", http.StatusMethodNotAllowed)
-
-}
-var req struct {
-string  `json:"corridor_code"`
-tNGN    float64 `json:"amount_ngn"`
-outMethod string  `json:"payout_method"`
-}
-if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-"Invalid request body", http.StatusBadRequest)
-
-}
-corridor, ok := corridorRegistry[req.CorridorCode]
-if !ok || !corridor.IsActive {
-fmt.Sprintf("Corridor %s not available", req.CorridorCode), http.StatusBadRequest)
-
-}
-fxRate, err := getLiveFXRate(req.CorridorCode)
-if err != nil {
-"Unable to fetch FX rate", http.StatusInternalServerError)
-
-}
-feeNGN := req.AmountNGN * corridor.FeePercent
-amountXOF := req.AmountNGN / fxRate
-payoutMethods := []string{"mobile_money", "bank_account", "cash_pickup"}
-if req.CorridorCode == "GH" {
-outMethods = []string{"mobile_money", "bank_account", "wallet"}
-}
-resp := XofQuoteResponse{
-       req.CorridorCode,
-tNGN:           req.AmountNGN,
-tXOF:           amountXOF,
-             fxRate,
-GN:              feeNGN,
-t:          corridor.FeePercent,
-GN:            req.AmountNGN + feeNGN,
-t: fmt.Sprintf("%d hours", corridor.SettlementHours),
-til:      time.Now().Add(60 * time.Second).Format(time.RFC3339),
-outMethods:       payoutMethods,
-}
-w.Header().Set("Content-Type", "application/json")
-json.NewEncoder(w).Encode(resp)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		CorridorCode string  `json:"corridor_code"`
+		AmountNGN    float64 `json:"amount_ngn"`
+		PayoutMethod string  `json:"payout_method"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	corridor, ok := corridorRegistry[req.CorridorCode]
+	if !ok || !corridor.IsActive {
+		http.Error(w, fmt.Sprintf("Corridor %s not available", req.CorridorCode), http.StatusBadRequest)
+		return
+	}
+	fxRate, err := getLiveFXRate(req.CorridorCode)
+	if err != nil {
+		http.Error(w, "Unable to fetch FX rate", http.StatusInternalServerError)
+		return
+	}
+	feeNGN := req.AmountNGN * corridor.FeePercent
+	amountXOF := req.AmountNGN / fxRate
+	payoutMethods := []string{"mobile_money", "bank_account", "cash_pickup"}
+	if req.CorridorCode == "GH" {
+		payoutMethods = []string{"mobile_money", "bank_account", "wallet"}
+	}
+	resp := XofQuoteResponse{
+		CorridorCode:   req.CorridorCode,
+		AmountNGN:      req.AmountNGN,
+		AmountXOF:      amountXOF,
+		FxRate:         fxRate,
+		FeeNGN:         feeNGN,
+		FeePercent:     corridor.FeePercent,
+		TotalNGN:       req.AmountNGN + feeNGN,
+		EstimatedSettlement: fmt.Sprintf("%d hours", corridor.SettlementHours),
+		RateValidUntil:     time.Now().Add(60 * time.Second).Format(time.RFC3339),
+		PayoutMethods:      payoutMethods,
+	}
+	// Persist quote to PostgreSQL (middleware-ready: swap to TigerBeetle in production)
+	if db != nil {
+		go func() { _ = dbUpsert("quote:"+resp.CorridorCode+":"+fmt.Sprint(time.Now().UnixNano()), resp) }()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func handleTransfer(w http.ResponseWriter, r *http.Request) {
-if r.Method != http.MethodPost {
-"Method not allowed", http.StatusMethodNotAllowed)
-
-}
-var req XofTransferRequest
-if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-"Invalid request body", http.StatusBadRequest)
-
-}
-corridor, ok := corridorRegistry[req.CorridorCode]
-if !ok || !corridor.IsActive {
-fmt.Sprintf("Corridor %s not available", req.CorridorCode), http.StatusBadRequest)
-
-}
-if req.AmountNGN < 5000 || req.AmountNGN > 5000000 {
-"Amount must be between NGN 5,000 and NGN 5,000,000", http.StatusBadRequest)
-
-}
-fxRate, _ := getLiveFXRate(req.CorridorCode)
-feeNGN := req.AmountNGN * corridor.FeePercent
-amountXOF := req.AmountNGN / fxRate
-transferID := fmt.Sprintf("XOF-%s-%s-%d", req.CorridorCode, req.Reference, time.Now().Unix())
-tbEntry, _ := recordTigerBeetleEntry(req.UserID, req.AmountNGN, req.CorridorCode)
-kafkaEvent := map[string]interface{}{
-t_type": "xof_transfer_initiated", "transfer_id": transferID,
-req.UserID, "corridor_code": req.CorridorCode,
-t_ngn": req.AmountNGN, "amount_xof": amountXOF,
-fxRate, "payout_method": req.PayoutMethod,
-time.Now().Unix(),
-}
-kafkaOffset, _ := publishKafkaEvent("xof-transfers", kafkaEvent)
-var mojalooopRef string
-if corridor.MojalooopEnabled {
-= fmt.Sprintf("MJL-%s-%d", transferID, time.Now().UnixNano())
-}
-resp := XofTransferResponse{
-sferID:          transferID,
-             "processing",
-tNGN:           req.AmountNGN,
-tXOF:           amountXOF,
-             fxRate,
-GN:              feeNGN,
-t: fmt.Sprintf("%d hours", corridor.SettlementHours),
-       mojalooopRef,
-try:    tbEntry,
-        kafkaOffset,
-}
-go indexOpenSearch(transferID, map[string]interface{}{
-sfer_id": transferID, "user_id": req.UserID,
-req.CorridorCode, "amount_ngn": req.AmountNGN,
-"processing", "timestamp": time.Now().Format(time.RFC3339),
-})
-w.Header().Set("Content-Type", "application/json")
-w.WriteHeader(http.StatusAccepted)
-json.NewEncoder(w).Encode(resp)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req XofTransferRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	corridor, ok := corridorRegistry[req.CorridorCode]
+	if !ok || !corridor.IsActive {
+		http.Error(w, fmt.Sprintf("Corridor %s not available", req.CorridorCode), http.StatusBadRequest)
+		return
+	}
+	if req.AmountNGN < 5000 || req.AmountNGN > 5000000 {
+		http.Error(w, "Amount must be between NGN 5,000 and NGN 5,000,000", http.StatusBadRequest)
+		return
+	}
+	fxRate, _ := getLiveFXRate(req.CorridorCode)
+	feeNGN := req.AmountNGN * corridor.FeePercent
+	amountXOF := req.AmountNGN / fxRate
+	transferID := fmt.Sprintf("XOF-%s-%s-%d", req.CorridorCode, req.Reference, time.Now().Unix())
+	tbEntry, _ := recordTigerBeetleEntry(req.UserID, req.AmountNGN, req.CorridorCode)
+	kafkaEvent := map[string]interface{}{
+		"event_type": "xof_transfer_initiated", "transfer_id": transferID,
+		"user_id": req.UserID, "corridor_code": req.CorridorCode,
+		"amount_ngn": req.AmountNGN, "amount_xof": amountXOF,
+		"fx_rate": fxRate, "payout_method": req.PayoutMethod,
+		"timestamp": time.Now().Unix(),
+	}
+	kafkaOffset, _ := publishKafkaEvent("xof-transfers", kafkaEvent)
+	var mojalooopRef string
+	if corridor.MojalooopEnabled {
+		mojalooopRef = fmt.Sprintf("MJL-%s-%d", transferID, time.Now().UnixNano())
+	}
+	resp := XofTransferResponse{
+		TransferID:     transferID,
+		Status:         "processing",
+		AmountNGN:      req.AmountNGN,
+		AmountXOF:      amountXOF,
+		FxRate:         fxRate,
+		FeeNGN:         feeNGN,
+		EstimatedSettlement: fmt.Sprintf("%d hours", corridor.SettlementHours),
+		MojalooopRef:       mojalooopRef,
+		TigerBeetleEntry:   tbEntry,
+		KafkaOffset:        kafkaOffset,
+	}
+	go indexOpenSearch(transferID, map[string]interface{}{
+		"transfer_id": transferID, "user_id": req.UserID,
+		"corridor": req.CorridorCode, "amount_ngn": req.AmountNGN,
+		"status": "processing", "timestamp": time.Now().Format(time.RFC3339),
+	})
+	// Persist transfer to PostgreSQL (middleware-ready: swap to TigerBeetle ledger in production)
+	if db != nil {
+		go func() {
+			_ = dbUpsert("transfer:"+transferID, resp)
+			_ = dbLogEvent("xof_transfer_initiated", map[string]interface{}{
+				"transfer_id": transferID, "user_id": req.UserID,
+				"amount_ngn": req.AmountNGN, "corridor": req.CorridorCode,
+			})
+		}()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(resp)
 }
 
 func handleCorridors(w http.ResponseWriter, r *http.Request) {
-corridors := make([]Corridor, 0, len(corridorRegistry))
-for _, c := range corridorRegistry {
-c.IsActive {
-_ := getLiveFXRate(c.Code)
-GN = rate
-= append(corridors, c)
-tent-Type", "application/json")
-json.NewEncoder(w).Encode(map[string]interface{}{"corridors": corridors})
+	// DB-primary read for corridor config (middleware-ready: swap to config service in production)
+	if db != nil {
+		dbData, dbErr := dbList(50)
+		if dbErr == nil && len(dbData) > 0 {
+			// Check if we have corridor configs in DB
+			for _, raw := range dbData {
+				var item map[string]interface{}
+				if json.Unmarshal(raw, &item) == nil {
+					if _, hasCode := item["code"]; hasCode {
+						w.Header().Set("Content-Type", "application/json")
+						json.NewEncoder(w).Encode(map[string]interface{}{"corridors": dbData, "source": "postgresql"})
+						return
+					}
+				}
+				break
+			}
+		}
+	}
+	// Fallback: in-memory corridor registry
+	corridors := make([]Corridor, 0, len(corridorRegistry))
+	for _, c := range corridorRegistry {
+		if c.IsActive {
+			rate, _ := getLiveFXRate(c.Code)
+			c.FxRateNGN = rate
+			corridors = append(corridors, c)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"corridors": corridors})
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
-w.Header().Set("Content-Type", "application/json")
-json.NewEncoder(w).Encode(map[string]interface{}{
-"ok", "service": "go-xof-adapter",
-len(corridorRegistry), "timestamp": time.Now().Unix(),
-})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "ok", "service": "go-xof-adapter",
+		"corridors": len(corridorRegistry), "timestamp": time.Now().Unix(),
+	})
 }
 
 func getEnv(key, fallback string) string {
-if v := os.Getenv(key); v != "" {
- v
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
-return fallback
+
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := os.Getenv("INTERNAL_SERVICE_KEY")
+		if key == "" {
+			key = "remitflow-internal-2026"
+		}
+		if apiKey := r.Header.Get("X-API-Key"); apiKey == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		if len(auth) > 7 && auth[:7] == "Bearer " && auth[7:] == key {
+			next.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"unauthorized"}`))
+	})
+}
+
+
+// ── PostgreSQL Persistence Layer ─────────────────────────────────────────────
+var db *sql.DB
+
+func initDB() error {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgresql://remitflow:remitflow123@localhost:5432/remitflow"
+	}
+	var err error
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		return fmt.Errorf("db connect: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err = db.Ping(); err != nil {
+		return fmt.Errorf("db ping: %w", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS go_xof_adapter_state (
+			id TEXT PRIMARY KEY,
+			data JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_go_xof_adapter_updated ON go_xof_adapter_state(updated_at);
+		CREATE TABLE IF NOT EXISTS go_xof_adapter_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			payload JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_go_xof_adapter_events_type ON go_xof_adapter_events(event_type, created_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("create tables: %w", err)
+	}
+	slog.Info("PostgreSQL connected", "service", "go-xof-adapter", "table", "go_xof_adapter_state")
+	return nil
+}
+
+func dbUpsert(id string, data interface{}) error {
+	if db == nil { return nil }
+	jsonData, err := json.Marshal(data)
+	if err != nil { return err }
+	_, err = db.Exec(`INSERT INTO go_xof_adapter_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`, id, jsonData)
+	return err
+}
+
+func dbGet(id string, dest interface{}) error {
+	if db == nil { return fmt.Errorf("no db") }
+	var jsonData []byte
+	err := db.QueryRow("SELECT data FROM go_xof_adapter_state WHERE id = $1", id).Scan(&jsonData)
+	if err != nil { return err }
+	return json.Unmarshal(jsonData, dest)
+}
+
+func dbList(limit int) ([]json.RawMessage, error) {
+	if db == nil { return nil, nil }
+	rows, err := db.Query("SELECT data FROM go_xof_adapter_state ORDER BY updated_at DESC LIMIT $1", limit)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var results []json.RawMessage
+	for rows.Next() {
+		var data json.RawMessage
+		if err := rows.Scan(&data); err != nil { return nil, err }
+		results = append(results, data)
+	}
+	return results, rows.Err()
+}
+
+func dbLogEvent(eventType string, payload interface{}) error {
+	if db == nil { return nil }
+	jsonData, err := json.Marshal(payload)
+	if err != nil { return err }
+	_, err = db.Exec("INSERT INTO go_xof_adapter_events (event_type, payload) VALUES ($1, $2)", eventType, jsonData)
+	return err
+}
+// ── End PostgreSQL Layer ─────────────────────────────────────────────────────
+
+// panicRecoveryMiddleware catches panics and returns 500 instead of crashing
+func panicRecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[PANIC] %v", err)
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 func main() {
-rand.Seed(time.Now().UnixNano())
-mux := http.NewServeMux()
-mux.HandleFunc("/health", handleHealth)
-mux.HandleFunc("/quote", handleQuote)
-mux.HandleFunc("/transfer", handleTransfer)
-mux.HandleFunc("/corridors", handleCorridors)
-addr := fmt.Sprintf(":%s", port)
-log.Printf("[go-xof-adapter] Starting on %s | Corridors: %d", addr, len(corridorRegistry))
-if err := http.ListenAndServe(addr, mux); err != nil {
-Server failed: %v", err)
-}
+	if err := initDB(); err != nil {
+		slog.Warn("PostgreSQL init failed, using in-memory fallback", "err", err)
+	}
+
+	rand.Seed(time.Now().UnixNano())
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", handleHealth)
+	mux.HandleFunc("/quote", handleQuote)
+	mux.HandleFunc("/transfer", handleTransfer)
+	mux.HandleFunc("/corridors", handleCorridors)
+	addr := fmt.Sprintf(":%s", port)
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      panicRecoveryMiddleware(authMiddleware(mux)),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("[go-xof-adapter] Graceful shutdown initiated...")
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[go-xof-adapter] Shutdown error: %v", err)
+		}
+	}()
+
+	log.Printf("[go-xof-adapter] Listening on %s | Corridors: %d", addr, len(corridorRegistry))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("[go-xof-adapter] Server error: %v", err)
+	}
+	log.Println("[go-xof-adapter] Server stopped")
 }

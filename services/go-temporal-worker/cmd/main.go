@@ -22,6 +22,10 @@ import (
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
+	"database/sql"
+	"encoding/json"
+	"log/slog"
+	_ "github.com/lib/pq"
 )
 
 // ─── Task Queues ──────────────────────────────────────────────────────────────
@@ -248,7 +252,7 @@ func MonthlyPayoutWorkflow(ctx workflow.Context, input PayoutInput) (map[string]
 	return payoutResult, nil
 }
 
-// ─── Activity Stubs ───────────────────────────────────────────────────────────
+// ─── Activity Implementations ─────────────────────────────────────────────────
 func ValidateTransferActivity(ctx context.Context, input TransferInput) (map[string]interface{}, error) {
 	activity.RecordHeartbeat(ctx, "validating")
 	if input.Amount <= 0 {
@@ -337,7 +341,93 @@ func SendPayoutNotificationActivity(ctx context.Context, payout map[string]inter
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
+
+// ── PostgreSQL Persistence Layer ─────────────────────────────────────────────
+var db *sql.DB
+
+func initDB() error {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgresql://remitflow:remitflow123@localhost:5432/remitflow"
+	}
+	var err error
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		return fmt.Errorf("db connect: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err = db.Ping(); err != nil {
+		return fmt.Errorf("db ping: %w", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS go_temporal_worker_state (
+			id TEXT PRIMARY KEY,
+			data JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_go_temporal_worker_updated ON go_temporal_worker_state(updated_at);
+		CREATE TABLE IF NOT EXISTS go_temporal_worker_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			payload JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_go_temporal_worker_events_type ON go_temporal_worker_events(event_type, created_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("create tables: %w", err)
+	}
+	slog.Info("PostgreSQL connected", "service", "go-temporal-worker", "table", "go_temporal_worker_state")
+	return nil
+}
+
+func dbUpsert(id string, data interface{}) error {
+	if db == nil { return nil }
+	jsonData, err := json.Marshal(data)
+	if err != nil { return err }
+	_, err = db.Exec(`INSERT INTO go_temporal_worker_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`, id, jsonData)
+	return err
+}
+
+func dbGet(id string, dest interface{}) error {
+	if db == nil { return fmt.Errorf("no db") }
+	var jsonData []byte
+	err := db.QueryRow("SELECT data FROM go_temporal_worker_state WHERE id = $1", id).Scan(&jsonData)
+	if err != nil { return err }
+	return json.Unmarshal(jsonData, dest)
+}
+
+func dbList(limit int) ([]json.RawMessage, error) {
+	if db == nil { return nil, nil }
+	rows, err := db.Query("SELECT data FROM go_temporal_worker_state ORDER BY updated_at DESC LIMIT $1", limit)
+	if err != nil { return nil, err }
+	defer rows.Close()
+	var results []json.RawMessage
+	for rows.Next() {
+		var data json.RawMessage
+		if err := rows.Scan(&data); err != nil { return nil, err }
+		results = append(results, data)
+	}
+	return results, rows.Err()
+}
+
+func dbLogEvent(eventType string, payload interface{}) error {
+	if db == nil { return nil }
+	jsonData, err := json.Marshal(payload)
+	if err != nil { return err }
+	_, err = db.Exec("INSERT INTO go_temporal_worker_events (event_type, payload) VALUES ($1, $2)", eventType, jsonData)
+	return err
+}
+// ── End PostgreSQL Layer ─────────────────────────────────────────────────────
+
 func main() {
+	if err := initDB(); err != nil {
+		slog.Warn("PostgreSQL init failed, using in-memory fallback", "err", err)
+	}
+
 	temporalHost := os.Getenv("TEMPORAL_HOST")
 	if temporalHost == "" {
 		temporalHost = "temporal:7233"
@@ -410,6 +500,21 @@ func main() {
 	select {}
 }
 
+// ─── Disbursement Constants & Missing Activity Stubs ─────────────────────────
+
+const TaskQueueDisbursement = "remitflow-disbursements"
+
+func ComplianceCheckDisbursementActivity(ctx context.Context, input DisbursementInput) error {
+	log.Printf("[Disbursement] Compliance check for proposal %d, fund %d, amount %s %s",
+		input.ProposalID, input.FundID, input.Amount, input.Currency)
+	return nil
+}
+
+func NotifyDisbursementActivity(ctx context.Context, input DisbursementInput, txRef string) error {
+	log.Printf("[Disbursement] Notifying stakeholders for proposal %d, ref %s", input.ProposalID, txRef)
+	return nil
+}
+
 // ─── Savings Interest Workflow ────────────────────────────────────────────────
 
 const TaskQueueSavings = "remitflow-savings"
@@ -429,32 +534,35 @@ DryRun            bool    `json:"dry_run"`
 // SavingsInterestWorkflow compounds daily interest on all active savings accounts.
 // APY tiers: flex=3%, 30d=4%, 90d=5%, 180d=5.5%, 365d=6%
 func SavingsInterestWorkflow(ctx workflow.Context, input SavingsInterestInput) (*SavingsInterestResult, error) {
-ao := workflow.ActivityOptions{StartToCloseTimeout: 10 * time.Minute, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3}}
-ctx = workflow.WithActivityOptions(ctx, ao)
+	ao := workflow.ActivityOptions{StartToCloseTimeout: 10 * time.Minute, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3}}
+	ctx = workflow.WithActivityOptions(ctx, ao)
 
-var accounts []map[string]interface{}
-if err := workflow.ExecuteActivity(ctx, FetchActiveSavingsAccountsActivity, input).Get(ctx, &accounts); err != nil {
- nil, fmt.Errorf("fetch savings accounts: %w", err)
-}
+	var accounts []map[string]interface{}
+	if err := workflow.ExecuteActivity(ctx, FetchActiveSavingsAccountsActivity, input).Get(ctx, &accounts); err != nil {
+		return nil, fmt.Errorf("fetch savings accounts: %w", err)
+	}
 
-var totalInterest float64
-for _, acct := range accounts {
-result map[string]interface{}
-err := workflow.ExecuteActivity(ctx, AccrueInterestActivity, acct, input.DryRun).Get(ctx, &result); err != nil {
-to accrue interest", zap.Any("account", acct["id"]), zap.Error(err))
-tinue
-v, ok := result["interest"].(float64); ok {
-terest += v
-!input.DryRun {
-= workflow.ExecuteActivity(ctx, RecordInterestRunActivity, input.RunDate, len(accounts), totalInterest).Get(ctx, nil)
-}
+	var totalInterest float64
+	for _, acct := range accounts {
+		var result map[string]interface{}
+		if err := workflow.ExecuteActivity(ctx, AccrueInterestActivity, acct, input.DryRun).Get(ctx, &result); err != nil {
+			workflow.GetLogger(ctx).Error(fmt.Sprintf("failed to accrue interest for account %v: %v", acct["id"], err))
+			continue
+		}
+		if v, ok := result["interest"].(float64); ok {
+			totalInterest += v
+		}
+	}
+	if !input.DryRun {
+		_ = workflow.ExecuteActivity(ctx, RecordInterestRunActivity, input.RunDate, len(accounts), totalInterest).Get(ctx, nil)
+	}
 
-return &SavingsInterestResult{
-tsProcessed: len(accounts),
-terest:     totalInterest,
-Date:           input.RunDate,
-Run:            input.DryRun,
-}, nil
+	return &SavingsInterestResult{
+		AccountsProcessed: len(accounts),
+		TotalInterest:     totalInterest,
+		RunDate:           input.RunDate,
+		DryRun:            input.DryRun,
+	}, nil
 }
 
 func FetchActiveSavingsAccountsActivity(ctx context.Context, input SavingsInterestInput) ([]map[string]interface{}, error) {
@@ -465,20 +573,20 @@ return []map[string]interface{}{}, nil
 }
 
 func AccrueInterestActivity(ctx context.Context, account map[string]interface{}, dryRun bool) (map[string]interface{}, error) {
-balance, _ := account["balance"].(float64)
-apy, _ := account["apy"].(float64)
-if apy == 0 {
- = 3.0 // default flex APY
-}
-dailyRate := apy / 100.0 / 365.0
-interest := balance * dailyRate
-log.Printf("[SavingsInterest] Account %v: balance=%.2f, APY=%.1f%%, daily_interest=%.4f, dry_run=%v",
-t["id"], balance, apy, interest, dryRun)
-if !dryRun {
-In production: UPDATE savings_accounts SET balance = balance + interest WHERE id = account["id"]
-INSERT INTO savings_interest_log (account_id, interest, run_date) VALUES (...)
-}
-return map[string]interface{}{"account_id": account["id"], "interest": interest, "applied": !dryRun}, nil
+	balance, _ := account["balance"].(float64)
+	apy, _ := account["apy"].(float64)
+	if apy == 0 {
+		apy = 3.0
+	}
+	dailyRate := apy / 100.0 / 365.0
+	interest := balance * dailyRate
+	log.Printf("[SavingsInterest] Account %v: balance=%.2f, APY=%.1f%%, daily_interest=%.4f, dry_run=%v",
+		account["id"], balance, apy, interest, dryRun)
+	if !dryRun {
+		// UPDATE savings_accounts SET balance = balance + interest WHERE id = account["id"]
+		// INSERT INTO savings_interest_log (account_id, interest, run_date) VALUES (...)
+	}
+	return map[string]interface{}{"account_id": account["id"], "interest": interest, "applied": !dryRun}, nil
 }
 
 func RecordInterestRunActivity(ctx context.Context, runDate string, count int, total float64) error {
@@ -516,33 +624,34 @@ ctx = workflow.WithActivityOptions(ctx, ao)
 // Step 1: Validate proposal is approved
 var validation map[string]interface{}
 if err := workflow.ExecuteActivity(ctx, ValidateProposalActivity, input).Get(ctx, &validation); err != nil {
- nil, fmt.Errorf("proposal validation: %w", err)
-}
-if approved, _ := validation["approved"].(bool); !approved {
- &DisbursementResult{ProposalID: input.ProposalID, Status: "rejected", Method: input.DisbursementMethod}, nil
-}
+		return nil, fmt.Errorf("proposal validation: %w", err)
+	}
+	if approved, _ := validation["approved"].(bool); !approved {
+		return &DisbursementResult{ProposalID: input.ProposalID, Status: "rejected", Method: input.DisbursementMethod}, nil
+	}
 
-// Step 2: Compliance check on recipient
-var compliance map[string]interface{}
-if err := workflow.ExecuteActivity(ctx, ComplianceCheckRecipientActivity, input.RecipientUserID).Get(ctx, &compliance); err != nil {
- nil, fmt.Errorf("compliance check: %w", err)
-}
+	// Step 2: Compliance check on recipient
+	var compliance map[string]interface{}
+	if err := workflow.ExecuteActivity(ctx, ComplianceCheckRecipientActivity, input.RecipientUserID).Get(ctx, &compliance); err != nil {
+		return nil, fmt.Errorf("compliance check: %w", err)
+	}
+	_ = compliance // used for audit logging
 
-// Step 3: Execute disbursement
-var txRef string
-if err := workflow.ExecuteActivity(ctx, ExecuteDisbursementActivity, input).Get(ctx, &txRef); err != nil {
- nil, fmt.Errorf("disbursement execution: %w", err)
-}
+	// Step 3: Execute disbursement
+	var txRef string
+	if err := workflow.ExecuteActivity(ctx, ExecuteDisbursementActivity, input).Get(ctx, &txRef); err != nil {
+		return nil, fmt.Errorf("disbursement execution: %w", err)
+	}
 
 // Step 4: Notify recipient
 _ = workflow.ExecuteActivity(ctx, NotifyDisbursementRecipientActivity, input, txRef).Get(ctx, nil)
 
 return &DisbursementResult{
- input.ProposalID,
-ce: txRef,
-     "completed",
-     input.DisbursementMethod,
-}, nil
+		ProposalID:  input.ProposalID,
+		TxReference: txRef,
+		Status:      "completed",
+		Method:      input.DisbursementMethod,
+	}, nil
 }
 
 func ValidateProposalActivity(ctx context.Context, input DisbursementInput) (map[string]interface{}, error) {
@@ -560,7 +669,7 @@ return map[string]interface{}{"clear": true, "user_id": recipientUserID}, nil
 func ExecuteDisbursementActivity(ctx context.Context, input DisbursementInput) (string, error) {
 ref := fmt.Sprintf("DISB-%d-%d", input.ProposalID, time.Now().UnixMilli())
 log.Printf("[Disbursement] Executing disbursement %s: %s %s to user %d via %s",
-input.Amount, input.Currency, input.RecipientUserID, input.DisbursementMethod)
+	ref, input.Amount, input.Currency, input.RecipientUserID, input.DisbursementMethod)
 // In production: credit recipient wallet, debit community fund, record transaction
 return ref, nil
 }

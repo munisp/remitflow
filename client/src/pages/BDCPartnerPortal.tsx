@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import React, { useState } from "react";
 import { trpc } from "@/lib/trpc";
@@ -237,6 +238,7 @@ function ApprovePartnerButton({ partnerId, partnerName, onSuccess }: { partnerId
 // ─── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function BDCPartnerPortal() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
   const utils = trpc.useUtils();

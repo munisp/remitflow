@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { CheckCircle, XCircle, FileText, RefreshCw } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "bg-yellow-500/20 text-yellow-400",
@@ -18,6 +19,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function KYCLifecyclePage() {
+  const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState("pending");
   const [rejectDialog, setRejectDialog] = useState<{ id: number } | null>(null);
   const [rejectReason, setRejectReason] = useState("");
@@ -115,7 +117,7 @@ export default function KYCLifecyclePage() {
                     <CheckCircle className="w-8 h-8 mx-auto mb-2 text-green-400 opacity-50" />
                     No documents in this status
                   </td></tr>
-                ) : docs.map((doc) => (
+                ) : docs.map((doc: any) => (
                   <tr key={doc.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                     <td className="p-3 font-mono text-xs text-muted-foreground">#{doc.id}</td>
                     <td className="p-3 text-sm">User #{doc.userId}</td>

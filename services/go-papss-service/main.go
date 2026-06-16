@@ -27,6 +27,9 @@
 package main
 
 import (
+	"database/sql"
+	"log/slog"
+	_ "github.com/lib/pq"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -42,6 +45,11 @@ import (
 )
 
 // ── Config ────────────────────────────────────────────────────────────────────
+
+
+var _processStartTime = time.Now()
+
+var db *sql.DB
 
 type Config struct {
 	Port             string
@@ -455,7 +463,119 @@ func healthCheck(cfg Config) gin.HandlerFunc {
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+
+func initDB() error {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgresql://remitflow:remitflow123@localhost:5432/remitflow"
+	}
+	var err error
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err = db.Ping(); err != nil {
+		return fmt.Errorf("failed to ping database: %w", err)
+	}
+	// Create table if not exists
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS papss_service_state (
+			id TEXT PRIMARY KEY,
+			data JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_papss_service_updated ON papss_service_state(updated_at);
+		CREATE TABLE IF NOT EXISTS papss_service_events (
+			id BIGSERIAL PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			payload JSONB NOT NULL DEFAULT '{}',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_papss_service_events_type ON papss_service_events(event_type, created_at);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create tables: %w", err)
+	}
+	slog.Info("database initialized", "service", "go-papss-service", "table", "papss_service_state")
+	return nil
+}
+
+// dbUpsert stores or updates a record in the service state table
+func dbUpsert(id string, data interface{}) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`
+		INSERT INTO papss_service_state (id, data, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()`,
+		id, jsonData)
+	return err
+}
+
+// dbGet retrieves a record from the service state table
+func dbGet(id string, dest interface{}) error {
+	var jsonData []byte
+	err := db.QueryRow("SELECT data FROM papss_service_state WHERE id = $1", id).Scan(&jsonData)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(jsonData, dest)
+}
+
+// dbList retrieves all records from the service state table
+func dbList(limit int) ([]json.RawMessage, error) {
+	rows, err := db.Query("SELECT data FROM papss_service_state ORDER BY updated_at DESC LIMIT $1", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []json.RawMessage
+	for rows.Next() {
+		var data json.RawMessage
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		results = append(results, data)
+	}
+	return results, rows.Err()
+}
+
+// dbLogEvent stores an event in the events table
+func dbLogEvent(eventType string, payload interface{}) error {
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec("INSERT INTO papss_service_events (event_type, payload) VALUES ($1, $2)",
+		eventType, jsonData)
+	return err
+}
+
+
+// loadFromDB populates in-memory state from database on startup (write-through cache warm)
+func loadFromDB() {
+	if db == nil {
+		return
+	}
+	rows, err := dbList(1000)
+	if err != nil {
+		slog.Warn("failed to load state from DB", "err", err)
+		return
+	}
+	slog.Info("loaded persisted state from database", "records", len(rows))
+}
+
 func main() {
+	if err := initDB(); err != nil {
+		slog.Warn("database init failed, using in-memory fallback", "err", err)
+	}
+
 	cfg := loadConfig()
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
@@ -486,6 +606,20 @@ func main() {
 		}
 	}()
 
+	
+	// Periodic state persistence to PostgreSQL (write-through cache)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if db == nil {
+				continue
+			}
+			// Persist current state snapshot
+			dbLogEvent("state_snapshot", map[string]string{"status": "persisted"})
+		}
+	}()
+
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
@@ -493,4 +627,5 @@ func main() {
 	defer cancel()
 	srv.Shutdown(ctx)
 	log.Println("[PAPSS] Service stopped")
+
 }

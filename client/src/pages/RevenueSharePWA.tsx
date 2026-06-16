@@ -198,7 +198,9 @@ function EarningsSparkline({ data }: { data: number[] }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 export default function RevenueSharePWA() {
+  const { t } = useTranslation();
   const { user, isAuthenticated } = useAuth();
   const [activeTab, setActiveTab] = useState(() => {
     const params = new URLSearchParams(window.location.search);
@@ -211,7 +213,7 @@ export default function RevenueSharePWA() {
     trpc.revenueShare.myAgreement.useQuery(undefined, { enabled: isAuthenticated });
 
   const { data: myEarnings, isLoading: earningsLoading, refetch: refetchEarnings } =
-    trpc.revenueShare.myEarnings.useQuery(undefined, { enabled: isAuthenticated });
+    trpc.revenueShare.myEarnings.useQuery({ periodYear: new Date().getFullYear() }, { enabled: isAuthenticated });
 
   const applyMutation = trpc.revenueShare.applyAsPartner.useMutation({
     onSuccess: () => {

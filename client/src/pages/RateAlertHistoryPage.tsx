@@ -8,6 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Bell, BellOff, Clock, CheckCircle, TrendingUp, TrendingDown, BarChart2 } from "lucide-react";
 import { format } from "date-fns";
+import { useTranslation } from 'react-i18next';
 
 const statusColor: Record<string, string> = {
   triggered: "bg-green-100 text-green-700",
@@ -16,10 +17,11 @@ const statusColor: Record<string, string> = {
 };
 
 export default function RateAlertHistoryPage() {
+  const { t } = useTranslation();
   const utils = trpc.useUtils();
   const [snoozeHours, setSnoozeHours] = useState<Record<number, string>>({});
 
-  const { data, isLoading } = trpc.rateAlertHistory.list.useQuery();
+  const { data, isLoading, isError } = trpc.rateAlertHistory.list.useQuery();
   const { data: statsData } = trpc.rateAlertHistory.stats.useQuery();
 
   const snoozeMutation = trpc.rateAlertHistory.snooze.useMutation({
@@ -80,7 +82,7 @@ export default function RateAlertHistoryPage() {
               </div>
             ) : (
               <div className="space-y-3">
-                {data.history.map(alert => (
+                {data.history.map((alert: any) => (
                   <div key={alert.id} className="flex items-center gap-4 p-4 rounded-lg border hover:bg-muted/30 transition-colors">
                     <div className={`w-10 h-10 rounded-full flex items-center justify-center ${alert.direction === "above" ? "bg-green-100" : "bg-red-100"}`}>
                       {alert.direction === "above" ? <TrendingUp className="w-5 h-5 text-green-600" /> : <TrendingDown className="w-5 h-5 text-red-600" />}

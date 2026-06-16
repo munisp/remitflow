@@ -29,7 +29,7 @@ function makeCtx(overrides: Record<string, any> = {}): TrpcContext {
     openId: "smoke-test-user",
     email: "smoke@remitflow.test",
     name: "Smoke Test User",
-    loginMethod: "manus",
+    loginMethod: "keycloak",
     role: "user" as const,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -186,15 +186,23 @@ describe("Beneficiary CRUD", () => {
   });
 
   it("beneficiaries.add creates a new beneficiary", async () => {
+    // Ensure we're under the 50-beneficiary limit by removing a test entry if needed
+    const existing = await caller.beneficiaries.list();
+    if (Array.isArray(existing) && existing.length >= 50) {
+      const smokeEntry = existing.find((b: any) => b.name?.startsWith("Smoke Test"));
+      if (smokeEntry && (smokeEntry as any).id) {
+        try { await caller.beneficiaries.delete({ id: (smokeEntry as any).id }); } catch { /* ok */ }
+      }
+    }
+
     const result = await caller.beneficiaries.add({
       name: "Smoke Test Recipient",
-      accountNumber: "0123456789",
+      accountNumber: `01${Date.now().toString().slice(-8)}`,
       bankName: "GTBank",
       country: "Nigeria",
       currency: "NGN",
     });
     expect(result).toBeDefined();
-    // add returns the created beneficiary or a success object
     expect(result).not.toBeNull();
   });
 
@@ -282,12 +290,20 @@ describe("Savings Goals", () => {
   });
 
   it("savings.createGoal creates a new goal", async () => {
+    // Clean up stale test goals to stay under the 10-goal limit
+    const { getDb } = await import("./db");
+    const { sql } = await import("drizzle-orm");
+    const db = await getDb();
+    if (db) {
+      const pattern = "Smoke Test Goal%";
+      await db.execute(sql`DELETE FROM "savingsGoals" WHERE name LIKE ${pattern} AND "userId" = 1`);
+    }
+
     const goal = await caller.savings.createGoal({
       name: "Smoke Test Goal",
       targetAmount: 50000,
       deadline: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
     });
-    // createGoal returns { success: true }
     expect(goal).toBeDefined();
     expect((goal as any).success).toBe(true);
   });
@@ -309,11 +325,18 @@ describe("Input Validation", () => {
   });
 
   it("beneficiaries.add accepts valid beneficiary (no strict name validation)", async () => {
-    // The add procedure uses z.string() without .min(1) so empty string is accepted
-    // We verify a valid add works correctly
+    // Ensure we're under the 50-beneficiary limit
+    const existing = await caller.beneficiaries.list();
+    if (Array.isArray(existing) && existing.length >= 50) {
+      const entry = existing.find((b: any) => b.name === "Valid Name" || b.name?.startsWith("Smoke Test"));
+      if (entry && (entry as any).id) {
+        try { await caller.beneficiaries.delete({ id: (entry as any).id }); } catch { /* ok */ }
+      }
+    }
+
     const result = await caller.beneficiaries.add({
       name: "Valid Name",
-      accountNumber: "9876543210",
+      accountNumber: `98${Date.now().toString().slice(-8)}`,
       country: "Ghana",
       currency: "GHS",
     });

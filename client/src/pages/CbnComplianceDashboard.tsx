@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 /**
  * CBN Compliance Dashboard (v187)
@@ -122,6 +123,7 @@ function StatusBadge({ status }: { status: string }) {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 export default function CbnComplianceDashboard() {
+  const { t } = useTranslation();
   const { user } = useAuth();
   const [, navigate] = useLocation();
   const [activeTab, setActiveTab] = useState("overview");
@@ -604,7 +606,7 @@ export default function CbnComplianceDashboard() {
                   <TableRow className="border-white/10">
                     <TableHead className="w-8">
                       <input type="checkbox" className="rounded" onChange={e => {
-                        if (e.target.checked) setSelectedAccountIds((accounts.data ?? []).filter(a => a.status === "pending_cbn_filing").map(a => a.id));
+                        if (e.target.checked) setSelectedAccountIds((accounts.data ?? []).filter((a: any) => a.status === "pending_cbn_filing").map((a: any) => a.id));
                         else setSelectedAccountIds([]);
                       }} />
                     </TableHead>
@@ -617,7 +619,7 @@ export default function CbnComplianceDashboard() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(accounts.data ?? []).map((acc) => (
+                  {(accounts.data ?? []).map((acc: any) => (
                     <TableRow key={acc.id} className="border-white/5 hover:bg-white/5">
                       <TableCell>
                         {acc.status === "pending_cbn_filing" && (
@@ -722,7 +724,7 @@ export default function CbnComplianceDashboard() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(bdcPartners.data ?? []).map((bdc) => (
+                  {(bdcPartners.data ?? []).map((bdc: any) => (
                     <TableRow key={bdc.id} className="border-white/5 hover:bg-white/5">
                       <TableCell className="font-medium text-white">{bdc.name}</TableCell>
                       <TableCell className="font-mono text-sm text-white/70">{bdc.cbnLicenceNumber}</TableCell>
@@ -817,7 +819,7 @@ export default function CbnComplianceDashboard() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {(exports.data ?? []).slice(0, 10).map((exp) => (
+                  {(exports.data ?? []).slice(0, 10).map((exp: any) => (
                     <div key={exp.id} className="flex items-center justify-between p-3 rounded-lg bg-white/5">
                       <div>
                         <p className="text-sm text-white font-medium">{exp.exportType.replace(/_/g, " ")}</p>
@@ -862,7 +864,7 @@ export default function CbnComplianceDashboard() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(fundingEvents.data ?? []).map((ev) => (
+                  {(fundingEvents.data ?? []).map((ev: any) => (
                     <TableRow key={ev.id} className="border-white/5 hover:bg-white/5">
                       <TableCell className="font-mono text-xs text-white/60">{ev.userId}</TableCell>
                       <TableCell className="font-mono text-white">{ev.amount}</TableCell>

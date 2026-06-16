@@ -46,7 +46,7 @@ function useSystemHealth() {
 
 const CORRIDOR_COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#f97316", "#84cc16"];
 
-const REVENUE_DATA = [
+const REVENUE_DATA_FALLBACK = [
   { name: "Transfer Fees", value: 62, color: "#3b82f6" },
   { name: "FX Spread", value: 24, color: "#10b981" },
   { name: "Card Fees", value: 8, color: "#f59e0b" },
@@ -117,6 +117,12 @@ export default function AdminAnalytics() {
     undefined,
     { enabled: user?.role === "admin" }
   );
+
+  const { data: revenueResult } = trpc.admin.revenueBreakdown.useQuery(
+    undefined,
+    { enabled: user?.role === "admin" }
+  );
+  const revenueData = revenueResult?.sources ?? REVENUE_DATA_FALLBACK;
 
   const upsertThreshold = trpc.admin.upsertAnalyticsThreshold.useMutation({
     onSuccess: () => {
@@ -473,8 +479,8 @@ export default function AdminAnalytics() {
             <div className="flex items-center gap-4">
               <ResponsiveContainer width={160} height={160}>
                 <PieChart>
-                  <Pie data={REVENUE_DATA} cx="50%" cy="50%" innerRadius={45} outerRadius={70} paddingAngle={3} dataKey="value">
-                    {REVENUE_DATA.map((entry, index) => (
+                  <Pie data={revenueData} cx="50%" cy="50%" innerRadius={45} outerRadius={70} paddingAngle={3} dataKey="value">
+                    {revenueData.map((entry: any, index: number) => (
                       <Cell key={index} fill={entry.color} />
                     ))}
                   </Pie>
@@ -482,7 +488,7 @@ export default function AdminAnalytics() {
                 </PieChart>
               </ResponsiveContainer>
               <div className="flex-1 space-y-2">
-                {REVENUE_DATA.map((item) => (
+                {revenueData.map((item: any) => (
                   <div key={item.name} className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className="h-2.5 w-2.5 rounded-full" style={{ background: item.color }} />
@@ -544,7 +550,7 @@ export default function AdminAnalytics() {
             </div>
           ) : (
             <div className="divide-y">
-              {thresholds.map((t) => {
+              {thresholds.map((t: any) => {
                 const metricOpt = METRIC_OPTIONS.find(m => m.value === t.metric);
                 const isBr = isBreached(t.metric);
                 return (
@@ -582,7 +588,7 @@ export default function AdminAnalytics() {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Bell className="h-4 w-4 text-amber-500" />
-              {thresholds.find(t => t.metric === editMetric) ? "Edit" : "Add"} Alert Threshold
+              {thresholds.find((t: any) => t.metric === editMetric) ? "Edit" : "Add"} Alert Threshold
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">

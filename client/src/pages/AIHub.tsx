@@ -11,8 +11,10 @@ import {  Brain, Database, Network, Cpu, Activity, CheckCircle2, XCircle,
   GitBranch, Layers, TrendingUp, Shield
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function AIHub() {
+  const { t } = useTranslation();
   
   const [diagRunning, setDiagRunning] = useState(false);
   const [diagResults, setDiagResults] = useState<any>(null);

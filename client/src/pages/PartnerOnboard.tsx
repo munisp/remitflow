@@ -15,6 +15,7 @@ import { toast } from "sonner";
 import { CheckCircle2, ArrowRight, ArrowLeft, Building2, Palette, Globe, BarChart3, Eye, Rocket, Lock, Shield, Zap, Users } from "lucide-react";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { getLoginUrl } from "@/const";
+import { useTranslation } from 'react-i18next';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface OnboardingData {
@@ -77,6 +78,7 @@ const DEFAULT_CORRIDORS = [
 ];
 
 export default function PartnerOnboard() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
   const { user } = useAuth();
   const [step, setStep] = useState(1);

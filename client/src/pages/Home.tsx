@@ -211,7 +211,7 @@ export default function Home() {
   const [sendAmount, setSendAmount] = useState(500);
 
   // Fetch live FX rates for NGN
-  const { data: fxRates } = trpc.fx.rates.useQuery(undefined, {
+  const { data: fxRates, isLoading, isError } = trpc.fx.rates.useQuery(undefined, {
     staleTime: 5 * 60 * 1000,
     refetchOnWindowFocus: false,
   });

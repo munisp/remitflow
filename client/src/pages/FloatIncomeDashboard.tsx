@@ -6,12 +6,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TrendingUp, DollarSign, BarChart3, RefreshCw } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 export default function FloatIncomeDashboard() {
+  const { t } = useTranslation();
   const [days, setDays] = useState(30);
   const [currency, setCurrency] = useState<string | undefined>(undefined);
 
-  const { data: summary, isLoading: summaryLoading } = trpc.floatIncome.summary.useQuery();
+  const { data: summary, isLoading: summaryLoading, isError } = trpc.floatIncome.summary.useQuery();
   const { data: history, isLoading: historyLoading } = trpc.floatIncome.history.useQuery({ days, currency });
 
   const fmt = (n: number, decimals = 2) =>

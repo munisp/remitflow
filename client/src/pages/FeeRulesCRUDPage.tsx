@@ -11,6 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { Plus, Edit, Trash2, DollarSign } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 interface FeeRuleForm {
   corridor: string; minAmount: string; maxAmount: string;
@@ -24,6 +25,7 @@ const defaultForm: FeeRuleForm = {
 };
 
 export default function FeeRulesCRUDPage() {
+  const { t } = useTranslation();
   const [showCreate, setShowCreate] = useState(false);
   const [editRule, setEditRule] = useState<any | null>(null);
   const [form, setForm] = useState<FeeRuleForm>(defaultForm);
@@ -164,7 +166,7 @@ export default function FeeRulesCRUDPage() {
                   <tr><td colSpan={7} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
                 ) : rules.length === 0 ? (
                   <tr><td colSpan={7} className="p-8 text-center text-muted-foreground">No fee rules found</td></tr>
-                ) : rules.map((r) => (
+                ) : rules.map((r: any) => (
                   <tr key={r.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                     <td className="p-3 font-mono font-bold">{r.corridor}</td>
                     <td className="p-3 capitalize">{r.feeType}</td>

@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
 import { Loader2, Search, CheckCircle2, XCircle, Globe, Zap, Shield, Clock } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 const RAIL_ICONS: Record<string, string> = {
   cips: "🇨🇳",
@@ -327,6 +328,7 @@ function InitiateTransfer() {
 }
 
 export default function PaymentRails() {
+  const { t } = useTranslation();
   const { data: railsData, isLoading } = trpc.v90.paymentRails.getSupportedRails.useQuery();
 
   const rails = railsData?.rails || [];

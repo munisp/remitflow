@@ -8,8 +8,10 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Globe, ShieldCheck, AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function CrossBorderCompliancePage() {
+  const { t } = useTranslation();
   const [form, setForm] = useState({
     userId: 1,
     amount: 5000,

@@ -65,7 +65,7 @@ export default function LiveChat() {
   const [showQuickActions, setShowQuickActions] = useState(true);
 
   const { data: sessions = [], isLoading: sessionsLoading } = trpc.support.listSessions.useQuery();
-  const { data: sessionMessages } = trpc.support.getMessages.useQuery(
+  const { data: sessionMessages, isError } = trpc.support.getMessages.useQuery(
     { sessionId: activeSessionId! },
     { enabled: !!activeSessionId }
   );
@@ -75,7 +75,7 @@ export default function LiveChat() {
       if (sessionMessages.length === 0) {
         setMessages([WELCOME_MESSAGE]);
       } else {
-        setMessages(sessionMessages.map((m) => ({ role: m.role as "user" | "assistant", content: m.content })));
+        setMessages(sessionMessages.map((m: any) => ({ role: m.role as "user" | "assistant", content: m.content })));
         setShowQuickActions(false);
       }
     } else if (!activeSessionId) {
@@ -202,13 +202,13 @@ export default function LiveChat() {
             <div className="p-3 text-xs text-muted-foreground">No conversations yet. Start chatting!</div>
           ) : (() => {
             const q = searchQuery.trim().toLowerCase();
-            const filtered = q ? sessions.filter(s => s.title.toLowerCase().includes(q)) : sessions;
+            const filtered = q ? sessions.filter((s: any) => s.title.toLowerCase().includes(q)) : sessions;
             if (filtered.length === 0) return (
               <div className="p-3 text-xs text-muted-foreground">No conversations match "{searchQuery}"</div>
             );
             return (
               <div className="flex flex-col gap-0.5 p-2">
-                {filtered.map((s) => {
+                {filtered.map((s: any) => {
                   const title = s.title;
                   const idx = q ? title.toLowerCase().indexOf(q) : -1;
                   return (
@@ -266,7 +266,7 @@ export default function LiveChat() {
         <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-card">
           <MessageCircle className="w-4 h-4 text-primary" />
           <span className="text-sm font-medium text-foreground">
-            {activeSessionId ? sessions.find((s) => s.id === activeSessionId)?.title ?? "Conversation" : "New Conversation"}
+            {activeSessionId ? sessions.find((s: any) => s.id === activeSessionId)?.title ?? "Conversation" : "New Conversation"}
           </span>
           <div className="ml-auto flex items-center gap-2">
             <span className="flex items-center gap-1 text-xs text-green-600">

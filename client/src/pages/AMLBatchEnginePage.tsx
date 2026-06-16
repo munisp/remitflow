@@ -9,8 +9,10 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Shield, Play, CheckCircle2, AlertTriangle } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function AMLBatchEnginePage() {
+  const { t } = useTranslation();
   const [batchSize, setBatchSize] = useState(100);
   const [riskThreshold, setRiskThreshold] = useState(70);
 
@@ -129,13 +131,13 @@ export default function AMLBatchEnginePage() {
               <div className="flex justify-between">
                 <span className="text-muted-foreground text-sm">High Risk</span>
                 <span className="font-bold text-red-600">
-                  {queue?.queue.filter((q) => q.riskLevel === "high" || q.riskLevel === "critical").length ?? 0}
+                  {queue?.queue.filter((q: any) => q.riskLevel === "high" || q.riskLevel === "critical").length ?? 0}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground text-sm">Medium Risk</span>
                 <span className="font-bold text-yellow-600">
-                  {queue?.queue.filter((q) => q.riskLevel === "medium").length ?? 0}
+                  {queue?.queue.filter((q: any) => q.riskLevel === "medium").length ?? 0}
                 </span>
               </div>
             </div>
@@ -163,7 +165,7 @@ export default function AMLBatchEnginePage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {(queue?.queue ?? []).map((item) => (
+                {(queue?.queue ?? []).map((item: any) => (
                   <TableRow key={item.id}>
                     <TableCell className="font-mono text-xs">{item.id}</TableCell>
                     <TableCell>{item.userId}</TableCell>

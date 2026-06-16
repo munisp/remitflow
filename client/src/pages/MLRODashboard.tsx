@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import { AlertTriangle, FileText, Clock, CheckCircle2, ShieldAlert, User, Calendar, DollarSign, RefreshCw, CheckSquare, Square } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { DeadlineBadge } from "./OfficerWorkload";
+import { useTranslation } from 'react-i18next';
 
 const SEVERITY_COLORS: Record<string, string> = {
   critical: "bg-red-100 text-red-800 border-red-200",
@@ -55,6 +56,7 @@ interface SARFormState {
 }
 
 export default function MLRODashboard() {
+  const { t } = useTranslation();
   const [sarOpen, setSarOpen] = useState(false);
   const [sarForm, setSarForm] = useState<SARFormState | null>(null);
   const [assignOpen, setAssignOpen] = useState(false);
@@ -70,7 +72,6 @@ export default function MLRODashboard() {
   const { data: escalatedAlerts, isLoading: alertsLoading, refetch } = trpc.complianceAlerts.list.useQuery({
     status: "escalated",
     limit: 50,
-    offset: 0,
   });
 
   // Fetch MLRO summary stats
@@ -388,7 +389,7 @@ export default function MLRODashboard() {
             ) : (
               <ScrollArea className="max-h-[520px]">
                 <div className="divide-y">
-                  {alerts.map((alert) => {
+                  {alerts.map((alert: any) => {
                     let meta: Record<string, unknown> = {};
                     try { meta = JSON.parse((alert as any).metadata ?? "{}"); } catch {}
                     return (
@@ -604,7 +605,7 @@ export default function MLRODashboard() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="unassign">— Unassign —</SelectItem>
-                  {(officers ?? []).map(o => (
+                  {(officers ?? []).map((o: any) => (
                     <SelectItem key={o.id} value={String(o.id)}>
                       {o.name ?? o.email ?? `Officer #${o.id}`}
                     </SelectItem>

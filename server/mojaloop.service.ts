@@ -18,14 +18,24 @@ import { circuitBreakers, CircuitOpenError } from "./services/circuitBreaker";
 import { logger } from './_core/logger';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
-const MOJALOOP_BASE_URL =
-  process.env.MOJALOOP_SWITCH_URL ?? "https://sandbox.mojaloop.io";
-const MOJALOOP_FSP_ID =
-  process.env.MOJALOOP_FSP_ID ?? "remitflow-fsp";
-const MOJALOOP_API_KEY =
-  process.env.MOJALOOP_API_KEY ?? "remitflow-sandbox-key";
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
+function mojaloopEnv(name: string, sandboxFallback: string): string {
+  const val = process.env[name];
+  if (val) return val;
+  if (IS_PRODUCTION) {
+    logger.error({ variable: name }, `[Mojaloop] CRITICAL: Missing ${name} in production — Mojaloop rail will be unavailable`);
+    return "";
+  }
+  logger.warn({ variable: name }, `[Mojaloop] Using sandbox fallback for ${name} (development mode)`);
+  return sandboxFallback;
+}
+
+const MOJALOOP_BASE_URL = mojaloopEnv("MOJALOOP_SWITCH_URL", "https://sandbox.mojaloop.io");
+const MOJALOOP_FSP_ID = mojaloopEnv("MOJALOOP_FSP_ID", "remitflow-fsp");
+const MOJALOOP_API_KEY = mojaloopEnv("MOJALOOP_API_KEY", "remitflow-sandbox-key");
 const MOJALOOP_CALLBACK_URL =
-  process.env.MOJALOOP_CALLBACK_URL ?? "https://remitflow.manus.space/api/mojaloop/callback";
+  process.env.MOJALOOP_CALLBACK_URL ?? "https://remitflow.example.com/api/mojaloop/callback";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface MojaloopParty {
@@ -139,11 +149,14 @@ export async function lookupParty(
     return { found: false, error: `Lookup failed with status ${resp.status}` };
   } catch (err: any) {
     if (err instanceof CircuitOpenError) {
-      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — skipping party lookup:');
+      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — skipping party lookup');
     } else {
-      logger.warn({ data: err.message }, '[Mojaloop] Party lookup failed, using mock:');
+      logger.warn({ data: err.message }, '[Mojaloop] Party lookup failed');
     }
-    // Graceful fallback for sandbox/dev environments
+    if (IS_PRODUCTION) {
+      return { found: false, error: `Mojaloop party lookup failed: ${err.message}` };
+    }
+    // Graceful fallback for development environments only
     return {
       found: true,
       party: {
@@ -230,9 +243,12 @@ export async function requestQuote(params: {
     throw new Error(`Quote request failed: ${resp.status}`);
   } catch (err: any) {
     if (err instanceof CircuitOpenError) {
-      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — using mock quote:');
+      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — quote unavailable');
     } else {
-      logger.warn({ data: err.message }, '[Mojaloop] Quote request failed, using mock:');
+      logger.warn({ data: err.message }, '[Mojaloop] Quote request failed');
+    }
+    if (IS_PRODUCTION) {
+      throw new Error(`Mojaloop quote request failed: ${err.message}`);
     }
     const expiration = new Date(Date.now() + 60000).toISOString();
     return {
@@ -311,16 +327,14 @@ export async function initiateTransfer(params: {
     };
   } catch (err: any) {
     if (err instanceof CircuitOpenError) {
-      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — using sandbox mock transfer:');
+      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — transfer unavailable');
     } else {
-      logger.warn({ data: err.message }, '[Mojaloop] Transfer failed, using sandbox mock:');
+      logger.warn({ data: err.message }, '[Mojaloop] Transfer initiation failed');
     }
-    // Sandbox mock: simulate successful transfer
     return {
       transferId,
-      transferState: "COMMITTED",
-      completedTimestamp: new Date().toISOString(),
-      fulfilment: crypto.randomBytes(32).toString("base64url"),
+      transferState: "ABORTED",
+      errorInformation: { errorCode: "5000", errorDescription: `Mojaloop transfer failed: ${err.message}` },
     };
   }
 }
@@ -345,9 +359,9 @@ export async function getTransferStatus(transferId: string): Promise<MojaloopTra
     return { transferId, transferState: "ABORTED", errorInformation: { errorCode: String(resp.status), errorDescription: "Status check failed" } };
   } catch (err: any) {
     if (err instanceof CircuitOpenError) {
-      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — returning mock status:');
+      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — status unavailable');
     }
-    return { transferId, transferState: "COMMITTED", completedTimestamp: new Date().toISOString() };
+    return { transferId, transferState: "ABORTED", errorInformation: { errorCode: "5000", errorDescription: `Status check failed: ${err.message}` } };
   }
 }
 
@@ -370,16 +384,132 @@ export async function getFSPParticipants(): Promise<Array<{
     }
   } catch { /* fallback */ }
 
-  // Well-known Mojaloop sandbox participants
-  return [
-    { fspId: "payerfsp", name: "Payer FSP (Test)", currency: ["USD", "KES"], country: "KE", active: true },
-    { fspId: "payeefsp", name: "Payee FSP (Test)", currency: ["USD", "KES"], country: "KE", active: true },
-    { fspId: "ecobank-ng", name: "Ecobank Nigeria", currency: ["NGN", "USD"], country: "NG", active: true },
-    { fspId: "gtbank-ng", name: "GTBank Nigeria", currency: ["NGN"], country: "NG", active: true },
-    { fspId: "kcb-ke", name: "KCB Bank Kenya", currency: ["KES", "USD"], country: "KE", active: true },
-    { fspId: "equity-ke", name: "Equity Bank Kenya", currency: ["KES", "USD"], country: "KE", active: true },
-    { fspId: "stanbic-gh", name: "Stanbic Bank Ghana", currency: ["GHS", "USD"], country: "GH", active: true },
-    { fspId: "absa-za", name: "ABSA South Africa", currency: ["ZAR", "USD"], country: "ZA", active: true },
-    { fspId: "remitflow-fsp", name: "RemitFlow FSP", currency: ["NGN", "USD", "GBP", "EUR", "KES"], country: "NG", active: true },
-  ];
+  logger.warn("[Mojaloop] Participants endpoint unavailable — returning empty list");
+  return [];
+}
+
+// ─── ILP Fulfillment / Condition Matching ─────────────────────────────────────
+
+/**
+ * Generate an ILP condition and fulfillment pair for a transfer.
+ * The condition is a SHA-256 hash of the fulfillment.
+ * The fulfillment is revealed only when the transfer is committed.
+ *
+ * Per FSPIOP spec:
+ *   condition  = BASE64URL(SHA256(fulfillment))
+ *   fulfillment = 32 random bytes, BASE64URL-encoded
+ */
+export function generateIlpConditionPair(): { condition: string; fulfillment: string } {
+  const fulfillmentBytes = crypto.randomBytes(32);
+  const fulfillment = fulfillmentBytes.toString("base64url");
+  const condition = crypto.createHash("sha256").update(fulfillmentBytes).digest("base64url");
+  return { condition, fulfillment };
+}
+
+/**
+ * Verify that a fulfillment matches a condition.
+ * Used in the callback handler when Mojaloop switch returns the fulfillment.
+ */
+export function verifyIlpFulfillment(condition: string, fulfillment: string): boolean {
+  try {
+    const fulfillmentBytes = Buffer.from(fulfillment, "base64url");
+    const computedCondition = crypto.createHash("sha256").update(fulfillmentBytes).digest("base64url");
+    return computedCondition === condition;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Generate a full ILP packet for a transfer request.
+ * Includes destination address, amount, and expiry.
+ */
+export function buildIlpPacket(params: {
+  amount: string;
+  currency: string;
+  destinationFspId: string;
+  destinationAccount: string;
+  expirySeconds?: number;
+}): { ilpPacket: string; condition: string; fulfillment: string } {
+  const { condition, fulfillment } = generateIlpConditionPair();
+  const expiry = new Date(Date.now() + (params.expirySeconds || 30) * 1000).toISOString();
+
+  const packet = {
+    amount: { amount: params.amount, currency: params.currency },
+    destination: `g.${params.destinationFspId}.${params.destinationAccount}`,
+    data: { transactionType: { scenario: "TRANSFER", initiator: "PAYER", initiatorType: "CONSUMER" } },
+    expiration: expiry,
+  };
+
+  const ilpPacket = Buffer.from(JSON.stringify(packet)).toString("base64url");
+  return { ilpPacket, condition, fulfillment };
+}
+
+// ─── Webhook Receiver (Mojaloop Callback Handlers) ───────────────────────────
+
+export interface MojaloopCallback {
+  transferId: string;
+  transferState: "COMMITTED" | "ABORTED" | "RESERVED";
+  fulfilment?: string;
+  completedTimestamp?: string;
+  errorInformation?: { errorCode: string; errorDescription: string };
+}
+
+/** Pending transfers awaiting callback — keyed by transferId */
+const pendingTransfers = new Map<string, {
+  condition: string;
+  resolve: (result: MojaloopCallback) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}>();
+
+/**
+ * Register a transfer as pending, waiting for Mojaloop callback.
+ * Returns a promise that resolves when the callback arrives (or times out).
+ */
+export function awaitTransferCallback(
+  transferId: string,
+  condition: string,
+  timeoutMs = 30_000
+): Promise<MojaloopCallback> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingTransfers.delete(transferId);
+      resolve({
+        transferId,
+        transferState: "ABORTED",
+        errorInformation: { errorCode: "5003", errorDescription: "Transfer callback timeout" },
+      });
+    }, timeoutMs);
+
+    pendingTransfers.set(transferId, { condition, resolve, timeout });
+  });
+}
+
+/**
+ * Handle an incoming Mojaloop callback (PUT /transfers/{id}).
+ * Verifies ILP fulfillment before accepting.
+ */
+export function handleMojaloopCallback(callback: MojaloopCallback): { accepted: boolean; reason?: string } {
+  const pending = pendingTransfers.get(callback.transferId);
+  if (!pending) {
+    logger.warn(`[Mojaloop] Received callback for unknown transfer: ${callback.transferId}`);
+    return { accepted: false, reason: "Unknown transfer" };
+  }
+
+  clearTimeout(pending.timeout);
+  pendingTransfers.delete(callback.transferId);
+
+  // Verify ILP fulfillment if present
+  if (callback.fulfilment && !verifyIlpFulfillment(pending.condition, callback.fulfilment)) {
+    logger.error(`[Mojaloop] ILP fulfillment mismatch for ${callback.transferId}`);
+    pending.resolve({
+      ...callback,
+      transferState: "ABORTED",
+      errorInformation: { errorCode: "5105", errorDescription: "ILP fulfillment mismatch" },
+    });
+    return { accepted: false, reason: "Fulfillment mismatch" };
+  }
+
+  pending.resolve(callback);
+  return { accepted: true };
 }

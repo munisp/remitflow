@@ -15,8 +15,10 @@ import {  Plus, Copy, Power, PowerOff, Trash2, RefreshCw, Building2,
   BarChart3, TrendingUp, Activity, Shield,
 } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 export default function AdminInviteCodes() {
+  const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState("codes");
   const [generateOpen, setGenerateOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -71,7 +73,7 @@ export default function AdminInviteCodes() {
   const tenants = tenantsData?.tenants ?? [];
   const sessions = sessionsData?.sessions ?? [];
 
-  const filteredCodes = codes.filter(c =>
+  const filteredCodes = codes.filter((c: any) =>
     !searchQuery || c.code.includes(searchQuery.toUpperCase()) || c.description?.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
@@ -187,9 +189,9 @@ export default function AdminInviteCodes() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { label: "Total Codes", value: codesData?.total ?? 0, icon: Key, color: "violet" },
-          { label: "Active Tenants", value: tenants.filter(t => t.status === "active").length, icon: Building2, color: "emerald" },
-          { label: "In Progress", value: sessions.filter(s => s.status === "in_progress").length, icon: Activity, color: "amber" },
-          { label: "Completed", value: sessions.filter(s => s.status === "completed").length, icon: CheckCircle2, color: "blue" },
+          { label: "Active Tenants", value: tenants.filter((t: any) => t.status === "active").length, icon: Building2, color: "emerald" },
+          { label: "In Progress", value: sessions.filter((s: any) => s.status === "in_progress").length, icon: Activity, color: "amber" },
+          { label: "Completed", value: sessions.filter((s: any) => s.status === "completed").length, icon: CheckCircle2, color: "blue" },
         ].map(({ label, value, icon: Icon, color }) => (
           <Card key={label} className="bg-white/5 border-white/10">
             <CardContent className="pt-4 pb-3">
@@ -239,7 +241,7 @@ export default function AdminInviteCodes() {
                 <p className="text-white/20 text-xs mt-1">Generate your first code to start onboarding partners</p>
               </div>
             )}
-            {filteredCodes.map((code) => {
+            {filteredCodes.map((code: any) => {
               const isExpired = code.expiresAt && new Date() > new Date(code.expiresAt);
               const isExhausted = code.maxUses !== null && code.usedCount >= (code.maxUses ?? 0);
               const usagePercent = code.maxUses ? Math.round((code.usedCount / code.maxUses) * 100) : 0;
@@ -331,7 +333,7 @@ export default function AdminInviteCodes() {
                 <p className="text-white/30 text-sm">No tenants yet</p>
               </div>
             )}
-            {tenants.map((tenant) => (
+            {tenants.map((tenant: any) => (
               <div key={tenant.id} className="flex items-center justify-between p-4 rounded-xl bg-white/5 border border-white/10">
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="w-9 h-9 rounded-lg flex items-center justify-center text-white font-bold text-sm shrink-0"

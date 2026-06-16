@@ -8,6 +8,7 @@
  *  - iOS native: 91 Swift files (Secure Enclave, Jailbreak detection, etc.)
  */
 
+import { useTranslation } from 'react-i18next';
 import DashboardLayout from "@/components/DashboardLayout";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -291,6 +292,7 @@ function SandboxBanner({ onDismiss }: { onDismiss: () => void }) {
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export default function MobileSDK() {
+  const { t } = useTranslation();
   const [sandboxMode, setSandboxMode] = useState(false);
   const [, setLocation] = useLocation();
   const { data: healthData } = trpc.system.health.useQuery(undefined, { refetchInterval: 30000 });

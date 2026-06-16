@@ -20,13 +20,13 @@ import { protectedProcedure, publicProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
 import { logger } from '../_core/logger';
+import { redis } from '../middleware/middlewareIntegration';
 // createAuditLog-compatible audit trail for SMS OTP operations
 const logSmsAction = (userId: number, action: string, phone: string) => {
   logger.info(JSON.stringify({ level: "AUDIT", userId, action, phone: phone.slice(0, 6) + "****", ts: new Date().toISOString() }));
 };
 
-// ── In-memory OTP store (TTL: 10 minutes) ────────────────────────────────────
-// In production, use Redis or DB-backed store
+// ── Redis-backed OTP store (TTL: 10 minutes) ─────────────────────────────────
 interface OtpEntry {
   code: string;
   transferId: string;
@@ -34,20 +34,28 @@ interface OtpEntry {
   expiresAt: number;
   attempts: number;
 }
-const otpStore = new Map<string, OtpEntry>();
 
-const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const OTP_TTL_SECONDS = 600; // 10 minutes
 const MAX_ATTEMPTS = 3;
+const OTP_PREFIX = "otp:sms:";
 
 function generateOtp(): string {
   return crypto.randomInt(100000, 999999).toString();
 }
 
-function cleanExpiredOtps(): void {
-  const now = Date.now();
-  for (const [key, entry] of Array.from(otpStore.entries())) {
-    if (entry.expiresAt < now) otpStore.delete(key);
-  }
+async function getOtpEntry(key: string): Promise<OtpEntry | null> {
+  const raw = await redis.get(`${OTP_PREFIX}${key}`);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as OtpEntry; } catch { return null; }
+}
+
+async function setOtpEntry(key: string, entry: OtpEntry): Promise<void> {
+  const ttl = Math.max(1, Math.ceil((entry.expiresAt - Date.now()) / 1000));
+  await redis.set(`${OTP_PREFIX}${key}`, JSON.stringify(entry), ttl);
+}
+
+async function deleteOtpEntry(key: string): Promise<void> {
+  await redis.del(`${OTP_PREFIX}${key}`);
 }
 
 /**
@@ -128,16 +136,14 @@ export const smsConfirmRouter = {
       })
     )
     .mutation(async ({ input, ctx }) => {
-      cleanExpiredOtps();
-
       const otp = generateOtp();
       const key = `${ctx.user.id}:${input.transferId}`;
 
-      otpStore.set(key, {
+      await setOtpEntry(key, {
         code: otp,
         transferId: input.transferId,
         phone: input.phone,
-        expiresAt: Date.now() + OTP_TTL_MS,
+        expiresAt: Date.now() + OTP_TTL_SECONDS * 1000,
         attempts: 0,
       });
 
@@ -155,8 +161,7 @@ export const smsConfirmRouter = {
       return {
         sent: true,
         phone: input.phone.replace(/(\+\d{3})\d+(\d{3})/, "$1****$2"),
-        expiresAt: Date.now() + OTP_TTL_MS,
-        // In sandbox/mock mode, return OTP for testing
+        expiresAt: Date.now() + OTP_TTL_SECONDS * 1000,
         ...(isMock ? { sandboxOtp: otp } : {}),
       };
     }),
@@ -173,7 +178,7 @@ export const smsConfirmRouter = {
     )
     .mutation(async ({ input, ctx }) => {
       const key = `${ctx.user.id}:${input.transferId}`;
-      const entry = otpStore.get(key);
+      const entry = await getOtpEntry(key);
 
       if (!entry) {
         throw new TRPCError({
@@ -183,7 +188,7 @@ export const smsConfirmRouter = {
       }
 
       if (entry.expiresAt < Date.now()) {
-        otpStore.delete(key);
+        await deleteOtpEntry(key);
         throw new TRPCError({
           code: "BAD_REQUEST",
           message: "Confirmation code has expired. Please request a new one.",
@@ -192,7 +197,7 @@ export const smsConfirmRouter = {
 
       entry.attempts++;
       if (entry.attempts > MAX_ATTEMPTS) {
-        otpStore.delete(key);
+        await deleteOtpEntry(key);
         throw new TRPCError({
           code: "TOO_MANY_REQUESTS",
           message: "Too many failed attempts. Please request a new code.",
@@ -200,13 +205,15 @@ export const smsConfirmRouter = {
       }
 
       if (entry.code !== input.code) {
+        await setOtpEntry(key, entry);
         throw new TRPCError({
           code: "BAD_REQUEST",
           message: `Invalid code. ${MAX_ATTEMPTS - entry.attempts} attempt(s) remaining.`,
         });
       }
 
-      otpStore.delete(key);
+      await deleteOtpEntry(key);
+      logSmsAction(ctx.user.id, "otp_verified", entry.phone);
       return { verified: true, transferId: input.transferId };
     }),
 

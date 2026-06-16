@@ -29,7 +29,11 @@ import (
 	"github.com/go-redis/redis/v8"
 	_ "github.com/lib/pq"
 	"github.com/segmentio/kafka-go"
+	"os/signal"
+	"syscall"
 )
+
+var _processStartTime = time.Now()
 
 const (
 	PORT          = "8087"
@@ -586,8 +590,31 @@ func main() {
 	}
 
 	addr := ":" + PORT
+	srv := &http.Server{
+		Addr:         addr,
+		Handler:      r,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Fprintf(os.Stderr, "{\"event\":\"pod.shutdown.initiated\",\"service\":\"%s\",\"timestamp\":\"%s\",\"pid\":%d}\n", "go-bdc-connector", time.Now().Format(time.RFC3339), os.Getpid())
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("[BDCConnector] Shutdown error: %v", err)
+		}
+	}()
+
 	log.Printf("[BDCConnector] Listening on %s", addr)
-	if err := r.Run(addr); err != nil {
+	fmt.Fprintf(os.Stderr, "{\"event\":\"pod.startup.complete\",\"service\":\"%s\",\"startup_ms\":%d,\"timestamp\":\"%s\"}\n", "go-bdc-connector", time.Since(_processStartTime).Milliseconds(), time.Now().Format(time.RFC3339))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("[BDCConnector] Server error: %v", err)
 	}
+	log.Println("[BDCConnector] Server stopped")
+
 }

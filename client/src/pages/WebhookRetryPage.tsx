@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { toast } from "sonner";
 import { RefreshCw, AlertCircle, CheckCircle, Clock, Zap } from "lucide-react";
 import DashboardLayout from "@/components/DashboardLayout";
+import { useTranslation } from 'react-i18next';
 
 const STATUS_COLORS: Record<string, string> = {
   pending: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
@@ -16,6 +17,7 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function WebhookRetryPage() {
+  const { t } = useTranslation();
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [page, setPage] = useState(0);
@@ -125,7 +127,7 @@ export default function WebhookRetryPage() {
                   <th className="p-3 text-left w-8">
                     <input type="checkbox" className="rounded"
                       checked={selectedIds.length === deliveries.length && deliveries.length > 0}
-                      onChange={(e) => setSelectedIds(e.target.checked ? deliveries.map((d) => d.id) : [])} />
+                      onChange={(e) => setSelectedIds(e.target.checked ? deliveries.map((d: any) => d.id) : [])} />
                   </th>
                   <th className="p-3 text-left">ID</th>
                   <th className="p-3 text-left">Event Type</th>
@@ -141,7 +143,7 @@ export default function WebhookRetryPage() {
                   <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">Loading...</td></tr>
                 ) : deliveries.length === 0 ? (
                   <tr><td colSpan={8} className="p-8 text-center text-muted-foreground">No deliveries found</td></tr>
-                ) : deliveries.map((d) => (
+                ) : deliveries.map((d: any) => (
                   <tr key={d.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                     <td className="p-3">
                       <input type="checkbox" className="rounded" checked={selectedIds.includes(d.id)}

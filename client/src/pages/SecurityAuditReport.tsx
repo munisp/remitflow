@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Shield, CheckCircle2, XCircle, AlertTriangle, Info, Download, RefreshCw, Lock, Eye, Zap } from "lucide-react";
+import { useTranslation } from 'react-i18next';
 
 // Static OWASP Top 10 audit data (v92 security hardening results)
 const OWASP_CHECKS = [
@@ -74,9 +75,10 @@ const PENETRATION_RESULTS = [
 ];
 
 export default function SecurityAuditReport() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState("overview");
 
-  const { data: auditData, isLoading } = trpc.auditLog.getSecuritySummary.useQuery();
+  const { data: auditData, isLoading, isError } = trpc.auditLog.getSecuritySummary.useQuery();
 
   const passCount = OWASP_CHECKS.filter(c => c.status === "pass").length;
   const totalControls = SECURITY_CONTROLS.flatMap(c => c.controls).length;

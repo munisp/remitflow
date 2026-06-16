@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { trpc } from "@/lib/trpc";
 import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -27,8 +28,9 @@ function formatNGN(val: string | number | null | undefined) {
 }
 
 export default function InvestmentPortfolio() {
+  const { t } = useTranslation();
   const [, navigate] = useLocation();
-  const { data: summary, isLoading, refetch } = trpc.investmentPortfolio.summary.useQuery();
+  const { data: summary, isLoading, refetch, isError } = trpc.investmentPortfolio.summary.useQuery();
 
   const totalUSD = summary
     ? parseFloat(summary.stocks?.totalUsd ?? "0") +
