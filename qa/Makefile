@@ -9,7 +9,7 @@
 #   make -f qa/Makefile security
 #   make -f qa/Makefile load BASE_URL=https://staging.remitflow.io
 
-.PHONY: help all unit security contracts load soak reconciliation chaos dr compliance canary clean
+.PHONY: help all unit security contracts load soak reconciliation chaos dr compliance canary pentest uat clean
 
 BASE_URL ?= http://localhost:3001
 K6 ?= k6
@@ -36,7 +36,7 @@ help:
 	@echo "    BASE_URL=<url>  Target server (default: http://localhost:3001)"
 	@echo ""
 
-all: unit security contracts load reconciliation chaos dr compliance
+all: unit security contracts load reconciliation chaos dr compliance pentest uat
 
 unit:
 	@echo "── Running Unit & Integration Tests ──"
@@ -88,6 +88,17 @@ canary:
 	chmod +x qa/canary/canary-verify.sh
 	./qa/canary/canary-verify.sh $(BASE_URL)
 
+pentest:
+	@echo "── Running Authenticated Penetration Test ──"
+	chmod +x qa/security/pentest-authenticated.sh
+	./qa/security/pentest-authenticated.sh $(BASE_URL)
+
+uat:
+	@echo "── Running User Acceptance Tests ──"
+	chmod +x qa/uat/uat-scenarios.sh
+	mkdir -p qa/uat/results
+	./qa/uat/uat-scenarios.sh $(BASE_URL) all
+
 clean:
 	rm -rf qa/security/results/*.json
 	rm -rf qa/chaos-engineering/results/*.json
@@ -96,4 +107,5 @@ clean:
 	rm -rf qa/regulatory-sandbox/results/*.json
 	rm -rf qa/canary/results/*.json
 	rm -rf qa/load-testing/results/*.json
+	rm -rf qa/uat/results/*.json
 	@echo "Results cleaned"
