@@ -393,6 +393,28 @@ export const FeatureEvents = {
     emitFeatureEvent("feature.nfc-payments", data.offlineId as string, { event: "nfc.offline_synced", ...data }),
   nfcRefundProcessed: (data: Record<string, unknown>) =>
     emitFeatureEvent("feature.nfc-payments", data.txId as string, { event: "nfc.refund_processed", ...data }),
+
+  // Mark Lane Integration
+  markLaneQuoteCreated: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.quoteId as string, { event: "marklane.quote.created", ...data }),
+  markLaneTransferInitiated: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.transferId as string, { event: "marklane.transfer.initiated", ...data }),
+  markLaneTransferCancelled: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.transferId as string, { event: "marklane.transfer.cancelled", ...data }),
+  markLaneTransferCompleted: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.transferId as string, { event: "marklane.transfer.completed", ...data }),
+  markLaneKYCPassportRequested: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.passportId as string, { event: "marklane.kyc.passport_requested", ...data }),
+  markLaneKYCPassportRevoked: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.passportId as string, { event: "marklane.kyc.passport_revoked", ...data }),
+  markLanePrefundingRequested: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.prefundingId as string, { event: "marklane.settlement.prefunding", ...data }),
+  markLaneFXProfessionalRegistered: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.professionalId as string, { event: "marklane.fx_professional.registered", ...data }),
+  markLaneWebhookRegistered: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.webhookId as string, { event: "marklane.webhook.registered", ...data }),
+  markLaneWebhookProcessed: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.eventId as string, { event: "marklane.webhook.processed", ...data }),
 };
 
 // ── Database Migration for Feature Tables ────────────────────────────────────
@@ -699,6 +721,88 @@ export async function ensureFeatureTables(): Promise<void> {
         till_number VARCHAR(50),
         created_at TIMESTAMP DEFAULT NOW()
       );
+
+      -- Mark Lane Integration Tables
+      CREATE TABLE IF NOT EXISTS feature_marklane_quotes (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        corridor_id VARCHAR(10),
+        from_currency VARCHAR(8),
+        to_currency VARCHAR(8),
+        amount NUMERIC(18,4),
+        rate NUMERIC(18,8),
+        converted_amount NUMERIC(18,4),
+        fee NUMERIC(12,4),
+        expires_at TIMESTAMP,
+        quote_type VARCHAR(10) DEFAULT 'spot',
+        data JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_marklane_transfers (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        marklane_transfer_id VARCHAR(64),
+        corridor VARCHAR(10),
+        from_currency VARCHAR(8),
+        to_currency VARCHAR(8),
+        send_amount NUMERIC(18,4),
+        receive_amount NUMERIC(18,4),
+        fx_rate NUMERIC(18,8),
+        fee NUMERIC(12,4),
+        status VARCHAR(20) DEFAULT 'pending',
+        reference VARCHAR(100),
+        recipient_name VARCHAR(100),
+        recipient_account VARCHAR(34),
+        recipient_bank VARCHAR(50),
+        data JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW(),
+        completed_at TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_marklane_kyc_passports (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        source_regulator VARCHAR(20),
+        target_regulator VARCHAR(20),
+        kyc_tier INTEGER,
+        verification_status VARCHAR(20) DEFAULT 'pending',
+        documents JSONB DEFAULT '[]',
+        aml_screening JSONB DEFAULT '{}',
+        valid_until TIMESTAMP,
+        data JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_marklane_fx_professionals (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        name VARCHAR(100),
+        email VARCHAR(200),
+        marklane_partner_id VARCHAR(64),
+        status VARCHAR(20) DEFAULT 'pending',
+        corridors JSONB DEFAULT '[]',
+        commission_rate NUMERIC(6,4) DEFAULT 0.15,
+        total_volume NUMERIC(18,4) DEFAULT 0,
+        total_commissions NUMERIC(18,4) DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_marklane_prefunding (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        currency VARCHAR(8),
+        amount NUMERIC(18,4),
+        status VARCHAR(20) DEFAULT 'pending',
+        instructions JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ml_quote_user ON feature_marklane_quotes(user_id);
+      CREATE INDEX IF NOT EXISTS idx_ml_transfer_user ON feature_marklane_transfers(user_id);
+      CREATE INDEX IF NOT EXISTS idx_ml_transfer_status ON feature_marklane_transfers(status);
+      CREATE INDEX IF NOT EXISTS idx_ml_kyc_user ON feature_marklane_kyc_passports(user_id);
+      CREATE INDEX IF NOT EXISTS idx_ml_fx_prof_user ON feature_marklane_fx_professionals(user_id);
 
       CREATE INDEX IF NOT EXISTS idx_ledger_reference ON ledger_entries(reference);
       CREATE INDEX IF NOT EXISTS idx_merchant_user ON feature_merchant_accounts(user_id);
