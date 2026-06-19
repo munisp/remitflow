@@ -1,0 +1,66 @@
+name: Nightly Soak Test
+
+on:
+  schedule:
+    # Every night at 3am UTC (after main QA pipeline)
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: "20"
+  K6_VERSION: "0.49.0"
+
+jobs:
+  soak-test:
+    name: "30-minute Soak Test"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: remitflow_soak
+          POSTGRES_USER: remitflow
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install k6
+        run: |
+          curl -sSL https://github.com/grafana/k6/releases/download/v${{ env.K6_VERSION }}/k6-v${{ env.K6_VERSION }}-linux-amd64.tar.gz | tar xzf -
+          sudo mv k6-v${{ env.K6_VERSION }}-linux-amd64/k6 /usr/local/bin/
+
+      - name: Install dependencies & start server
+        run: |
+          npm ci
+          npm run dev &
+          sleep 10
+        env:
+          DATABASE_URL: postgresql://remitflow:test_password@localhost:5432/remitflow_soak
+          REDIS_URL: redis://localhost:6379
+
+      - name: Run 30-minute soak test
+        run: |
+          mkdir -p qa/load-testing/results
+          k6 run qa/load-testing/k6-api-soak.js \
+            --env BASE_URL=http://localhost:3001 \
+            --out json=qa/load-testing/results/soak-test.json
+
+      - name: Upload soak results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: soak-test-results
+          path: qa/load-testing/results/

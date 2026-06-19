@@ -1,0 +1,202 @@
+# RemitFlow — Data Retention & Privacy Policy (Technical Implementation)
+#
+# Compliance: GDPR (EU), NDPR (Nigeria), POPIA (South Africa), PDPA (Kenya)
+# Financial: CBN regulations, FCA record-keeping, FATF Recommendation 11
+
+---
+data_categories:
+
+  # ─── User Identity Data ──────────────────────────────────────────────────────
+  - category: "user_identity"
+    description: "PII: name, email, phone, address, date of birth"
+    storage: "PostgreSQL (encrypted at rest, AES-256)"
+    retention:
+      active_user: "Duration of account + 7 years (financial regulations)"
+      inactive_user: "5 years after last login (then anonymize)"
+      deleted_user: "Anonymize within 30 days of deletion request"
+    legal_basis:
+      gdpr: "Article 6(1)(b) — Contract performance + Article 6(1)(c) — Legal obligation"
+      ndpr: "Section 2.2 — Consent + legitimate interest"
+    deletion_procedure:
+      - "Replace PII with SHA-256 hash (preserves referential integrity)"
+      - "Retain transaction history with anonymized references"
+      - "Remove from search indices (OpenSearch)"
+      - "Purge from Redis cache"
+      - "Log deletion in audit trail (GDPR Article 30)"
+    automated: true
+    cron: "0 2 * * 0"  # Weekly Sunday 2am UTC
+
+  # ─── KYC Documents ──────────────────────────────────────────────────────────
+  - category: "kyc_documents"
+    description: "ID scans, selfies, proof of address, BVN/NIN verification results"
+    storage: "Object storage (S3/GCS, encrypted, separate bucket)"
+    retention:
+      active_user: "Duration of account + 7 years"
+      post_verification: "Original documents deleted after 90 days; verification result retained"
+      rejected_user: "6 months after rejection (regulatory requirement)"
+    legal_basis:
+      cbn: "CBN AML/CFT Regulations 2022 — 5 year minimum"
+      fca: "FCA SYSC 9.1 — 5 years after relationship ends"
+      fatf: "Recommendation 11 — 5 years minimum"
+    deletion_procedure:
+      - "Securely delete document files (cryptographic erasure)"
+      - "Retain verification metadata (passed/failed, date, tier)"
+      - "Retain document type and issuing country (no content)"
+
+  # ─── Transaction Records ─────────────────────────────────────────────────────
+  - category: "transactions"
+    description: "Transfer records, payment intents, settlement records, batch payouts"
+    storage: "PostgreSQL + TigerBeetle (immutable ledger)"
+    retention:
+      all: "7 years minimum (financial regulation requirement)"
+      tigerbeetle: "Permanent (append-only, cannot delete)"
+      postgresql: "7 years active, then archive to cold storage"
+    legal_basis:
+      cbn: "CBN Prudential Guidelines — 7 years"
+      fca: "FCA record-keeping — 5 years (we retain 7 for safety)"
+      tax: "Tax authority requirements — typically 6-7 years"
+    archival:
+      trigger: "Records older than 2 years"
+      destination: "S3 Glacier Deep Archive"
+      format: "Parquet (compressed, queryable)"
+      cron: "0 3 1 * *"  # Monthly 1st at 3am
+
+  # ─── Audit Logs ─────────────────────────────────────────────────────────────
+  - category: "audit_logs"
+    description: "System actions, admin operations, access logs, Kafka events"
+    storage: "Kafka (30 days hot) → S3 (7 years cold)"
+    retention:
+      kafka_hot: "30 days"
+      s3_cold: "7 years"
+      security_events: "10 years (fraud investigations)"
+    deletion_procedure:
+      - "Kafka topic retention.ms = 2592000000 (30 days)"
+      - "Kafka Connect archives to S3 before expiry"
+      - "S3 lifecycle policy moves to Glacier after 1 year"
+
+  # ─── SAR & Compliance Reports ────────────────────────────────────────────────
+  - category: "compliance_reports"
+    description: "SARs, CTRs, PEP screening results, sanctions hits"
+    storage: "PostgreSQL (encrypted, restricted access)"
+    retention:
+      all: "10 years (FATF Recommendation 11, CBN AML/CFT)"
+      active_investigation: "Duration of investigation + 10 years"
+    access_control:
+      - "Compliance team only (Permify role: compliance_officer)"
+      - "Audit trail on every access"
+      - "Cannot be modified or deleted (append-only)"
+    legal_basis:
+      fatf: "Recommendation 11 — record-keeping for 5+ years"
+      cbn: "CBN AML/CFT — 10 years"
+
+  # ─── Session & Auth Data ─────────────────────────────────────────────────────
+  - category: "sessions"
+    description: "Login sessions, OAuth tokens, device fingerprints"
+    storage: "Redis (active) + PostgreSQL (historical)"
+    retention:
+      active_session: "24 hours (auto-expire)"
+      refresh_token: "30 days"
+      login_history: "2 years"
+      device_fingerprints: "Duration of account"
+    deletion_procedure:
+      - "Redis TTL handles active session expiry"
+      - "Login history purged with account deletion"
+
+  # ─── Analytics & Metrics ─────────────────────────────────────────────────────
+  - category: "analytics"
+    description: "Prometheus metrics, Grafana data, usage statistics"
+    storage: "Prometheus TSDB + Lakehouse (DuckDB/Delta)"
+    retention:
+      prometheus_raw: "30 days"
+      prometheus_downsampled: "1 year (5m resolution)"
+      lakehouse: "3 years (aggregated, no PII)"
+    anonymization:
+      - "All analytics are aggregated (no individual user tracking)"
+      - "Corridor volumes, not individual transfer amounts"
+
+  # ─── Communication Data ──────────────────────────────────────────────────────
+  - category: "communications"
+    description: "SMS, email, push notification logs, webhook payloads"
+    storage: "PostgreSQL"
+    retention:
+      notification_content: "90 days"
+      delivery_metadata: "2 years (delivery status, timestamps)"
+      webhook_payloads: "30 days"
+
+---
+# DSAR (Data Subject Access Request) Implementation
+dsar:
+  right_to_access:
+    endpoint: "/api/trpc/privacy.exportData"
+    format: "JSON + PDF (machine-readable + human-readable)"
+    response_time: "30 days maximum (GDPR Article 12)"
+    includes:
+      - "All PII"
+      - "Transaction history"
+      - "KYC verification status"
+      - "Communication preferences"
+    excludes:
+      - "SAR filings (legal exemption)"
+      - "Internal risk scores"
+      - "Fraud investigation notes"
+
+  right_to_erasure:
+    endpoint: "/api/trpc/privacy.requestDeletion"
+    response_time: "30 days maximum"
+    exceptions:
+      - "Active financial obligations"
+      - "Regulatory retention requirements (7-10 years)"
+      - "Ongoing investigations"
+    process:
+      1: "User requests deletion via app or support"
+      2: "System checks for legal holds / obligations"
+      3: "If clear: schedule anonymization in 30 days"
+      4: "Notify user of timeline and any exceptions"
+      5: "Execute anonymization (replace PII with hash)"
+      6: "Confirm deletion to user"
+
+  right_to_portability:
+    endpoint: "/api/trpc/privacy.exportPortable"
+    format: "JSON (structured, machine-readable)"
+    includes: "All data provided by user + generated during use"
+
+---
+# Automated Retention Jobs
+automation:
+  jobs:
+    - name: "anonymize_inactive_users"
+      schedule: "0 2 * * 0"  # Weekly
+      query: "SELECT id FROM users WHERE last_login < now() - interval '5 years' AND NOT anonymized"
+      action: "anonymize_user(id)"
+
+    - name: "archive_old_transactions"
+      schedule: "0 3 1 * *"  # Monthly
+      query: "SELECT * FROM transfers WHERE created_at < now() - interval '2 years'"
+      action: "archive_to_s3_glacier(records)"
+
+    - name: "purge_expired_sessions"
+      schedule: "0 * * * *"  # Hourly
+      action: "redis SCAN + DEL expired keys"
+
+    - name: "purge_old_notifications"
+      schedule: "0 4 1 * *"  # Monthly
+      query: "DELETE FROM notifications WHERE created_at < now() - interval '90 days'"
+
+    - name: "kafka_archival"
+      schedule: "0 5 * * *"  # Daily
+      action: "Kafka Connect S3 sink (all topics > 30 days)"
+
+---
+# Encryption Standards
+encryption:
+  at_rest:
+    postgresql: "AES-256 (Transparent Data Encryption)"
+    s3: "AES-256-GCM (SSE-S3 or SSE-KMS)"
+    redis: "TLS in transit, no at-rest (ephemeral)"
+    tigerbeetle: "Built-in encryption"
+  in_transit:
+    external: "TLS 1.3 (minimum TLS 1.2)"
+    internal: "mTLS between services"
+  key_rotation:
+    schedule: "90 days"
+    method: "AWS KMS / HashiCorp Vault"

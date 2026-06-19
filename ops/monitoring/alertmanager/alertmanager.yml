@@ -1,0 +1,144 @@
+# RemitFlow — Alertmanager Configuration
+#
+# Routes alerts to appropriate channels based on severity and team.
+# Integrates: PagerDuty (critical), Opsgenie (warning), Slack (info)
+
+global:
+  resolve_timeout: 5m
+  pagerduty_url: "https://events.pagerduty.com/v2/enqueue"
+  opsgenie_api_url: "https://api.opsgenie.com/"
+  slack_api_url: "${SLACK_WEBHOOK_URL}"
+
+# Notification templates
+templates:
+  - "/etc/alertmanager/templates/*.tmpl"
+
+# Inhibition: suppress lower severity if higher is firing
+inhibit_rules:
+  - source_matchers:
+      - severity="critical"
+    target_matchers:
+      - severity="warning"
+    equal: ["alertname", "team"]
+
+  - source_matchers:
+      - alertname="ServiceDown"
+    target_matchers:
+      - alertname=~".*Latency.*|.*ErrorRate.*"
+    equal: ["job"]
+
+# Routing tree
+route:
+  receiver: "default-slack"
+  group_by: ["alertname", "team", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # Critical: Page immediately
+    - match:
+        severity: critical
+      receiver: "pagerduty-critical"
+      group_wait: 10s
+      repeat_interval: 1h
+      routes:
+        # Financial integrity: separate escalation
+        - match:
+            alertname: LedgerImbalance
+          receiver: "pagerduty-finance-critical"
+          group_wait: 0s
+          repeat_interval: 15m
+
+        # Compliance critical: separate channel
+        - match:
+            team: compliance
+          receiver: "pagerduty-compliance"
+          group_wait: 10s
+
+    # Warning: Create ticket
+    - match:
+        severity: warning
+      receiver: "opsgenie-warning"
+      group_wait: 1m
+      repeat_interval: 8h
+      routes:
+        - match:
+            team: finance
+          receiver: "opsgenie-finance"
+
+        - match:
+            team: compliance
+          receiver: "opsgenie-compliance"
+
+    # Info: Slack only
+    - match:
+        severity: info
+      receiver: "slack-info"
+      group_wait: 5m
+      repeat_interval: 24h
+
+# Receivers
+receivers:
+  - name: "default-slack"
+    slack_configs:
+      - channel: "#remitflow-alerts"
+        send_resolved: true
+        title: '{{ template "slack.title" . }}'
+        text: '{{ template "slack.text" . }}'
+
+  - name: "pagerduty-critical"
+    pagerduty_configs:
+      - service_key: "${PAGERDUTY_PLATFORM_KEY}"
+        severity: critical
+        description: '{{ template "pagerduty.description" . }}'
+        details:
+          firing: '{{ template "pagerduty.firing" . }}'
+          runbook: "{{ (index .Alerts 0).Labels.runbook }}"
+
+  - name: "pagerduty-finance-critical"
+    pagerduty_configs:
+      - service_key: "${PAGERDUTY_FINANCE_KEY}"
+        severity: critical
+        description: "FINANCIAL INTEGRITY: {{ .CommonAnnotations.summary }}"
+        details:
+          firing: '{{ template "pagerduty.firing" . }}'
+          runbook: "{{ (index .Alerts 0).Labels.runbook }}"
+    slack_configs:
+      - channel: "#remitflow-finance-emergency"
+        send_resolved: true
+        color: danger
+        title: "🚨 LEDGER ALERT: {{ .CommonAnnotations.summary }}"
+
+  - name: "pagerduty-compliance"
+    pagerduty_configs:
+      - service_key: "${PAGERDUTY_COMPLIANCE_KEY}"
+        severity: critical
+        description: "COMPLIANCE: {{ .CommonAnnotations.summary }}"
+
+  - name: "opsgenie-warning"
+    opsgenie_configs:
+      - api_key: "${OPSGENIE_API_KEY}"
+        message: "{{ .CommonAnnotations.summary }}"
+        priority: P3
+        tags: "remitflow,{{ .CommonLabels.team }}"
+
+  - name: "opsgenie-finance"
+    opsgenie_configs:
+      - api_key: "${OPSGENIE_API_KEY}"
+        message: "FINANCE: {{ .CommonAnnotations.summary }}"
+        priority: P2
+        tags: "remitflow,finance"
+
+  - name: "opsgenie-compliance"
+    opsgenie_configs:
+      - api_key: "${OPSGENIE_API_KEY}"
+        message: "COMPLIANCE: {{ .CommonAnnotations.summary }}"
+        priority: P2
+        tags: "remitflow,compliance"
+
+  - name: "slack-info"
+    slack_configs:
+      - channel: "#remitflow-alerts-info"
+        send_resolved: true
+        title: "ℹ️ {{ .CommonAnnotations.summary }}"
