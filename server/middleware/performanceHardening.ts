@@ -82,18 +82,18 @@ export function compressionHeaders(req: Request, res: Response, next: NextFuncti
 }
 
 // ─── Cache Control for Static Assets ─────────────────────────────────────────
+// NOTE: Production cache headers are handled by cacheBustingHeaders() in
+// server/_core/vite.ts which is content-hash-aware. This legacy middleware is
+// kept for backward compatibility but is NOT wired into the Express app.
 
 export function staticCacheHeaders(req: Request, res: Response, next: NextFunction) {
   if (req.path.match(/\.(js|css|png|jpg|jpeg|gif|svg|woff2?|ttf|eot|ico)$/)) {
-    // Immutable static assets — cache for 1 year
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
     res.setHeader("CDN-Cache-Control", "public, max-age=31536000");
   } else if (req.path.startsWith("/api/")) {
-    // API responses — no cache by default
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
     res.setHeader("Pragma", "no-cache");
   } else {
-    // HTML pages — short cache with revalidation
     res.setHeader("Cache-Control", "public, max-age=300, must-revalidate");
   }
   next();
