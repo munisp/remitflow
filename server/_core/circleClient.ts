@@ -100,18 +100,28 @@ const circleBreaker = getCircuitBreaker("circle-api");
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [1000, 2000, 4000];
 
+function isProduction(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
 async function circleRequest<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<T> {
   if (!CIRCLE_API_KEY) {
-    logger.warn("Circle API key not configured — returning mock response");
+    if (isProduction()) {
+      throw new Error("Circle API unavailable: CIRCLE_API_KEY not configured. Cannot process payment.");
+    }
+    logger.warn("Circle API key not configured — returning mock response (dev mode)");
     return mockCircleResponse(path) as T;
   }
 
   if (!circleBreaker.canRequest()) {
-    logger.warn({ path }, "Circle circuit breaker open — returning mock");
+    if (isProduction()) {
+      throw new Error("Circle API circuit breaker open — payment provider temporarily unavailable");
+    }
+    logger.warn({ path }, "Circle circuit breaker open — returning mock (dev mode)");
     return mockCircleResponse(path) as T;
   }
 

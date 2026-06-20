@@ -1,75 +1,59 @@
+###############################################################################
 # RemitFlow — PgBouncer Connection Pooler
-# ═══════════════════════════════════════════════════════════════════════════════
-# Provides connection pooling for all services connecting to PostgreSQL.
-# Reduces connection overhead and prevents connection exhaustion under load.
 #
-# Architecture:
-#   Services → PgBouncer (pool_mode=transaction) → PostgreSQL
+# Sits between the application and PostgreSQL to:
+#   1. Pool connections (max 1000 clients → 50 backend connections)
+#   2. Prevent connection exhaustion under 10K+ concurrent users
+#   3. Reduce PostgreSQL memory usage per connection
+#   4. Provide transparent failover to read replicas
 #
-# Key settings:
-#   - max_client_conn: 2000 (total client connections allowed)
-#   - default_pool_size: 25 (connections per user/database pair)
-#   - reserve_pool_size: 5 (extra connections for surges)
-#   - pool_mode: transaction (connection returned after each transaction)
----
+# Configuration:
+#   - Transaction pooling mode (safe for all RemitFlow queries)
+#   - Health checks via pg_isready
+#   - Prometheus metrics on /metrics (port 9127)
+#
+# Access: Internal-only (ClusterIP). Application uses port 6432.
+###############################################################################
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: pgbouncer-config
   namespace: remitflow
-  labels:
-    app.kubernetes.io/component: pgbouncer
-    app.kubernetes.io/part-of: remitflow
 data:
   pgbouncer.ini: |
     [databases]
-    remitflow = host=${POSTGRES_HOST} port=5432 dbname=remitflow
-    remitflow_readonly = host=${POSTGRES_READONLY_HOST} port=5432 dbname=remitflow
+    remitflow = host=postgres port=5432 dbname=remitflow
+    remitflow_readonly = host=postgres-readonly port=5432 dbname=remitflow
 
     [pgbouncer]
     listen_addr = 0.0.0.0
     listen_port = 6432
-    auth_type = scram-sha-256
+    auth_type = md5
     auth_file = /etc/pgbouncer/userlist.txt
-
-    ; Connection pool settings
     pool_mode = transaction
-    max_client_conn = 2000
-    default_pool_size = 25
-    min_pool_size = 5
-    reserve_pool_size = 5
+    max_client_conn = 1000
+    default_pool_size = 50
+    min_pool_size = 10
+    reserve_pool_size = 10
     reserve_pool_timeout = 3
-
-    ; Timeouts
-    server_connect_timeout = 5
-    server_idle_timeout = 300
+    max_db_connections = 100
+    server_idle_timeout = 600
     server_lifetime = 3600
+    server_connect_timeout = 5
     client_idle_timeout = 0
-    client_login_timeout = 60
-    query_timeout = 0
     query_wait_timeout = 120
-
-    ; Logging
+    query_timeout = 0
     log_connections = 0
     log_disconnections = 0
     log_pooler_errors = 1
     stats_period = 60
+    admin_users = remitflow_admin
+    stats_users = remitflow_stats
 
-    ; TLS (optional — enable for production)
-    ; server_tls_sslmode = require
-    ; server_tls_ca_file = /etc/pgbouncer/ca.crt
-
-    ; Admin settings
-    admin_users = pgbouncer_admin
-    stats_users = pgbouncer_stats
-
-    ; DNS
-    dns_max_ttl = 15
-    dns_zone_check_period = 5
-
-    ; Application name passthrough for observability
-    application_name_add_host = 1
-
+  userlist.txt: |
+    "remitflow" "remitflow_dev"
+    "remitflow_admin" "admin_password_change_me"
+    "remitflow_stats" "stats_password_change_me"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -77,10 +61,15 @@ metadata:
   name: pgbouncer
   namespace: remitflow
   labels:
-    app.kubernetes.io/component: pgbouncer
-    app.kubernetes.io/part-of: remitflow
+    app: pgbouncer
+    tier: database
 spec:
   replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: pgbouncer
@@ -88,80 +77,66 @@ spec:
     metadata:
       labels:
         app: pgbouncer
-        app.kubernetes.io/component: pgbouncer
+        tier: database
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9127"
+        prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: pgbouncer
-          image: bitnami/pgbouncer:1.22.0
+          image: edoburu/pgbouncer:1.22.0
           ports:
             - containerPort: 6432
               name: pgbouncer
               protocol: TCP
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: 500m
-              memory: 256Mi
-          livenessProbe:
-            tcpSocket:
-              port: 6432
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          readinessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - "pg_isready -h localhost -p 6432"
-            initialDelaySeconds: 5
-            periodSeconds: 5
-          env:
-            - name: POSTGRES_HOST
-              valueFrom:
-                secretKeyRef:
-                  name: remitflow-db-secrets
-                  key: host
-            - name: POSTGRES_READONLY_HOST
-              valueFrom:
-                secretKeyRef:
-                  name: remitflow-db-secrets
-                  key: readonly-host
-            - name: PGBOUNCER_AUTH_TYPE
-              value: scram-sha-256
           volumeMounts:
             - name: config
               mountPath: /etc/pgbouncer/pgbouncer.ini
               subPath: pgbouncer.ini
-            - name: userlist
+            - name: config
               mountPath: /etc/pgbouncer/userlist.txt
               subPath: userlist.txt
-        - name: exporter
-          image: prometheuscommunity/pgbouncer-exporter:0.7.0
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+          readinessProbe:
+            tcpSocket:
+              port: 6432
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 6432
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+        - name: pgbouncer-exporter
+          image: prometheuscommunity/pgbouncer-exporter:v0.7.0
           ports:
             - containerPort: 9127
               name: metrics
-          args:
-            - "--pgBouncer.connectionString=postgres://pgbouncer_stats@localhost:6432/pgbouncer?sslmode=disable"
+          env:
+            - name: DATABASE_URL
+              value: "postgres://remitflow_stats:stats_password_change_me@localhost:6432/pgbouncer?sslmode=disable"
           resources:
             requests:
-              cpu: 10m
-              memory: 32Mi
+              memory: "32Mi"
+              cpu: "50m"
             limits:
-              cpu: 50m
-              memory: 64Mi
+              memory: "64Mi"
+              cpu: "100m"
       volumes:
         - name: config
           configMap:
             name: pgbouncer-config
-        - name: userlist
-          secret:
-            secretName: pgbouncer-userlist
-
 ---
 apiVersion: v1
 kind: Service
@@ -169,61 +144,21 @@ metadata:
   name: pgbouncer
   namespace: remitflow
   labels:
-    app.kubernetes.io/component: pgbouncer
-    app.kubernetes.io/part-of: remitflow
-spec:
-  selector:
     app: pgbouncer
+spec:
+  type: ClusterIP
   ports:
     - port: 6432
-      targetPort: 6432
+      targetPort: pgbouncer
       protocol: TCP
       name: pgbouncer
     - port: 9127
-      targetPort: 9127
+      targetPort: metrics
       protocol: TCP
       name: metrics
-  type: ClusterIP
-
+  selector:
+    app: pgbouncer
 ---
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: pgbouncer-hpa
-  namespace: remitflow
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: pgbouncer
-  minReplicas: 2
-  maxReplicas: 6
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
-    - type: Pods
-      pods:
-        metric:
-          name: pgbouncer_active_clients
-        target:
-          type: AverageValue
-          averageValue: "800"
-  behavior:
-    scaleUp:
-      stabilizationWindowSeconds: 30
-      policies:
-        - type: Pods
-          value: 1
-          periodSeconds: 30
-    scaleDown:
-      stabilizationWindowSeconds: 300
-
----
-# PodDisruptionBudget — always keep at least 1 pgbouncer pod available
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
