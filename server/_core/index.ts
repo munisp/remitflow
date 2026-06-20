@@ -19,6 +19,7 @@ import { startMicroservices } from "./microservices";
 import { ensureTopicsExist, disconnectKafka } from "../middleware/kafka";
 import { metricsHandler } from "../metrics";
 import { registerMojaloopWebhooks } from "../mojaloop.webhook";
+import { registerPaymentRailWebhooks } from "../payment-rail-webhooks";
 import { registerSseClient, registerUserSseClient } from "../sse.service";
 import { requestIdMiddleware } from "../middleware/requestId";
 import { attachServicesHealthWS, stopServicesHealthWS } from "../ws-services-health.js";
@@ -299,6 +300,9 @@ async function startServer() {
 
   // Mojaloop FSPIOP webhook callbacks (PUT /api/mojaloop/callback/*)
   registerMojaloopWebhooks(app);
+
+  // PIX + UPI payment rail webhooks (POST /api/webhooks/pix, /api/webhooks/upi)
+  registerPaymentRailWebhooks(app);
 
   // Admin SSE endpoint — GET /api/admin/sse (real-time notifications)
   app.get("/api/admin/sse", async (req, res) => {

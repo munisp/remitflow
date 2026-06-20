@@ -377,8 +377,8 @@ async function enforceTransferLimits(userId: number, amount: number, currency: s
   const now = new Date();
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const [dailyRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
-  const [monthlyRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+  const [dailyRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
+  const [monthlyRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
   const dailyUsedUSD = Number(dailyRow?.total ?? 0) / fromRate;
   const monthlyUsedUSD = Number(monthlyRow?.total ?? 0) / fromRate;
   const limitCheck = checkTransferLimit(amountUSD, userTier, dailyUsedUSD, monthlyUsedUSD);
@@ -609,20 +609,20 @@ export const appRouter = router({
           const now = new Date();
           const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
           const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-          const [sentRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
-          const [recvRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, monthStart)));
+          const [sentRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+          const [recvRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, monthStart)));
           sentThisMonth = Number(sentRow?.total ?? 0);
           receivedThisMonth = Number(recvRow?.total ?? 0);
           // Last month totals for real monthly change calculation
-          const [sentLastRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
-          const [recvLastRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
+          const [sentLastRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
+          const [recvLastRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
           sentLastMonth = Number(sentLastRow?.total ?? 0);
           receivedLastMonth = Number(recvLastRow?.total ?? 0);
           // Spend by category — query actual transaction types
           const categoryTypes = ["bill", "airtime", "exchange", "topup"] as const;
           for (const cType of categoryTypes) {
             try {
-              const [row] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, cType), gte(transactions.createdAt, monthStart)));
+              const [row] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, cType), gte(transactions.createdAt, monthStart)));
               const val = Number(row?.total ?? 0);
               if (cType === "bill" || cType === "airtime") billsThisMonth += val;
               else if (cType === "exchange") exchangeThisMonth = val;
@@ -631,7 +631,7 @@ export const appRouter = router({
           }
           // Savings contributions this month
           try {
-            const [savRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "savings"), gte(transactions.createdAt, monthStart)));
+            const [savRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "savings"), gte(transactions.createdAt, monthStart)));
             savingsThisMonth = Number(savRow?.total ?? 0);
           } catch { /* skip */ }
         } catch { /* ignore monthly query errors in test env */ }
@@ -940,7 +940,7 @@ export const appRouter = router({
       const amtUsdW = input.amount / rateW;
       const limitsW = KYC_TIER_LIMITS[userTierW];
       const dayStartW = new Date(); dayStartW.setHours(0, 0, 0, 0);
-      const [dailyRowW] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "withdrawal"), gte(transactions.createdAt, dayStartW)));
+      const [dailyRowW] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "withdrawal"), gte(transactions.createdAt, dayStartW)));
       const dailyUsedW = Number(dailyRowW?.total ?? 0) / rateW;
       if (amtUsdW > limitsW.perTx) throw new TRPCError({ code: "FORBIDDEN", message: `Withdrawal exceeds per-transaction limit of $${limitsW.perTx.toLocaleString()} USD for your KYC tier.` });
       if (dailyUsedW + amtUsdW > limitsW.daily) throw new TRPCError({ code: "FORBIDDEN", message: `Withdrawal would exceed your daily limit of $${limitsW.daily.toLocaleString()} USD. Remaining today: $${Math.max(0, limitsW.daily - dailyUsedW).toFixed(0)}.` });
@@ -1076,8 +1076,8 @@ export const appRouter = router({
         const ratesForLimits = await getLiveRates("USD");
         const fromRateForLimits = ratesForLimits[input.fromCurrency] ?? 1;
         const amountInUsdForLimits = input.amount / fromRateForLimits;
-        const [dailyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
-        const [monthlyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+        const [dailyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
+        const [monthlyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
         const dailyUsedUSD = Number(dailyRow?.total ?? 0) / fromRateForLimits;
         const monthlyUsedUSD = Number(monthlyRow?.total ?? 0) / fromRateForLimits;
         const limitCheck = checkTransferLimit(amountInUsdForLimits, userTier, dailyUsedUSD, monthlyUsedUSD);
@@ -1322,7 +1322,9 @@ export const appRouter = router({
           }
           const { rates: ratesForPipeline } = await fetchLiveRates("USD").catch(() => ({ rates: {} as Record<string, number> }));
           const amountUSDForPipeline = input.amount / (ratesForPipeline[input.fromCurrency] ?? 1);
-          const mlFeatures = buildFeatures({ amount_usd: amountUSDForPipeline, source_country: "NG", dest_country: input.recipientCountry ?? "NG", user_kyc_level: kycTierNum, is_new_recipient: false });
+          const CURRENCY_TO_COUNTRY_ML: Record<string, string> = { CAD: "CA", USD: "US", GBP: "GB", EUR: "EU", NGN: "NG", GHS: "GH", KES: "KE", ZAR: "ZA", BRL: "BR", INR: "IN", TZS: "TZ", UGX: "UG", XOF: "SN", XAF: "CM", MWK: "MW", ZMW: "ZM" };
+          const mlSourceCountry = CURRENCY_TO_COUNTRY_ML[input.fromCurrency.toUpperCase()] ?? "US";
+          const mlFeatures = buildFeatures({ amount_usd: amountUSDForPipeline, source_country: mlSourceCountry, dest_country: input.recipientCountry ?? "NG", user_kyc_level: kycTierNum, is_new_recipient: false });
           const mlFraudResult = scoreFraud(mlFeatures);
           const amlFlagsForPipeline = getAmlFlags(amountUSDForPipeline);
           await runTransferPipeline(ref, ctx.user!.id, { fraudScore: mlFraudResult.score, amlFlags: amlFlagsForPipeline, kycTier: kycTierNum, amountUSD: amountUSDForPipeline });
@@ -4697,7 +4699,7 @@ Case: #${input.caseId}`,
         const avgResolutionHours = Math.round(Number((resRaw as any[])[0]?.avg_hours ?? 0));
         // Transfer volume per day
         const volRaw = await db.execute(
-          sql`SELECT DATE(created_at) as day, COALESCE(SUM(from_amount), 0) as volume FROM transactions WHERE created_at >= ${since} AND type = 'send' GROUP BY DATE(created_at) ORDER BY day ASC`
+          sql`SELECT DATE("createdAt") as day, COALESCE(SUM("fromAmount"), 0) as volume FROM transactions WHERE "createdAt" >= ${since} AND type = 'send' GROUP BY DATE("createdAt") ORDER BY day ASC`
         );
         const transferVolumePerDay = (volRaw as any[]).map((r: any) => ({ day: String(r.day), volume: Number(r.volume ?? 0) }));
         // Summary counts
@@ -4721,7 +4723,7 @@ Case: #${input.caseId}`,
         );
         const prevAvgResolutionHours = Math.round(Number((prevResRaw as any[])[0]?.avg_hours ?? 0));
         const prevVolRaw = await db.execute(
-          sql`SELECT COALESCE(SUM(from_amount), 0) as volume FROM transactions WHERE created_at >= ${prevSince} AND created_at < ${prevUntil} AND type = 'send'`
+          sql`SELECT COALESCE(SUM("fromAmount"), 0) as volume FROM transactions WHERE "createdAt" >= ${prevSince} AND "createdAt" < ${prevUntil} AND type = 'send'`
         );
         const prevTransferVolume = Number((prevVolRaw as any[])[0]?.volume ?? 0);
         const currTransferVolume = (transferVolumePerDay as any[]).reduce((s: number, r: any) => s + r.volume, 0);
