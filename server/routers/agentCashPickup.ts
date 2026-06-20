@@ -20,6 +20,7 @@ import { broadcastUserEvent } from "../sse.service.js";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
 import { logger } from "../_core/logger.js";
 import { sendNotification } from "../notifications.service.js";
+import { withTransferLock } from "../lib/transferLock.js";
 
 // ─── Pickup Code Generation ─────────────────────────────────────────────────
 
@@ -209,6 +210,8 @@ export const agentCashPickupRouter = router({
       recipientIdNumber: z.string().min(3).max(30),
     }))
     .mutation(async ({ ctx, input }) => {
+      // Acquire distributed lock to prevent concurrent reversal + disbursement
+      return withTransferLock(input.transferReference, "disburse cash pickup", async () => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -221,6 +224,15 @@ export const agentCashPickupRouter = router({
 
       if (!agent || agent.status === "suspended") {
         throw new TRPCError({ code: "FORBIDDEN", message: "Agent account not active or not found." });
+      }
+
+      // Verify the transfer hasn't been reversed while we were waiting for the lock
+      const txStateRows = await db.execute(sql`
+        SELECT status FROM transactions WHERE reference = ${input.transferReference} LIMIT 1
+      `);
+      const txState = (txStateRows.rows ?? txStateRows)?.[0] as any;
+      if (txState?.status === "reversed" || txState?.status === "cancelled") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: `Transfer has been ${txState.status}. Cannot disburse.` });
       }
 
       // Fetch the pickup assignment
@@ -287,13 +299,19 @@ export const agentCashPickupRouter = router({
         });
       }
 
-      // Deduct from agent wallet
+      // Deduct from agent wallet with pessimistic balance check (prevents negative balance)
       if (wallet) {
-        await db
+        const [updated] = await db
           .update(wallets)
-          .set({ balance: sql`${wallets.balance} - ${amount}`, updatedAt: new Date() })
-          .where(eq(wallets.id, wallet.id))
-          .returning();
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${amount} AS VARCHAR)`, updatedAt: new Date() })
+          .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${amount}`))
+          .returning({ balance: wallets.balance });
+        if (!updated) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Insufficient float balance (concurrent deduction detected). Please try again.",
+          });
+        }
       }
 
       // Record the disbursement transaction
@@ -397,6 +415,7 @@ export const agentCashPickupRouter = router({
           createdAt: new Date(),
         },
       };
+      }); // end withTransferLock
     }),
 
   // ── 4. Get pickup status (sender or recipient can check) ───────────────────

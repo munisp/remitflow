@@ -1046,7 +1046,7 @@ export const appRouter = router({
         return { workflowId: input.workflowId, status: temporalStatus, sagaSteps, error: result.error, isFallback: false };
       }),
 
-    send: transferSendProcedure.input(z.object({ fromCurrency: z.string().max(8), amount: z.number().positive().max(10_000_000), toCurrency: z.string().max(8), recipientName: z.string().min(1).max(128).trim(), recipientAccount: z.string().max(64).optional(), recipientEmail: z.string().email().max(320).optional(), recipientBank: z.string().max(128).optional(), recipientCountry: z.string().max(64).optional(), deliveryMethod: z.string().max(32).optional(), description: z.string().max(500).optional(), idempotencyKey: z.string().max(200).optional(), totpCode: z.string().length(6).optional() })).mutation(async ({ ctx, input }) => {
+    send: transferSendProcedure.input(z.object({ fromCurrency: z.string().max(8), amount: z.number().positive().max(10_000_000), toCurrency: z.string().max(8), recipientName: z.string().min(1).max(128).trim(), recipientAccount: z.string().max(64).optional(), recipientEmail: z.string().email().max(320).optional(), recipientBank: z.string().max(128).optional(), recipientCountry: z.string().max(64).optional(), deliveryMethod: z.string().max(32).optional(), description: z.string().max(500).optional(), idempotencyKey: z.string().max(200).optional(), totpCode: z.string().length(6).optional(), rateLockToken: z.string().max(64).optional() })).mutation(async ({ ctx, input }) => {
       // ─── 2FA enforcement for high-value transfers (> $1,000 USD equivalent) ───
       const HIGH_VALUE_THRESHOLD_USD = 1000;
       const ratesFor2fa = await getLiveRates("USD");
@@ -1241,6 +1241,17 @@ export const appRouter = router({
       const feeBreakdown = calculateFee(amountUsdForFee, { from: senderCountry, to: input.recipientCountry ?? "US" }, userTierForFee);
       const fee = feeBreakdown.totalFee * fromRate; // convert back to source currency
       const toAmount = (input.amount - fee) * fxRate;
+      // ─── FX rate lock validation: reject if rate moved > 0.5% since quote ──────
+      if (input.rateLockToken) {
+        const { validateRateLock } = await import("./lib/fxRateLock");
+        const lockResult = validateRateLock(input.rateLockToken, ctx.user!.id, input.fromCurrency, input.toCurrency, fxRate);
+        if (!lockResult.valid) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `FX rate has changed since your quote. ${lockResult.reason ?? 'Please request a new quote.'}`,
+          });
+        }
+      }
       const idempotencyKey = input.idempotencyKey ?? `TRF-${ctx.user!.id}-${Date.now()}`;
       // ─── Idempotency guard: reject duplicate transfers within 24h window ──────
       if (input.idempotencyKey) {
@@ -1450,12 +1461,15 @@ export const appRouter = router({
       ).catch(err => logger.error({ err }, "[ComplianceFiling] Auto-filing module failed"));
       return { success: true, reference: ref, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, fxRate, orchestrated: false, mlRisk: anomalyResult ? { isAnomaly: anomalyResult.isAnomaly, confidence: anomalyResult.confidence, requiresReview: anomalyResult.isAnomaly && anomalyResult.confidence > 0.65 } : null };
     }),
-    quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ input }) => {
+    quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ ctx, input }) => {
       const rates = await getLiveRates("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const fxRate = toRate / fromRate;
       const feeBreakdown = calculateFee(input.amount / fromRate, { from: input.fromCurrency.slice(0, 2), to: input.toCurrency.slice(0, 2) });
       const fee = feeBreakdown.totalFee * fromRate;
       const toAmount = (input.amount - fee) * fxRate;
-      return { fxRate, fee: Math.round(fee * 100) / 100, toAmount: Math.round(toAmount * 100) / 100, fromAmount: input.amount, estimatedTime: "1-3 minutes" };
+      // Generate FX rate lock token (valid for 60 seconds)
+      const { createRateLock } = await import("./lib/fxRateLock");
+      const rateLockToken = createRateLock(ctx.user!.id, input.fromCurrency, input.toCurrency, fxRate);
+      return { fxRate, fee: Math.round(fee * 100) / 100, toAmount: Math.round(toAmount * 100) / 100, fromAmount: input.amount, estimatedTime: "1-3 minutes", rateLockToken, rateLockExpiresInSeconds: 60 };
     }),
   }),
 

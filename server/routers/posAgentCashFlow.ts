@@ -311,13 +311,16 @@ export const posAgentCashFlowRouter = router({
           return [{ id: Date.now(), reference: ref }];
         });
 
-      // Deduct from wallet
+      // Deduct from wallet with pessimistic balance check (prevents negative float)
       if (wallet) {
-        await db
+        const [updated] = await db
           .update(wallets)
-          .set({ balance: sql`${wallets.balance} - ${input.amount}`, updatedAt: new Date() })
-          .where(eq(wallets.id, wallet.id))
-          .returning();
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)`, updatedAt: new Date() })
+          .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+          .returning({ balance: wallets.balance });
+        if (!updated) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient float balance (concurrent deduction). Please retry." });
+        }
       }
 
       // Update agent totals

@@ -13,6 +13,7 @@ import { transactions } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 import { logger } from "./_core/logger";
 import { advanceTransferState } from "./transfer-state-machine.js";
+import { verifyWebhookSignature, isWebhookDuplicate } from "./lib/webhookHmac.js";
 
 // ─── Webhook Rate Limiter ──────────────────────────────────────────────────────
 // Sliding window rate limiter for webhook endpoints to prevent replay attacks
@@ -83,11 +84,25 @@ interface PixWebhookPayload {
 
 function handlePixCallback(app: Express) {
   app.post("/api/webhooks/pix", async (req: Request, res: Response) => {
+    // HMAC signature verification
+    const rawBody = JSON.stringify(req.body);
+    if (!verifyWebhookSignature("pix", rawBody, req.headers as Record<string, string>)) {
+      logger.warn({ ip: req.ip }, "[PIX Webhook] Invalid HMAC signature");
+      res.status(401).json({ error: "Invalid webhook signature" });
+      return;
+    }
+
     const payload = req.body as PixWebhookPayload;
     const { endToEndId, status } = payload;
 
     if (!endToEndId) {
       res.status(400).json({ error: "Missing endToEndId" });
+      return;
+    }
+
+    // Deduplication check
+    if (isWebhookDuplicate("pix", endToEndId)) {
+      res.status(200).json({ received: true, duplicate: true });
       return;
     }
 
@@ -163,11 +178,24 @@ interface UpiWebhookPayload {
 
 function handleUpiCallback(app: Express) {
   app.post("/api/webhooks/upi", async (req: Request, res: Response) => {
+    // HMAC signature verification
+    const rawBody = JSON.stringify(req.body);
+    if (!verifyWebhookSignature("upi", rawBody, req.headers as Record<string, string>)) {
+      logger.warn({ ip: req.ip }, "[UPI Webhook] Invalid HMAC signature");
+      res.status(401).json({ error: "Invalid webhook signature" });
+      return;
+    }
+
     const payload = req.body as UpiWebhookPayload;
     const { transactionId, status } = payload;
 
     if (!transactionId) {
       res.status(400).json({ error: "Missing transactionId" });
+      return;
+    }
+
+    if (isWebhookDuplicate("upi", transactionId)) {
+      res.status(200).json({ received: true, duplicate: true });
       return;
     }
 
@@ -247,11 +275,23 @@ interface CipsWebhookPayload {
 
 function handleCipsCallback(app: Express) {
   app.post("/api/webhooks/cips", async (req: Request, res: Response) => {
+    const rawBody = JSON.stringify(req.body);
+    if (!verifyWebhookSignature("cips", rawBody, req.headers as Record<string, string>)) {
+      logger.warn({ ip: req.ip }, "[CIPS Webhook] Invalid HMAC signature");
+      res.status(401).json({ error: "Invalid webhook signature" });
+      return;
+    }
+
     const payload = req.body as CipsWebhookPayload;
     const { transactionId, status } = payload;
 
     if (!transactionId) {
       res.status(400).json({ error: "Missing transactionId" });
+      return;
+    }
+
+    if (isWebhookDuplicate("cips", transactionId)) {
+      res.status(200).json({ received: true, duplicate: true });
       return;
     }
 
@@ -318,10 +358,22 @@ function handleCipsCallback(app: Express) {
 
 function handleMojaloopCallback(app: Express): void {
   app.post("/api/webhooks/mojaloop", async (req: Request, res: Response) => {
+    const rawBody = JSON.stringify(req.body);
+    if (!verifyWebhookSignature("mojaloop", rawBody, req.headers as Record<string, string>)) {
+      logger.warn({ ip: req.ip }, "[Mojaloop Webhook] Invalid HMAC signature");
+      res.status(401).json({ error: "Invalid webhook signature" });
+      return;
+    }
+
     const { transferId, transferState, fulfilment, completedTimestamp } = req.body;
 
     if (!transferId) {
       res.status(400).json({ error: "Missing transferId" });
+      return;
+    }
+
+    if (isWebhookDuplicate("mojaloop", transferId)) {
+      res.status(200).json({ received: true, duplicate: true });
       return;
     }
 
@@ -372,10 +424,22 @@ function handleMojaloopCallback(app: Express): void {
 
 function handleSwiftCallback(app: Express): void {
   app.post("/api/webhooks/swift", async (req: Request, res: Response) => {
+    const rawBody = JSON.stringify(req.body);
+    if (!verifyWebhookSignature("swift", rawBody, req.headers as Record<string, string>)) {
+      logger.warn({ ip: req.ip }, "[SWIFT Webhook] Invalid HMAC signature");
+      res.status(401).json({ error: "Invalid webhook signature" });
+      return;
+    }
+
     const { uetr, transactionStatus, completionTime } = req.body;
 
     if (!uetr) {
       res.status(400).json({ error: "Missing UETR (Unique End-to-End Transaction Reference)" });
+      return;
+    }
+
+    if (isWebhookDuplicate("swift", uetr)) {
+      res.status(200).json({ received: true, duplicate: true });
       return;
     }
 
