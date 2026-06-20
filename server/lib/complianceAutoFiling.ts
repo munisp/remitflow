@@ -45,6 +45,8 @@ interface FilingResult {
 const CURRENCY_TO_JURISDICTION: Record<string, string> = {
   CAD: "CA", USD: "US", GBP: "GB", EUR: "EU",
   NGN: "NG", GHS: "GH", KES: "KE", ZAR: "ZA",
+  BRL: "BR", INR: "IN", TZS: "TZ", UGX: "UG",
+  XOF: "SN", XAF: "CM", MWK: "MW", ZMW: "ZM",
 };
 
 const TRAVEL_RULE_THRESHOLDS_USD: Record<string, number> = {
@@ -53,6 +55,13 @@ const TRAVEL_RULE_THRESHOLDS_USD: Record<string, number> = {
   GB: 0,       // UK: all transfers (no de minimis)
   NG: 3_250,   // NFIU: NGN 5,000,000 equivalent
   EU: 1_000,   // EU MiCA: EUR 1,000
+  GH: 1_000,   // Bank of Ghana: GHS 12,000 equivalent
+  KE: 1_000,   // CBK: KES 100,000 equivalent
+  ZA: 1_500,   // FIC (South Africa): ZAR 25,000 equivalent
+  BR: 1_000,   // COAF/Banco Central: BRL 5,000 equivalent
+  IN: 500,     // RBI: INR 50,000 equivalent
+  TZ: 1_000,   // BoT: TZS 2,500,000 equivalent
+  UG: 1_000,   // BoU: UGX 4,000,000 equivalent
 };
 
 const CTR_THRESHOLD_USD = 10_000;
@@ -79,6 +88,42 @@ export async function autoFileCompliance(ctx: TransferContext): Promise<FilingRe
   if (destJurisdiction === "NG" && ctx.toAmount >= 5_000_000) {
     const nfiuResult = await fileNFIUReport(ctx);
     results.push(nfiuResult);
+  }
+
+  // 4. Kenya CBK inbound reporting (KES > 1,000,000)
+  if (destJurisdiction === "KE" && ctx.toAmount >= 1_000_000) {
+    const keResult = await fileInboundReport(ctx, "KE", "CBK_CTR", 1_000_000);
+    results.push(keResult);
+  }
+
+  // 5. Ghana BoG inbound reporting (GHS > 20,000)
+  if (destJurisdiction === "GH" && ctx.toAmount >= 20_000) {
+    const ghResult = await fileInboundReport(ctx, "GH", "BOG_CTR", 20_000);
+    results.push(ghResult);
+  }
+
+  // 6. South Africa FIC inbound reporting (ZAR > 25,000)
+  if (destJurisdiction === "ZA" && ctx.toAmount >= 25_000) {
+    const zaResult = await fileInboundReport(ctx, "ZA", "FIC_CTR", 25_000);
+    results.push(zaResult);
+  }
+
+  // 7. Tanzania BoT inbound reporting (TZS > 10,000,000)
+  if (destJurisdiction === "TZ" && ctx.toAmount >= 10_000_000) {
+    const tzResult = await fileInboundReport(ctx, "TZ", "BOT_CTR", 10_000_000);
+    results.push(tzResult);
+  }
+
+  // 8. Brazil COAF inbound reporting (BRL > 50,000)
+  if (destJurisdiction === "BR" && ctx.toAmount >= 50_000) {
+    const brResult = await fileInboundReport(ctx, "BR", "COAF_CTR", 50_000);
+    results.push(brResult);
+  }
+
+  // 9. India RBI inbound reporting (INR > 1,000,000)
+  if (destJurisdiction === "IN" && ctx.toAmount >= 1_000_000) {
+    const inResult = await fileInboundReport(ctx, "IN", "RBI_CTR", 1_000_000);
+    results.push(inResult);
   }
 
   // 4. Persist all filing records to DB
@@ -220,5 +265,34 @@ async function fileNFIUReport(ctx: TransferContext): Promise<FilingResult> {
   } catch (err) {
     logger.error({ err, filingId }, "[NFIU] Filing failed");
     return { filingType: "NFIU_CTR", jurisdiction: "NG", status: "failed", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function fileInboundReport(
+  ctx: TransferContext,
+  jurisdiction: string,
+  filingType: string,
+  threshold: number,
+): Promise<FilingResult> {
+  const filingId = `${filingType}-${ctx.reference}-${Date.now()}`;
+  try {
+    const db = await getDb();
+    if (db) {
+      await db.execute(sql`
+        INSERT INTO audit_logs ("userId", "action", "description", "severity", "createdAt")
+        VALUES (
+          ${ctx.userId},
+          ${`${filingType}_FILED`},
+          ${`${filingType} inbound report filed for ${jurisdiction}: ${ctx.toCurrency} ${ctx.toAmount.toLocaleString()} (threshold: ${threshold.toLocaleString()}) to ${ctx.recipientName} at ${ctx.recipientBank ?? "unknown bank"}. Filing ID: ${filingId}`},
+          'info',
+          NOW()
+        )
+      `);
+    }
+    logger.info({ filingId, jurisdiction, amount: ctx.toAmount, threshold }, `[${filingType}] Inbound report filed`);
+    return { filingType, jurisdiction, status: "filed", filingId };
+  } catch (err) {
+    logger.error({ err, filingId }, `[${filingType}] Filing failed`);
+    return { filingType, jurisdiction, status: "failed", error: err instanceof Error ? err.message : String(err) };
   }
 }

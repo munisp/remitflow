@@ -213,6 +213,6 @@ export async function checkVelocity(
     const attemptsInWindow = Number(rows[0]?.cnt ?? 0);
     return { allowed: attemptsInWindow < maxAttempts, attemptsInWindow };
   } catch {
-    return { allowed: true, attemptsInWindow: 0 };
+    return { allowed: false, attemptsInWindow: maxAttempts };
   }
 }
