@@ -1,0 +1,124 @@
+# RemitFlow — Fluvio Real-Time Fund Flow Streaming Configuration
+#
+# Fluvio topics for low-latency event streaming of all fund movements.
+# Used for:
+#   - Real-time fraud detection (sub-100ms)
+#   - Live transaction monitoring dashboard
+#   - Balance change notifications
+#   - Anomaly detection pipeline
+#   - Compliance event stream
+
+topics:
+  # Primary fund flow event stream — all 15 flow types
+  - name: fund-flow-stream
+    partitions: 12
+    replication: 3
+    retention:
+      time: 168h  # 7 days
+      segment_size: 1073741824  # 1GB
+    compression: lz4
+    max_partition_size: 10737418240  # 10GB
+
+  # Saga lifecycle events (started, step-completed, compensated, failed)
+  - name: fund-flow-sagas
+    partitions: 6
+    replication: 3
+    retention:
+      time: 720h  # 30 days (long retention for audit)
+    compression: lz4
+
+  # Balance change stream (every debit/credit, for real-time alerting)
+  - name: balance-changes
+    partitions: 24
+    replication: 3
+    retention:
+      time: 72h  # 3 days
+    compression: lz4
+    max_partition_size: 5368709120  # 5GB
+
+  # Fraud detection input (enriched events for ML pipeline)
+  - name: fraud-detection-input
+    partitions: 12
+    replication: 3
+    retention:
+      time: 168h
+    compression: lz4
+
+  # Reconciliation results stream
+  - name: reconciliation-results
+    partitions: 3
+    replication: 3
+    retention:
+      time: 720h  # 30 days
+    compression: zstd
+
+  # Circuit breaker state changes
+  - name: circuit-breaker-events
+    partitions: 3
+    replication: 3
+    retention:
+      time: 72h
+    compression: lz4
+
+# SmartModules (Fluvio WASM filters/transforms)
+smart_modules:
+  # Filter: only pass through high-value transactions (> $1000 equivalent)
+  - name: high-value-filter
+    type: filter
+    source_topic: fund-flow-stream
+    output_topic: high-value-transactions
+    params:
+      threshold_usd: 1000
+
+  # Map: extract balance-relevant fields for the balance stream
+  - name: balance-extractor
+    type: map
+    source_topic: fund-flow-stream
+    output_topic: balance-changes
+    params:
+      fields: ["userId", "amount", "currency", "flowType", "operationId", "timestamp"]
+
+  # Filter: detect potential fraud patterns (velocity, amount anomalies)
+  - name: fraud-pattern-detector
+    type: filter
+    source_topic: fund-flow-stream
+    output_topic: fraud-detection-input
+    params:
+      velocity_window_seconds: 3600
+      max_transactions_per_window: 10
+      amount_anomaly_std_devs: 3
+
+# Connectors
+connectors:
+  # Kafka mirror — replicate fund flow events to Kafka for long-term storage
+  - name: kafka-mirror
+    type: sink
+    source_topic: fund-flow-stream
+    config:
+      type: kafka
+      brokers: "${KAFKA_BROKERS}"
+      topic: "remitflow.fund-flow.events"
+      compression: lz4
+
+  # PostgreSQL sink — write reconciliation results to audit table
+  - name: postgres-audit-sink
+    type: sink
+    source_topic: reconciliation-results
+    config:
+      type: postgres
+      url: "${DATABASE_URL}"
+      table: fund_flow_audit
+      batch_size: 100
+      linger_ms: 1000
+
+  # HTTP webhook — notify external systems of high-value transactions
+  - name: high-value-webhook
+    type: sink
+    source_topic: high-value-transactions
+    config:
+      type: http
+      url: "${CORE_API_URL}/api/internal/high-value-alert"
+      method: POST
+      headers:
+        Content-Type: application/json
+        X-Internal-Secret: "${INTERNAL_API_SECRET}"
