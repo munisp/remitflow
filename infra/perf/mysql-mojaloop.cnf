@@ -1,0 +1,139 @@
+# =============================================================================
+# RemitFlow — MySQL 8.0 Performance Tuning for Mojaloop Central Ledger
+# Target: 1M+ transfers/sec on 64-core / 256GB server with NVMe storage
+#
+# Mojaloop services using MySQL:
+#   - central-ledger (transfers, positions, settlements)
+#   - account-lookup-service (participant resolution)
+#   - central-settlement (netting & settlement)
+# =============================================================================
+
+[mysqld]
+# ── InnoDB Storage Engine (primary tuning target) ─────────────────────────────
+
+# Buffer pool: 70% of RAM for a dedicated DB server
+innodb_buffer_pool_size = 180G
+innodb_buffer_pool_instances = 16
+innodb_buffer_pool_chunk_size = 2G
+
+# Redo log: larger = fewer checkpoints = higher throughput
+innodb_redo_log_capacity = 16G
+innodb_log_buffer_size = 256M
+
+# Flush behavior: 2 = flush to OS cache every commit (best throughput)
+# Use 1 (fsync every commit) if durability > throughput
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method = O_DIRECT
+innodb_doublewrite = ON
+
+# I/O capacity: NVMe can sustain 50K+ IOPS
+innodb_io_capacity = 20000
+innodb_io_capacity_max = 40000
+innodb_read_io_threads = 16
+innodb_write_io_threads = 16
+
+# Page cleaner: aggressive flushing to avoid stalls
+innodb_page_cleaners = 8
+innodb_lru_scan_depth = 2048
+innodb_max_dirty_pages_pct = 90
+innodb_max_dirty_pages_pct_lwm = 10
+
+# Concurrency: 0 = let InnoDB manage concurrency adaptively
+innodb_thread_concurrency = 0
+innodb_spin_wait_delay = 6
+innodb_spin_wait_pause_multiplier = 50
+
+# Change buffer: disabled for high-throughput OLTP (all ops are unique inserts)
+innodb_change_buffering = none
+
+# Adaptive hash index: enable for point lookups (Mojaloop transfer IDs)
+innodb_adaptive_hash_index = ON
+innodb_adaptive_hash_index_parts = 16
+
+# Compression: disabled for latency-sensitive OLTP
+innodb_compression_level = 0
+
+# ── Connection Handling ───────────────────────────────────────────────────────
+
+max_connections = 5000
+thread_cache_size = 256
+table_open_cache = 8192
+table_open_cache_instances = 16
+table_definition_cache = 4096
+
+# Thread pool (MySQL Enterprise / Percona)
+# thread_handling = pool-of-threads
+# thread_pool_size = 64
+# thread_pool_max_threads = 2000
+
+# ── Query Optimization ───────────────────────────────────────────────────────
+
+# Sort/join buffers per connection — keep small (per-thread allocation)
+sort_buffer_size = 4M
+join_buffer_size = 8M
+read_buffer_size = 2M
+read_rnd_buffer_size = 4M
+tmp_table_size = 256M
+max_heap_table_size = 256M
+
+# Optimizer: use index condition pushdown, MRR, BKA
+optimizer_switch = 'index_condition_pushdown=on,mrr=on,mrr_cost_based=off,batched_key_access=on'
+
+# ── Binary Log / Replication ─────────────────────────────────────────────────
+
+# GTID-based replication for Mojaloop HA
+server_id = 1
+log_bin = mysql-bin
+binlog_format = ROW
+binlog_row_image = MINIMAL
+sync_binlog = 0
+binlog_expire_logs_seconds = 604800
+gtid_mode = ON
+enforce_gtid_consistency = ON
+
+# Group replication readiness
+binlog_checksum = NONE
+transaction_write_set_extraction = XXHASH64
+
+# Semi-sync replication for consistency
+# rpl_semi_sync_source_enabled = ON
+# rpl_semi_sync_source_timeout = 1000
+
+# ── Network ──────────────────────────────────────────────────────────────────
+
+max_allowed_packet = 64M
+net_buffer_length = 32K
+net_read_timeout = 30
+net_write_timeout = 60
+interactive_timeout = 3600
+wait_timeout = 600
+connect_timeout = 10
+
+# ── Monitoring ───────────────────────────────────────────────────────────────
+
+# Performance schema: enable for production monitoring
+performance_schema = ON
+performance_schema_max_table_instances = 8192
+
+# Slow query log: capture queries > 100ms
+slow_query_log = ON
+slow_query_log_file = /var/log/mysql/slow.log
+long_query_time = 0.1
+log_queries_not_using_indexes = ON
+min_examined_row_limit = 1000
+
+# General log: OFF in production
+general_log = OFF
+
+# Error log verbosity
+log_error_verbosity = 2
+
+# ── Character Set ────────────────────────────────────────────────────────────
+
+character_set_server = utf8mb4
+collation_server = utf8mb4_0900_ai_ci
+
+# ── Security ─────────────────────────────────────────────────────────────────
+
+local_infile = OFF
+skip_symbolic_links = ON

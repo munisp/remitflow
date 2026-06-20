@@ -1,0 +1,152 @@
+# OpenSearch StatefulSet — 3-node cluster for 1M+ index ops/sec
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: opensearch
+  namespace: remitflow
+  labels:
+    app: opensearch
+    tier: search
+spec:
+  serviceName: opensearch
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: opensearch
+  template:
+    metadata:
+      labels:
+        app: opensearch
+        tier: search
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9114"
+    spec:
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: sysctl
+          image: busybox:1.36
+          command: ["sysctl", "-w", "vm.max_map_count=262144"]
+          securityContext:
+            privileged: true
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.13.0
+          ports:
+            - containerPort: 9200
+              name: http
+              protocol: TCP
+            - containerPort: 9300
+              name: transport
+              protocol: TCP
+            - containerPort: 9600
+              name: perf
+              protocol: TCP
+          env:
+            - name: cluster.name
+              value: remitflow-cluster
+            - name: node.name
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: discovery.seed_hosts
+              value: "opensearch-0.opensearch,opensearch-1.opensearch,opensearch-2.opensearch"
+            - name: cluster.initial_cluster_manager_nodes
+              value: "opensearch-0,opensearch-1,opensearch-2"
+            - name: OPENSEARCH_JAVA_OPTS
+              value: "-Xms16g -Xmx16g -XX:+UseG1GC -XX:G1HeapRegionSize=16m -XX:InitiatingHeapOccupancyPercent=35 -XX:MaxGCPauseMillis=200"
+            - name: bootstrap.memory_lock
+              value: "true"
+            - name: DISABLE_INSTALL_DEMO_CONFIG
+              value: "true"
+            - name: DISABLE_SECURITY_PLUGIN
+              value: "true"
+            - name: thread_pool.write.queue_size
+              value: "2000"
+            - name: thread_pool.search.queue_size
+              value: "1000"
+            - name: indices.memory.index_buffer_size
+              value: "20%"
+            - name: indices.queries.cache.size
+              value: "20%"
+          volumeMounts:
+            - name: data
+              mountPath: /usr/share/opensearch/data
+          resources:
+            requests:
+              memory: "24Gi"
+              cpu: "4"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+          readinessProbe:
+            httpGet:
+              path: /_cluster/health?local=true
+              port: 9200
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /_cluster/health?local=true
+              port: 9200
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - opensearch
+              topologyKey: kubernetes.io/hostname
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3-nvme
+        resources:
+          requests:
+            storage: 500Gi
+---
+# OpenSearch headless service for StatefulSet DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch
+  namespace: remitflow
+  labels:
+    app: opensearch
+spec:
+  clusterIP: None
+  selector:
+    app: opensearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+      name: http
+    - port: 9300
+      targetPort: 9300
+      name: transport
+---
+# OpenSearch client-facing service (load balanced)
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch-client
+  namespace: remitflow
+  labels:
+    app: opensearch
+spec:
+  type: ClusterIP
+  selector:
+    app: opensearch
+  ports:
+    - port: 9200
+      targetPort: 9200
+      name: http

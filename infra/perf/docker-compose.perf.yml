@@ -223,3 +223,134 @@ services:
         reservations:
           cpus: "1"
           memory: 1G
+
+  # ── MySQL (Mojaloop Central Ledger DB) ──────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    volumes:
+      - mysql_perf_data:/var/lib/mysql
+      - ./infra/perf/mysql-mojaloop.cnf:/etc/mysql/conf.d/perf.cnf:ro
+    environment:
+      MYSQL_ROOT_PASSWORD: root_secret_change_in_production
+      MYSQL_DATABASE: remitflow
+      MYSQL_USER: remitflow
+      MYSQL_PASSWORD: remitflow_secret
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 200G
+        reservations:
+          cpus: "4"
+          memory: 180G
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      memlock:
+        soft: -1
+        hard: -1
+    sysctls:
+      net.core.somaxconn: 65535
+
+  # ── OpenSearch (3-node cluster) ─────────────────────────────────────────────
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    environment:
+      cluster.name: remitflow-cluster
+      node.name: opensearch-1
+      discovery.seed_hosts: "opensearch-1,opensearch-2,opensearch-3"
+      cluster.initial_cluster_manager_nodes: "opensearch-1,opensearch-2,opensearch-3"
+      OPENSEARCH_JAVA_OPTS: "-Xms16g -Xmx16g -XX:+UseG1GC -XX:G1HeapRegionSize=16m -XX:InitiatingHeapOccupancyPercent=35 -XX:MaxGCPauseMillis=200"
+      bootstrap.memory_lock: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      thread_pool.write.queue_size: "2000"
+      thread_pool.search.queue_size: "1000"
+      indices.memory.index_buffer_size: "20%"
+      indices.queries.cache.size: "20%"
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 32G
+        reservations:
+          cpus: "4"
+          memory: 24G
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+  # ── Fluvio (streaming platform) ─────────────────────────────────────────────
+  fluvio:
+    image: infinyon/fluvio:latest
+    environment:
+      FLUVIO_SC_PUBLIC_ENDPOINT: "0.0.0.0:9003"
+      FLUVIO_SPU_MIN: "3"
+      SPU_LOG_SEGMENT_SIZE: "268435456"
+      SPU_LOG_INDEX_MAX_BYTES: "10485760"
+      SPU_SOCKET_SEND_BUFFER_SIZE: "1048576"
+      SPU_SOCKET_RECEIVE_BUFFER_SIZE: "1048576"
+      SPU_BATCH_MAX_SIZE: "1048576"
+      SPU_LOG_FLUSH_WRITE_COUNT: "10000"
+      SPU_REPLICATION_FACTOR: "2"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+        reservations:
+          cpus: "2"
+          memory: 4G
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+  # ── open-appsec WAF agent ───────────────────────────────────────────────────
+  openappsec-agent:
+    image: ghcr.io/openappsec/agent:latest
+    environment:
+      OPENAPPSEC_MODE: prevent
+      OPENAPPSEC_LOG_LEVEL: warning
+      OPENAPPSEC_MAX_BODY_SIZE: "65536"
+      OPENAPPSEC_INSPECTION_TIMEOUT_MS: "5"
+      OPENAPPSEC_MAX_CONCURRENT_INSPECTIONS: "10000"
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 2G
+        reservations:
+          cpus: "2"
+          memory: 1G
+
+  # ── Lakehouse ETL (high-throughput pipeline) ────────────────────────────────
+  lakehouse-etl:
+    environment:
+      PIPELINE_BATCH_SIZE: "100000"
+      CDC_BATCH_SIZE: "10000"
+      CDC_POLL_INTERVAL_MS: "100"
+      DB_POOL_MIN_SIZE: "10"
+      DB_POOL_MAX_SIZE: "50"
+      PARQUET_ROW_GROUP_SIZE: "134217728"
+      PARQUET_COMPRESSION: zstd
+      DUCKDB_THREADS: "16"
+      DUCKDB_MEMORY_LIMIT: "32GB"
+      MAX_CONCURRENT_EXTRACTORS: "8"
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 48G
+        reservations:
+          cpus: "4"
+          memory: 32G
+
+volumes:
+  mysql_perf_data:
+    driver: local
