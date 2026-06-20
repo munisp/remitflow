@@ -303,11 +303,16 @@ export async function runTransferPipeline(
       return;
     }
     // Step 2: AML check
+    // CTR_REQUIRED and TRAVEL_RULE are informational filing requirements — they
+    // must NOT block the transfer.  Only genuinely suspicious flags (SAR_REVIEW
+    // with high risk, or EDD_REQUIRED for sanctioned corridors) should hold.
     await advanceTransferState(transferRef, userId, "aml_check");
     await delay(STATE_DURATION_MS.aml_check!);
-    if (context.amlFlags.length > 0 && context.amountUSD >= 10_000) {
+    const INFORMATIONAL_FLAGS = new Set(["CTR_REQUIRED", "TRAVEL_RULE"]);
+    const blockingAmlFlags = context.amlFlags.filter(f => !INFORMATIONAL_FLAGS.has(f));
+    if (blockingAmlFlags.length > 0 && context.amountUSD >= 10_000) {
       await advanceTransferState(transferRef, userId, "failed", {
-        failureReason: `AML hold: ${context.amlFlags.join(", ")}. Manual review required.`,
+        failureReason: `AML hold: ${blockingAmlFlags.join(", ")}. Manual review required.`,
         requiresManualReview: true,
       });
       return;
@@ -341,7 +346,26 @@ export async function runTransferPipeline(
         const currency = (txRow.toCurrency ?? "").toUpperCase();
         const amount = safeParseAmount(txRow.toAmount ?? "0");
         try {
-          if (currency === "BRL" || country.includes("brazil")) {
+          const fromCur = (txRow.fromCurrency ?? "").toUpperCase();
+          if (fromCur === "CAD" && ["NGN","KES","GHS","TZS","UGX","XOF","ZAR","XAF"].includes(currency)) {
+            // Mark Lane FX Bridge (Canadian corridor → African destination)
+            const { initiateMarkLaneTransfer } = await import("./integrations/marklane/markLaneClient");
+            const mlResult = await initiateMarkLaneTransfer({
+              fromCurrency: "CAD",
+              toCurrency: currency,
+              amount,
+              senderName: txRow.recipientName ?? "RemitFlow User",
+              senderEmail: "",
+              recipientName: txRow.recipientName ?? "Unknown",
+              recipientAccount: txRow.recipientAccount ?? "unknown",
+              recipientBank: txRow.recipientBank ?? "unknown",
+              recipientCountry: country || "NG",
+              corridor: `CA-${currency.slice(0, 2)}`,
+              purpose: "remittance",
+              idempotencyKey: transferRef,
+            });
+            partnerRef = mlResult.transferId;
+          } else if (currency === "BRL" || country.includes("brazil")) {
             // PIX (Brazil)
             const pixResult = await pixTransfer({
               pixKey: txRow.recipientAccount ?? `cpf-${Date.now()}`,
@@ -380,18 +404,21 @@ export async function runTransferPipeline(
             partnerRef = genericResult.transferId;
           }
         } catch (railErr) {
-          logger.warn(`[TransferStateMachine] Payment rail error for ${transferRef}:`, railErr);
-          // Non-fatal: use generated reference, partner_sent still proceeds
+          logger.error(`[TransferStateMachine] Payment rail error for ${transferRef}:`, railErr);
+          await advanceTransferState(transferRef, userId, "failed", {
+            failureReason: `Payment rail disbursement failed: ${railErr instanceof Error ? railErr.message : String(railErr)}. Funds will be returned to sender wallet.`,
+            requiresManualReview: true,
+          });
+          return;
         }
       }
     }
     await advanceTransferState(transferRef, userId, "partner_sent", {
       partnerReference: partnerRef,
     });
-    // Note: partner_sent → completed is triggered by webhook/callback from partner network
-    // For demo/simulation, we advance to completed after a delay
-    await delay(STATE_DURATION_MS.partner_sent!);
-    await advanceTransferState(transferRef, userId, "completed");
+    // partner_sent → completed is triggered by webhook/callback from partner network.
+    // Do NOT auto-advance — the payment rail webhook handler calls
+    // advanceTransferState(ref, userId, "completed") when settlement is confirmed.
   } catch (err) {
     logger.error(`[TransferStateMachine] Pipeline error for ${transferRef}:`, err);
     await advanceTransferState(transferRef, userId, "failed", {
