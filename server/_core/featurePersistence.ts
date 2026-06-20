@@ -159,16 +159,24 @@ export async function persistFeatureRecord(
   try {
     const columns = Object.keys(data);
     const values = Object.values(data);
-    const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
     const columnList = columns.map(c => `"${camelToSnake(c)}"`).join(", ");
+    // Build parameterized placeholders for safe insertion
+    const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
     const updateSet = columns.map((c, i) => `"${camelToSnake(c)}" = $${i + 1}`).join(", ");
 
-    await (db as any).execute(sql.raw(
-      `INSERT INTO "${tableName}" (${columnList}) VALUES (${placeholders})
-       ON CONFLICT ("id") DO UPDATE SET ${updateSet}`,
-    ));
-  } catch {
-    // Table may not exist — features degrade to in-memory only
+    const query = `INSERT INTO "${tableName}" (${columnList}) VALUES (${placeholders})
+       ON CONFLICT ("id") DO UPDATE SET ${updateSet}`;
+
+    // Use parameterized query with actual values bound
+    const serializedValues = values.map(v => {
+      if (v === null || v === undefined) return null;
+      if (typeof v === "object") return JSON.stringify(v);
+      return v;
+    });
+
+    await (db as any).execute(sql.raw(query), serializedValues);
+  } catch (err) {
+    logger.debug({ err, tableName, id }, "persistFeatureRecord failed — table may not exist");
   }
 }
 
@@ -226,9 +234,10 @@ export async function loadFeatureRecord(
   if (!db) return null;
 
   try {
-    const rows = await (db as any).execute(sql.raw(
-      `SELECT * FROM "${tableName}" WHERE id = '${id}' LIMIT 1`
-    ));
+    // Use parameterized query to prevent SQL injection
+    const rows = await (db as any).execute(
+      sql`SELECT * FROM ${sql.raw(`"${tableName}"`)} WHERE id = ${id} LIMIT 1`
+    );
     if (!rows || !Array.isArray(rows) || rows.length === 0) return null;
     const row = rows[0] as Record<string, unknown>;
     const camelRow: Record<string, unknown> = {};
@@ -252,9 +261,9 @@ export async function deleteFeatureRecord(
   if (!db) return;
 
   try {
-    await (db as any).execute(sql.raw(
-      `DELETE FROM "${tableName}" WHERE id = '${id}'`
-    ));
+    await (db as any).execute(
+      sql`DELETE FROM ${sql.raw(`"${tableName}"`)} WHERE id = ${id}`
+    );
   } catch {
     // Graceful degradation
   }
@@ -272,18 +281,19 @@ export async function updateFeatureRecord(
   if (!db) return;
 
   try {
-    const updates = Object.entries(data)
-      .map(([key, val]) => {
-        const col = camelToSnake(key);
-        if (val === null || val === undefined) return `"${col}" = NULL`;
-        if (typeof val === "number") return `"${col}" = ${val}`;
-        if (typeof val === "boolean") return `"${col}" = ${val}`;
-        return `"${col}" = '${String(val).replace(/'/g, "''")}'`;
-      })
-      .join(", ");
-    await (db as any).execute(sql.raw(
-      `UPDATE "${tableName}" SET ${updates} WHERE id = '${id}'`
-    ));
+    const entries = Object.entries(data);
+    const setClauses = entries.map(([key], i) => `"${camelToSnake(key)}" = $${i + 1}`).join(", ");
+    const values = entries.map(([, val]) => {
+      if (val === null || val === undefined) return null;
+      if (typeof val === "object") return JSON.stringify(val);
+      return val;
+    });
+    values.push(id); // for WHERE clause
+
+    await (db as any).execute(
+      sql.raw(`UPDATE "${tableName}" SET ${setClauses} WHERE id = $${entries.length + 1}`),
+      values,
+    );
   } catch {
     // Graceful degradation
   }

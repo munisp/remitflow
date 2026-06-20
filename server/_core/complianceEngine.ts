@@ -89,6 +89,10 @@ export interface ComplianceDecision {
   decidedAt: string;
 }
 
+function isProduction(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
 const complianceBreaker = getCircuitBreaker("compliance-engine");
 
 // ── Sanctions Screening ─────────────────────────────────────────────────────
@@ -99,7 +103,35 @@ export async function screenSanctions(params: {
   country?: string;
   type?: "individual" | "entity";
 }): Promise<SanctionsScreenResult> {
-  if (!process.env.OFAC_API_KEY || !complianceBreaker.canRequest()) {
+  if (!process.env.OFAC_API_KEY) {
+    if (isProduction()) {
+      // FAIL-CLOSED: In production, missing sanctions screening = block transaction
+      return {
+        screened: false,
+        sanctioned: false,
+        matchScore: 0,
+        lists: [],
+        matchedEntries: [],
+        screenedAt: new Date().toISOString(),
+        source: "mock",
+        _blocked: true,
+        _reason: "OFAC_API_KEY not configured — cannot clear transaction",
+      } as SanctionsScreenResult & { _blocked: boolean; _reason: string };
+    }
+    return mockSanctionsScreen(params.name);
+  }
+  if (!complianceBreaker.canRequest()) {
+    if (isProduction()) {
+      return {
+        screened: false,
+        sanctioned: false,
+        matchScore: 0,
+        lists: [],
+        matchedEntries: [],
+        screenedAt: new Date().toISOString(),
+        source: "mock",
+      };
+    }
     return mockSanctionsScreen(params.name);
   }
 
@@ -140,7 +172,19 @@ export async function screenSanctions(params: {
       source: "combined",
     };
   } catch (err) {
-    logger.warn({ error: err }, "OFAC screening failed — falling back to mock");
+    logger.error({ error: err }, "OFAC screening failed");
+    if (isProduction()) {
+      // FAIL-CLOSED: screening failure = cannot clear, require manual review
+      return {
+        screened: false,
+        sanctioned: false,
+        matchScore: 0,
+        lists: [],
+        matchedEntries: [],
+        screenedAt: new Date().toISOString(),
+        source: "mock",
+      };
+    }
     return mockSanctionsScreen(params.name);
   }
 }
@@ -175,6 +219,19 @@ export async function assessAddressRisk(params: {
   chain: string;
 }): Promise<ChainalysisRiskResult> {
   if (!CHAINALYSIS_API_KEY) {
+    if (isProduction()) {
+      // FAIL-CLOSED: No chain analysis = high risk assumed
+      return {
+        address: params.address,
+        chain: params.chain,
+        riskScore: 75,
+        riskLevel: "high",
+        exposures: [],
+        cluster: null,
+        alerts: ["Chainalysis API unavailable — risk assessment pending"],
+        assessedAt: new Date().toISOString(),
+      };
+    }
     return mockChainRisk(params.address, params.chain);
   }
 
@@ -215,7 +272,19 @@ export async function assessAddressRisk(params: {
       assessedAt: new Date().toISOString(),
     };
   } catch (err) {
-    logger.warn({ error: err }, "Chainalysis KYT failed — fallback to mock");
+    logger.error({ error: err }, "Chainalysis KYT failed");
+    if (isProduction()) {
+      return {
+        address: params.address,
+        chain: params.chain,
+        riskScore: 75,
+        riskLevel: "high",
+        exposures: [],
+        cluster: null,
+        alerts: ["Chainalysis API error — elevated risk assumed"],
+        assessedAt: new Date().toISOString(),
+      };
+    }
     return mockChainRisk(params.address, params.chain);
   }
 }
@@ -249,6 +318,9 @@ export async function sendTravelRuleMessage(params: {
   const transferId = `TR-${randomBytes(8).toString("hex")}`;
 
   if (!NOTABENE_API_KEY) {
+    if (isProduction()) {
+      throw new Error("Travel Rule compliance unavailable: NOTABENE_API_KEY not configured. Transfer blocked.");
+    }
     return {
       transferId,
       originator: { vasp: params.originatorVasp, name: params.originatorName, accountNumber: params.originatorAccount },
@@ -291,7 +363,10 @@ export async function sendTravelRuleMessage(params: {
       status: data.status as "sent",
     };
   } catch (err) {
-    logger.warn({ error: err }, "Travel Rule message failed — returning mock");
+    logger.error({ error: err }, "Travel Rule message failed");
+    if (isProduction()) {
+      throw new Error(`Travel Rule compliance failed: ${(err as Error).message}`);
+    }
     return {
       transferId,
       originator: { vasp: params.originatorVasp, name: params.originatorName, accountNumber: params.originatorAccount },
