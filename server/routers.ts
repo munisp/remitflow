@@ -1235,7 +1235,7 @@ export const appRouter = router({
         userTierForFee = (userForFee?.kycTier ?? "tier1") as KycTier;
       }
       const amountUsdForFee = input.amount / fromRate;
-      const CURRENCY_TO_COUNTRY: Record<string, string> = { CAD: "CA", USD: "US", GBP: "GB", EUR: "EU", NGN: "NG", GHS: "GH", KES: "KE", ZAR: "ZA", BRL: "BR", INR: "IN" };
+      const CURRENCY_TO_COUNTRY: Record<string, string> = { CAD: "CA", USD: "US", GBP: "GB", EUR: "EU", NGN: "NG", GHS: "GH", KES: "KE", ZAR: "ZA", BRL: "BR", INR: "IN", CNY: "CN", CNH: "CN" };
       const senderCountry = CURRENCY_TO_COUNTRY[input.fromCurrency.toUpperCase()] ?? "US";
       const feeBreakdown = calculateFee(amountUsdForFee, { from: senderCountry, to: input.recipientCountry ?? "US" }, userTierForFee);
       const fee = feeBreakdown.totalFee * fromRate; // convert back to source currency
@@ -1322,7 +1322,7 @@ export const appRouter = router({
           }
           const { rates: ratesForPipeline } = await fetchLiveRates("USD").catch(() => ({ rates: {} as Record<string, number> }));
           const amountUSDForPipeline = input.amount / (ratesForPipeline[input.fromCurrency] ?? 1);
-          const CURRENCY_TO_COUNTRY_ML: Record<string, string> = { CAD: "CA", USD: "US", GBP: "GB", EUR: "EU", NGN: "NG", GHS: "GH", KES: "KE", ZAR: "ZA", BRL: "BR", INR: "IN", TZS: "TZ", UGX: "UG", XOF: "SN", XAF: "CM", MWK: "MW", ZMW: "ZM" };
+          const CURRENCY_TO_COUNTRY_ML: Record<string, string> = { CAD: "CA", USD: "US", GBP: "GB", EUR: "EU", NGN: "NG", GHS: "GH", KES: "KE", ZAR: "ZA", BRL: "BR", INR: "IN", TZS: "TZ", UGX: "UG", XOF: "SN", XAF: "CM", MWK: "MW", ZMW: "ZM", CNY: "CN", CNH: "CN" };
           const mlSourceCountry = CURRENCY_TO_COUNTRY_ML[input.fromCurrency.toUpperCase()] ?? "US";
           const mlFeatures = buildFeatures({ amount_usd: amountUSDForPipeline, source_country: mlSourceCountry, dest_country: input.recipientCountry ?? "NG", user_kyc_level: kycTierNum, is_new_recipient: false });
           const mlFraudResult = scoreFraud(mlFeatures);
