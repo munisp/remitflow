@@ -46,10 +46,10 @@ const config: CorridorConfig = {
   ],
   relatedCorridors: [
     { flag: "🇳🇬", country: "Nigeria", route: "/send-to-nigeria" },
-    { flag: "🇬🇭", country: "Ghana", route: "/send-to-ghana" },
     { flag: "🇰🇪", country: "Kenya", route: "/send-to-kenya" },
-    { flag: "🇺🇬", country: "Uganda", route: "/send-to-uganda" },
-    { flag: "🇹🇿", country: "Tanzania", route: "/send-to-tanzania" },
+    { flag: "🇨🇳", country: "China", route: "/send-to-china" },
+    { flag: "🇧🇷", country: "Brazil", route: "/send-to-brazil" },
+    { flag: "🇮🇳", country: "India", route: "/send-to-india" },
   ],
 };
 
