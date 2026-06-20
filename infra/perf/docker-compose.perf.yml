@@ -1,0 +1,225 @@
+version: "3.9"
+# =============================================================================
+# RemitFlow — Performance Override Compose
+# =============================================================================
+# Usage: docker compose -f docker-compose.middleware.yml -f infra/perf/docker-compose.perf.yml up -d
+# Overrides middleware service configs with production-grade tuning.
+
+services:
+  # ── Kafka (3-broker cluster) ───────────────────────────────────────────────
+  kafka:
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_NUM_NETWORK_THREADS: 8
+      KAFKA_NUM_IO_THREADS: 16
+      KAFKA_NUM_PARTITIONS: 12
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_LOG_FLUSH_INTERVAL_MESSAGES: 100000
+      KAFKA_LOG_FLUSH_INTERVAL_MS: 1000
+      KAFKA_COMPRESSION_TYPE: lz4
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+      KAFKA_SOCKET_SEND_BUFFER_BYTES: 1048576
+      KAFKA_SOCKET_RECEIVE_BUFFER_BYTES: 1048576
+      KAFKA_HEAP_OPTS: "-Xms6g -Xmx6g"
+      KAFKA_JVM_PERFORMANCE_OPTS: >-
+        -XX:+UseG1GC
+        -XX:MaxGCPauseMillis=20
+        -XX:InitiatingHeapOccupancyPercent=35
+        -XX:G1HeapRegionSize=16M
+        -XX:MetaspaceSize=96m
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 8G
+        reservations:
+          cpus: "4"
+          memory: 6G
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+  # ── Redis (threaded I/O) ───────────────────────────────────────────────────
+  redis:
+    command: >-
+      redis-server
+      --requirepass remitflow_redis_secret
+      --appendonly yes
+      --maxmemory 32gb
+      --maxmemory-policy allkeys-lfu
+      --io-threads 4
+      --io-threads-do-reads yes
+      --lazyfree-lazy-eviction yes
+      --lazyfree-lazy-expire yes
+      --lazyfree-lazy-server-del yes
+      --lazyfree-lazy-user-del yes
+      --save "3600 1"
+      --save "300 100"
+      --save "60 50000"
+      --no-appendfsync-on-rewrite yes
+      --auto-aof-rewrite-min-size 256mb
+      --tcp-backlog 65535
+      --activedefrag yes
+      --slowlog-log-slower-than 5000
+      --latency-monitor-threshold 50
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 34G
+        reservations:
+          cpus: "2"
+          memory: 32G
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    sysctls:
+      net.core.somaxconn: 65535
+
+  # ── Temporal (high-throughput) ─────────────────────────────────────────────
+  temporal:
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal_secret
+      POSTGRES_SEEDS: temporal-db
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/production.yaml
+      SQL_MAX_OPEN_CONNS: 100
+      SQL_MAX_IDLE_CONNS: 50
+      SQL_MAX_CONN_LIFETIME: "300s"
+      NUM_HISTORY_SHARDS: 512
+      FRONTEND_RPS: 100000
+      HISTORY_CACHE_MAX_SIZE: 65536
+    volumes:
+      - ./infra/perf/temporal-dynamic-config.yaml:/etc/temporal/config/dynamicconfig/production.yaml:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+        reservations:
+          cpus: "2"
+          memory: 4G
+
+  # ── Permify (cached permission checks) ────────────────────────────────────
+  permify:
+    environment:
+      PERMIFY_DATABASE_ENGINE: postgres
+      PERMIFY_DATABASE_URI: postgres://permify:permify_secret@permify-db:5432/permify
+      PERMIFY_DATABASE_AUTO_MIGRATE: "true"
+      PERMIFY_DATABASE_MAX_OPEN_CONNECTIONS: "100"
+      PERMIFY_DATABASE_MAX_IDLE_CONNECTIONS: "50"
+      PERMIFY_LOG_LEVEL: "warn"
+      PERMIFY_CACHE_ENGINE: "redis"
+      PERMIFY_CACHE_REDIS_ADDRESS: "redis:6379"
+      PERMIFY_SERVICE_CIRCUIT_BREAKER: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+        reservations:
+          cpus: "1"
+          memory: 2G
+
+  # ── APISIX (optimized gateway) ────────────────────────────────────────────
+  apisix:
+    volumes:
+      - ./infra/perf/apisix-config.yaml:/usr/local/apisix/conf/config.yaml:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: 4G
+        reservations:
+          cpus: "4"
+          memory: 2G
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    sysctls:
+      net.core.somaxconn: 65535
+
+  # ── TigerBeetle (financial ledger) ────────────────────────────────────────
+  tigerbeetle:
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 16G
+        reservations:
+          cpus: "2"
+          memory: 8G
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      memlock:
+        soft: -1
+        hard: -1
+
+  # ── Mojaloop Central Ledger ───────────────────────────────────────────────
+  mojaloop-central-ledger:
+    environment:
+      NODE_ENV: production
+      KAFKA_HOST: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: remitflow_redis_secret
+      CLEDG_DATABASE__POOL__MIN: 20
+      CLEDG_DATABASE__POOL__MAX: 100
+      CLEDG_CACHE__ENABLED: true
+      CLEDG_CACHE__EXPIRES_IN_MS: 30000
+      CLEDG_KAFKA__PRODUCER__BATCH__SIZE: 524288
+      CLEDG_KAFKA__PRODUCER__LINGER__MS: 5
+      CLEDG_KAFKA__PRODUCER__COMPRESSION__TYPE: lz4
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 4G
+        reservations:
+          cpus: "2"
+          memory: 2G
+
+  # ── Dapr Sidecar (high-throughput) ─────────────────────────────────────────
+  dapr-sidecar:
+    command:
+      - "./daprd"
+      - "-app-id"
+      - "remitflow"
+      - "-app-port"
+      - "3000"
+      - "-dapr-http-port"
+      - "3500"
+      - "-dapr-grpc-port"
+      - "50001"
+      - "-placement-host-address"
+      - "dapr-placement:50006"
+      - "-components-path"
+      - "/components"
+      - "-config"
+      - "/config/config.yaml"
+      - "-enable-metrics"
+      - "-metrics-port"
+      - "9090"
+      - "-log-level"
+      - "warn"
+      - "-enable-api-logging=false"
+    volumes:
+      - ./infra/perf/dapr-config.yaml:/config/config.yaml:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2G
+        reservations:
+          cpus: "1"
+          memory: 1G

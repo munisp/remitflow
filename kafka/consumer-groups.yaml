@@ -1,4 +1,13 @@
 # RemitFlow Kafka Consumer Group Registry
+# Tuned for 1M+ msg/s: increased session timeouts, fetch sizes, heartbeat intervals.
+# Default consumer config per group:
+#   fetch.min.bytes: 1024
+#   fetch.max.bytes: 52428800 (50MB)
+#   max.partition.fetch.bytes: 10485760 (10MB)
+#   max.poll.records: 1000
+#   session.timeout.ms: 45000
+#   heartbeat.interval.ms: 10000
+#   auto.commit: false (manual commit after processing)
 consumer_groups:
   - id: remitflow-transfer-processor
     topics:
