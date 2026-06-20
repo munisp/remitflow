@@ -13,10 +13,8 @@
  */
 
 import { z } from "zod";
-import { initTRPC, TRPCError } from "@trpc/server";
-
-const t = initTRPC.create();
-const adminProcedure = t.procedure;
+import { TRPCError } from "@trpc/server";
+import { router, adminProcedure } from "../_core/trpc";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -54,10 +52,10 @@ const AdminAction = z.enum([
 
 // ── Admin Router ──────────────────────────────────────────────────────────────
 
-export const adminRouter = t.router({
+export const adminRouter = router({
   // ── Transaction Investigation ────────────────────────────────────────────
 
-  transactions: t.router({
+  transactions: router({
     search: adminProcedure
       .input(
         z.object({
@@ -184,7 +182,7 @@ export const adminRouter = t.router({
 
   // ── KYC Management ──────────────────────────────────────────────────────
 
-  kyc: t.router({
+  kyc: router({
     pendingReviews: adminProcedure
       .input(
         z.object({
@@ -252,7 +250,7 @@ export const adminRouter = t.router({
 
   // ── Compliance Case Management ──────────────────────────────────────────
 
-  compliance: t.router({
+  compliance: router({
     cases: adminProcedure
       .input(
         z.object({
@@ -351,7 +349,7 @@ export const adminRouter = t.router({
 
   // ── System Health ───────────────────────────────────────────────────────
 
-  system: t.router({
+  system: router({
     health: adminProcedure.query(async () => {
       return {
         status: "healthy" as "healthy" | "degraded" | "down",
@@ -422,7 +420,7 @@ export const adminRouter = t.router({
 
   // ── User Management ─────────────────────────────────────────────────────
 
-  users: t.router({
+  users: router({
     search: adminProcedure
       .input(
         z.object({
@@ -514,7 +512,7 @@ export const adminRouter = t.router({
 
   // ── Reconciliation ──────────────────────────────────────────────────────
 
-  reconciliation: t.router({
+  reconciliation: router({
     status: adminProcedure.query(async () => {
       return {
         lastRun: new Date().toISOString(),
