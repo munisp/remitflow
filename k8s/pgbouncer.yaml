@@ -2,8 +2,8 @@
 # RemitFlow — PgBouncer Connection Pooler
 #
 # Sits between the application and PostgreSQL to:
-#   1. Pool connections (max 1000 clients → 50 backend connections)
-#   2. Prevent connection exhaustion under 10K+ concurrent users
+#   1. Pool connections (max 10000 clients → 200 backend connections)
+#   2. Prevent connection exhaustion under 100K+ concurrent users
 #   3. Reduce PostgreSQL memory usage per connection
 #   4. Provide transparent failover to read replicas
 #
@@ -31,22 +31,32 @@ data:
     auth_type = md5
     auth_file = /etc/pgbouncer/userlist.txt
     pool_mode = transaction
-    max_client_conn = 1000
-    default_pool_size = 50
-    min_pool_size = 10
-    reserve_pool_size = 10
+    max_client_conn = 10000
+    default_pool_size = 100
+    min_pool_size = 25
+    reserve_pool_size = 25
     reserve_pool_timeout = 3
-    max_db_connections = 100
-    server_idle_timeout = 600
-    server_lifetime = 3600
-    server_connect_timeout = 5
+    max_db_connections = 200
+    server_idle_timeout = 300
+    server_lifetime = 1800
+    server_connect_timeout = 3
+    server_check_delay = 10
+    server_check_query = select 1
     client_idle_timeout = 0
     query_wait_timeout = 120
     query_timeout = 0
     log_connections = 0
     log_disconnections = 0
     log_pooler_errors = 1
-    stats_period = 60
+    stats_period = 30
+    pkt_buf = 4096
+    listen_backlog = 4096
+    sbuf_lookahead = 1
+    so_reuseport = 1
+    tcp_keepalive = 1
+    tcp_keepcnt = 3
+    tcp_keepidle = 30
+    tcp_keepintvl = 10
     admin_users = remitflow_admin
     stats_users = remitflow_stats
 
@@ -64,7 +74,7 @@ metadata:
     app: pgbouncer
     tier: database
 spec:
-  replicas: 2
+  replicas: 3
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -99,11 +109,11 @@ spec:
               subPath: userlist.txt
           resources:
             requests:
-              memory: "64Mi"
-              cpu: "100m"
-            limits:
               memory: "256Mi"
               cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "2"
           readinessProbe:
             tcpSocket:
               port: 6432

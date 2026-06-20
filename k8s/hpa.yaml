@@ -1,9 +1,11 @@
 # RemitFlow — Horizontal Pod Autoscaler
-# Tuned based on k6 load test results (10K concurrent target per go-live checklist):
-#   - API: p95 latency < 200ms at 5K RPS → CPU target 65%, min 3 pods
-#   - Transfer Engine: p99 < 500ms at 2K TPS → CPU target 55%, min 3 pods
-#   - Webhook Processor: burst-tolerant (PIX/UPI/CIPS callbacks) → min 2 pods
-#   - Fraud Scorer: ML inference latency-sensitive → CPU target 50%, min 2 pods
+# Tuned for 1M+ TPS sustained throughput:
+#   - API: 50K RPS target → min 10, max 100 pods, CPU 60%
+#   - Transfer Engine: 20K TPS target → min 8, max 50 pods, CPU 50%
+#   - Webhook Processor: burst-tolerant → min 5, max 30 pods
+#   - Fraud Scorer: ML inference → min 5, max 20 pods, CPU 45%
+#   - Mojaloop Connector: high fan-out → min 5, max 25 pods
+#   - Temporal Workers: durable workflows → min 5, max 30 pods
 
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -18,44 +20,44 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: remitflow-api
-  minReplicas: 3
-  maxReplicas: 25
+  minReplicas: 10
+  maxReplicas: 100
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 65
+          averageUtilization: 60
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: 75
+          averageUtilization: 70
     - type: Pods
       pods:
         metric:
           name: http_requests_per_second
         target:
           type: AverageValue
-          averageValue: "1000"
+          averageValue: "5000"
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 30
+      stabilizationWindowSeconds: 15
       policies:
         - type: Pods
-          value: 5
-          periodSeconds: 30
+          value: 10
+          periodSeconds: 15
         - type: Percent
           value: 100
-          periodSeconds: 30
+          periodSeconds: 15
       selectPolicy: Max
     scaleDown:
       stabilizationWindowSeconds: 300
       policies:
         - type: Pods
-          value: 2
+          value: 5
           periodSeconds: 120
 ---
 apiVersion: autoscaling/v2
@@ -71,33 +73,44 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: remitflow-transfer-engine
-  minReplicas: 3
-  maxReplicas: 15
+  minReplicas: 8
+  maxReplicas: 50
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 55
+          averageUtilization: 50
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: 65
+    - type: Pods
+      pods:
+        metric:
+          name: transfer_processing_rate
+        target:
+          type: AverageValue
+          averageValue: "2000"
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 15
+      stabilizationWindowSeconds: 10
       policies:
         - type: Pods
-          value: 3
-          periodSeconds: 15
+          value: 5
+          periodSeconds: 10
+        - type: Percent
+          value: 50
+          periodSeconds: 10
+      selectPolicy: Max
     scaleDown:
       stabilizationWindowSeconds: 300
       policies:
         - type: Pods
-          value: 1
+          value: 2
           periodSeconds: 120
 ---
 apiVersion: autoscaling/v2
@@ -113,28 +126,28 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: remitflow-webhook-processor
-  minReplicas: 2
-  maxReplicas: 10
+  minReplicas: 5
+  maxReplicas: 30
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 60
+          averageUtilization: 55
     - type: Pods
       pods:
         metric:
           name: webhook_queue_depth
         target:
           type: AverageValue
-          averageValue: "50"
+          averageValue: "100"
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 10
+      stabilizationWindowSeconds: 5
       policies:
         - type: Pods
-          value: 3
+          value: 5
           periodSeconds: 10
       selectPolicy: Max
     scaleDown:
@@ -153,8 +166,86 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: remitflow-fraud-scorer
-  minReplicas: 2
-  maxReplicas: 8
+  minReplicas: 5
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 45
+    - type: Pods
+      pods:
+        metric:
+          name: fraud_score_latency_p95
+        target:
+          type: AverageValue
+          averageValue: "50"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 10
+      policies:
+        - type: Pods
+          value: 3
+          periodSeconds: 10
+    scaleDown:
+      stabilizationWindowSeconds: 300
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: remitflow-mojaloop-connector-hpa
+  namespace: remitflow
+  labels:
+    app: remitflow
+    component: mojaloop-connector
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: remitflow-mojaloop-connector
+  minReplicas: 5
+  maxReplicas: 25
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 55
+    - type: Pods
+      pods:
+        metric:
+          name: mojaloop_transfer_rate
+        target:
+          type: AverageValue
+          averageValue: "3000"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 10
+      policies:
+        - type: Pods
+          value: 3
+          periodSeconds: 10
+    scaleDown:
+      stabilizationWindowSeconds: 180
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: remitflow-temporal-worker-hpa
+  namespace: remitflow
+  labels:
+    app: remitflow
+    component: temporal-worker
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: remitflow-temporal-worker
+  minReplicas: 5
+  maxReplicas: 30
   metrics:
     - type: Resource
       resource:
@@ -165,16 +256,16 @@ spec:
     - type: Pods
       pods:
         metric:
-          name: fraud_score_latency_p95
+          name: temporal_workflow_task_schedule_to_start_latency
         target:
           type: AverageValue
-          averageValue: "100"
+          averageValue: "200"
   behavior:
     scaleUp:
-      stabilizationWindowSeconds: 15
+      stabilizationWindowSeconds: 10
       policies:
         - type: Pods
-          value: 2
+          value: 5
           periodSeconds: 15
     scaleDown:
       stabilizationWindowSeconds: 300

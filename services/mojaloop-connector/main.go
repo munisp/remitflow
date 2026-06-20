@@ -125,7 +125,21 @@ type PartyLookupResponse struct {
 
 // ── Middleware helpers ────────────────────────────────────────────────────────
 
-var httpClient = &http.Client{Timeout: 5 * time.Second}
+// httpClient with connection pooling tuned for 1M+ TPS.
+// MaxIdleConnsPerHost must match the upstream's capacity.
+var httpTransport = &http.Transport{
+	MaxIdleConns:        500,
+	MaxIdleConnsPerHost: 100,
+	MaxConnsPerHost:     200,
+	IdleConnTimeout:     90 * time.Second,
+	TLSHandshakeTimeout: 5 * time.Second,
+	DisableKeepAlives:   false,
+	ForceAttemptHTTP2:   true,
+}
+var httpClient = &http.Client{
+	Timeout:   10 * time.Second,
+	Transport: httpTransport,
+}
 
 func postJSON(url string, payload any) {
 	body, _ := json.Marshal(payload)
@@ -432,11 +446,13 @@ func main() {
 	r.GET("/parties/:type/:id", partyLookupHandler)
 
 	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		MaxHeaderBytes:    1 << 16, // 64KB
 	}
 
 	go func() {

@@ -1,0 +1,143 @@
+# =============================================================================
+# RemitFlow Dapr — Configuration for 1M+ msg/s
+# =============================================================================
+# Dapr sidecar tuning for high-throughput pub/sub and service invocation.
+# Place at /config/dapr/config.yaml and mount into daprd.
+
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: remitflow-dapr-config
+  namespace: remitflow
+spec:
+  # ── HTTP Pipeline ──────────────────────────────────────────────────────────
+  httpPipeline:
+    handlers: []
+  
+  # ── API Configuration ──────────────────────────────────────────────────────
+  api:
+    allowed:
+      - name: state
+      - name: pubsub
+      - name: bindings
+      - name: invoke
+      - name: secrets
+      - name: actors
+      - name: metadata
+      - name: configuration
+
+  # ── Tracing (reduce for throughput — sample 1% in prod) ────────────────────
+  tracing:
+    samplingRate: "0.01"
+    otel:
+      endpointAddress: "jaeger:4317"
+      isSecure: false
+      protocol: grpc
+
+  # ── Metric (reduce cardinality for high throughput) ────────────────────────
+  metric:
+    enabled: true
+    rules:
+      - name: dapr_component_pubsub_ingress_count
+        labels:
+          - name: topic
+            allowList: ["remitflow.transfers.*", "remitflow.audit.*"]
+      - name: dapr_http_server_request_count
+        labels:
+          - name: path
+
+  # ── mTLS ───────────────────────────────────────────────────────────────────
+  mtls:
+    enabled: true
+    workloadCertTTL: "24h"
+    allowedClockSkew: "15m"
+
+  # ── Access Control ────────────────────────────────────────────────────────
+  accessControl:
+    defaultAction: allow
+    trustDomain: "remitflow"
+
+  # ── App Channel ────────────────────────────────────────────────────────────
+  appHttpMaxRequestBodySize: 16
+  appHttpReadBufferSize: 16
+
+---
+# =============================================================================
+# Dapr Pub/Sub — Kafka High-Throughput
+# =============================================================================
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: remitflow-pubsub
+  namespace: remitflow
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers
+      value: "kafka-0:29092,kafka-1:29092,kafka-2:29092"
+    - name: consumerGroup
+      value: "remitflow-dapr"
+    - name: clientID
+      value: "remitflow-dapr-client"
+    - name: authRequired
+      value: "false"
+    - name: initialOffset
+      value: "newest"
+    - name: maxMessageBytes
+      value: "10485760"
+    - name: consumeRetryInterval
+      value: "100ms"
+    # Bulk subscribe: process up to 1000 messages per batch
+    - name: consumeRetryEnabled
+      value: "true"
+    # Producer batching
+    - name: producerRequiredAcks
+      value: "all"
+    - name: producerCompression
+      value: "lz4"
+    - name: producerMaxMessageBytes
+      value: "10485760"
+    - name: clientConnectionTopicMetadataRefreshInterval
+      value: "5m"
+    - name: clientConnectionKeepAliveInterval
+      value: "30s"
+
+---
+# =============================================================================
+# Dapr State Store — Redis Cluster High-Throughput
+# =============================================================================
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: remitflow-statestore
+  namespace: remitflow
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: "redis-cluster:6379"
+    - name: redisPassword
+      secretKeyRef:
+        name: remitflow-secrets
+        key: redis-password
+    - name: enableTLS
+      value: "false"
+    - name: maxRetries
+      value: "5"
+    - name: maxRetryBackoff
+      value: "2s"
+    - name: ttlInSeconds
+      value: "3600"
+    - name: keyPrefix
+      value: "remitflow"
+    # Pipeline for batch operations (reduces round-trips)
+    - name: processingTimeout
+      value: "30s"
+    - name: redeliverInterval
+      value: "15s"
+    - name: queryIndexes
+      value: '[{"name":"userId","jsonPath":"$.userId"},{"name":"corridorKey","jsonPath":"$.corridorKey"}]'
+auth:
+  secretStore: kubernetes

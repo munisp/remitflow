@@ -99,6 +99,11 @@ impl FluvioBackend {
             endpoint,
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
+                .pool_max_idle_per_host(100)
+                .pool_idle_timeout(Duration::from_secs(90))
+                .tcp_keepalive(Duration::from_secs(60))
+                .tcp_nodelay(true)
+                .http2_adaptive_window(true)
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }

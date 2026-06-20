@@ -81,14 +81,24 @@ class OpenSearchClient:
         self.base_url = OPENSEARCH_URL
         self.auth = (OPENSEARCH_USER, OPENSEARCH_PASSWORD)
         self._available = None
+        limits = httpx.Limits(
+            max_keepalive_connections=100,
+            max_connections=200,
+            keepalive_expiry=90,
+        )
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, connect=5.0),
+            limits=limits,
+            auth=self.auth,
+            http2=True,
+        )
 
     async def check_availability(self) -> bool:
         if self._available is not None:
             return self._available
         try:
-            async with httpx.AsyncClient(timeout=3) as client:
-                resp = await client.get(f"{self.base_url}/_cluster/health", auth=self.auth)
-                self._available = resp.status_code == 200
+            resp = await self._client.get(f"{self.base_url}/_cluster/health")
+            self._available = resp.status_code == 200
         except Exception:
             self._available = False
         return self._available
@@ -97,15 +107,13 @@ class OpenSearchClient:
         if not await self.check_availability():
             return self._mock_search(index, query)
 
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                f"{self.base_url}/{index}/_search",
-                auth=self.auth,
-                json=query,
-                headers={"Content-Type": "application/json"}
-            )
-            if resp.status_code == 200:
-                return resp.json()
+        resp = await self._client.post(
+            f"{self.base_url}/{index}/_search",
+            json=query,
+            headers={"Content-Type": "application/json"}
+        )
+        if resp.status_code == 200:
+            return resp.json()
         return self._mock_search(index, query)
 
     async def index_document(self, index: str, doc_id: Optional[str], doc: dict) -> dict:
@@ -116,19 +124,37 @@ class OpenSearchClient:
         if doc_id:
             url += f"/{doc_id}"
 
-        async with httpx.AsyncClient(timeout=10) as client:
-            method = client.put if doc_id else client.post
-            resp = await method(url, auth=self.auth, json=doc,
-                               headers={"Content-Type": "application/json"})
-            return resp.json() if resp.status_code in (200, 201) else {"error": resp.text}
+        method = self._client.put if doc_id else self._client.post
+        resp = await method(url, json=doc, headers={"Content-Type": "application/json"})
+        return resp.json() if resp.status_code in (200, 201) else {"error": resp.text}
+
+    async def bulk_index(self, actions: List[Dict[str, Any]]) -> dict:
+        """Bulk index documents for high-throughput ingestion."""
+        if not await self.check_availability():
+            return {"errors": False, "items": [], "mock": True}
+
+        ndjson_lines = []
+        for action in actions:
+            meta = {"index": {"_index": action["index"]}}
+            if "id" in action:
+                meta["index"]["_id"] = action["id"]
+            ndjson_lines.append(json.dumps(meta))
+            ndjson_lines.append(json.dumps(action["document"]))
+        body = "\n".join(ndjson_lines) + "\n"
+
+        resp = await self._client.post(
+            f"{self.base_url}/_bulk",
+            content=body,
+            headers={"Content-Type": "application/x-ndjson"}
+        )
+        return resp.json() if resp.status_code == 200 else {"error": resp.text}
 
     async def get_cluster_stats(self) -> dict:
         if not await self.check_availability():
             return {"status": "mock", "indices": list(INDICES.values()), "available": False}
 
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.get(f"{self.base_url}/_cluster/stats", auth=self.auth)
-            return resp.json() if resp.status_code == 200 else {"error": "unavailable"}
+        resp = await self._client.get(f"{self.base_url}/_cluster/stats")
+        return resp.json() if resp.status_code == 200 else {"error": "unavailable"}
 
     def _mock_search(self, index: str, query: dict) -> dict:
         """Return mock search results when OpenSearch is unavailable"""

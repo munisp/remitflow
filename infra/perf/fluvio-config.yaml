@@ -1,0 +1,135 @@
+# =============================================================================
+# RemitFlow — Fluvio Streaming Platform Performance Tuning
+# Target: 1M+ events/sec for real-time FX rates, transfer events, compliance
+#
+# Fluvio topics:
+#   - remitflow-fx-rates (high frequency: 10K+ updates/sec)
+#   - remitflow-transfer-events (high throughput: 1M+ events/sec)
+#   - remitflow-compliance-events (medium: 100K events/sec)
+#   - remitflow-analytics (medium: 50K events/sec)
+#   - remitflow-notifications (low: 10K events/sec)
+# =============================================================================
+
+# ── Cluster Configuration ────────────────────────────────────────────────────
+cluster:
+  # 3-node SPU cluster for HA and throughput
+  spu_count: 3
+  replication_factor: 2
+  min_in_sync_replicas: 1
+
+# ── SPU (Stream Processing Unit) Tuning ──────────────────────────────────────
+spu:
+  # I/O threads: match NVMe device count
+  io_threads: 8
+  # Network threads: handle concurrent producer/consumer connections
+  network_threads: 8
+  # Batch size: larger batches = higher throughput, slightly more latency
+  batch_max_size_bytes: 1048576  # 1MB batches
+  batch_linger_ms: 5  # wait up to 5ms to fill batch
+  # Socket buffer sizes
+  socket_send_buffer_bytes: 1048576  # 1MB
+  socket_receive_buffer_bytes: 1048576  # 1MB
+  # Request queue depth
+  max_request_queue_size: 10000
+  # Segment size: 256MB per segment file
+  log_segment_bytes: 268435456
+  # Retention: 7 days for transfer events, 30 days for compliance
+  log_retention_hours: 168
+  log_retention_bytes: -1  # unlimited by size
+  # Compression at segment level
+  log_compression_type: lz4
+  # Index interval: every 4KB for fast lookups
+  log_index_interval_bytes: 4096
+  # Flush: let OS manage page cache (best throughput)
+  log_flush_interval_messages: 10000
+  log_flush_interval_ms: 1000
+  # Memory: 4GB for page cache + index buffers
+  memory_limit_mb: 4096
+
+# ── Topic-Specific Configuration ─────────────────────────────────────────────
+topics:
+  remitflow-fx-rates:
+    partitions: 12
+    replication_factor: 2
+    retention_ms: 86400000  # 1 day (rates expire quickly)
+    compression: lz4
+    max_message_bytes: 65536  # 64KB (small JSON payloads)
+    cleanup_policy: delete
+
+  remitflow-transfer-events:
+    partitions: 24
+    replication_factor: 2
+    retention_ms: 604800000  # 7 days
+    compression: lz4
+    max_message_bytes: 1048576  # 1MB
+    cleanup_policy: delete
+
+  remitflow-compliance-events:
+    partitions: 12
+    replication_factor: 2
+    retention_ms: 2592000000  # 30 days (regulatory requirement)
+    compression: lz4
+    max_message_bytes: 524288  # 512KB
+    cleanup_policy: compact
+
+  remitflow-analytics:
+    partitions: 6
+    replication_factor: 2
+    retention_ms: 604800000  # 7 days
+    compression: lz4
+    max_message_bytes: 1048576  # 1MB
+    cleanup_policy: delete
+
+  remitflow-notifications:
+    partitions: 6
+    replication_factor: 2
+    retention_ms: 259200000  # 3 days
+    compression: lz4
+    max_message_bytes: 65536  # 64KB
+    cleanup_policy: delete
+
+# ── Producer Tuning ──────────────────────────────────────────────────────────
+producer:
+  # Batch size: 512KB for high throughput
+  batch_size_bytes: 524288
+  # Linger: wait up to 5ms to fill batch
+  linger_ms: 5
+  # Compression: lz4 for best throughput/compression ratio
+  compression: lz4
+  # Acks: 1 for FX rates (speed), all for transfers (durability)
+  default_acks: all
+  # Max in-flight: 5 for ordering guarantee with idempotent producer
+  max_in_flight_requests: 5
+  # Retry: 3 retries with 100ms backoff
+  retries: 3
+  retry_backoff_ms: 100
+  # Request timeout
+  request_timeout_ms: 30000
+  # Buffer memory: 64MB for producer buffers
+  buffer_memory_bytes: 67108864
+  # Max request size: 10MB
+  max_request_size_bytes: 10485760
+
+# ── Consumer Tuning ──────────────────────────────────────────────────────────
+consumer:
+  # Fetch size: 50MB per fetch for high throughput
+  fetch_max_bytes: 52428800
+  # Max poll records: 1000 per poll
+  max_poll_records: 1000
+  # Session timeout: 45s
+  session_timeout_ms: 45000
+  # Heartbeat interval: 15s
+  heartbeat_interval_ms: 15000
+  # Auto offset reset: latest for real-time, earliest for replay
+  auto_offset_reset: latest
+  # Max partition fetch: 10MB
+  max_partition_fetch_bytes: 10485760
+
+# ── SmartModule (Fluvio WASM Processing) ─────────────────────────────────────
+smartmodule:
+  # Max WASM execution time per record
+  max_execution_time_ms: 100
+  # Memory limit per SmartModule instance
+  max_memory_bytes: 134217728  # 128MB
+  # Thread pool for WASM execution
+  thread_pool_size: 8
