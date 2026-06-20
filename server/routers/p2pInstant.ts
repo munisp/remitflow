@@ -102,12 +102,19 @@ function normalizeAlias(type: "phone" | "email", value: string): string {
 function detectCountryFromPhone(phone: string): string {
   const prefixes: Record<string, string> = {
     "+234": "NG", "+233": "GH", "+254": "KE", "+27": "ZA",
+    "+255": "TZ", "+256": "UG", "+260": "ZM", "+265": "MW",
+    "+221": "SN", "+237": "CM", "+225": "CI", "+250": "RW",
     "+1": "US", "+44": "GB", "+52": "MX", "+91": "IN", "+55": "BR",
+    "+86": "CN", "+81": "JP", "+82": "KR", "+49": "DE", "+33": "FR",
+    "+34": "ES", "+39": "IT", "+31": "NL", "+46": "SE", "+47": "NO",
+    "+61": "AU", "+64": "NZ", "+971": "AE", "+966": "SA", "+20": "EG",
   };
-  for (const [prefix, country] of Object.entries(prefixes)) {
+  // Sort by prefix length descending so longer prefixes match first
+  const sorted = Object.entries(prefixes).sort((a, b) => b[0].length - a[0].length);
+  for (const [prefix, country] of sorted) {
     if (phone.startsWith(prefix)) return country;
   }
-  return "NG";
+  return "XX";
 }
 
 // Rail health status (tracked in memory, updated by health checks)
@@ -454,7 +461,7 @@ export const p2pInstantRouter = router({
       let receiverId: number | null = null;
       let receiverFspId = "unknown-fsp";
       let receiverCurrency = input.currency;
-      let receiverCountry = "NG";
+      let receiverCountry = "XX";
       let isCrossBorder = false;
 
       // Local lookup

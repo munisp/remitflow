@@ -167,14 +167,34 @@ export async function fraudCheckActivity(
   log.info("Running fraud check (ensemble: gRPC + local ML)", { transactionId: input.idempotencyKey });
   heartbeat("Scoring transaction");
 
+  // Derive source country from sender's currency
+  const CURRENCY_TO_COUNTRY: Record<string, string> = {
+    CAD: "CA", USD: "US", GBP: "GB", EUR: "EU", NGN: "NG", GHS: "GH",
+    KES: "KE", ZAR: "ZA", BRL: "BR", INR: "IN", TZS: "TZ", UGX: "UG",
+    XOF: "SN", XAF: "CM", MWK: "MW", ZMW: "ZM", CNY: "CN", CNH: "CN",
+  };
+  const sourceCountry = CURRENCY_TO_COUNTRY[input.fromCurrency.toUpperCase()] ?? "US";
+  const destCountry = input.recipientCountry ?? CURRENCY_TO_COUNTRY[input.toCurrency.toUpperCase()] ?? "US";
+
+  // Look up actual KYC tier from DB
+  let kycTierNum = 1;
+  try {
+    const db = await getDb();
+    if (db) {
+      const [u] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, input.userId)).limit(1);
+      const tierMap: Record<string, number> = { tier0: 0, tier1: 1, tier2: 2, tier3: 3 };
+      kycTierNum = tierMap[u?.kycTier ?? "tier1"] ?? 1;
+    }
+  } catch { /* non-blocking — defaults to tier 1 */ }
+
   // ── gRPC Rust fraud engine (primary) ─────────────────────────────────────
   const grpcResult = await grpcFraudCheck({
     transactionId: input.idempotencyKey,
     userId: String(input.userId),
     amount: String(input.amount),
     currency: input.fromCurrency,
-    fromCountry: "NG",
-    toCountry: input.recipientCountry ?? "NG",
+    fromCountry: sourceCountry,
+    toCountry: destCountry,
     recipientAccount: input.recipientAccount ?? "",
   }).catch(err => {
     log.warn("gRPC fraud check failed, using local ML only", { error: err?.message });
@@ -184,9 +204,9 @@ export async function fraudCheckActivity(
   // ── Local ML scorer (secondary — always runs) ─────────────────────────────
   const mlFeatures = buildFeatures({
     amount_usd: input.amount,
-    source_country: "NG",
-    dest_country: input.recipientCountry ?? "NG",
-    user_kyc_level: 1,
+    source_country: sourceCountry,
+    dest_country: destCountry,
+    user_kyc_level: kycTierNum,
     is_new_recipient: false,
   });
   const mlResult = scoreFraud(mlFeatures);
