@@ -824,6 +824,22 @@ export async function ensureFeatureTables(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_wallet_user ON feature_smart_wallets(user_id);
       CREATE INDEX IF NOT EXISTS idx_batch_user ON feature_batch_payouts(user_id);
       CREATE INDEX IF NOT EXISTS idx_payment_user ON feature_programmable_payments(user_id);
+
+      CREATE TABLE IF NOT EXISTS compliance_filings (
+        id SERIAL PRIMARY KEY,
+        "userId" INTEGER NOT NULL,
+        "transferRef" VARCHAR(128) NOT NULL,
+        "filingType" VARCHAR(32) NOT NULL,
+        jurisdiction VARCHAR(8) NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending_review',
+        "filingId" VARCHAR(128),
+        "amountUsd" NUMERIC(18,2),
+        "createdAt" TIMESTAMP DEFAULT NOW(),
+        "resolvedAt" TIMESTAMP,
+        UNIQUE("transferRef", "filingType", jurisdiction)
+      );
+      CREATE INDEX IF NOT EXISTS idx_compliance_filings_user ON compliance_filings("userId");
+      CREATE INDEX IF NOT EXISTS idx_compliance_filings_ref ON compliance_filings("transferRef");
     `);
 
     logger.info("Feature persistence tables ensured");

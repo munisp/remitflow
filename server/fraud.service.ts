@@ -200,7 +200,7 @@ export async function checkVelocity(
   maxAttempts: number = 10
 ): Promise<{ allowed: boolean; attemptsInWindow: number }> {
   const db = await getDb();
-  if (!db) return { allowed: true, attemptsInWindow: 0 };
+  if (!db) return { allowed: false, attemptsInWindow: maxAttempts };
   const windowStart = new Date(Date.now() - windowHours * 60 * 60 * 1000);
   try {
     const rows = await db.select({ cnt: sql<number>`COUNT(*)::int` })

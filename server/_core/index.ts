@@ -1255,6 +1255,8 @@ async function startServer() {
     startScheduler();
     // Auto-start polyglot microservices in development (no-op in production)
     startMicroservices();
+    // Start automated daily reconciliation scheduler
+    import("../lib/reconciliationScheduler").then(({ startReconciliationScheduler }) => startReconciliationScheduler()).catch(err => logger.warn({ errMsg: err?.message }, "[Reconciliation] Scheduler init failed (non-blocking):"));
     // Initialize Kafka topics (non-blocking, graceful fallback if Kafka unavailable)
     ensureTopicsExist().catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic init failed (non-blocking):"));
     // Start webhook retry scheduler (exponential backoff for failed payment callbacks)
