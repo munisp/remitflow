@@ -339,14 +339,28 @@ export async function runTransferPipeline(
         toAmount: transactions.toAmount,
         recipientAccount: transactions.recipientAccount,
         recipientName: transactions.recipientName,
+        recipientBank: transactions.recipientBank,
         fromCurrency: transactions.fromCurrency,
+        channel: transactions.channel,
+        metadata: transactions.metadata,
       }).from(transactions).where(eq(transactions.reference, transferRef)).limit(1);
       if (txRow) {
         const country = (txRow.recipientCountry ?? "").toLowerCase();
         const currency = (txRow.toCurrency ?? "").toUpperCase();
         const amount = safeParseAmount(txRow.toAmount ?? "0");
+        // Detect cash_pickup delivery method from channel or metadata
+        const metaObj = typeof txRow.metadata === "string" ? JSON.parse(txRow.metadata || "{}") : (txRow.metadata ?? {});
+        const deliveryMethod = txRow.channel ?? (metaObj as Record<string, unknown>)?.deliveryMethod ?? "bank_transfer";
         try {
           const fromCur = (txRow.fromCurrency ?? "").toUpperCase();
+          if (deliveryMethod === "cash_pickup") {
+            // Cash pickup: do NOT route to external payment rail.
+            // Funds stay on-platform until agent disburses via verifyAndDisburse.
+            // Mark as awaiting_pickup — the agent's cashPickup.verifyAndDisburse will
+            // call advanceTransferState(ref, "completed") after verification.
+            partnerRef = `CP-${Date.now()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+            logger.info(`[TransferStateMachine] Cash pickup — awaiting agent disbursement for ${transferRef}`);
+          } else
           if (fromCur === "CAD" && ["NGN","KES","GHS","TZS","UGX","XOF","ZAR","XAF"].includes(currency)) {
             // Mark Lane FX Bridge (Canadian corridor → African destination)
             const { initiateMarkLaneTransfer } = await import("./integrations/marklane/markLaneClient");
