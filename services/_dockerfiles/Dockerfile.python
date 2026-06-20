@@ -1,0 +1,54 @@
+# Multi-stage Dockerfile for RemitFlow Python microservices
+#
+# Usage:
+#   docker build -f services/_dockerfiles/Dockerfile.python \
+#     --build-arg SERVICE_NAME=python-settlement-reconciliation \
+#     -t remitflow/python-settlement-reconciliation:latest \
+#     ./services/python-settlement-reconciliation
+#
+# Works for all Python services in /services/python-*
+
+ARG PYTHON_VERSION=3.12
+ARG SERVICE_NAME=python-service
+
+# ── Build Stage ────────────────────────────────────────────────────────────────
+
+FROM python:${PYTHON_VERSION}-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt* pyproject.toml* ./
+RUN pip install --no-cache-dir --prefix=/install \
+    -r requirements.txt 2>/dev/null || \
+    pip install --no-cache-dir --prefix=/install . 2>/dev/null || true
+
+# Copy source
+COPY . .
+
+# ── Runtime Stage ──────────────────────────────────────────────────────────────
+
+FROM python:${PYTHON_VERSION}-slim-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 1000 -m appuser
+
+COPY --from=builder /install /usr/local
+COPY --from=builder /app /app
+
+WORKDIR /app
+
+USER appuser
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:8080/health || exit 1
+
+ENTRYPOINT ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
