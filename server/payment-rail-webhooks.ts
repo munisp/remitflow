@@ -1,10 +1,11 @@
 // ============================================================================
-// RemitFlow — PIX & UPI Payment Rail Webhook Handlers
+// RemitFlow — PIX, UPI & CIPS Payment Rail Webhook Handlers
 // Receives settlement confirmations from payment partners and advances
 // transfer state from "partner_sent" → "completed".
 //
 //   POST /api/webhooks/pix    — PIX (Brazil) settlement callback
 //   POST /api/webhooks/upi    — UPI (India) settlement callback
+//   POST /api/webhooks/cips   — CIPS (China) settlement callback
 // ============================================================================
 import type { Express, Request, Response } from "express";
 import { getDb, createAuditLog } from "./db.js";
@@ -196,12 +197,91 @@ function handleUpiCallback(app: Express) {
   });
 }
 
+// ─── CIPS Webhook ──────────────────────────────────────────────────────────────
+
+interface CipsWebhookPayload {
+  transactionId: string;
+  status: "ACSC" | "RJCT" | "PDNG" | "ACCP";
+  statusReason?: string;
+  msgId?: string;
+  settlementDate?: string;
+  amount?: number;
+  currency?: string;
+}
+
+function handleCipsCallback(app: Express) {
+  app.post("/api/webhooks/cips", async (req: Request, res: Response) => {
+    const payload = req.body as CipsWebhookPayload;
+    const { transactionId, status } = payload;
+
+    if (!transactionId) {
+      res.status(400).json({ error: "Missing transactionId" });
+      return;
+    }
+
+    logger.info(
+      { transactionId, status, msgId: payload.msgId },
+      "[CIPS Webhook] Received settlement callback"
+    );
+
+    const txn = await findTransactionByPartnerRef(transactionId);
+    if (!txn) {
+      logger.warn(
+        { transactionId },
+        "[CIPS Webhook] No matching transaction found"
+      );
+      res.status(200).json({ received: true, matched: false });
+      return;
+    }
+
+    try {
+      if (status === "ACSC") {
+        // Accepted Settlement Completed
+        await advanceTransferState(txn.reference, txn.userId, "completed");
+        await createAuditLog({
+          userId: txn.userId,
+          action: "CIPS_SETTLEMENT_CONFIRMED",
+          description: `CIPS settlement confirmed for ${txn.reference} (txnId: ${transactionId}, msgId: ${payload.msgId ?? "N/A"})`,
+        });
+        logger.info(
+          { reference: txn.reference, transactionId },
+          "[CIPS Webhook] Transfer completed via CIPS settlement"
+        );
+      } else if (status === "RJCT") {
+        // Rejected by CIPS Switch or beneficiary bank
+        await advanceTransferState(txn.reference, txn.userId, "failed", {
+          failureReason: `CIPS settlement rejected (txnId: ${transactionId}, reason: ${payload.statusReason ?? "unknown"}). Funds will be returned to sender wallet.`,
+          requiresManualReview: true,
+        });
+        await createAuditLog({
+          userId: txn.userId,
+          action: "CIPS_SETTLEMENT_FAILED",
+          description: `CIPS settlement rejected for ${txn.reference} (txnId: ${transactionId}, reason: ${payload.statusReason ?? "N/A"})`,
+        });
+        logger.error(
+          { reference: txn.reference, transactionId, statusReason: payload.statusReason },
+          "[CIPS Webhook] Transfer failed via CIPS settlement"
+        );
+      }
+      // ACCP (accepted, pending) and PDNG — no state change
+    } catch (err) {
+      logger.error(
+        { err, reference: txn.reference, transactionId },
+        "[CIPS Webhook] Error processing callback"
+      );
+    }
+
+    res.status(200).json({ received: true, matched: true });
+  });
+}
+
 // ─── Registration ──────────────────────────────────────────────────────────────
 
 export function registerPaymentRailWebhooks(app: Express): void {
   handlePixCallback(app);
   handleUpiCallback(app);
+  handleCipsCallback(app);
   logger.info(
-    "[PaymentRails] Webhook handlers registered at /api/webhooks/pix, /api/webhooks/upi"
+    "[PaymentRails] Webhook handlers registered at /api/webhooks/pix, /api/webhooks/upi, /api/webhooks/cips"
   );
 }

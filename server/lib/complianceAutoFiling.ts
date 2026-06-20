@@ -47,6 +47,7 @@ const CURRENCY_TO_JURISDICTION: Record<string, string> = {
   NGN: "NG", GHS: "GH", KES: "KE", ZAR: "ZA",
   BRL: "BR", INR: "IN", TZS: "TZ", UGX: "UG",
   XOF: "SN", XAF: "CM", MWK: "MW", ZMW: "ZM",
+  CNY: "CN", CNH: "CN",
 };
 
 const TRAVEL_RULE_THRESHOLDS_USD: Record<string, number> = {
@@ -62,6 +63,7 @@ const TRAVEL_RULE_THRESHOLDS_USD: Record<string, number> = {
   IN: 500,     // RBI: INR 50,000 equivalent
   TZ: 1_000,   // BoT: TZS 2,500,000 equivalent
   UG: 1_000,   // BoU: UGX 4,000,000 equivalent
+  CN: 0,       // PBoC: all cross-border RMB transfers require reporting
 };
 
 const CTR_THRESHOLD_USD = 10_000;
@@ -126,7 +128,19 @@ export async function autoFileCompliance(ctx: TransferContext): Promise<FilingRe
     results.push(inResult);
   }
 
-  // 4. Persist all filing records to DB
+  // 10. China PBoC inbound reporting (CNY > 200,000 for transfers)
+  if (destJurisdiction === "CN" && ctx.toAmount >= 200_000) {
+    const cnResult = await fileInboundReport(ctx, "CN", "PBOC_LTR", 200_000);
+    results.push(cnResult);
+  }
+
+  // 11. China SAFE cross-border declaration (all cross-border CNY)
+  if ((sourceJurisdiction === "CN" || destJurisdiction === "CN") && sourceJurisdiction !== destJurisdiction) {
+    const safeResult = await fileInboundReport(ctx, "CN", "SAFE_CROSS_BORDER", 0);
+    results.push(safeResult);
+  }
+
+  // Persist all filing records to DB
   const db = await getDb();
   if (db) {
     for (const filing of results) {

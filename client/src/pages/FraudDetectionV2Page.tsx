@@ -235,6 +235,51 @@ export default function FraudDetectionV2Page() {
               </Card>
             )}
           </div>
+
+          <Card className="mt-4">
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <AlertTriangle className="h-5 w-5 text-orange-500" />
+                Country Risk Tiers (Graduated Scoring)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div className="rounded-lg border-2 border-red-500 bg-red-50 dark:bg-red-950/30 p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-semibold text-red-700 dark:text-red-300 text-sm">HIGH RISK</span>
+                    <Badge className="bg-red-600 text-white text-xs">Score: 85</Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Sanctioned / conflict zones</p>
+                  <p className="text-xs mt-1 font-mono">AF BY CD CU ER IR IQ KP LY MM NI SO SS SD SY VE YE ZW</p>
+                </div>
+                <div className="rounded-lg border-2 border-orange-400 bg-orange-50 dark:bg-orange-950/30 p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-semibold text-orange-700 dark:text-orange-300 text-sm">ELEVATED RISK</span>
+                    <Badge className="bg-orange-500 text-white text-xs">Score: 60</Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">FATF grey list / enhanced monitoring</p>
+                  <p className="text-xs mt-1 font-mono">PK HT JM PA TT VN AL BB BF CM GI JO MZ PH SN TZ UG VU</p>
+                </div>
+                <div className="rounded-lg border-2 border-yellow-400 bg-yellow-50 dark:bg-yellow-950/30 p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-semibold text-yellow-700 dark:text-yellow-300 text-sm">MODERATE RISK</span>
+                    <Badge className="bg-yellow-500 text-black text-xs">Score: 40</Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">Emerging markets / higher volume corridors</p>
+                  <p className="text-xs mt-1 font-mono">NG GH KE ZA BR IN MX CN RU TR EG TH ID BD CO PE</p>
+                </div>
+                <div className="rounded-lg border-2 border-green-400 bg-green-50 dark:bg-green-950/30 p-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-semibold text-green-700 dark:text-green-300 text-sm">LOW RISK</span>
+                    <Badge className="bg-green-500 text-white text-xs">Score: 15</Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">OECD / developed economies</p>
+                  <p className="text-xs mt-1 font-mono">US CA GB EU JP AU NZ DE FR IT NL SE NO CH</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         {/* ── Model Metrics ── */}
