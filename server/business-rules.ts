@@ -264,6 +264,7 @@ export interface CorridorConfig {
 }
 
 export const CORRIDOR_CONFIGS: CorridorConfig[] = [
+  // Africa outbound
   { from: "NG", to: "US", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.2, isActive: true, minAmount: 10, maxAmount: 50000 },
   { from: "NG", to: "UK", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
   { from: "NG", to: "GH", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "Minutes", feeMultiplier: 0.8, isActive: true, minAmount: 1, maxAmount: 10000 },
@@ -271,9 +272,69 @@ export const CORRIDOR_CONFIGS: CorridorConfig[] = [
   { from: "KE", to: "TZ", deliveryMethods: ["mobile_money", "bank_transfer"], estimatedTime: "Minutes", feeMultiplier: 0.75, isActive: true, minAmount: 1, maxAmount: 5000 },
   { from: "GH", to: "UK", deliveryMethods: ["bank_transfer"], estimatedTime: "1-3 business days", feeMultiplier: 1.2, isActive: true, minAmount: 10, maxAmount: 50000 },
   { from: "ZA", to: "US", deliveryMethods: ["bank_transfer"], estimatedTime: "2-3 business days", feeMultiplier: 1.25, isActive: true, minAmount: 10, maxAmount: 50000 },
+  // Diaspora inbound to Africa
   { from: "US", to: "NG", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "US", to: "KE", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "US", to: "GH", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "US", to: "ZA", deliveryMethods: ["bank_transfer"], estimatedTime: "2-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
   { from: "UK", to: "NG", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "UK", to: "KE", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "UK", to: "GH", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "UK", to: "ZA", deliveryMethods: ["bank_transfer"], estimatedTime: "2-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
   { from: "EU", to: "NG", deliveryMethods: ["bank_transfer"], estimatedTime: "1-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "EU", to: "KE", deliveryMethods: ["bank_transfer"], estimatedTime: "1-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "EU", to: "GH", deliveryMethods: ["bank_transfer"], estimatedTime: "1-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "EU", to: "ZA", deliveryMethods: ["bank_transfer"], estimatedTime: "2-3 business days", feeMultiplier: 1.2, isActive: true, minAmount: 10, maxAmount: 50000 },
+  // Canada (Mark Lane FX Bridge corridors)
+  { from: "CA", to: "NG", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.05, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "CA", to: "KE", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "1-2 business days", feeMultiplier: 1.05, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "CA", to: "GH", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "1-2 business days", feeMultiplier: 1.05, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "CA", to: "ZA", deliveryMethods: ["bank_transfer"], estimatedTime: "2-3 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "CA", to: "TZ", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "1-2 business days", feeMultiplier: 1.05, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "CA", to: "UG", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "1-2 business days", feeMultiplier: 1.05, isActive: true, minAmount: 10, maxAmount: 50000 },
+  // Non-Africa destinations (PIX/UPI)
+  { from: "US", to: "BR", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "US", to: "IN", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "EU", to: "BR", deliveryMethods: ["bank_transfer"], estimatedTime: "2-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  // CIPS corridors (China cross-border RMB)
+  { from: "US", to: "CN", deliveryMethods: ["bank_transfer"], estimatedTime: "2-4 hours", feeMultiplier: 1.15, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "CN", to: "US", deliveryMethods: ["bank_transfer"], estimatedTime: "2-4 hours", feeMultiplier: 1.2, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "CA", to: "CN", deliveryMethods: ["bank_transfer"], estimatedTime: "2-4 hours", feeMultiplier: 1.15, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "CN", to: "CA", deliveryMethods: ["bank_transfer"], estimatedTime: "2-4 hours", feeMultiplier: 1.2, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "UK", to: "CN", deliveryMethods: ["bank_transfer"], estimatedTime: "2-4 hours", feeMultiplier: 1.15, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "CN", to: "UK", deliveryMethods: ["bank_transfer"], estimatedTime: "2-4 hours", feeMultiplier: 1.2, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "EU", to: "CN", deliveryMethods: ["bank_transfer"], estimatedTime: "2-4 hours", feeMultiplier: 1.15, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "CN", to: "EU", deliveryMethods: ["bank_transfer"], estimatedTime: "2-4 hours", feeMultiplier: 1.2, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "CN", to: "NG", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.2, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "CN", to: "KE", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.2, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "CN", to: "ZA", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.2, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "CN", to: "GH", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.2, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "NG", to: "CN", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.25, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "KE", to: "CN", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.25, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "ZA", to: "CN", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.25, isActive: true, minAmount: 100, maxAmount: 50000 },
+  { from: "GH", to: "CN", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.25, isActive: true, minAmount: 100, maxAmount: 50000 },
+  // Reverse corridors for bi-directionality (Africa outbound → diaspora)
+  { from: "GH", to: "NG", deliveryMethods: ["bank_transfer", "mobile_money"], estimatedTime: "Minutes", feeMultiplier: 0.8, isActive: true, minAmount: 1, maxAmount: 10000 },
+  { from: "KE", to: "NG", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.0, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "TZ", to: "KE", deliveryMethods: ["mobile_money", "bank_transfer"], estimatedTime: "Minutes", feeMultiplier: 0.75, isActive: true, minAmount: 1, maxAmount: 5000 },
+  { from: "KE", to: "US", deliveryMethods: ["bank_transfer"], estimatedTime: "1-3 business days", feeMultiplier: 1.2, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "GH", to: "US", deliveryMethods: ["bank_transfer"], estimatedTime: "1-3 business days", feeMultiplier: 1.2, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "KE", to: "UK", deliveryMethods: ["bank_transfer"], estimatedTime: "1-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "ZA", to: "UK", deliveryMethods: ["bank_transfer"], estimatedTime: "2-3 business days", feeMultiplier: 1.25, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "NG", to: "EU", deliveryMethods: ["bank_transfer"], estimatedTime: "1-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "KE", to: "EU", deliveryMethods: ["bank_transfer"], estimatedTime: "1-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "GH", to: "EU", deliveryMethods: ["bank_transfer"], estimatedTime: "1-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "ZA", to: "EU", deliveryMethods: ["bank_transfer"], estimatedTime: "2-3 business days", feeMultiplier: 1.2, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "NG", to: "CA", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "KE", to: "CA", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "GH", to: "CA", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "ZA", to: "CA", deliveryMethods: ["bank_transfer"], estimatedTime: "2-3 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "TZ", to: "CA", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "UG", to: "CA", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.1, isActive: true, minAmount: 10, maxAmount: 50000 },
+  // Reverse corridors for PIX/UPI bi-directionality
+  { from: "BR", to: "US", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "IN", to: "US", deliveryMethods: ["bank_transfer"], estimatedTime: "1-2 business days", feeMultiplier: 1.15, isActive: true, minAmount: 10, maxAmount: 50000 },
+  { from: "BR", to: "EU", deliveryMethods: ["bank_transfer"], estimatedTime: "2-3 business days", feeMultiplier: 1.2, isActive: true, minAmount: 10, maxAmount: 50000 },
 ];
 
 export function getCorridorConfig(from: string, to: string): CorridorConfig | null {

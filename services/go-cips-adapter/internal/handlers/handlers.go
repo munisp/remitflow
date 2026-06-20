@@ -2,10 +2,12 @@
 package handlers
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -398,6 +400,36 @@ func CheckSanctions(c *gin.Context) {
 	})
 }
 
+// forwardSettlementToCore forwards CIPS settlement status to the Node.js core
+// webhook endpoint so the transfer state machine can advance.
+func forwardSettlementToCore(transactionID, status, statusReason string) {
+	coreURL := os.Getenv("CORE_WEBHOOK_URL")
+	if coreURL == "" {
+		coreURL = "http://localhost:3001/api/webhooks/cips"
+	}
+
+	payload := map[string]string{
+		"transactionId": transactionID,
+		"status":        status,
+		"statusReason":  statusReason,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Printf("[CIPS] Failed to marshal webhook payload: %v\n", err)
+		return
+	}
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(coreURL, "application/json", bytes.NewReader(body))
+	if err != nil {
+		fmt.Printf("[CIPS] Failed to forward settlement to core: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	fmt.Printf("[CIPS] Forwarded settlement to core: txn=%s status=%s httpStatus=%d\n",
+		transactionID, status, resp.StatusCode)
+}
+
 // ─── Callbacks ────────────────────────────────────────────────────────────────
 func HandlePacs002Callback(c *gin.Context) {
 	var cb models.Pacs002Callback
@@ -428,6 +460,9 @@ func HandlePacs002Callback(c *gin.Context) {
 		}
 	}
 	mu.Unlock()
+
+	// Forward settlement result to Node.js core for state machine advancement
+	go forwardSettlementToCore(cb.TransactionID, cb.Status, cb.StatusReason)
 
 	c.JSON(http.StatusOK, gin.H{"acknowledged": true})
 }

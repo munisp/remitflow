@@ -19,6 +19,7 @@ import { startMicroservices } from "./microservices";
 import { ensureTopicsExist, disconnectKafka } from "../middleware/kafka";
 import { metricsHandler } from "../metrics";
 import { registerMojaloopWebhooks } from "../mojaloop.webhook";
+import { registerPaymentRailWebhooks } from "../payment-rail-webhooks";
 import { registerSseClient, registerUserSseClient } from "../sse.service";
 import { requestIdMiddleware } from "../middleware/requestId";
 import { attachServicesHealthWS, stopServicesHealthWS } from "../ws-services-health.js";
@@ -299,6 +300,26 @@ async function startServer() {
 
   // Mojaloop FSPIOP webhook callbacks (PUT /api/mojaloop/callback/*)
   registerMojaloopWebhooks(app);
+
+  // PIX + UPI + CIPS + Mojaloop + SWIFT payment rail webhooks
+  registerPaymentRailWebhooks(app);
+
+  // OpenAPI/Swagger documentation — serves spec at /api/docs and /api/docs.json
+  const { generateOpenApiSpec } = await import("../lib/openapi");
+  app.get("/api/docs.json", (_req, res) => {
+    res.json(generateOpenApiSpec());
+  });
+  app.get("/api/docs", (_req, res) => {
+    res.send(`<!DOCTYPE html>
+<html><head><title>RemitFlow API Docs</title>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"/>
+</head><body>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>SwaggerUIBundle({ url: '/api/docs.json', dom_id: '#swagger-ui', deepLinking: true });</script>
+</body></html>`);
+  });
 
   // Admin SSE endpoint — GET /api/admin/sse (real-time notifications)
   app.get("/api/admin/sse", async (req, res) => {
@@ -1255,6 +1276,8 @@ async function startServer() {
     startScheduler();
     // Auto-start polyglot microservices in development (no-op in production)
     startMicroservices();
+    // Start automated daily reconciliation scheduler
+    import("../lib/reconciliationScheduler").then(({ startReconciliationScheduler }) => startReconciliationScheduler()).catch(err => logger.warn({ errMsg: err?.message }, "[Reconciliation] Scheduler init failed (non-blocking):"));
     // Initialize Kafka topics (non-blocking, graceful fallback if Kafka unavailable)
     ensureTopicsExist().catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic init failed (non-blocking):"));
     // Start webhook retry scheduler (exponential backoff for failed payment callbacks)

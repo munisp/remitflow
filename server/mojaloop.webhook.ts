@@ -9,9 +9,10 @@
 // ============================================================================
 import type { Express, Request, Response } from "express";
 import { getDb, createAuditLog } from "./db.js";
-import { mojaloopTransfers } from "../drizzle/schema.js";
-import { eq } from "drizzle-orm";
+import { mojaloopTransfers, transactions } from "../drizzle/schema.js";
+import { eq, sql } from "drizzle-orm";
 import { logger } from './_core/logger';
+import { advanceTransferState } from "./transfer-state-machine.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -137,6 +138,26 @@ export function registerMojaloopWebhooks(app: Express) {
       completedTimestamp: payload.completedTimestamp,
       fulfilment: payload.fulfilment,
     });
+
+    // Advance main transfer state when settlement is confirmed
+    if ((payload.transferState ?? "COMMITTED") === "COMMITTED") {
+      try {
+        const db2 = await getDb();
+        if (db2) {
+          const rows = await db2.execute(
+            sql`SELECT reference, "userId" FROM transactions
+                WHERE metadata->>'partnerReference' = ${transferId} LIMIT 1`
+          );
+          const txn = (rows as any[])[0];
+          if (txn) {
+            await advanceTransferState(txn.reference, txn.userId, "completed");
+            logger.info(`[Mojaloop] Transfer ${txn.reference} completed via Mojaloop settlement`);
+          }
+        }
+      } catch (advErr) {
+        logger.warn({ err: advErr, transferId }, "[Mojaloop] Failed to advance transfer state");
+      }
+    }
 
     res.status(200).json({ received: true });
   });

@@ -47,6 +47,34 @@ const PLATFORM_FLAGS = [
   { key: "beyond_remittance",  name: "Beyond Remittance",    category: "premium",     description: "Premium investment and wealth management features" },
 ] as const;
 
+// ─── Corridor Kill Switches ──────────────────────────────────────────────────
+// In-memory corridor state for instant kill switches without DB writes.
+// Admin can disable/enable any corridor via API — no deploy required.
+
+interface CorridorState {
+  enabled: boolean;
+  disabledAt?: string;
+  disabledBy?: string;
+  reason?: string;
+}
+
+const corridorKillSwitches = new Map<string, CorridorState>();
+
+export function isCorridorEnabled(from: string, to: string): boolean {
+  const key = `${from}-${to}`;
+  const state = corridorKillSwitches.get(key);
+  if (!state) return true;
+  return state.enabled;
+}
+
+export function getCorridorStates(): Record<string, CorridorState> {
+  const result: Record<string, CorridorState> = {};
+  corridorKillSwitches.forEach((state, key) => {
+    result[key] = state;
+  });
+  return result;
+}
+
 // ─── Feature Flags Router ────────────────────────────────────────────────────
 export const featureFlagsRouter = router({
   // List all flags (admin sees all; users see their effective state)
@@ -759,6 +787,49 @@ export const whiteLabelRouter = router({
         navSections: config?.navSections ?? [],
         onboardingSteps: config?.onboardingSteps ?? [],
       };
+    }),
+
+  // ─── Corridor Kill Switches ──────────────────────────────────────────────
+  corridorStates: protectedProcedure
+    .query(async () => {
+      return getCorridorStates();
+    }),
+
+  disableCorridor: adminProcedure
+    .input(z.object({
+      from: z.string().length(3),
+      to: z.string().length(3),
+      reason: z.string().optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const key = `${input.from}-${input.to}`;
+      corridorKillSwitches.set(key, {
+        enabled: false,
+        disabledAt: new Date().toISOString(),
+        disabledBy: String(ctx.user?.id ?? "admin"),
+        reason: input.reason ?? "Kill switch activated",
+      });
+      return { corridor: key, enabled: false };
+    }),
+
+  enableCorridor: adminProcedure
+    .input(z.object({
+      from: z.string().length(3),
+      to: z.string().length(3),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const key = `${input.from}-${input.to}`;
+      corridorKillSwitches.delete(key);
+      return { corridor: key, enabled: true };
+    }),
+
+  isCorridorActive: protectedProcedure
+    .input(z.object({
+      from: z.string().length(3),
+      to: z.string().length(3),
+    }))
+    .query(async ({ input }) => {
+      return { enabled: isCorridorEnabled(input.from, input.to) };
     }),
 });
 

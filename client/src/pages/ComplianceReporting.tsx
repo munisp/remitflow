@@ -21,12 +21,16 @@ const REPORT_TYPES = [
   { value: "TRANSACTION_MONITORING", label: "Transaction Monitoring Report" },
   { value: "REGULATORY_CAPITAL", label: "Regulatory Capital Report" },
   { value: "OFAC_SCREENING", label: "OFAC Screening Report" },
+  { value: "PBOC_LTR", label: "PBoC Large Transaction Report (China)" },
+  { value: "SAFE_CROSS_BORDER", label: "SAFE Cross-Border Declaration (China)" },
+  { value: "NFIU_STR", label: "NFIU Suspicious Transaction Report (Nigeria)" },
+  { value: "FINTRAC_CTR", label: "FINTRAC Currency Transaction Report (Canada)" },
 ];
 
 export default function ComplianceReporting() {
   const { t } = useTranslation();
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState<{ reportType: "SAR" | "CTR" | "AML" | "KYC_AUDIT" | "TRANSACTION_MONITORING" | "REGULATORY_CAPITAL" | "OFAC_SCREENING"; reportPeriod: string }>({ reportType: "AML", reportPeriod: "2025-Q4" });
+  const [form, setForm] = useState<{ reportType: "SAR" | "CTR" | "AML" | "KYC_AUDIT" | "TRANSACTION_MONITORING" | "REGULATORY_CAPITAL" | "OFAC_SCREENING" | "PBOC_LTR" | "SAFE_CROSS_BORDER" | "NFIU_STR" | "FINTRAC_CTR"; reportPeriod: string }>({ reportType: "AML", reportPeriod: "2025-Q4" });
 
   const { data, isLoading, refetch } = trpc.complianceReports.listReports.useQuery({ limit: 30 });
 
@@ -224,6 +228,83 @@ export default function ComplianceReporting() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Card className="mt-6">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Shield className="h-5 w-5 text-blue-500" />
+            Jurisdiction-Specific Auto-Filing Thresholds
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Jurisdiction</TableHead>
+                <TableHead>Report Type</TableHead>
+                <TableHead>Threshold</TableHead>
+                <TableHead>Auto-Filed</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow>
+                <TableCell className="font-medium">US (FinCEN)</TableCell>
+                <TableCell>CTR</TableCell>
+                <TableCell>$10,000 USD</TableCell>
+                <TableCell><Badge className="bg-green-500 text-white text-xs">Auto</Badge></TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell className="font-medium">US (FinCEN)</TableCell>
+                <TableCell>Travel Rule</TableCell>
+                <TableCell>$1,000 USD</TableCell>
+                <TableCell><Badge className="bg-green-500 text-white text-xs">Auto</Badge></TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell className="font-medium">Canada (FINTRAC)</TableCell>
+                <TableCell>CTR</TableCell>
+                <TableCell>$10,000 CAD</TableCell>
+                <TableCell><Badge className="bg-green-500 text-white text-xs">Auto</Badge></TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell className="font-medium">China (PBoC)</TableCell>
+                <TableCell>Large Transaction Report</TableCell>
+                <TableCell>CNY 200,000</TableCell>
+                <TableCell><Badge className="bg-green-500 text-white text-xs">Auto</Badge></TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell className="font-medium">China (SAFE)</TableCell>
+                <TableCell>Cross-Border Declaration</TableCell>
+                <TableCell>All cross-border RMB</TableCell>
+                <TableCell><Badge className="bg-green-500 text-white text-xs">Auto</Badge></TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell className="font-medium">Nigeria (NFIU)</TableCell>
+                <TableCell>STR / CTR</TableCell>
+                <TableCell>NGN 5,000,000</TableCell>
+                <TableCell><Badge className="bg-green-500 text-white text-xs">Auto</Badge></TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell className="font-medium">Brazil (BCB/COAF)</TableCell>
+                <TableCell>Inbound Report</TableCell>
+                <TableCell>BRL 50,000</TableCell>
+                <TableCell><Badge className="bg-green-500 text-white text-xs">Auto</Badge></TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell className="font-medium">India (FIU-IND)</TableCell>
+                <TableCell>CTR</TableCell>
+                <TableCell>INR 1,000,000</TableCell>
+                <TableCell><Badge className="bg-green-500 text-white text-xs">Auto</Badge></TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell className="font-medium">Kenya (FRC)</TableCell>
+                <TableCell>Inbound Report</TableCell>
+                <TableCell>KES 1,000,000</TableCell>
+                <TableCell><Badge className="bg-green-500 text-white text-xs">Auto</Badge></TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
     </div>
   
 

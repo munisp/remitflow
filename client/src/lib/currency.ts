@@ -7,11 +7,15 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
   NGN: "₦", USD: "$", GBP: "£", EUR: "€", KES: "KSh", GHS: "₵",
   ZAR: "R", TZS: "TSh", UGX: "USh", XOF: "CFA", XAF: "FCFA",
   EGP: "E£", MAD: "MAD", ETB: "Br", RWF: "FRw", MWK: "MK",
+  CNY: "¥", CNH: "¥", BRL: "R$", INR: "₹", CAD: "C$", AUD: "A$",
+  JPY: "¥", HKD: "HK$", SGD: "S$", CHF: "CHF", SEK: "kr", MXN: "$",
 };
 
 const CURRENCY_LOCALES: Record<string, string> = {
   NGN: "en-NG", USD: "en-US", GBP: "en-GB", EUR: "de-DE", KES: "en-KE",
   GHS: "en-GH", ZAR: "en-ZA", XOF: "fr-SN", XAF: "fr-CM",
+  CNY: "zh-CN", CNH: "zh-CN", BRL: "pt-BR", INR: "en-IN", CAD: "en-CA",
+  AUD: "en-AU", JPY: "ja-JP", HKD: "zh-HK", SGD: "en-SG", MXN: "es-MX",
 };
 
 /**

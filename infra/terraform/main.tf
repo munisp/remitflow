@@ -70,6 +70,16 @@ variable "eks_max_nodes" {
   default = 10
 }
 
+variable "dr_region" {
+  default     = "af-south-1" # Cape Town — closest to West/East Africa for failover
+  description = "Disaster recovery region for multi-region deployment"
+}
+
+variable "enable_multi_region" {
+  default     = true
+  description = "Enable multi-region DR infrastructure"
+}
+
 # ─── VPC ─────────────────────────────────────────────────────────────────────
 
 module "vpc" {
@@ -228,6 +238,154 @@ resource "aws_s3_bucket_public_access_block" "documents" {
   restrict_public_buckets = true
 }
 
+# ─── Multi-Region DR ─────────────────────────────────────────────────────────
+
+provider "aws" {
+  alias  = "dr"
+  region = var.dr_region
+
+  default_tags {
+    tags = {
+      Project     = "RemitFlow"
+      Environment = "${var.environment}-dr"
+      ManagedBy   = "Terraform"
+    }
+  }
+}
+
+# DR Region VPC
+module "vpc_dr" {
+  count   = var.enable_multi_region ? 1 : 0
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "~> 5.0"
+
+  providers = { aws = aws.dr }
+
+  name = "remitflow-${var.environment}-dr"
+  cidr = "10.1.0.0/16"
+
+  azs             = ["${var.dr_region}a", "${var.dr_region}b", "${var.dr_region}c"]
+  private_subnets = ["10.1.1.0/24", "10.1.2.0/24", "10.1.3.0/24"]
+  public_subnets  = ["10.1.101.0/24", "10.1.102.0/24", "10.1.103.0/24"]
+
+  enable_nat_gateway   = true
+  single_nat_gateway   = false
+  enable_dns_hostnames = true
+  enable_dns_support   = true
+}
+
+# DR Region EKS (standby — scaled to minimum)
+module "eks_dr" {
+  count   = var.enable_multi_region ? 1 : 0
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 20.0"
+
+  providers = { aws = aws.dr }
+
+  cluster_name    = "remitflow-${var.environment}-dr"
+  cluster_version = "1.29"
+
+  vpc_id     = module.vpc_dr[0].vpc_id
+  subnet_ids = module.vpc_dr[0].private_subnets
+
+  cluster_endpoint_public_access = true
+
+  eks_managed_node_groups = {
+    general = {
+      instance_types = [var.eks_node_instance_type]
+      min_size       = 2
+      max_size       = var.eks_max_nodes
+      desired_size   = 2
+    }
+  }
+}
+
+# Cross-region RDS read replica for DR
+resource "aws_db_instance" "dr_replica" {
+  count    = var.enable_multi_region ? 1 : 0
+  provider = aws.dr
+
+  identifier          = "remitflow-${var.environment}-dr-replica"
+  replicate_source_db = aws_db_instance.primary.arn
+  instance_class      = var.db_instance_class
+  storage_encrypted   = true
+
+  performance_insights_enabled = true
+  monitoring_interval          = 60
+
+  tags = { Name = "remitflow-dr-replica" }
+}
+
+# DR region Redis (warm standby)
+resource "aws_elasticache_subnet_group" "dr" {
+  count    = var.enable_multi_region ? 1 : 0
+  provider = aws.dr
+
+  name       = "remitflow-${var.environment}-dr"
+  subnet_ids = module.vpc_dr[0].private_subnets
+}
+
+resource "aws_elasticache_replication_group" "dr" {
+  count    = var.enable_multi_region ? 1 : 0
+  provider = aws.dr
+
+  replication_group_id = "remitflow-${var.environment}-dr"
+  description          = "RemitFlow DR Redis"
+
+  node_type            = "cache.r6g.large"
+  num_cache_clusters   = 2
+  port                 = 6379
+  subnet_group_name    = aws_elasticache_subnet_group.dr[0].name
+  at_rest_encryption_enabled = true
+  transit_encryption_enabled = true
+  automatic_failover_enabled = true
+}
+
+# Global Accelerator for automatic failover between regions
+resource "aws_globalaccelerator_accelerator" "main" {
+  count = var.enable_multi_region ? 1 : 0
+
+  name            = "remitflow-${var.environment}"
+  ip_address_type = "IPV4"
+  enabled         = true
+
+  attributes {
+    flow_logs_enabled = true
+    flow_logs_s3_bucket = aws_s3_bucket.documents.id
+    flow_logs_s3_prefix = "global-accelerator-logs/"
+  }
+}
+
+resource "aws_globalaccelerator_listener" "https" {
+  count = var.enable_multi_region ? 1 : 0
+
+  accelerator_arn = aws_globalaccelerator_accelerator.main[0].id
+  protocol        = "TCP"
+
+  port_range {
+    from_port = 443
+    to_port   = 443
+  }
+}
+
+# S3 cross-region replication for documents
+resource "aws_s3_bucket" "documents_dr" {
+  count    = var.enable_multi_region ? 1 : 0
+  provider = aws.dr
+
+  bucket = "remitflow-${var.environment}-documents-dr"
+}
+
+resource "aws_s3_bucket_versioning" "documents_dr" {
+  count    = var.enable_multi_region ? 1 : 0
+  provider = aws.dr
+
+  bucket = aws_s3_bucket.documents_dr[0].id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
 # ─── Outputs ─────────────────────────────────────────────────────────────────
 
 output "eks_cluster_endpoint" {
@@ -244,4 +402,16 @@ output "redis_endpoint" {
 
 output "s3_bucket" {
   value = aws_s3_bucket.documents.id
+}
+
+output "dr_region" {
+  value = var.enable_multi_region ? var.dr_region : "disabled"
+}
+
+output "dr_eks_cluster_endpoint" {
+  value = var.enable_multi_region ? module.eks_dr[0].cluster_endpoint : "disabled"
+}
+
+output "dr_rds_endpoint" {
+  value = var.enable_multi_region ? aws_db_instance.dr_replica[0].endpoint : "disabled"
 }

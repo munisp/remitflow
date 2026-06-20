@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Security Alert - RemitFlow</title>
+</head>
+<body style="margin:0;padding:0;background-color:#f4f4f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f7;padding:40px 20px;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+          <tr>
+            <td style="background-color:#dc2626;padding:24px 32px;">
+              <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;">RemitFlow Security Alert</h1>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:32px;">
+              <div style="padding:16px;background-color:#fef2f2;border-radius:8px;border:1px solid #fecaca;margin-bottom:24px;">
+                <p style="margin:0;font-size:16px;font-weight:600;color:#dc2626;">{{ALERT_TITLE}}</p>
+              </div>
+              <p style="margin:0 0 16px;font-size:14px;color:#4b5563;line-height:1.6;">Hi {{USER_NAME}},</p>
+              <p style="margin:0 0 16px;font-size:14px;color:#4b5563;line-height:1.6;">{{ALERT_MESSAGE}}</p>
+              <table width="100%" cellpadding="8" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:8px;margin-bottom:24px;">
+                <tr style="border-bottom:1px solid #e5e7eb;">
+                  <td style="color:#6b7280;font-size:14px;padding:12px 16px;">Event</td>
+                  <td style="font-weight:600;font-size:14px;padding:12px 16px;text-align:right;">{{EVENT_TYPE}}</td>
+                </tr>
+                <tr style="border-bottom:1px solid #e5e7eb;">
+                  <td style="color:#6b7280;font-size:14px;padding:12px 16px;">Date &amp; Time</td>
+                  <td style="font-size:14px;padding:12px 16px;text-align:right;">{{TIMESTAMP}}</td>
+                </tr>
+                <tr style="border-bottom:1px solid #e5e7eb;">
+                  <td style="color:#6b7280;font-size:14px;padding:12px 16px;">IP Address</td>
+                  <td style="font-family:monospace;font-size:14px;padding:12px 16px;text-align:right;">{{IP_ADDRESS}}</td>
+                </tr>
+                <tr>
+                  <td style="color:#6b7280;font-size:14px;padding:12px 16px;">Device</td>
+                  <td style="font-size:14px;padding:12px 16px;text-align:right;">{{DEVICE}}</td>
+                </tr>
+              </table>
+              <p style="margin:0 0 24px;font-size:14px;color:#4b5563;line-height:1.6;">If this was you, no action is needed. If you did not authorize this activity, please secure your account immediately:</p>
+              <div style="text-align:center;">
+                <a href="{{APP_URL}}/security" style="display:inline-block;background-color:#dc2626;color:#ffffff;text-decoration:none;padding:12px 32px;border-radius:6px;font-weight:600;font-size:14px;">Secure My Account</a>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px 32px;background-color:#f9fafb;border-top:1px solid #e5e7eb;">
+              <p style="margin:0 0 8px;font-size:12px;color:#9ca3af;">If you believe your account has been compromised, contact us immediately at <a href="mailto:security@remitflow.com" style="color:#dc2626;text-decoration:none;">security@remitflow.com</a></p>
+              <p style="margin:0;font-size:12px;color:#9ca3af;">RemitFlow Ltd | FCA Authorized Payment Institution</p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
