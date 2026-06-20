@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, StyleSheet,
   ScrollView, ActivityIndicator, Alert,
 } from 'react-native';
+import NetInfo from '@react-native-community/netinfo';
 import { trpc } from '../services/trpc';
+import { enqueue, pendingCount } from '../services/offlineQueue';
 
 const CURRENCIES = ['USD', 'EUR', 'GBP', 'NGN', 'KES', 'GHS', 'ZAR', 'CNY', 'INR', 'BRL'];
 
@@ -25,7 +27,18 @@ export default function SendMoneyScreen() {
   const convertedAmount = amount ? (parseFloat(amount) * rate).toFixed(2) : '0.00';
   const fee = amount ? (parseFloat(amount) * 0.015).toFixed(2) : '0.00';
 
-  const handleSend = () => {
+  const [isOffline, setIsOffline] = useState(false);
+  const [queuedCount, setQueuedCount] = useState(0);
+
+  useEffect(() => {
+    const unsubscribe = NetInfo.addEventListener(state => {
+      setIsOffline(!(state.isConnected ?? true));
+    });
+    pendingCount().then(setQueuedCount);
+    return () => unsubscribe();
+  }, []);
+
+  const handleSend = async () => {
     if (!amount || !recipientEmail) {
       Alert.alert('Missing Fields', 'Please fill in all required fields');
       return;
@@ -34,6 +47,29 @@ export default function SendMoneyScreen() {
       setStep('confirm');
       return;
     }
+
+    if (isOffline) {
+      await enqueue({
+        operationType: 'transfer',
+        endpoint: 'transactions.send',
+        payload: {
+          amount: parseFloat(amount),
+          currency: fromCurrency,
+          recipientEmail,
+          note,
+          rail: 'SWIFT',
+        },
+      });
+      const count = await pendingCount();
+      setQueuedCount(count);
+      Alert.alert(
+        'Queued Offline',
+        'Your transfer has been saved and will be sent automatically when connectivity is restored.'
+      );
+      setStep('success');
+      return;
+    }
+
     sendMutation.mutate({
       amount: parseFloat(amount),
       currency: fromCurrency,

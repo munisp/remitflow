@@ -47,6 +47,7 @@ type Config struct {
 	TigerBeetleAddr  string
 	OpenSearchURL    string
 	LakehouseURL     string
+	CoreAPIURL       string
 	ServiceName      string
 }
 
@@ -64,6 +65,7 @@ func loadConfig() Config {
 		TigerBeetleAddr:  getEnv("TIGERBEETLE_ADDR", "localhost:3001"),
 		OpenSearchURL:    getEnv("OPENSEARCH_URL", "http://localhost:9200"),
 		LakehouseURL:     getEnv("LAKEHOUSE_URL", "http://localhost:8090"),
+		CoreAPIURL:       getEnv("CORE_API_URL", "http://localhost:3001"),
 		ServiceName:      "mojaloop-connector",
 	}
 }
@@ -347,8 +349,40 @@ func transferCallbackHandler(cfg Config) gin.HandlerFunc {
 			"transferId": transferID, "callback": body,
 		})
 
+		// Forward to Node.js core API for transfer state advancement
+		go forwardToCore(cfg, transferID, body)
+
 		c.JSON(http.StatusOK, gin.H{"status": "accepted"})
 	}
+}
+
+// forwardToCore sends the Mojaloop callback to the Node.js core webhook handler
+// so that transfer state is advanced from partner_sent → completed.
+func forwardToCore(cfg Config, transferID string, body map[string]interface{}) {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"transferId":   transferID,
+		"transferState": body["transferState"],
+		"fulfilment":    body["fulfilment"],
+		"completedTimestamp": body["completedTimestamp"],
+	})
+
+	url := fmt.Sprintf("%s/api/webhooks/mojaloop", cfg.CoreAPIURL)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("[CORE-FORWARD] Failed to create request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-By", "mojaloop-connector")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[CORE-FORWARD] Failed to forward to core: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	log.Printf("[CORE-FORWARD] Forwarded transfer %s to core → %d", transferID, resp.StatusCode)
 }
 
 func metricsHandler(c *gin.Context) {

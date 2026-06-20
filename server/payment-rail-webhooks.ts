@@ -7,12 +7,48 @@
 //   POST /api/webhooks/upi    — UPI (India) settlement callback
 //   POST /api/webhooks/cips   — CIPS (China) settlement callback
 // ============================================================================
-import type { Express, Request, Response } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import { getDb, createAuditLog } from "./db.js";
 import { transactions } from "../drizzle/schema.js";
 import { sql } from "drizzle-orm";
 import { logger } from "./_core/logger";
 import { advanceTransferState } from "./transfer-state-machine.js";
+
+// ─── Webhook Rate Limiter ──────────────────────────────────────────────────────
+// Sliding window rate limiter for webhook endpoints to prevent replay attacks
+// and DDoS via webhook flooding. 100 requests per minute per IP.
+const webhookRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const WEBHOOK_RATE_LIMIT = 100;
+const WEBHOOK_RATE_WINDOW_MS = 60_000;
+
+function webhookRateLimiter(req: Request, res: Response, next: NextFunction): void {
+  const ip = req.ip ?? req.socket.remoteAddress ?? "unknown";
+  const now = Date.now();
+  const entry = webhookRateLimitMap.get(ip);
+
+  if (!entry || now > entry.resetAt) {
+    webhookRateLimitMap.set(ip, { count: 1, resetAt: now + WEBHOOK_RATE_WINDOW_MS });
+    next();
+    return;
+  }
+
+  entry.count++;
+  if (entry.count > WEBHOOK_RATE_LIMIT) {
+    logger.warn({ ip, count: entry.count }, "[Webhook] Rate limit exceeded");
+    res.status(429).json({ error: "Too many webhook requests" });
+    return;
+  }
+
+  next();
+}
+
+// Clean up stale entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  webhookRateLimitMap.forEach((entry, ip) => {
+    if (now > entry.resetAt) webhookRateLimitMap.delete(ip);
+  });
+}, 300_000);
 
 /**
  * Look up a transaction by its partner reference stored in metadata.
@@ -275,13 +311,134 @@ function handleCipsCallback(app: Express) {
   });
 }
 
+// ─── Mojaloop Webhook ────────────────────────────────────────────────────────
+//   POST /api/webhooks/mojaloop — Mojaloop FSPIOP settlement callback
+//   Forwarded from Go mojaloop-connector on transfer fulfil/abort.
+// ──────────────────────────────────────────────────────────────────────────────
+
+function handleMojaloopCallback(app: Express): void {
+  app.post("/api/webhooks/mojaloop", async (req: Request, res: Response) => {
+    const { transferId, transferState, fulfilment, completedTimestamp } = req.body;
+
+    if (!transferId) {
+      res.status(400).json({ error: "Missing transferId" });
+      return;
+    }
+
+    const tx = await findTransactionByPartnerRef(transferId);
+    if (!tx) {
+      logger.warn({ transferId }, "[Mojaloop Webhook] No matching transaction");
+      res.status(200).json({ received: true, matched: false });
+      return;
+    }
+
+    const state = transferState || "COMMITTED";
+    const targetState = state === "COMMITTED" ? "completed" : "failed";
+
+    try {
+      await advanceTransferState(
+        tx.reference,
+        tx.userId,
+        targetState,
+        { failureReason: targetState === "failed" ? `Mojaloop ${state}` : undefined }
+      );
+
+      await createAuditLog({
+        userId: tx.userId,
+        action: "mojaloop_webhook_processed",
+        description: `Transfer ${tx.reference} → ${targetState} via Mojaloop callback`,
+        ipAddress: req.ip ?? "webhook",
+      });
+
+      logger.info(
+        { transferId, reference: tx.reference, targetState },
+        "[Mojaloop Webhook] Transfer state advanced"
+      );
+    } catch (err) {
+      logger.error(
+        { err, transferId, reference: tx.reference },
+        "[Mojaloop Webhook] Error processing callback"
+      );
+    }
+
+    res.status(200).json({ received: true, matched: true });
+  });
+}
+
+// ─── SWIFT Webhook ─────────────────────────────────────────────────────────────
+//   POST /api/webhooks/swift — SWIFT gpi tracking notification (camt.054)
+//   Handles settlement confirmations from SWIFT gpi for international transfers.
+// ──────────────────────────────────────────────────────────────────────────────
+
+function handleSwiftCallback(app: Express): void {
+  app.post("/api/webhooks/swift", async (req: Request, res: Response) => {
+    const { uetr, transactionStatus, completionTime } = req.body;
+
+    if (!uetr) {
+      res.status(400).json({ error: "Missing UETR (Unique End-to-End Transaction Reference)" });
+      return;
+    }
+
+    const tx = await findTransactionByPartnerRef(uetr);
+    if (!tx) {
+      logger.warn({ uetr }, "[SWIFT Webhook] No matching transaction");
+      res.status(200).json({ received: true, matched: false });
+      return;
+    }
+
+    // SWIFT gpi status codes: ACSC (accepted), RJCT (rejected), ACSP (pending)
+    type SwiftState = "completed" | "failed" | "partner_sent";
+    const statusMap: Record<string, SwiftState> = {
+      ACSC: "completed",
+      ACCC: "completed",
+      RJCT: "failed",
+      ACSP: "partner_sent",
+    };
+    const targetState: SwiftState = statusMap[transactionStatus] || "partner_sent";
+
+    try {
+      await advanceTransferState(
+        tx.reference,
+        tx.userId,
+        targetState,
+        { failureReason: targetState === "failed" ? `SWIFT gpi ${transactionStatus}` : undefined }
+      );
+
+      await createAuditLog({
+        userId: tx.userId,
+        action: "swift_webhook_processed",
+        description: `Transfer ${tx.reference} → ${targetState} via SWIFT gpi (${transactionStatus})`,
+        ipAddress: req.ip ?? "webhook",
+      });
+
+      logger.info(
+        { uetr, reference: tx.reference, targetState, transactionStatus },
+        "[SWIFT Webhook] Transfer state advanced"
+      );
+    } catch (err) {
+      logger.error(
+        { err, uetr, reference: tx.reference },
+        "[SWIFT Webhook] Error processing callback"
+      );
+    }
+
+    res.status(200).json({ received: true, matched: true });
+  });
+}
+
 // ─── Registration ──────────────────────────────────────────────────────────────
 
 export function registerPaymentRailWebhooks(app: Express): void {
+  // Apply rate limiting to all webhook endpoints
+  app.use("/api/webhooks", webhookRateLimiter);
+
   handlePixCallback(app);
   handleUpiCallback(app);
   handleCipsCallback(app);
+  handleMojaloopCallback(app);
+  handleSwiftCallback(app);
   logger.info(
-    "[PaymentRails] Webhook handlers registered at /api/webhooks/pix, /api/webhooks/upi, /api/webhooks/cips"
+    "[PaymentRails] Webhook handlers registered (rate-limited: %d/min) at /api/webhooks/{pix,upi,cips,mojaloop,swift}",
+    WEBHOOK_RATE_LIMIT
   );
 }

@@ -301,8 +301,25 @@ async function startServer() {
   // Mojaloop FSPIOP webhook callbacks (PUT /api/mojaloop/callback/*)
   registerMojaloopWebhooks(app);
 
-  // PIX + UPI payment rail webhooks (POST /api/webhooks/pix, /api/webhooks/upi)
+  // PIX + UPI + CIPS + Mojaloop + SWIFT payment rail webhooks
   registerPaymentRailWebhooks(app);
+
+  // OpenAPI/Swagger documentation — serves spec at /api/docs and /api/docs.json
+  const { generateOpenApiSpec } = await import("../lib/openapi");
+  app.get("/api/docs.json", (_req, res) => {
+    res.json(generateOpenApiSpec());
+  });
+  app.get("/api/docs", (_req, res) => {
+    res.send(`<!DOCTYPE html>
+<html><head><title>RemitFlow API Docs</title>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"/>
+</head><body>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>SwaggerUIBundle({ url: '/api/docs.json', dom_id: '#swagger-ui', deepLinking: true });</script>
+</body></html>`);
+  });
 
   // Admin SSE endpoint — GET /api/admin/sse (real-time notifications)
   app.get("/api/admin/sse", async (req, res) => {
