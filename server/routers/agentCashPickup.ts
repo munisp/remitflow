@@ -56,14 +56,17 @@ export const agentCashPickupRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Query agent_network for active agents in the area
+      // Build conditions dynamically to avoid drizzle raw SQL NULL handling issues
+      const conditions = [sql`status = 'active'`, sql`country = ${input.country}`];
+      if (input.city) conditions.push(sql`city ILIKE ${'%' + input.city + '%'}`);
+      if (input.currency) conditions.push(sql`currency = ${input.currency}`);
+
+      const whereClause = sql.join(conditions, sql` AND `);
       const rows = await db.execute(sql`
         SELECT id, name, country, city, address, phone, latitude, longitude,
                operating_hours, services, daily_limit, currency, status
         FROM agent_network
-        WHERE status = 'active'
-          AND country = ${input.country}
-          AND (${input.city ?? null} IS NULL OR city ILIKE ${'%' + (input.city ?? '') + '%'})
-          AND (${input.currency ?? null} IS NULL OR currency = ${input.currency ?? 'USD'})
+        WHERE ${whereClause}
         ORDER BY name ASC
         LIMIT ${input.limit}
       `) as any;
@@ -492,11 +495,13 @@ export const agentCashPickupRouter = router({
 
     if (locationIds.length === 0) return { pickups: [] };
 
+    // Use sql.join for IN clause to avoid drizzle ANY() array expansion issues
+    const idList = sql.join(locationIds.map((id: number) => sql`${id}`), sql`, `);
     const pickupRows = await db.execute(sql`
       SELECT transfer_reference, amount, currency, recipient_name, status,
              created_at, expires_at, agent_name, agent_address
       FROM cash_pickup_assignments
-      WHERE agent_network_id = ANY(${locationIds})
+      WHERE agent_network_id IN (${idList})
         AND status = 'pending'
         AND expires_at > NOW()
       ORDER BY created_at DESC
@@ -675,11 +680,12 @@ export const floatReplenishmentRouter = router({
     // Calculate today's volume
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
+    const todayIso = todayStart.toISOString();
     const todayRows = await db.execute(sql`
       SELECT COALESCE(SUM(CAST("fromAmount" AS DECIMAL(18,2))), 0) as total
       FROM transactions
       WHERE "userId" = ${ctx.user.id}
-        AND "createdAt" >= ${todayStart}
+        AND "createdAt" >= ${todayIso}::timestamptz
         AND type IN ('withdrawal', 'send')
         AND status = 'completed'
     `);
