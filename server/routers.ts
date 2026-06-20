@@ -335,6 +335,7 @@ import { platformFeaturesRouter } from "./_core/platformFeatures";
 import { qrPaymentsRouter } from "./_core/qrPayments";
 import { nfcPaymentsRouter } from "./_core/nfcPayments";
 import { markLaneRouter } from "./integrations/marklane/markLaneRouter";
+import { adminRouter as adminDashboardRouter } from "./admin/adminRouter";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -6972,5 +6973,7 @@ Case: #${input.caseId}`,
   nfcPayments: nfcPaymentsRouter,
   // Mark Lane Integration (Canadian FX Partner)
   markLane: markLaneRouter,
+  // Admin Dashboard (compliance ops, transaction investigation, KYC review)
+  adminDashboard: adminDashboardRouter,
 });
 export type AppRouter = typeof appRouter;

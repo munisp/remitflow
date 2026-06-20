@@ -186,6 +186,19 @@ async function migrateStatus(pool: Pool): Promise<void> {
 
 async function main() {
   const command = process.argv[2] || "status";
+
+  if (command === "generate") {
+    console.log("Use: npx drizzle-kit generate:pg --config=drizzle.config.ts");
+    console.log("Then move generated SQL to drizzle/migrations/");
+    return;
+  }
+
+  if (!["up", "down", "status"].includes(command)) {
+    console.error(`Unknown command: ${command}`);
+    console.error("Usage: npx tsx drizzle/migrate.ts [up|down|status|generate]");
+    process.exit(1);
+  }
+
   const pool = await getPool();
 
   try {
@@ -199,14 +212,6 @@ async function main() {
       case "status":
         await migrateStatus(pool);
         break;
-      case "generate":
-        console.log("Use: npx drizzle-kit generate:pg --config=drizzle.config.ts");
-        console.log("Then move generated SQL to drizzle/migrations/");
-        break;
-      default:
-        console.error(`Unknown command: ${command}`);
-        console.error("Usage: npx tsx drizzle/migrate.ts [up|down|status|generate]");
-        process.exit(1);
     }
   } finally {
     await pool.end();
