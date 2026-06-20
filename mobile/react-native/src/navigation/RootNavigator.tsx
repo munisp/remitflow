@@ -74,6 +74,22 @@ import MedicalTourismScreen from '../screens/MedicalTourismScreen';
 import FormalizationDashboardScreen from '../screens/FormalizationDashboardScreen';
 import OutboundRevenueModelScreen from '../screens/OutboundRevenueModelScreen';
 import RecipientOnboardingScreen from '../screens/RecipientOnboardingScreen';
+// Country-specific SendTo screens
+import SendToNigeriaScreen from '../screens/SendToNigeriaScreen';
+import SendToGhanaScreen from '../screens/SendToGhanaScreen';
+import SendToKenyaScreen from '../screens/SendToKenyaScreen';
+import SendToSouthAfricaScreen from '../screens/SendToSouthAfricaScreen';
+import SendToTanzaniaScreen from '../screens/SendToTanzaniaScreen';
+import SendToUgandaScreen from '../screens/SendToUgandaScreen';
+import SendToCameroonScreen from '../screens/SendToCameroonScreen';
+import SendToSenegalScreen from '../screens/SendToSenegalScreen';
+import SendToBeninScreen from '../screens/SendToBeninScreen';
+import SendToTogoScreen from '../screens/SendToTogoScreen';
+import SendToNigerScreen from '../screens/SendToNigerScreen';
+import SendToMaliScreen from '../screens/SendToMaliScreen';
+import SendToChinaScreen from '../screens/SendToChinaScreen';
+import SendToBrazilScreen from '../screens/SendToBrazilScreen';
+import SendToIndiaScreen from '../screens/SendToIndiaScreen';
 
 export type RootStackParamList = {
   Auth: undefined;
@@ -132,6 +148,22 @@ export type RootStackParamList = {
   FormalizationDashboard: undefined;
   OutboundRevenueModel: undefined;
   RecipientOnboarding: undefined;
+  // Country-specific SendTo screens
+  SendToNigeria: undefined;
+  SendToGhana: undefined;
+  SendToKenya: undefined;
+  SendToSouthAfrica: undefined;
+  SendToTanzania: undefined;
+  SendToUganda: undefined;
+  SendToCameroon: undefined;
+  SendToSenegal: undefined;
+  SendToBenin: undefined;
+  SendToTogo: undefined;
+  SendToNiger: undefined;
+  SendToMali: undefined;
+  SendToChina: undefined;
+  SendToBrazil: undefined;
+  SendToIndia: undefined;
 };
 
 export type TabParamList = {
@@ -238,6 +270,22 @@ export default function RootNavigator() {
           <Stack.Screen name="FormalizationDashboard" component={FormalizationDashboardScreen} />
           <Stack.Screen name="OutboundRevenueModel" component={OutboundRevenueModelScreen} />
           <Stack.Screen name="RecipientOnboarding" component={RecipientOnboardingScreen} />
+          {/* Country-specific SendTo screens */}
+          <Stack.Screen name="SendToNigeria" component={SendToNigeriaScreen} />
+          <Stack.Screen name="SendToGhana" component={SendToGhanaScreen} />
+          <Stack.Screen name="SendToKenya" component={SendToKenyaScreen} />
+          <Stack.Screen name="SendToSouthAfrica" component={SendToSouthAfricaScreen} />
+          <Stack.Screen name="SendToTanzania" component={SendToTanzaniaScreen} />
+          <Stack.Screen name="SendToUganda" component={SendToUgandaScreen} />
+          <Stack.Screen name="SendToCameroon" component={SendToCameroonScreen} />
+          <Stack.Screen name="SendToSenegal" component={SendToSenegalScreen} />
+          <Stack.Screen name="SendToBenin" component={SendToBeninScreen} />
+          <Stack.Screen name="SendToTogo" component={SendToTogoScreen} />
+          <Stack.Screen name="SendToNiger" component={SendToNigerScreen} />
+          <Stack.Screen name="SendToMali" component={SendToMaliScreen} />
+          <Stack.Screen name="SendToChina" component={SendToChinaScreen} />
+          <Stack.Screen name="SendToBrazil" component={SendToBrazilScreen} />
+          <Stack.Screen name="SendToIndia" component={SendToIndiaScreen} />
         </>
       )}
     </Stack.Navigator>

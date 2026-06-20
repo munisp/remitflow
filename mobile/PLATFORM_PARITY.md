@@ -44,6 +44,11 @@
 | **M-Pesa** | ✅ Full integration | ✅ v140 | ✅ v140 |
 | **KGQA** | ✅ Full QA | ✅ v140 | ✅ v140 |
 | **Fee Rules V2** | ✅ Full CRUD | ✅ v140 | ✅ v140 |
+| **Send to China (CIPS)** | ✅ Full landing page | ✅ SendToChinaScreen | ✅ send_to_china_screen |
+| **Send to Brazil (PIX)** | ✅ Full landing page | ✅ SendToBrazilScreen | ✅ send_to_brazil_screen |
+| **Send to India (UPI)** | ✅ Full landing page | ✅ SendToIndiaScreen | ✅ send_to_india_screen |
+| **Graduated Country Risk** | ✅ 4-tier display | ✅ via FraudDetection | ✅ via FraudDetection |
+| **PBoC/SAFE Compliance** | ✅ Jurisdiction table | Admin-only | Admin-only |
 
 ## Admin / Advanced Features (PWA Only)
 
@@ -58,7 +63,7 @@ These features are intentionally PWA-only as they require desktop-class UI:
 - System Configuration
 - Microservices Health Monitor
 - Webhook Management
-- All 40+ country-specific Send To pages
+- All 40+ country-specific Send To pages (Africa, China, Brazil, India)
 
 ## Mobile-Specific Features
 

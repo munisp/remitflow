@@ -212,7 +212,7 @@ export const complianceRouter = router({
 
   generateReport: adminProcedure
     .input(z.object({
-      reportType: z.enum(["SAR", "CTR", "AML", "KYC_AUDIT", "TRANSACTION_MONITORING", "REGULATORY_CAPITAL", "OFAC_SCREENING"]),
+      reportType: z.enum(["SAR", "CTR", "AML", "KYC_AUDIT", "TRANSACTION_MONITORING", "REGULATORY_CAPITAL", "OFAC_SCREENING", "PBOC_LTR", "SAFE_CROSS_BORDER", "NFIU_STR", "FINTRAC_CTR"]),
       reportPeriod: z.string(),
     }))
     .mutation(async ({ ctx, input }) => {
