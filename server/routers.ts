@@ -232,6 +232,7 @@ import { runTransferPipeline } from "./transfer-state-machine.js";
 import { detectStructuring, isGhostBeneficiary, detectRoundTripping } from "./security.attacks.js";
 import { newRailsRouter } from './routers/newRails';
 import { agentOnboardingRouter } from "./routers/agentOnboarding.js";
+import { agentCashPickupRouter, floatReplenishmentRouter } from "./routers/agentCashPickup.js";
 import { posReceiptRouter } from "./routers/posReceipt.js";
 import { transferDisputeRouter } from "./routers/transferDispute.js";
 // v181 — Wire 32 previously orphaned routers
@@ -1304,6 +1305,8 @@ export const appRouter = router({
           description: input.description || `Transfer to ${input.recipientName}`,
           recipientName: input.recipientName, recipientAccount: input.recipientAccount,
           recipientBank: input.recipientBank, recipientCountry: input.recipientCountry,
+          channel: input.deliveryMethod ?? "bank_transfer",
+          metadata: input.deliveryMethod ? JSON.stringify({ deliveryMethod: input.deliveryMethod }) : undefined,
           reference: txRef,
         });
         return { ref: txRef, newBalance: updTransfer.balance };
@@ -6864,6 +6867,8 @@ Case: #${input.caseId}`,
   cryptoCustody: router(cryptoCustodyRouter),
   newRails: newRailsRouter,
   agentOnboarding: agentOnboardingRouter,
+  cashPickup: agentCashPickupRouter,
+  floatReplenishment: floatReplenishmentRouter,
   posReceipt: posReceiptRouter,
   transferDispute: transferDisputeRouter,
   // v181 — Previously orphaned routers now wired
