@@ -19,6 +19,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -372,6 +375,13 @@ func transferCallbackHandler(cfg Config) gin.HandlerFunc {
 
 // forwardToCore sends the Mojaloop callback to the Node.js core webhook handler
 // so that transfer state is advanced from partner_sent → completed.
+// computeWebhookHMAC generates HMAC-SHA256 signature for webhook payloads
+func computeWebhookHMAC(payload []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func forwardToCore(cfg Config, transferID string, body map[string]interface{}) {
 	payload, _ := json.Marshal(map[string]interface{}{
 		"transferId":   transferID,
@@ -388,6 +398,11 @@ func forwardToCore(cfg Config, transferID string, body map[string]interface{}) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Forwarded-By", "mojaloop-connector")
+
+	// Sign the webhook payload with HMAC-SHA256
+	secret := getEnv("WEBHOOK_SECRET_MOJALOOP", "dev-mojaloop-secret-change-in-prod")
+	signature := computeWebhookHMAC(payload, secret)
+	req.Header.Set("X-Webhook-Signature", "sha256="+signature)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)

@@ -296,6 +296,71 @@ async fn reconcile_agent(
     (StatusCode::OK, Json(serde_json::json!(result)))
 }
 
+/// Float guard: validates an agent has sufficient float before a cash-out
+/// operation, using a SELECT FOR UPDATE to prevent concurrent drains.
+/// Returns allowed=true if the deduction is safe, false if it would
+/// cause a negative balance.
+async fn float_guard(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agent_user_id = req.get("agentUserId").and_then(|v| v.as_i64()).unwrap_or(0);
+    let amount = req.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let currency = req.get("currency").and_then(|v| v.as_str()).unwrap_or("NGN");
+
+    if agent_user_id == 0 || amount <= 0.0 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "allowed": false,
+            "reason": "Invalid agentUserId or amount"
+        })));
+    }
+
+    // Use SELECT FOR UPDATE to lock the wallet row during check
+    let result = sqlx::query(
+        r#"SELECT id, CAST(balance AS DOUBLE PRECISION) as balance
+           FROM wallets
+           WHERE "userId" = $1 AND currency = $2
+           FOR UPDATE SKIP LOCKED
+           LIMIT 1"#
+    )
+    .bind(agent_user_id as i32)
+    .bind(currency)
+    .fetch_optional(&state.db)
+    .await;
+
+    match result {
+        Ok(Some(row)) => {
+            let balance: f64 = row.try_get("balance").unwrap_or(0.0);
+            let allowed = balance >= amount;
+            let remaining = balance - amount;
+            let low_float = remaining < state.config.cash_out_alert_floor;
+
+            let remaining_after = if allowed { remaining } else { balance };
+            (StatusCode::OK, Json(serde_json::json!({
+                "allowed": allowed,
+                "currentBalance": balance,
+                "requestedAmount": amount,
+                "remainingAfter": remaining_after,
+                "lowFloatWarning": allowed && low_float,
+                "currency": currency,
+            })))
+        }
+        Ok(None) => {
+            (StatusCode::OK, Json(serde_json::json!({
+                "allowed": false,
+                "reason": "Wallet not found for agent"
+            })))
+        }
+        Err(e) => {
+            error!(error = %e, "Float guard DB error");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
+                "allowed": false,
+                "reason": "Database error"
+            })))
+        }
+    }
+}
+
 async fn detect_anomaly(
     axum::extract::State(state): axum::extract::State<AppState>,
     Json(req): Json<AnomalyRequest>,
@@ -558,6 +623,7 @@ async fn main() {
         .route("/readiness", get(readiness))
         .route("/reconcile/agent", post(reconcile_agent))
         .route("/detect/anomaly", post(detect_anomaly))
+        .route("/float-guard", post(float_guard))
         .route("/report/{agent_id}", get(get_report))
         .route("/metrics", get(get_metrics))
         .layer(cors)

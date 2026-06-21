@@ -20,6 +20,7 @@ import { broadcastUserEvent } from "../sse.service.js";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
 import { logger } from "../_core/logger.js";
 import { sendNotification } from "../notifications.service.js";
+import { withTransferLock } from "../lib/transferLock.js";
 
 // ─── Pickup Code Generation ─────────────────────────────────────────────────
 
@@ -56,14 +57,17 @@ export const agentCashPickupRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
       // Query agent_network for active agents in the area
+      // Build conditions dynamically to avoid drizzle raw SQL NULL handling issues
+      const conditions = [sql`status = 'active'`, sql`country = ${input.country}`];
+      if (input.city) conditions.push(sql`city ILIKE ${'%' + input.city + '%'}`);
+      if (input.currency) conditions.push(sql`currency = ${input.currency}`);
+
+      const whereClause = sql.join(conditions, sql` AND `);
       const rows = await db.execute(sql`
         SELECT id, name, country, city, address, phone, latitude, longitude,
                operating_hours, services, daily_limit, currency, status
         FROM agent_network
-        WHERE status = 'active'
-          AND country = ${input.country}
-          AND (${input.city ?? null} IS NULL OR city ILIKE ${'%' + (input.city ?? '') + '%'})
-          AND (${input.currency ?? null} IS NULL OR currency = ${input.currency ?? 'USD'})
+        WHERE ${whereClause}
         ORDER BY name ASC
         LIMIT ${input.limit}
       `) as any;
@@ -206,6 +210,8 @@ export const agentCashPickupRouter = router({
       recipientIdNumber: z.string().min(3).max(30),
     }))
     .mutation(async ({ ctx, input }) => {
+      // Acquire distributed lock to prevent concurrent reversal + disbursement
+      return withTransferLock(input.transferReference, "disburse cash pickup", async () => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -218,6 +224,15 @@ export const agentCashPickupRouter = router({
 
       if (!agent || agent.status === "suspended") {
         throw new TRPCError({ code: "FORBIDDEN", message: "Agent account not active or not found." });
+      }
+
+      // Verify the transfer hasn't been reversed while we were waiting for the lock
+      const txStateRows = await db.execute(sql`
+        SELECT status FROM transactions WHERE reference = ${input.transferReference} LIMIT 1
+      `);
+      const txState = (txStateRows.rows ?? txStateRows)?.[0] as any;
+      if (txState?.status === "reversed" || txState?.status === "cancelled") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: `Transfer has been ${txState.status}. Cannot disburse.` });
       }
 
       // Fetch the pickup assignment
@@ -284,13 +299,19 @@ export const agentCashPickupRouter = router({
         });
       }
 
-      // Deduct from agent wallet
+      // Deduct from agent wallet with pessimistic balance check (prevents negative balance)
       if (wallet) {
-        await db
+        const [updated] = await db
           .update(wallets)
-          .set({ balance: sql`${wallets.balance} - ${amount}`, updatedAt: new Date() })
-          .where(eq(wallets.id, wallet.id))
-          .returning();
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${amount} AS VARCHAR)`, updatedAt: new Date() })
+          .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${amount}`))
+          .returning({ balance: wallets.balance });
+        if (!updated) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Insufficient float balance (concurrent deduction detected). Please try again.",
+          });
+        }
       }
 
       // Record the disbursement transaction
@@ -394,6 +415,7 @@ export const agentCashPickupRouter = router({
           createdAt: new Date(),
         },
       };
+      }); // end withTransferLock
     }),
 
   // ── 4. Get pickup status (sender or recipient can check) ───────────────────
@@ -492,11 +514,13 @@ export const agentCashPickupRouter = router({
 
     if (locationIds.length === 0) return { pickups: [] };
 
+    // Use sql.join for IN clause to avoid drizzle ANY() array expansion issues
+    const idList = sql.join(locationIds.map((id: number) => sql`${id}`), sql`, `);
     const pickupRows = await db.execute(sql`
       SELECT transfer_reference, amount, currency, recipient_name, status,
              created_at, expires_at, agent_name, agent_address
       FROM cash_pickup_assignments
-      WHERE agent_network_id = ANY(${locationIds})
+      WHERE agent_network_id IN (${idList})
         AND status = 'pending'
         AND expires_at > NOW()
       ORDER BY created_at DESC
@@ -675,11 +699,12 @@ export const floatReplenishmentRouter = router({
     // Calculate today's volume
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
+    const todayIso = todayStart.toISOString();
     const todayRows = await db.execute(sql`
       SELECT COALESCE(SUM(CAST("fromAmount" AS DECIMAL(18,2))), 0) as total
       FROM transactions
       WHERE "userId" = ${ctx.user.id}
-        AND "createdAt" >= ${todayStart}
+        AND "createdAt" >= ${todayIso}::timestamptz
         AND type IN ('withdrawal', 'send')
         AND status = 'completed'
     `);

@@ -27,6 +27,11 @@ export const KAFKA_TOPICS = {
   COMPLIANCE_ALERT: "remitflow.compliance.alert",
   FRAUD_ALERT: "remitflow.fraud.alert",
   KYC_LIVENESS_RESULT: "kyc.liveness.result",
+  FUND_FLOW_EVENTS: "remitflow.fund-flow.events",
+  FUND_FLOW_LEDGER: "remitflow.fund-flow.ledger",
+  FUND_FLOW_SAGAS: "remitflow.fund-flow.sagas",
+  FUND_FLOW_DLQ: "remitflow.fund-flow.dlq",
+  FUND_FLOW_RECONCILIATION: "remitflow.fund-flow.reconciliation",
 } as const;
 
 export type KafkaTopic = typeof KAFKA_TOPICS[keyof typeof KAFKA_TOPICS];

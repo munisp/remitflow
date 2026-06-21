@@ -20,6 +20,7 @@ import { mojaloopTransfer, pixTransfer, upiTransfer, initiateTransfer } from "./
 import { logger } from './_core/logger';
 import { sendEmail, buildTransferCompletedEmail, buildTransferFailedEmail } from "./email.service.js";
 import { safeParseAmount } from "./lib/safeDecimal";
+import { withTransferLock } from "./lib/transferLock.js";
 
 export type TransferState =
   | "pending"      // initial DB state before pipeline starts
@@ -116,15 +117,58 @@ export async function advanceTransferState(
     requiresManualReview?: boolean;
   } = {}
 ): Promise<StateTransitionResult> {
+  // For reversal transitions, acquire a distributed lock to prevent
+  // race conditions with concurrent operations (e.g., agent disbursement)
+  if (targetState === "reversed") {
+    return withTransferLock(transferRef, "reverse transfer", () =>
+      advanceTransferStateInternal(transferRef, userId, targetState, options)
+    );
+  }
+  return advanceTransferStateInternal(transferRef, userId, targetState, options);
+}
+
+async function advanceTransferStateInternal(
+  transferRef: string,
+  userId: number,
+  targetState: TransferState,
+  options: {
+    failureReason?: string;
+    partnerReference?: string;
+    requiresManualReview?: boolean;
+  } = {}
+): Promise<StateTransitionResult> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
 
   // Fetch current state from metadata.pipelineState (or fall back to status column)
   const rows = await db.execute(
-    sql`SELECT id, status, reference, metadata FROM transactions WHERE reference = ${transferRef} LIMIT 1`
+    sql`SELECT id, status, reference, metadata, channel FROM transactions WHERE reference = ${transferRef} LIMIT 1`
   );
   const txn = (rows as any[])[0];
   if (!txn) throw new Error(`Transfer ${transferRef} not found`);
+
+  // FIX #6: Block reversal on cash_pickup transfers that have active pickup assignments
+  if (targetState === "reversed") {
+    const channel = txn.channel as string | undefined;
+    const meta = typeof txn.metadata === "string" ? JSON.parse(txn.metadata || "{}") : (txn.metadata ?? {});
+    const deliveryMethod = channel ?? (meta as Record<string, unknown>)?.deliveryMethod;
+    if (deliveryMethod === "cash_pickup") {
+      const pickupRows = await db.execute(
+        sql`SELECT status FROM cash_pickup_assignments WHERE transfer_reference = ${transferRef} LIMIT 1`
+      );
+      const pickup = (pickupRows.rows ?? pickupRows)?.[0] as any;
+      if (pickup && (pickup.status === "pending" || pickup.status === "completed")) {
+        return {
+          success: false,
+          previousState: "completed" as TransferState,
+          newState: "completed" as TransferState,
+          message: pickup.status === "completed"
+            ? "Cannot reverse: cash has already been disbursed to the recipient via agent pickup."
+            : "Cannot reverse: a pickup assignment is pending. Cancel the pickup first.",
+        };
+      }
+    }
+  }
 
   // Determine current pipeline state from metadata, fall back to status
   let currentMeta: Record<string, unknown> = {};

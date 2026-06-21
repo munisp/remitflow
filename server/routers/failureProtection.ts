@@ -24,6 +24,7 @@ import { logger } from "../_core/logger.js";
 import { randomBytes } from "crypto";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { broadcastUserEvent } from "../sse.service";
+import { checkTransferStuckStatus, CORRIDOR_TIMEOUTS, type CorridorTimeout } from "../lib/corridorTimeouts.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -152,12 +153,18 @@ export const bnplProtectionRouter = router({
       if (!dispute) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       if (input.resolution === "refund_buyer" || input.resolution === "partial_refund") {
-        // Refund amount = total paid so far (or partial)
+        // Refund amount = total paid so far (or partial), capped at what was actually paid
         const paidRows = await db.execute(sql`
           SELECT COALESCE(SUM(amount_ngn), 0) as total_paid FROM bnpl_installments WHERE plan_id = ${dispute.plan_id} AND status = 'paid'
         `);
         const totalPaid = Number((paidRows.rows[0] as { total_paid: number }).total_paid);
-        const refundAmount = input.refundAmountNgn ?? totalPaid;
+        const requestedRefund = input.refundAmountNgn ?? totalPaid;
+        // Cap refund at total amount actually paid to prevent over-refunding
+        const refundAmount = Math.min(requestedRefund, totalPaid);
+        if (requestedRefund > totalPaid) {
+          logger.warn({ requestedRefund, totalPaid, disputeId: input.disputeId },
+            "[BNPL] Refund amount capped: requested exceeds total paid");
+        }
 
         if (refundAmount > 0) {
           await db.execute(sql`
@@ -313,37 +320,79 @@ export const agentProtectionRouter = router({
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export const transferProtectionRouter = router({
-  // Detect stuck transfers (no status update for >48h)
+  // Detect stuck transfers using per-corridor timeouts (not flat 48h)
   detectStuck: adminProcedure.mutation(async ({ ctx }) => {
     const db = await getDb();
+    // Fetch all processing transfers older than the minimum threshold (1 hour for Mojaloop)
     const result = await db.execute(sql`
-      UPDATE transactions
-      SET status = 'stuck', "updatedAt" = NOW()
+      SELECT id, "userId", amount, from_currency, to_currency, reference, channel,
+             metadata, "updatedAt"
+      FROM transactions
       WHERE status = 'processing'
-        AND "updatedAt" < NOW() - INTERVAL '48 hours'
-      RETURNING id, "userId", amount, from_currency, to_currency, reference
+        AND "updatedAt" < NOW() - INTERVAL '1 hour'
     `);
-    const stuck = result.rows as Array<{ id: number; userId: number; amount: string; reference: string }>;
+    const candidates = result.rows as Array<{
+      id: number; userId: number; amount: string; reference: string;
+      channel: string | null; metadata: string | Record<string, unknown> | null; updatedAt: Date;
+    }>;
 
-    for (const tx of stuck) {
-      await notify(db, tx.userId, "transfer_stuck",
-        `Your transfer of ${tx.amount} (ref: ${tx.reference}) appears to be stuck. Our team is investigating. If not resolved within 5 business days, you will receive an automatic refund.`);
+    const stuck: typeof candidates = [];
+    for (const tx of candidates) {
+      // Determine the rail from channel or metadata
+      let rail = tx.channel ?? "bank_transfer";
+      try {
+        const meta = typeof tx.metadata === "string" ? JSON.parse(tx.metadata) : tx.metadata;
+        if (meta && typeof meta === "object" && "paymentRail" in meta) {
+          rail = (meta as Record<string, string>).paymentRail;
+        }
+      } catch { /* use channel */ }
+
+      const status = checkTransferStuckStatus(rail, new Date(tx.updatedAt));
+      if (status.isStuck) {
+        stuck.push(tx);
+        await db.execute(sql`
+          UPDATE transactions SET status = 'stuck', "updatedAt" = NOW()
+          WHERE id = ${tx.id} AND status = 'processing'
+        `);
+        await notify(db, tx.userId, "transfer_stuck",
+          `Your transfer of ${tx.amount} (ref: ${tx.reference}) appears to be stuck after ${status.hoursElapsed}h. Expected: ${status.timeout.expectedSettlement}. Our team is investigating.`);
+      }
     }
 
-    await createAuditLog({ userId: ctx.user.id, action: "STUCK_TRANSFER_SCAN", metadata: { count: stuck.length } });
-    return { stuckCount: stuck.length };
+    await createAuditLog({ userId: ctx.user.id, action: "STUCK_TRANSFER_SCAN", metadata: { scanned: candidates.length, stuck: stuck.length } });
+    return { stuckCount: stuck.length, scanned: candidates.length };
   }),
 
-  // Auto-refund stuck transfers after SLA (5 business days = 7 calendar days)
+  // Per-corridor timeout configuration (admin can view)
+  corridorTimeouts: adminProcedure.query(async () => {
+    return Object.values(CORRIDOR_TIMEOUTS);
+  }),
+
+  // Auto-refund stuck transfers using per-corridor auto-refund thresholds
   autoRefundStuck: adminProcedure.mutation(async ({ ctx }) => {
     const db = await getDb();
     const result = await db.execute(sql`
-      SELECT id, "userId", amount, from_currency, reference
+      SELECT id, "userId", amount, from_currency, reference, channel, metadata, "updatedAt"
       FROM transactions
       WHERE status = 'stuck'
-        AND "updatedAt" < NOW() - INTERVAL '7 days'
     `);
-    const toRefund = result.rows as Array<{ id: number; userId: number; amount: string; from_currency: string; reference: string }>;
+    // Filter by per-corridor auto-refund threshold
+    const allStuck = result.rows as Array<{
+      id: number; userId: number; amount: string; from_currency: string; reference: string;
+      channel: string | null; metadata: string | Record<string, unknown> | null; updatedAt: Date;
+    }>;
+    const toRefund: typeof allStuck = [];
+    for (const tx of allStuck) {
+      let rail = tx.channel ?? "bank_transfer";
+      try {
+        const meta = typeof tx.metadata === "string" ? JSON.parse(tx.metadata) : tx.metadata;
+        if (meta && typeof meta === "object" && "paymentRail" in meta) {
+          rail = (meta as Record<string, string>).paymentRail;
+        }
+      } catch { /* use channel */ }
+      const status = checkTransferStuckStatus(rail, new Date(tx.updatedAt));
+      if (status.shouldAutoRefund) toRefund.push(tx);
+    }
     let refunded = 0;
 
     for (const tx of toRefund) {
