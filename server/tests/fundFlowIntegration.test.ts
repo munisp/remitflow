@@ -14,12 +14,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import type { AtomicOperation } from "../middleware/fundFlowAtomicity";
 
 describe("Full Fund Flow Integration Chain", () => {
   // ── Test 1: End-to-End Success Path ─────────────────────────────────────
 
   it("executes the full atomicity chain in correct order", async () => {
-    const { withAtomicFundFlow, type AtomicOperation } = await import("../middleware/fundFlowAtomicity");
+    const { withAtomicFundFlow } = await import("../middleware/fundFlowAtomicity");
 
     const executionOrder: string[] = [];
 

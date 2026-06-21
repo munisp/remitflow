@@ -252,15 +252,18 @@ export async function recordDoubleEntry(entry: LedgerEntry): Promise<string> {
   }
 
   // PostgreSQL fallback (development only — never reached in strict mode)
-  const db = await getDb();
-  if (db) {
-    await db.execute(sql`
-      INSERT INTO ledger_entries (id, debit_account_id, credit_account_id, amount, currency, type, transfer_ref, status, created_at)
-      VALUES (${entryId}, ${entry.debitAccountId}, ${entry.creditAccountId},
-              ${entry.amount.toString()}, ${entry.currency}, ${entry.flowType}, ${entry.transferRef}, 
-              ${entry.pending ? 'pending' : 'posted'}, NOW())
-      ON CONFLICT (id) DO NOTHING
-    `);
+  try {
+    const db = await getDb();
+    if (db) {
+      await db.execute(sql`
+        INSERT INTO ledger_entries (id, amount, currency, type, description, created_at)
+        VALUES (${entryId}, ${entry.amount.toString()}, ${entry.currency}, ${entry.flowType},
+                ${`${entry.debitAccountId} -> ${entry.creditAccountId} [${entry.transferRef}]`}, NOW())
+        ON CONFLICT (id) DO NOTHING
+      `);
+    }
+  } catch (pgErr) {
+    logger.warn({ pgErr, entryId }, "[TigerBeetle] PostgreSQL fallback failed — best-effort only");
   }
 
   return entryId;
