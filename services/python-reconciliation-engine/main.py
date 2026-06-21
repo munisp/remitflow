@@ -35,6 +35,16 @@ from alert_routing import (
     get_routing_metrics,
     get_routing_config,
 )
+from insider_threat_analytics import (
+    detect_collusion,
+    verify_fx_rate,
+    detect_admin_anomaly,
+    check_canary_access,
+    analyze_pgaudit_log,
+    get_insider_threat_metrics,
+    get_collusion_alerts,
+    get_fx_verification_history,
+)
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -620,6 +630,108 @@ async def get_reconciliation_log():
         ],
         "total": len(reconciliation_log),
     }
+
+
+# ── Insider Threat Analytics Endpoints ────────────────────────────────────────
+
+
+class CollusionDetectionRequest(BaseModel):
+    transactions: list[dict] = []
+
+
+class FXVerificationRequest(BaseModel):
+    pair: str
+    proposed_rate: float
+    source_rates: dict[str, float] | None = None
+
+
+class AdminAnomalyRequest(BaseModel):
+    user_id: int
+    action: str
+    current_hour_count: int
+
+
+class CanaryCheckRequest(BaseModel):
+    table: str
+    record_ids: list[str]
+
+
+class PgAuditRequest(BaseModel):
+    log_entries: list[dict] = []
+
+
+@app.get("/insider-threat/metrics")
+async def insider_threat_metrics():
+    """Get overall insider threat detection metrics."""
+    return get_insider_threat_metrics()
+
+
+@app.post("/insider-threat/collusion/detect")
+async def detect_collusion_endpoint(req: CollusionDetectionRequest):
+    """Analyze transactions for agent-employee collusion patterns."""
+    alerts = detect_collusion(req.transactions)
+    return {
+        "alerts_generated": len(alerts),
+        "alerts": [{"alert_id": a.alert_id, "pattern": a.pattern, "confidence": a.confidence, "severity": a.severity} for a in alerts],
+    }
+
+
+@app.get("/insider-threat/collusion/alerts")
+async def collusion_alerts_endpoint():
+    """Get recent collusion alerts."""
+    return {"alerts": get_collusion_alerts(), "total": len(get_collusion_alerts())}
+
+
+@app.post("/insider-threat/fx/verify")
+async def fx_verify_endpoint(req: FXVerificationRequest):
+    """Verify FX rate against multiple independent sources."""
+    result = verify_fx_rate(req.pair, req.proposed_rate, req.source_rates)
+    return {
+        "pair": result.pair,
+        "verified": result.verified,
+        "median_rate": result.median_rate,
+        "max_deviation": result.max_deviation,
+        "outlier_source": result.outlier_source,
+        "proposed_rate": req.proposed_rate,
+    }
+
+
+@app.get("/insider-threat/fx/history")
+async def fx_history_endpoint():
+    """Get FX rate verification history."""
+    return {"verifications": get_fx_verification_history()}
+
+
+@app.post("/insider-threat/admin-anomaly")
+async def admin_anomaly_endpoint(req: AdminAnomalyRequest):
+    """Check if admin action frequency is anomalous."""
+    event = detect_admin_anomaly(req.user_id, req.action, req.current_hour_count)
+    return {
+        "event_id": event.event_id,
+        "flagged": event.flagged,
+        "deviation_score": event.deviation_score,
+        "baseline": event.baseline_frequency,
+        "current": event.current_frequency,
+    }
+
+
+@app.post("/insider-threat/canary/check")
+async def canary_check_endpoint(req: CanaryCheckRequest):
+    """Check if any accessed records are canary (honey) tokens."""
+    trips = check_canary_access(req.table, req.record_ids)
+    return {
+        "canary_tripped": len(trips) > 0,
+        "trips": trips,
+        "table": req.table,
+        "records_checked": len(req.record_ids),
+    }
+
+
+@app.post("/insider-threat/pgaudit/analyze")
+async def pgaudit_analyze_endpoint(req: PgAuditRequest):
+    """Analyze pgaudit log entries for insider threat indicators."""
+    indicators = analyze_pgaudit_log(req.log_entries)
+    return indicators
 
 
 # ── Graceful Shutdown ────────────────────────────────────────────────────────

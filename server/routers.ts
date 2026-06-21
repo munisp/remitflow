@@ -337,6 +337,7 @@ import { qrPaymentsRouter } from "./_core/qrPayments";
 import { nfcPaymentsRouter } from "./_core/nfcPayments";
 import { markLaneRouter } from "./integrations/marklane/markLaneRouter";
 import { adminRouter as adminDashboardRouter } from "./admin/adminRouter";
+import { insiderThreatRouter } from "./routers/insiderThreatControls";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -7037,5 +7038,7 @@ Case: #${input.caseId}`,
   markLane: markLaneRouter,
   // Admin Dashboard (compliance ops, transaction investigation, KYC review)
   adminDashboard: adminDashboardRouter,
+  // Insider Threat Controls (maker-checker, JIT access, DLP, WebAuthn, geo-fencing)
+  insiderThreat: insiderThreatRouter,
 });
 export type AppRouter = typeof appRouter;
