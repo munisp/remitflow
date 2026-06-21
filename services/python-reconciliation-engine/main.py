@@ -29,6 +29,13 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
 
+from alert_routing import (
+    route_alert,
+    AlertPayload,
+    get_routing_metrics,
+    get_routing_config,
+)
+
 # ── Configuration ────────────────────────────────────────────────────────────
 
 PORT = int(os.environ.get("PORT", "8170"))
@@ -298,20 +305,52 @@ def process_dead_letter(entry: DeadLetterEntry) -> dict:
     return {"dlq_id": entry.dlq_id, "action": "retried", "retries": entry.retry_count}
 
 
-def raise_alert(severity: str, flow_type: str, message: str, operation_id: Optional[str] = None):
-    """Raise an alert for the operations team."""
+def raise_alert(severity: str, flow_type: str, message: str, operation_id: Optional[str] = None, metadata: Optional[dict] = None):
+    """Raise an alert and route to external channels (PagerDuty/OpsGenie/Slack)."""
+    alert_id = generate_id("alert")
+    raised_at = datetime.now(timezone.utc).isoformat()
+
     alert = {
-        "alert_id": generate_id("alert"),
+        "alert_id": alert_id,
         "severity": severity,
         "flow_type": flow_type,
         "message": message,
         "operation_id": operation_id,
-        "raised_at": datetime.now(timezone.utc).isoformat(),
+        "raised_at": raised_at,
         "acknowledged": False,
+        "routing_result": None,
     }
     alerts.append(alert)
     metrics["alerts_raised"] += 1
     logger.warning(f"[ALERT][{severity.upper()}] {message}")
+
+    # Route to external channels (PagerDuty, OpsGenie, Slack)
+    try:
+        payload = AlertPayload(
+            alert_id=alert_id,
+            severity=severity,
+            flow_type=flow_type,
+            message=message,
+            operation_id=operation_id,
+            raised_at=raised_at,
+            metadata=metadata,
+        )
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_route_alert_async(alert, payload))
+        else:
+            loop.run_until_complete(route_alert(payload))
+    except Exception as e:
+        logger.error(f"[AlertRouter] Failed to route alert {alert_id}: {e}")
+
+
+async def _route_alert_async(alert_dict: dict, payload: AlertPayload):
+    """Async helper to route alert without blocking the main request."""
+    try:
+        result = await route_alert(payload)
+        alert_dict["routing_result"] = result
+    except Exception as e:
+        logger.error(f"[AlertRouter] Async routing failed: {e}")
 
 
 def run_reconciliation_sweep() -> ReconciliationSweepResult:
@@ -514,6 +553,33 @@ async def acknowledge_alert(alert_id: str):
     return {"alert_id": alert_id, "status": "acknowledged"}
 
 
+@app.get("/alert-routing/config")
+async def alert_routing_config():
+    """Get alert routing configuration."""
+    return get_routing_config()
+
+
+@app.get("/alert-routing/metrics")
+async def alert_routing_metrics_endpoint():
+    """Get alert routing metrics."""
+    return get_routing_metrics()
+
+
+@app.post("/alert-routing/test")
+async def test_alert_routing():
+    """Send a test alert through all configured channels."""
+    test_payload = AlertPayload(
+        alert_id=generate_id("test"),
+        severity="low",
+        flow_type="test",
+        message="Test alert from RemitFlow reconciliation engine — please ignore",
+        operation_id="test-000",
+        raised_at=datetime.now(timezone.utc).isoformat(),
+    )
+    result = await route_alert(test_payload)
+    return {"test_result": result}
+
+
 @app.get("/metrics")
 async def get_metrics():
     """Get reconciliation engine metrics."""
@@ -529,6 +595,7 @@ async def get_metrics():
         "total_drift_amount": str(metrics["total_drift_amount"]),
         "active_sagas": len([s for s in saga_recoveries if s.recovery_action == "pending"]),
         "unresolved_dlq": sum(1 for e in dead_letter_queue if not e.resolved),
+        "alert_routing": get_routing_metrics(),
     }
 
 
