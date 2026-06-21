@@ -17,6 +17,7 @@ import { sql } from "drizzle-orm";
 import { getDb } from "../db";
 import { logger } from "../_core/logger.js";
 import { publishEvent, KAFKA_TOPICS } from "./kafka";
+import { getRedisConnection, isRedisAvailable, isFundFlowStrictMode } from "./redisCluster";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -87,29 +88,31 @@ function getIdempotencyKey(op: AtomicOperation): string {
 
 /**
  * Attempt to acquire a distributed lock.
- * Uses Redis SETNX with TTL in production; in-memory fallback for dev.
+ * Uses Redis Sentinel/Cluster in production. In strict mode (production),
+ * refuses to proceed if Redis is unavailable — no silent in-memory fallback
+ * for fund operations.
  */
 export async function acquireFundLock(op: AtomicOperation): Promise<{ acquired: boolean; lockToken: string }> {
   const lockKey = getLockKey(op);
   const lockToken = randomBytes(16).toString("hex");
   const now = Date.now();
 
-  // Try Redis first
+  // Try Redis (Sentinel/Cluster/Standalone via redisCluster module)
   try {
-    const redisUrl = process.env.REDIS_URL;
-    if (redisUrl) {
-      const { default: Redis } = await import("ioredis");
-      const redis = new Redis(redisUrl, { maxRetriesPerRequest: 1, connectTimeout: 2000 });
-      const result = await redis.set(lockKey, lockToken, "PX", LOCK_TTL_MS, "NX");
-      await redis.quit();
-      if (result === "OK") return { acquired: true, lockToken };
-      return { acquired: false, lockToken: "" };
+    const redis = await getRedisConnection();
+    const result = await redis.set(lockKey, lockToken, "PX", LOCK_TTL_MS, "NX");
+    if (result === "OK") return { acquired: true, lockToken };
+    return { acquired: false, lockToken: "" };
+  } catch (err) {
+    // In strict mode (production), fail-hard — do NOT fall back to in-memory
+    if (isFundFlowStrictMode()) {
+      logger.error({ err, lockKey }, "[FundLock] Redis unavailable in strict mode — rejecting fund operation");
+      throw new Error("[FUND_FLOW_BLOCKED] Redis unavailable — cannot acquire distributed lock for fund operation. In-memory fallback is disabled in production to prevent split-brain.");
     }
-  } catch {
-    // Fall through to in-memory
+    logger.warn({ err, lockKey }, "[FundLock] Redis unavailable, using in-memory fallback (dev only)");
   }
 
-  // In-memory fallback
+  // In-memory fallback (development only — never reached in strict mode)
   const existing = localLocks.get(lockKey);
   if (existing && existing.expiresAt > now) {
     return { acquired: false, lockToken: "" };
@@ -125,20 +128,15 @@ export async function releaseFundLock(op: AtomicOperation, lockToken: string): P
   const lockKey = getLockKey(op);
 
   try {
-    const redisUrl = process.env.REDIS_URL;
-    if (redisUrl) {
-      const { default: Redis } = await import("ioredis");
-      const redis = new Redis(redisUrl, { maxRetriesPerRequest: 1, connectTimeout: 2000 });
-      // Lua script for atomic check-and-delete
-      const script = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
-      await redis.eval(script, 1, lockKey, lockToken);
-      await redis.quit();
-      return;
-    }
+    const redis = await getRedisConnection();
+    const script = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
+    await redis.eval(script, 1, lockKey, lockToken);
+    return;
   } catch {
-    // Fall through to in-memory
+    // Best-effort release — lock will expire via TTL anyway
   }
 
+  // In-memory fallback (development only)
   const existing = localLocks.get(lockKey);
   if (existing?.owner === lockToken) {
     localLocks.delete(lockKey);
@@ -156,19 +154,18 @@ export async function checkIdempotency(op: AtomicOperation): Promise<unknown | n
   const now = Date.now();
 
   try {
-    const redisUrl = process.env.REDIS_URL;
-    if (redisUrl) {
-      const { default: Redis } = await import("ioredis");
-      const redis = new Redis(redisUrl, { maxRetriesPerRequest: 1, connectTimeout: 2000 });
-      const cached = await redis.get(key);
-      await redis.quit();
-      if (cached) return JSON.parse(cached);
-      return null;
-    }
+    const redis = await getRedisConnection();
+    const cached = await redis.get(key);
+    if (cached) return JSON.parse(cached);
+    return null;
   } catch {
-    // Fall through to in-memory
+    if (isFundFlowStrictMode()) {
+      logger.error({ key }, "[Idempotency] Redis unavailable in strict mode — cannot verify idempotency");
+      throw new Error("[FUND_FLOW_BLOCKED] Redis unavailable — cannot verify operation idempotency");
+    }
   }
 
+  // In-memory fallback (development only)
   const cached = idempotencyCache.get(key);
   if (cached && cached.expiresAt > now) return cached.result;
   return null;
@@ -181,18 +178,15 @@ export async function storeIdempotencyResult(op: AtomicOperation, result: unknow
   const key = getIdempotencyKey(op);
 
   try {
-    const redisUrl = process.env.REDIS_URL;
-    if (redisUrl) {
-      const { default: Redis } = await import("ioredis");
-      const redis = new Redis(redisUrl, { maxRetriesPerRequest: 1, connectTimeout: 2000 });
-      await redis.set(key, JSON.stringify(result), "PX", IDEMPOTENCY_TTL_MS);
-      await redis.quit();
-      return;
-    }
+    const redis = await getRedisConnection();
+    await redis.set(key, JSON.stringify(result), "PX", IDEMPOTENCY_TTL_MS);
+    return;
   } catch {
-    // Fall through to in-memory
+    // Best-effort — idempotency is defense-in-depth, not single point
+    logger.warn({ key }, "[Idempotency] Could not store result in Redis");
   }
 
+  // In-memory fallback (development only)
   idempotencyCache.set(key, { result, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS });
 }
 
@@ -210,8 +204,19 @@ export interface LedgerEntry {
 }
 
 /**
- * Record a double-entry in TigerBeetle (or PostgreSQL fallback).
- * Every wallet debit MUST have a corresponding credit somewhere.
+ * Whether TigerBeetle writes are mandatory.
+ * In production, TigerBeetle must succeed or the operation is rejected.
+ * In development, falls back to PostgreSQL.
+ */
+function isTigerBeetleStrictMode(): boolean {
+  if (process.env.NODE_ENV === "production") return true;
+  return process.env.FUND_FLOW_TIGERBEETLE_STRICT === "true";
+}
+
+/**
+ * Record a double-entry in TigerBeetle.
+ * In production (strict mode), TigerBeetle failure blocks the operation.
+ * In development, falls back to PostgreSQL.
  */
 export async function recordDoubleEntry(entry: LedgerEntry): Promise<string> {
   const entryId = entry.id || createHash("sha256").update(`${entry.debitAccountId}:${entry.creditAccountId}:${entry.amount}:${Date.now()}`).digest("hex").slice(0, 32);
@@ -233,11 +238,20 @@ export async function recordDoubleEntry(entry: LedgerEntry): Promise<string> {
       });
       return entryId;
     }
+
+    // TigerBeetle not configured
+    if (isTigerBeetleStrictMode()) {
+      throw new Error("[FUND_FLOW_BLOCKED] TIGERBEETLE_ADDRESSES not configured — ledger recording is mandatory in production");
+    }
   } catch (err) {
+    if (isTigerBeetleStrictMode()) {
+      logger.error({ err, entryId }, "[TigerBeetle] Transfer failed in strict mode — blocking fund operation");
+      throw new Error(`[FUND_FLOW_BLOCKED] TigerBeetle ledger write failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     logger.warn({ err, entryId }, "[TigerBeetle] Transfer failed, falling back to PostgreSQL");
   }
 
-  // PostgreSQL fallback — insert into ledger_entries
+  // PostgreSQL fallback (development only — never reached in strict mode)
   const db = await getDb();
   if (db) {
     await db.execute(sql`
