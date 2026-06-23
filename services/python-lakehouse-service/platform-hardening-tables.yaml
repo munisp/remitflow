@@ -1,0 +1,158 @@
+# Lakehouse (Medallion Architecture) — Platform Hardening Tables
+# Bronze → Silver → Gold pipeline for analytics and compliance
+
+bronze_tables:
+  # Raw events from Kafka/Fluvio — no transformation
+  - name: bronze_kyc_verifications
+    source: remitflow.kyc.verification.result
+    format: parquet
+    partition_by: [year, month, day]
+    retention_days: 2555  # 7 years
+
+  - name: bronze_kyc_rescreens
+    source: remitflow.kyc.rescreen.trigger
+    format: parquet
+    partition_by: [year, month]
+    retention_days: 2555
+
+  - name: bronze_stablecoin_ops
+    source: remitflow.stablecoin.*
+    format: parquet
+    partition_by: [year, month, day]
+    retention_days: 2555
+
+  - name: bronze_fund_flow_steps
+    source: remitflow.fund.coordinator.step
+    format: parquet
+    partition_by: [year, month, day]
+    retention_days: 2555
+
+  - name: bronze_security_events
+    source: remitflow.security.*
+    format: parquet
+    partition_by: [year, month, day]
+    retention_days: 2555
+
+  - name: bronze_settlement_batches
+    source: remitflow.fund.settlement.batch
+    format: parquet
+    partition_by: [year, month]
+    retention_days: 2555
+
+silver_tables:
+  # Cleaned, deduplicated, enriched
+  - name: silver_kyc_status
+    source: bronze_kyc_verifications
+    transformations:
+      - deduplicate_by: [user_id, check_id]
+      - enrich:
+          - field: country_name
+            lookup: iso_country_codes
+      - redact_pii: [email, phone, date_of_birth, document_number]
+    refresh_interval: 1h
+
+  - name: silver_stablecoin_volumes
+    source: bronze_stablecoin_ops
+    transformations:
+      - aggregate_by: [stablecoin, chain, operation]
+        metrics: [sum_amount, count, avg_fee]
+        window: 1h
+      - filter: status = 'completed'
+    refresh_interval: 15m
+
+  - name: silver_fund_flow_sla
+    source: bronze_fund_flow_steps
+    transformations:
+      - calculate:
+          - field: step_duration_ms
+            expression: completed_at - started_at
+          - field: sla_breached
+            expression: step_duration_ms > sla_threshold_ms
+    refresh_interval: 5m
+
+  - name: silver_security_incidents
+    source: bronze_security_events
+    transformations:
+      - filter: severity IN ('critical', 'high')
+      - deduplicate_by: [event_id]
+    refresh_interval: 1m
+
+  - name: silver_settlement_netting
+    source: bronze_settlement_batches
+    transformations:
+      - calculate:
+          - field: netting_savings_usd
+            expression: gross_amount - net_amount
+          - field: savings_pct
+            expression: (gross_amount - net_amount) / gross_amount * 100
+    refresh_interval: 1h
+
+gold_tables:
+  # Business-ready analytics and compliance reports
+  - name: gold_kyc_compliance_report
+    source: silver_kyc_status
+    description: Regulatory KYC compliance report (CBN, FCA, FinCEN)
+    metrics:
+      - total_verifications_by_tier
+      - average_verification_time
+      - rejection_rate_by_country
+      - document_expiry_upcoming_30d
+      - rescreen_overdue_count
+      - pad_attack_attempts
+    dimensions: [country, tier, provider, month]
+    refresh_interval: 6h
+
+  - name: gold_stablecoin_dashboard
+    source: silver_stablecoin_volumes
+    description: Executive stablecoin operations dashboard
+    metrics:
+      - daily_onramp_volume_usd
+      - daily_offramp_volume_usd
+      - net_flow_by_stablecoin
+      - bridge_volume_by_chain
+      - yield_positions_total
+      - dca_execution_success_rate
+      - depeg_incidents
+    dimensions: [stablecoin, chain, operation, day]
+    refresh_interval: 1h
+
+  - name: gold_fund_flow_health
+    source: silver_fund_flow_sla
+    description: Fund flow health and reliability dashboard
+    metrics:
+      - transaction_success_rate
+      - average_completion_time_ms
+      - sla_breach_rate
+      - compensation_trigger_rate
+      - settlement_netting_savings_usd
+      - stuck_transactions_count
+    dimensions: [type, corridor, rail, day]
+    refresh_interval: 15m
+
+  - name: gold_security_posture
+    source: silver_security_incidents
+    description: Security posture and insider threat dashboard
+    metrics:
+      - pad_attack_attempts
+      - biometric_mismatch_rate
+      - document_fraud_detected
+      - admin_anomalies
+      - canary_triggers
+      - webauthn_clone_alerts
+      - maker_checker_requests
+      - jit_access_grants
+    dimensions: [severity, event_type, day]
+    refresh_interval: 5m
+
+  - name: gold_corridor_economics
+    source: [silver_settlement_netting, silver_fund_flow_sla]
+    description: Corridor cost and performance optimization
+    metrics:
+      - gross_settlement_volume
+      - net_settlement_volume
+      - netting_savings_pct
+      - preferred_route_by_corridor
+      - liquidity_utilization_pct
+      - predictive_demand_accuracy
+    dimensions: [corridor, rail, month]
+    refresh_interval: 6h
