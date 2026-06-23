@@ -603,6 +603,95 @@ async def health() -> Dict[str, Any]:
         }
     }
 
+# ── Core Fund Flow Anomaly Detection ────────────────────────────────────────
+
+CORE_FUND_FLOW_TOPICS = [
+    "remitflow.savings.deposit", "remitflow.savings.withdraw",
+    "remitflow.cbdc.transfer", "remitflow.cbdc.receive",
+    "remitflow.bill.payment", "remitflow.airtime.topup",
+    "remitflow.batch.payment", "remitflow.wallet.topup",
+    "remitflow.wallet.withdraw", "remitflow.stablecoin.swap",
+]
+
+_fund_flow_history: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+_FUND_FLOW_WINDOW_SECONDS = 3600
+_FUND_FLOW_MAX_OPS_PER_HOUR = 50
+_FUND_FLOW_HIGH_VALUE_USD = 10000.0
+
+class FundFlowEventRequest(BaseModel):
+    user_id: int
+    transaction_id: str
+    amount: float
+    currency: str
+    feature: str
+    status: str
+    timestamp: str
+
+class FundFlowAnomalyResponse(BaseModel):
+    anomaly_detected: bool
+    risk_score: float
+    signals: List[str]
+    transaction_id: str
+    recommendation: str
+
+@app.post("/detect/fund-flow", response_model=FundFlowAnomalyResponse)
+async def detect_fund_flow_anomaly(req: FundFlowEventRequest) -> FundFlowAnomalyResponse:
+    signals: List[str] = []
+    risk_score = 0.0
+    now = time.time()
+
+    history = _fund_flow_history[req.user_id]
+    history.append({"amount": req.amount, "feature": req.feature, "ts": now, "txn": req.transaction_id})
+    cutoff = now - _FUND_FLOW_WINDOW_SECONDS
+    _fund_flow_history[req.user_id] = [h for h in history if h["ts"] >= cutoff]
+    recent = _fund_flow_history[req.user_id]
+
+    if len(recent) > _FUND_FLOW_MAX_OPS_PER_HOUR:
+        signals.append(f"velocity_spike: {len(recent)} ops in 1h (limit={_FUND_FLOW_MAX_OPS_PER_HOUR})")
+        risk_score += 0.4
+
+    if req.amount > _FUND_FLOW_HIGH_VALUE_USD:
+        signals.append(f"high_value: ${req.amount:,.2f} exceeds ${_FUND_FLOW_HIGH_VALUE_USD:,.0f} threshold")
+        risk_score += 0.2
+
+    recent_amounts = [h["amount"] for h in recent]
+    if len(recent_amounts) >= 3:
+        mean_amt = np.mean(recent_amounts[:-1])
+        std_amt = np.std(recent_amounts[:-1]) if len(recent_amounts) > 2 else mean_amt * 0.1
+        if std_amt > 0 and abs(req.amount - mean_amt) > 3 * std_amt:
+            signals.append(f"amount_outlier: ${req.amount:,.2f} vs mean=${mean_amt:,.2f} (>3σ)")
+            risk_score += 0.3
+
+    feature_counts: Dict[str, int] = defaultdict(int)
+    for h in recent:
+        feature_counts[h["feature"]] += 1
+    rapid_features = {f: c for f, c in feature_counts.items() if c > 10}
+    if rapid_features:
+        signals.append(f"rapid_same_op: {rapid_features}")
+        risk_score += 0.2
+
+    risk_score = min(risk_score, 1.0)
+    anomaly = risk_score >= 0.5
+
+    recommendation = "block_and_review" if risk_score >= 0.7 else "flag_for_review" if anomaly else "allow"
+
+    return FundFlowAnomalyResponse(
+        anomaly_detected=anomaly,
+        risk_score=round(risk_score, 3),
+        signals=signals,
+        transaction_id=req.transaction_id,
+        recommendation=recommendation,
+    )
+
+@app.get("/fund-flow/topics")
+async def fund_flow_topics() -> Dict[str, Any]:
+    return {
+        "topics": CORE_FUND_FLOW_TOPICS,
+        "window_seconds": _FUND_FLOW_WINDOW_SECONDS,
+        "max_ops_per_hour": _FUND_FLOW_MAX_OPS_PER_HOUR,
+        "high_value_threshold_usd": _FUND_FLOW_HIGH_VALUE_USD,
+    }
+
 
 if __name__ == "__main__":
     import uvicorn

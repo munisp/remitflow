@@ -408,10 +408,11 @@ const escrowPlanRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: `Insufficient USD balance. Required: $${depositUsd.toFixed(2)}` });
       }
 
-      await db.update(wallets).set({
-        balance: String(Number(wallet.balance) - depositUsd),
+      const [debitedDeposit] = await db.update(wallets).set({
+        balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) - ${depositUsd} AS VARCHAR)`,
         updatedAt: new Date(),
-      }).where(eq(wallets.id, wallet.id)).returning();
+      }).where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${depositUsd}`)).returning();
+      if (!debitedDeposit) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
 
       // Lock deposit in TigerBeetle
       try {
@@ -501,10 +502,11 @@ const escrowPlanRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: `Insufficient balance. Required: $${amount.toFixed(2)}` });
       }
 
-      await db.update(wallets).set({
-        balance: String(Number(wallet.balance) - amount),
+      const [debitedInstallment] = await db.update(wallets).set({
+        balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) - ${amount} AS VARCHAR)`,
         updatedAt: new Date(),
-      }).where(eq(wallets.id, wallet.id)).returning();
+      }).where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${amount}`)).returning();
+      if (!debitedInstallment) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
 
       // Lock in TigerBeetle
       try {
@@ -710,7 +712,7 @@ const milestoneRouter = router({
         const [builderWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, builder.userId), eq(wallets.currency, "USD"))).limit(1);
         if (builderWallet) {
           await db.update(wallets).set({
-            balance: String(Number(builderWallet.balance) + releaseAmount),
+            balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${releaseAmount} AS VARCHAR)`,
             updatedAt: new Date(),
           }).where(eq(wallets.id, builderWallet.id)).returning();
         }
@@ -878,7 +880,7 @@ const propertyDisputeRouter = router({
           const [buyerWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, plan.buyerId), eq(wallets.currency, "USD"))).limit(1);
           if (buyerWallet) {
             await db.update(wallets).set({
-              balance: String(Number(buyerWallet.balance) + input.refundAmountUsd),
+              balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${input.refundAmountUsd} AS VARCHAR)`,
               updatedAt: new Date(),
             }).where(eq(wallets.id, buyerWallet.id)).returning();
           }
@@ -943,7 +945,7 @@ const propertyDisputeRouter = router({
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
       if (wallet) {
         await db.update(wallets).set({
-          balance: String(Number(wallet.balance) + refundAmount),
+          balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${refundAmount} AS VARCHAR)`,
           updatedAt: new Date(),
         }).where(eq(wallets.id, wallet.id)).returning();
       }

@@ -114,12 +114,13 @@ export async function reserveFundsActivity(
     throw new Error(`Insufficient balance: ${wallet.balance} ${input.fromCurrency} < ${totalDeduct}`);
   }
 
-  // Lock funds in wallet
-  const newBalance = (Number(wallet.balance) - totalDeduct).toFixed(2);
+  // Lock funds in wallet (pessimistic debit)
   const newLocked = (Number(wallet.lockedBalance ?? 0) + totalDeduct).toFixed(2);
-  await db.update(wallets)
-    .set({ balance: newBalance, lockedBalance: newLocked })
-    .where(eq(wallets.id, wallet.id));
+  const [debitedWallet] = await db.update(wallets)
+    .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) - ${totalDeduct} AS VARCHAR)`, lockedBalance: newLocked })
+    .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${totalDeduct}`))
+    .returning();
+  if (!debitedWallet) throw new Error(`Insufficient balance (concurrent update): ${wallet.balance} ${input.fromCurrency} < ${totalDeduct}`);
 
   // Also reserve in TigerBeetle via gRPC (best-effort)
   const grpcRes = await grpcLedgerReserveFunds(
@@ -647,10 +648,12 @@ export async function executeRecurringPaymentActivity(
       return { success: false, error: `Insufficient balance: ${wallet.balance} < ${totalDeduct}` };
     }
 
-    // Deduct balance
-    await db.update(wallets)
-      .set({ balance: (Number(wallet.balance) - totalDeduct).toFixed(2) })
-      .where(eq(wallets.id, wallet.id));
+    // Pessimistic debit
+    const [debitedRecurring] = await db.update(wallets)
+      .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) - ${totalDeduct} AS VARCHAR)` })
+      .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${totalDeduct}`))
+      .returning();
+    if (!debitedRecurring) throw new Error(`Insufficient balance (concurrent update)`);;
 
     // Record transaction
     const ref = `REC${Date.now()}`;

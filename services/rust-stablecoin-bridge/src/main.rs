@@ -376,6 +376,88 @@ async fn card_authorize(req: web::Json<CardAuthRequest>) -> impl Responder {
     })
 }
 
+// ── Core Fund Flow Event Verification ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct FundFlowEvent {
+    transaction_id: String,
+    user_id: u64,
+    amount: f64,
+    currency: String,
+    feature: String,
+    status: String,
+    timestamp: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FundFlowVerification {
+    transaction_id: String,
+    verified: bool,
+    checks: Vec<VerificationCheck>,
+    verified_at: String,
+}
+
+#[derive(Debug, Serialize)]
+struct VerificationCheck {
+    check: String,
+    passed: bool,
+    detail: String,
+}
+
+static VERIFIED_FEATURES: &[&str] = &[
+    "savings", "cbdc", "bill_payment", "airtime", "batch",
+    "wallet", "stablecoin_swap", "transfer",
+];
+
+#[post("/verify/fund-flow")]
+async fn verify_fund_flow(req: web::Json<FundFlowEvent>) -> impl Responder {
+    let mut checks = Vec::new();
+
+    let amount_valid = req.amount > 0.0 && req.amount <= 10_000_000.0;
+    checks.push(VerificationCheck {
+        check: "amount_range".into(),
+        passed: amount_valid,
+        detail: format!("amount={} within [0, 10M]", req.amount),
+    });
+
+    let feature_valid = VERIFIED_FEATURES.iter().any(|f| req.feature.contains(f));
+    checks.push(VerificationCheck {
+        check: "known_feature".into(),
+        passed: feature_valid,
+        detail: format!("feature='{}' in allowed set", req.feature),
+    });
+
+    let status_valid = ["completed", "created", "failed", "pending"].contains(&req.status.as_str());
+    checks.push(VerificationCheck {
+        check: "valid_status".into(),
+        passed: status_valid,
+        detail: format!("status='{}' in allowed set", req.status),
+    });
+
+    let ts_valid = !req.timestamp.is_empty();
+    checks.push(VerificationCheck {
+        check: "timestamp_present".into(),
+        passed: ts_valid,
+        detail: format!("timestamp='{}'", req.timestamp),
+    });
+
+    let user_valid = req.user_id > 0;
+    checks.push(VerificationCheck {
+        check: "user_id_positive".into(),
+        passed: user_valid,
+        detail: format!("user_id={}", req.user_id),
+    });
+
+    let all_passed = checks.iter().all(|c| c.passed);
+
+    HttpResponse::Ok().json(FundFlowVerification {
+        transaction_id: req.transaction_id.clone(),
+        verified: all_passed,
+        checks,
+        verified_at: Utc::now().to_rfc3339(),
+    })
+}
+
 #[get("/chains")]
 async fn list_chains() -> impl Responder {
     HttpResponse::Ok().json(get_chains())
@@ -407,6 +489,7 @@ async fn main() -> std::io::Result<()> {
             .service(gas_estimates)
             .service(depeg_status)
             .service(card_authorize)
+            .service(verify_fund_flow)
             .service(list_chains)
     })
     .bind(&bind_addr)?

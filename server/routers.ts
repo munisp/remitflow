@@ -32,6 +32,8 @@ import { featureFlagsRouter, tenantsRouter, whiteLabelRouter } from "./routers/f
 import { fetchLiveRates } from "./fx-rates.service";
 import { startTransferWorkflow, startKYCWorkflow } from "./temporal/client";
 import { publishPaymentInitiated, publishTransactionEvent, publishKYCEvent, publishRiskScoreEvent, publishAuditEvent } from "./middleware/kafka";
+import { auditCoreOperation, CORE_TOPICS, generateOpRef, generateIdempotencyKey, checkIdempotency, storeIdempotency } from "./middleware/coreAtomicity";
+import { checkInsiderThreat, requiresMakerChecker } from "./middleware/insiderThreat";
 import { bnplRouter, travelRuleRouter, agentNetworkRouter, corridorAnalyticsRouter, referralEngineRouter, whiteLabelPreviewRouter, apiChangelogRouter, familyEnhancedRouter, tenantAnalyticsRouter } from "./routers/productionFeatures";
 import { partnerOnboardingRouter, adminInviteCodesRouter, travelRuleDbRouter } from "./routers/partnerOnboarding";
 import { partnerPayoutsRouter, webhooksRouter, apiKeysRouter, complianceWatchlistRouter, paymentGatewayLogsRouter, systemConfigRouter, notificationPrefsRouter, fxRateHistoryRouter } from "./routers/productionV2";
@@ -700,6 +702,9 @@ export const appRouter = router({
     }),
     virtualAccount: protectedProcedure.query(async ({ ctx }) => getVirtualAccountsByUserId(ctx.user.id)),
     topup: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000), method: z.string().default("bank_transfer") })).mutation(async ({ ctx, input }) => {
+      const idempKey = generateIdempotencyKey(ctx.user.id, "WALLET_TOPUP", input.currency, input.amount.toString(), input.method);
+      const cached = checkIdempotency(idempKey);
+      if (cached.cached) return cached.result as any;
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const walletRows = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!walletRows.length) throw new TRPCError({ code: "NOT_FOUND", message: "Wallet not found" });
@@ -720,7 +725,9 @@ export const appRouter = router({
       });
       await createAuditLog({ userId: ctx.user.id, action: "WALLET_TOPUP", description: `Topped up ${input.currency} wallet by ${input.amount}` });
       broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "Wallet Top-up Successful", message: `Your ${input.currency} wallet has been credited with ${Number(input.amount).toLocaleString()} ${input.currency}`, amount: input.amount, currency: input.currency, newBalance, method: input.method, reference: topupRef } });
-      return { success: true, newBalance, currency: input.currency };
+      const topupResult = { success: true, newBalance, currency: input.currency };
+      storeIdempotency(idempKey, topupResult);
+      return topupResult;
     }),
     stripeTopup: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000).min(100).max(10_000_000), currency: z.string().default("usd"), walletCurrency: z.string().default("USD"), origin: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const { getStripe } = await import("./stripe");
@@ -1635,6 +1642,9 @@ export const appRouter = router({
       return txs.filter((t: any) => t.type === 'savings_deposit' || t.type === 'savings_withdrawal').slice(0, input?.limit ?? 20);
     }),
     deposit: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), type: z.enum(['flex', 'locked']), lockDays: z.number().int().min(1).max(3650).optional() })).mutation(async ({ ctx, input }) => {
+      const savDepIdempKey = generateIdempotencyKey(ctx.user.id, "SAVINGS_DEPOSIT", input.amount.toString(), input.type, String(input.lockDays ?? 0));
+      const savDepCached = checkIdempotency(savDepIdempKey);
+      if (savDepCached.cached) return savDepCached.result as any;
       const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
       if (input.type === 'locked' && !input.lockDays) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Lock period required for locked savings' });
       const apyTiers: Record<string, number> = { flex: 3.0, '30': 4.0, '60': 4.5, '90': 5.0, '180': 5.5, '365': 6.0 };
@@ -1650,9 +1660,12 @@ export const appRouter = router({
         .returning({ balance: wallets.balance });
       if (!updDep) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
       const [created] = await db.insert(savingsGoals).values({ userId: ctx.user.id, name: `${input.type === 'flex' ? 'Flex' : `${input.lockDays}-Day Locked`} Savings`, emoji: input.type === 'flex' ? '\ud83d\udcb0' : '\ud83d\udd12', targetAmount: (input.amount * 10).toFixed(2), currentAmount: input.amount.toFixed(2), currency: 'USD', status: 'active', autoSave: false, targetDate: maturityDate }).returning();
-      await createAuditLog({ userId: ctx.user.id, action: 'SAVINGS_DEPOSIT', description: `${input.type} savings deposit: $${input.amount} at ${apy}% APY` });
+      const savingsDepRef = generateOpRef("SAVDEP", ctx.user.id);
       await createTransaction({ userId: ctx.user.id, type: "savings_deposit", status: "completed", fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0", description: `Savings deposit: $${input.amount} at ${apy}% APY` });
-      return { success: true, apy, maturityDate, projectedInterest: Math.round(projectedInterest * 100) / 100, goalId: (created as any).id };
+      await auditCoreOperation({ userId: ctx.user.id, action: 'SAVINGS_DEPOSIT', description: `${input.type} savings deposit: $${input.amount} at ${apy}% APY`, amount: input.amount, currency: 'USD', featureLabel: 'savings', operationRef: savingsDepRef, kafkaTopic: CORE_TOPICS.SAVINGS_DEPOSIT, metadata: { apy, lockDays: input.lockDays, type: input.type } });
+      const savDepResult = { success: true, apy, maturityDate, projectedInterest: Math.round(projectedInterest * 100) / 100, goalId: (created as any).id };
+      storeIdempotency(savDepIdempKey, savDepResult);
+      return savDepResult;
     }),
     withdraw: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), goalId: z.number().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
@@ -1700,8 +1713,9 @@ export const appRouter = router({
       } else {
         await db.insert(wallets).values({ userId: ctx.user.id, currency: "USD", balance: input.amount.toFixed(2), isDefault: false, status: "active" }).returning();
       }
-      await createAuditLog({ userId: ctx.user.id, action: 'SAVINGS_WITHDRAWAL', description: `Withdrawal: $${input.amount}` });
+      const savingsWdRef = generateOpRef("SAVWD", ctx.user.id);
       await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0", description: `Savings withdrawal: $${input.amount}` });
+      await auditCoreOperation({ userId: ctx.user.id, action: 'SAVINGS_WITHDRAWAL', description: `Withdrawal: $${input.amount}`, amount: input.amount, currency: 'USD', featureLabel: 'savings', operationRef: savingsWdRef, kafkaTopic: CORE_TOPICS.SAVINGS_WITHDRAW });
       return { success: true, withdrawn: input.amount };
     }),
     createGoal: protectedProcedure.input(z.object({ name: z.string().min(1).max(100), targetAmount: z.number().positive().max(10_000_000), deadline: z.string().optional() })).mutation(async ({ ctx, input }) => {
@@ -2430,12 +2444,32 @@ export const appRouter = router({
       await db.insert(batchPayments).values({ userId: ctx.user.id, name: input.name, currency: input.currency, totalAmount: totalAmount.toString(), totalRecipients: input.recipients.length, status: "draft", payments: input.recipients });
       return { success: true, totalAmount, recipientCount: input.recipients.length };
     }),
-    process: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
+    process: strictRateLimitedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.update(batchPayments).set({ status: "processing" }).where(and(eq(batchPayments.id, input.id), eq(batchPayments.userId, ctx.user.id))).returning();
-      db.update(batchPayments).set({ status: "completed" }).where(eq(batchPayments.id, input.id)).returning()
-        .catch((err: unknown) => logger.error({ err: err instanceof Error ? err.message : String(err) }, "Batch payment completion failed"));
-      return { success: true, batchId: input.id, status: "processing" };
+      const [batch] = await db.select().from(batchPayments).where(and(eq(batchPayments.id, input.id), eq(batchPayments.userId, ctx.user.id))).limit(1);
+      if (!batch) throw new TRPCError({ code: "NOT_FOUND", message: "Batch payment not found" });
+      // Insider threat: maker-checker + geo-fencing on batch payments
+      const batchInsiderCheck = await checkInsiderThreat({ userId: ctx.user.id, action: 'BATCH_PAYMENT', amount: Number(batch.totalAmount), currency: batch.currency ?? "NGN", metadata: { batchId: input.id, recipientCount: batch.totalRecipients } });
+      if (batchInsiderCheck.requiresApproval) throw new TRPCError({ code: 'FORBIDDEN', message: `High-value batch payment requires dual authorization. Approval ID: ${batchInsiderCheck.approvalId}` });
+      if (!batchInsiderCheck.geoFenceResult.allowed) throw new TRPCError({ code: 'FORBIDDEN', message: batchInsiderCheck.geoFenceResult.reason ?? 'Geo/time fence blocked' });
+      if (batch.status === "completed") return { success: true, batchId: input.id, status: "completed", message: "Already processed" };
+      if (batch.status === "processing") throw new TRPCError({ code: "CONFLICT", message: "Batch is already being processed" });
+      const totalAmount = Number(batch.totalAmount);
+      const [senderWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, batch.currency ?? "NGN"))).limit(1);
+      if (!senderWallet || Number(senderWallet.balance) < totalAmount) throw new TRPCError({ code: "BAD_REQUEST", message: `Insufficient balance. Required: ${totalAmount}, Available: ${senderWallet ? Number(senderWallet.balance) : 0}` });
+      await db.update(batchPayments).set({ status: "processing" }).where(eq(batchPayments.id, input.id)).returning();
+      const [debitResult] = await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${totalAmount} AS VARCHAR)` })
+        .where(and(eq(wallets.id, senderWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${totalAmount}`))
+        .returning({ balance: wallets.balance });
+      if (!debitResult) {
+        await db.update(batchPayments).set({ status: "failed" }).where(eq(batchPayments.id, input.id)).returning();
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+      }
+      await db.update(batchPayments).set({ status: "completed" }).where(eq(batchPayments.id, input.id)).returning();
+      const batchRef = generateOpRef("BATCH", ctx.user.id);
+      await auditCoreOperation({ userId: ctx.user.id, action: 'BATCH_PAYMENT', description: `Batch payment: ${batch.totalRecipients} recipients, total ${totalAmount} ${batch.currency ?? "NGN"}`, amount: totalAmount, currency: batch.currency ?? "NGN", featureLabel: 'batch', operationRef: batchRef, kafkaTopic: CORE_TOPICS.BATCH_PAYMENT, metadata: { batchId: input.id, recipientCount: batch.totalRecipients } });
+      return { success: true, batchId: input.id, status: "completed", totalDebited: totalAmount, reference: batchRef };
     }),
   }),
 
@@ -3061,13 +3095,21 @@ export const appRouter = router({
       return rows.map((r: any) => ({ id: r.id, type: r.cbdcType === 'receive' ? 'receive' : 'send', amount: Number(r.sendAmount), currency: r.currency, description: r.purpose ?? `CBDC ${r.cbdcType} transfer`, status: r.status, createdAt: r.createdAt, reference: r.transferId, cbdcRef: r.cbdcRef }));
     }),
     transfer: strictRateLimitedProcedure.input(z.object({ to: z.string().min(1).max(128).trim(), amount: z.number().positive().max(10_000_000), currency: z.string().min(2).max(10), description: z.string().max(500).optional() })).mutation(async ({ ctx, input }) => {
+      // Insider threat: maker-checker for high-value CBDC transfers
+      const insiderCheck = await checkInsiderThreat({ userId: ctx.user.id, action: 'CBDC_TRANSFER', amount: input.amount, currency: input.currency, metadata: { to: input.to } });
+      if (insiderCheck.requiresApproval) throw new TRPCError({ code: 'FORBIDDEN', message: `High-value CBDC transfer requires dual authorization. Approval ID: ${insiderCheck.approvalId}` });
+      if (!insiderCheck.geoFenceResult.allowed) throw new TRPCError({ code: 'FORBIDDEN', message: insiderCheck.geoFenceResult.reason ?? 'Geo/time fence blocked' });
       const db = await getDb();
       const [senderWallet] = await db.select().from(cbdcWallets).where(and(eq(cbdcWallets.userId, ctx.user.id), eq(cbdcWallets.currency, input.currency))).limit(1);
       if (!senderWallet || Number(senderWallet.balance) < input.amount) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient CBDC balance' });
-      const transferId = `CBDC-${Date.now()}-${randomBytes(3).toString('hex').toUpperCase()}`;
-      await db.update(cbdcWallets).set({ balance: (Number(senderWallet.balance) - input.amount).toFixed(2), updatedAt: new Date() }).where(eq(cbdcWallets.id, senderWallet.id)).returning();
+      const transferId = generateOpRef("CBDC", ctx.user.id);
+      const [updatedSender] = await db.update(cbdcWallets)
+        .set({ balance: sql`CAST(CAST(${cbdcWallets.balance} AS DECIMAL(18,2)) - ${input.amount} AS VARCHAR)`, updatedAt: new Date() })
+        .where(and(eq(cbdcWallets.id, senderWallet.id), sql`CAST(${cbdcWallets.balance} AS DECIMAL(18,2)) >= ${input.amount}`))
+        .returning({ balance: cbdcWallets.balance });
+      if (!updatedSender) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient CBDC balance (concurrent update)' });
       await db.insert(africbdcTransfers).values({ userId: ctx.user.id, transferId, cbdcType: 'send', sendAmount: input.amount.toFixed(6), currency: input.currency, country: 'NG', senderWallet: `user:${ctx.user.id}`, receiverWallet: input.to, purpose: input.description ?? 'CBDC transfer', status: 'completed', mojaloopRouted: false, createdAt: new Date(), updatedAt: new Date() });
-      await createAuditLog({ userId: ctx.user.id, action: 'CBDC_TRANSFER', description: `CBDC transfer: ${input.amount} ${input.currency} to ${input.to}`, severity: 'info' });
+      await auditCoreOperation({ userId: ctx.user.id, action: 'CBDC_TRANSFER', description: `CBDC transfer: ${input.amount} ${input.currency} to ${input.to}`, amount: input.amount, currency: input.currency, featureLabel: 'cbdc', operationRef: transferId, kafkaTopic: CORE_TOPICS.CBDC_TRANSFER });
       return { success: true, reference: transferId };
     }),
     receive: protectedProcedure.input(z.object({
@@ -3111,15 +3153,14 @@ export const appRouter = router({
       if (existing) {
         return { success: true, reference: existing.transferId, duplicate: true, message: 'Transfer already processed' };
       }
-      // Credit the receiver's CBDC wallet (upsert)
+      // Credit the receiver's CBDC wallet (atomic upsert)
       const [receiverWallet] = await db.select().from(cbdcWallets)
         .where(and(eq(cbdcWallets.userId, ctx.user.id), eq(cbdcWallets.currency, input.currency))).limit(1);
       if (receiverWallet) {
         await db.update(cbdcWallets)
-          .set({ balance: (Number(receiverWallet.balance) + input.amount).toFixed(2), updatedAt: new Date() })
+          .set({ balance: sql`CAST(CAST(${cbdcWallets.balance} AS DECIMAL(18,2)) + ${input.amount} AS VARCHAR)`, updatedAt: new Date() })
           .where(eq(cbdcWallets.id, receiverWallet.id)).returning();
       } else {
-        // Auto-provision a new CBDC wallet for this currency
         const issuerMap: Record<string, string> = {
           eNGN: 'Central Bank of Nigeria', eGHS: 'Bank of Ghana',
           eKES: 'Central Bank of Kenya', eZAR: 'South African Reserve Bank',
@@ -3133,7 +3174,6 @@ export const appRouter = router({
           status: 'active',
         });
       }
-      // Record the inbound transfer
       await db.insert(africbdcTransfers).values({
         userId: ctx.user.id,
         transferId: input.transferId,
@@ -3151,12 +3191,7 @@ export const appRouter = router({
         createdAt: new Date(),
         updatedAt: new Date(),
       });
-      await createAuditLog({
-        userId: ctx.user.id,
-        action: 'CBDC_RECEIVE',
-        description: `CBDC received: ${input.amount} ${input.currency} from ${input.senderWallet}`,
-        severity: 'info',
-      });
+      await auditCoreOperation({ userId: ctx.user.id, action: 'CBDC_RECEIVE', description: `CBDC received: ${input.amount} ${input.currency} from ${input.senderWallet}`, amount: input.amount, currency: input.currency, featureLabel: 'cbdc', operationRef: input.transferId, kafkaTopic: CORE_TOPICS.CBDC_RECEIVE });
       return { success: true, reference: input.transferId, duplicate: false };
     }),
     // Generate a payment request that a sender can use to push CBDC to this user
@@ -3219,9 +3254,11 @@ export const appRouter = router({
     issue: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [existing] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
-      if (existing) { await db.update(wallets).set({ balance: (Number(existing.balance) + input.amount).toFixed(2) }).where(eq(wallets.id, existing.id)).returning(); }
+      if (existing) { await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${input.amount} AS VARCHAR)` }).where(eq(wallets.id, existing.id)).returning(); }
       else { await db.insert(wallets).values({ userId: ctx.user.id, currency: input.currency, balance: input.amount.toFixed(2), isDefault: false, status: "active" }).returning(); }
-      return { success: true, verified: true, txId: `CBDC${Date.now()}` };
+      const issueRef = generateOpRef("ISSUE", ctx.user.id);
+      await auditCoreOperation({ userId: ctx.user.id, action: 'CBDC_ISSUE', description: `CBDC issuance: ${input.amount} ${input.currency}`, amount: input.amount, currency: input.currency, featureLabel: 'cbdc', operationRef: issueRef, kafkaTopic: CORE_TOPICS.CBDC_RECEIVE });
+      return { success: true, verified: true, txId: issueRef };
     }),
   }),
 
@@ -3257,19 +3294,25 @@ export const appRouter = router({
       const swapFeeBreakdown = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       const fee = Math.max(swapFeeBreakdown.totalFee, input.amount * 0.001);
       const toAmount = input.amount - fee;
-      // Debit from-wallet
+      // Pessimistic debit from-wallet
       const [fromWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.from))).limit(1);
       if (!fromWallet || Number(fromWallet.balance) < input.amount) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient balance' });
-      await db.update(wallets).set({ balance: (Number(fromWallet.balance) - input.amount).toFixed(8) }).where(eq(wallets.id, fromWallet.id)).returning();
-      // Credit to-wallet (upsert)
+      const [debitedFrom] = await db.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,8)) - ${input.amount} AS VARCHAR)` })
+        .where(and(eq(wallets.id, fromWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,8)) >= ${input.amount}`))
+        .returning({ balance: wallets.balance });
+      if (!debitedFrom) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient balance (concurrent update)' });
+      // Atomic credit to-wallet (upsert)
       const [toWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.to))).limit(1);
       if (toWallet) {
-        await db.update(wallets).set({ balance: (Number(toWallet.balance) + toAmount).toFixed(8) }).where(eq(wallets.id, toWallet.id)).returning();
+        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,8)) + ${toAmount} AS VARCHAR)` }).where(eq(wallets.id, toWallet.id)).returning();
       } else {
         await db.insert(wallets).values({ userId: ctx.user.id, currency: input.to, balance: toAmount.toFixed(8), isDefault: false, status: 'active' }).returning();
       }
+      const swapRef = generateOpRef("SWAP", ctx.user.id);
       const txHash = `0x${randomBytes(32).toString('hex')}`;
       await createTransaction({ userId: ctx.user.id, type: 'swap', status: 'completed', fromCurrency: input.from, fromAmount: input.amount.toString(), toCurrency: input.to, toAmount: toAmount.toString(), fee: fee.toFixed(8), description: `Stablecoin swap: ${input.amount} ${input.from} → ${toAmount.toFixed(6)} ${input.to}` });
+      await auditCoreOperation({ userId: ctx.user.id, action: 'STABLECOIN_SWAP', description: `Swap: ${input.amount} ${input.from} → ${toAmount.toFixed(6)} ${input.to}`, amount: input.amount, currency: input.from, featureLabel: 'stablecoin-swap', operationRef: swapRef, kafkaTopic: CORE_TOPICS.STABLECOIN_SWAP, metadata: { toCurrency: input.to, toAmount, fee } });
       return { success: true, txHash, fromAmount: input.amount, toAmount, fee, estimatedTime: '30 seconds' };
     }),
     send: strictRateLimitedProcedure.input(z.object({
@@ -3306,6 +3349,9 @@ export const appRouter = router({
       { id: "mtn-gh", name: "MTN Ghana", logo: "📱", country: "GH", type: "airtime" },
     ]),
     topup: protectedProcedure.input(z.object({ provider: z.string(), phone: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
+      const airtimeIdempKey = generateIdempotencyKey(ctx.user.id, "AIRTIME_TOPUP", input.provider, input.phone, input.amount.toString());
+      const airtimeCached = checkIdempotency(airtimeIdempKey);
+      if (airtimeCached.cached) return airtimeCached.result as any;
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
@@ -3315,7 +3361,9 @@ export const appRouter = router({
         .returning({ balance: wallets.balance });
       if (!updAirtime) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
       const ref = await createTransaction({ userId: ctx.user.id, type: "bill_payment", status: "completed", fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0", description: `Airtime: ${input.phone} (${input.provider})` });
-      return { success: true, reference: ref, phone: input.phone, amount: input.amount };
+      const airtimeResult = { success: true, reference: ref, phone: input.phone, amount: input.amount };
+      storeIdempotency(airtimeIdempKey, airtimeResult);
+      return airtimeResult;
     }),
   }),
 
@@ -3328,6 +3376,9 @@ export const appRouter = router({
       { id: "insurance", name: "Insurance", icon: "🛡️", providers: ["AXA Mansard", "Leadway", "AIICO"] },
     ]),
     pay: protectedProcedure.input(z.object({ category: z.string(), provider: z.string(), accountNumber: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
+      const billIdempKey = generateIdempotencyKey(ctx.user.id, "BILL_PAY", input.category, input.provider, input.accountNumber, input.amount.toString());
+      const billCached = checkIdempotency(billIdempKey);
+      if (billCached.cached) return billCached.result as any;
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
@@ -3337,7 +3388,9 @@ export const appRouter = router({
         .returning({ balance: wallets.balance });
       if (!updBill) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
       const ref = await createTransaction({ userId: ctx.user.id, type: "bill_payment", status: "completed", fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0", description: `${input.category}: ${input.provider} (${input.accountNumber})` });
-      return { success: true, reference: ref, token: `TKN${randomBytes(4).toString("hex").toUpperCase()}` };
+      const billResult = { success: true, reference: ref, token: `TKN${randomBytes(4).toString("hex").toUpperCase()}` };
+      storeIdempotency(billIdempKey, billResult);
+      return billResult;
     }),
   }),
 
