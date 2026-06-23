@@ -25,7 +25,98 @@ from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any
 
+import psycopg2
+import psycopg2.pool
+import psycopg2.extras
+
 PORT = int(os.getenv("PYTHON_HARDENING_PORT", "8270"))
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/remitflow")
+
+# ─── PostgreSQL Connection Pool ──────────────────────────────────────────────
+
+_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+
+
+def get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pool
+    if _pool is None or _pool.closed:
+        _pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=2,
+            maxconn=10,
+            dsn=DATABASE_URL,
+        )
+    return _pool
+
+
+def db_execute(query: str, params: tuple = ()) -> list[dict]:
+    """Execute a query and return rows as dicts."""
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, params)
+            if cur.description:
+                rows = [dict(r) for r in cur.fetchall()]
+            else:
+                rows = []
+            conn.commit()
+            return rows
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
+def db_execute_one(query: str, params: tuple = ()) -> dict | None:
+    rows = db_execute(query, params)
+    return rows[0] if rows else None
+
+
+def init_db_tables() -> None:
+    """Create PostgreSQL tables for persistent state."""
+    pool = get_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS biometric_profiles (
+                    user_id INTEGER PRIMARY KEY,
+                    typing_speed DOUBLE PRECISION DEFAULT 0,
+                    typing_rhythm JSONB DEFAULT '[]',
+                    touch_pressure DOUBLE PRECISION DEFAULT 0,
+                    scroll_pattern VARCHAR(64) DEFAULT 'moderate',
+                    session_duration DOUBLE PRECISION DEFAULT 0,
+                    device_handling VARCHAR(64) DEFAULT 'portrait',
+                    last_updated TIMESTAMPTZ DEFAULT NOW(),
+                    confidence_score DOUBLE PRECISION DEFAULT 0.8
+                );
+                CREATE TABLE IF NOT EXISTS admin_action_history (
+                    id SERIAL PRIMARY KEY,
+                    admin_id INTEGER NOT NULL,
+                    action_count INTEGER NOT NULL,
+                    data_accessed INTEGER NOT NULL DEFAULT 0,
+                    recorded_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_admin_history_admin
+                    ON admin_action_history(admin_id);
+                CREATE TABLE IF NOT EXISTS canary_triggers (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    trigger_id VARCHAR(128) NOT NULL,
+                    record_id VARCHAR(128) NOT NULL,
+                    accessor_id INTEGER NOT NULL,
+                    action VARCHAR(64) NOT NULL,
+                    severity VARCHAR(32) DEFAULT 'critical',
+                    alert TEXT,
+                    triggered_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"[DB] Table init error: {e}")
+    finally:
+        pool.putconn(conn)
 
 # ─── Predictive Liquidity ────────────────────────────────────────────────────
 
@@ -82,11 +173,9 @@ def predict_liquidity(corridor: str, target_date: str | None = None) -> dict:
 
 # ─── Behavioral Biometrics ──────────────────────────────────────────────────
 
-stored_profiles: dict[int, dict] = {}
-
 
 def create_biometric_profile(user_id: int, data: dict) -> dict:
-    """Create or update behavioral biometrics profile."""
+    """Create or update behavioral biometrics profile in PostgreSQL."""
     profile = {
         "user_id": user_id,
         "typing_speed": data.get("typing_speed", 0),
@@ -98,13 +187,41 @@ def create_biometric_profile(user_id: int, data: dict) -> dict:
         "last_updated": datetime.utcnow().isoformat(),
         "confidence_score": 0.8,
     }
-    stored_profiles[user_id] = profile
+    db_execute(
+        """INSERT INTO biometric_profiles
+               (user_id, typing_speed, typing_rhythm, touch_pressure,
+                scroll_pattern, session_duration, device_handling,
+                last_updated, confidence_score)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+           ON CONFLICT (user_id) DO UPDATE SET
+               typing_speed = EXCLUDED.typing_speed,
+               typing_rhythm = EXCLUDED.typing_rhythm,
+               touch_pressure = EXCLUDED.touch_pressure,
+               scroll_pattern = EXCLUDED.scroll_pattern,
+               session_duration = EXCLUDED.session_duration,
+               device_handling = EXCLUDED.device_handling,
+               last_updated = EXCLUDED.last_updated,
+               confidence_score = EXCLUDED.confidence_score""",
+        (
+            user_id,
+            profile["typing_speed"],
+            json.dumps(profile["typing_rhythm"]),
+            profile["touch_pressure"],
+            profile["scroll_pattern"],
+            profile["session_duration"],
+            profile["device_handling"],
+            profile["last_updated"],
+            profile["confidence_score"],
+        ),
+    )
     return profile
 
 
 def compare_biometric(user_id: int, current: dict) -> dict:
     """Compare current session behavior against stored profile."""
-    stored = stored_profiles.get(user_id)
+    stored = db_execute_one(
+        "SELECT * FROM biometric_profiles WHERE user_id = %s", (user_id,)
+    )
     if not stored:
         return {
             "match": True,
@@ -327,18 +444,27 @@ def detect_graph_fraud(transactions: list[dict]) -> dict:
 
 # ─── Admin Anomaly Detection ────────────────────────────────────────────────
 
-admin_action_history: dict[int, list[dict]] = {}
-
-
 def detect_admin_anomaly(admin_id: int, action_count: int, data_accessed: int) -> dict:
-    """Z-score based anomaly detection for admin behavior."""
-    history = admin_action_history.get(admin_id, [])
-    history.append({
-        "action_count": action_count,
-        "data_accessed": data_accessed,
-        "timestamp": datetime.utcnow().isoformat(),
-    })
-    admin_action_history[admin_id] = history[-100:]  # Keep last 100
+    """Z-score based anomaly detection for admin behavior (PostgreSQL-backed)."""
+    db_execute(
+        "INSERT INTO admin_action_history (admin_id, action_count, data_accessed) VALUES (%s, %s, %s)",
+        (admin_id, action_count, data_accessed),
+    )
+    # Keep only last 100 entries per admin
+    db_execute(
+        """DELETE FROM admin_action_history
+           WHERE id NOT IN (
+               SELECT id FROM admin_action_history
+               WHERE admin_id = %s
+               ORDER BY recorded_at DESC LIMIT 100
+           ) AND admin_id = %s""",
+        (admin_id, admin_id),
+    )
+
+    history = db_execute(
+        "SELECT action_count FROM admin_action_history WHERE admin_id = %s ORDER BY recorded_at ASC",
+        (admin_id,),
+    )
 
     if len(history) < 5:
         return {
@@ -369,8 +495,6 @@ def detect_admin_anomaly(admin_id: int, action_count: int, data_accessed: int) -
 
 # ─── Canary Token Monitoring ────────────────────────────────────────────────
 
-canary_triggers: list[dict] = []
-
 CANARY_RECORDS = [
     {"id": "honey_user_001", "type": "user", "email": "honeypot@remitflow.internal"},
     {"id": "honey_wallet_001", "type": "wallet", "balance": "99999.99"},
@@ -385,16 +509,23 @@ def check_canary(record_id: str, accessor_id: int, action: str) -> dict:
     is_canary = any(c["id"] == record_id for c in CANARY_RECORDS)
 
     if is_canary:
+        trigger_id = str(uuid.uuid4())
+        alert_msg = f"CANARY TRIPPED: Record {record_id} accessed by user {accessor_id} ({action})"
         trigger = {
-            "trigger_id": str(uuid.uuid4()),
+            "trigger_id": trigger_id,
             "record_id": record_id,
             "accessor_id": accessor_id,
             "action": action,
             "timestamp": datetime.utcnow().isoformat(),
             "severity": "critical",
-            "alert": f"CANARY TRIPPED: Record {record_id} accessed by user {accessor_id} ({action})",
+            "alert": alert_msg,
         }
-        canary_triggers.append(trigger)
+        db_execute(
+            """INSERT INTO canary_triggers
+                   (trigger_id, record_id, accessor_id, action, severity, alert)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (trigger_id, record_id, accessor_id, action, "critical", alert_msg),
+        )
         return {"canary_tripped": True, "trigger": trigger}
 
     return {"canary_tripped": False}
@@ -470,8 +601,8 @@ class Handler(BaseHTTPRequestHandler):
                 "status": "healthy",
                 "service": "python-platform-hardening",
                 "port": PORT,
-                "canary_triggers": len(canary_triggers),
-                "biometric_profiles": len(stored_profiles),
+                "canary_triggers": (db_execute_one("SELECT COUNT(*) AS cnt FROM canary_triggers") or {}).get("cnt", 0),
+                "biometric_profiles": (db_execute_one("SELECT COUNT(*) AS cnt FROM biometric_profiles") or {}).get("cnt", 0),
             })
         elif self.path.startswith("/fx/rate/"):
             parts = self.path.split("/")
@@ -484,12 +615,14 @@ class Handler(BaseHTTPRequestHandler):
             symbol = self.path.split("/")[-1]
             self._json_response(get_stablecoin_price(symbol))
         elif self.path == "/canary/triggers":
-            self._json_response({"triggers": canary_triggers[-50:], "total": len(canary_triggers)})
+            triggers = db_execute("SELECT * FROM canary_triggers ORDER BY triggered_at DESC LIMIT 50")
+            total_row = db_execute_one("SELECT COUNT(*) AS cnt FROM canary_triggers")
+            self._json_response({"triggers": triggers, "total": (total_row or {}).get("cnt", 0)})
         elif self.path == "/metrics":
             self._json_response({
-                "canary_triggers": len(canary_triggers),
-                "biometric_profiles": len(stored_profiles),
-                "admin_histories": len(admin_action_history),
+                "canary_triggers": (db_execute_one("SELECT COUNT(*) AS cnt FROM canary_triggers") or {}).get("cnt", 0),
+                "biometric_profiles": (db_execute_one("SELECT COUNT(*) AS cnt FROM biometric_profiles") or {}).get("cnt", 0),
+                "admin_histories": (db_execute_one("SELECT COUNT(DISTINCT admin_id) AS cnt FROM admin_action_history") or {}).get("cnt", 0),
                 "uptime_seconds": round(time.time() - start_time, 1),
             })
         else:
@@ -540,6 +673,8 @@ start_time = time.time()
 
 
 def main() -> None:
+    init_db_tables()
+    print(f"[Python Platform Hardening] PostgreSQL tables initialized")
     server = HTTPServer(("0.0.0.0", PORT), Handler)
     print(f"[Python Platform Hardening] Starting on :{PORT}")
     print(f"[Python Platform Hardening] Endpoints: /health, /v1/liquidity/predict, /v1/biometric/*, /v1/document/fraud, /v1/graph/fraud, /v1/admin/anomaly, /v1/canary/check, /fx/rate/*, /stablecoin/price/*")

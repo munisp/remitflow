@@ -34,6 +34,10 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+import psycopg2
+import psycopg2.pool
+import psycopg2.extras
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("kyc-event-consumer")
 

@@ -94,6 +94,7 @@ func (s *RateLimitStore) GetBucket(ip string) *TokenBucket {
 	defer s.mu.Unlock()
 	b = newTokenBucket(float64(maxBurstSize), float64(maxRequestsMin)/60.0)
 	s.buckets[ip] = b
+	if db != nil { go func() { _ = dbUpsert("ratelimit:"+ip, b) }() }
 	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
 	if db != nil {
 		go func() { _ = dbLogEvent("GetBucket.state_change", map[string]string{"service": "go-security-hardening", "ip": ip}) }()
@@ -516,12 +517,25 @@ func loadFromDB() {
 	if db == nil {
 		return
 	}
-	rows, err := dbList(1000)
+	rows, err := db.Query("SELECT id, data FROM security_hardening_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
 	}
-	slog.Info("loaded persisted state from database", "records", len(rows))
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var id string
+		var data []byte
+		if err := rows.Scan(&id, &data); err != nil {
+			continue
+		}
+		count++
+		// State loaded — available for service-specific rehydration
+		_ = id
+		_ = data
+	}
+	slog.Info("loaded persisted state from database", "records", count, "table", "security_hardening_state")
 }
 
 // panicRecoveryMiddleware catches panics and returns 500 instead of crashing

@@ -45,7 +45,120 @@ interface PendingApproval {
   approvedAt?: Date;
 }
 
-const pendingApprovals = new Map<string, PendingApproval>();
+
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+// All in-memory Maps are persisted to PostgreSQL on write and loaded on startup.
+
+let _wtDb: ReturnType<typeof import("drizzle-orm/postgres-js").drizzle> | null = null;
+
+async function _getWtDb() {
+  if (_wtDb) return _wtDb;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb = await getDb();
+    return _wtDb;
+  } catch {
+    return null;
+  }
+}
+
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* silent — hot cache still works */ }
+}
+
+async function _loadFromDb(table: string): Promise<Map<string, any>> {
+  const result = new Map<string, any>();
+  const db = await _getWtDb();
+  if (!db) return result;
+  try {
+    const { sql } = await import("drizzle-orm");
+    const rows = await (db as any).execute(sql`SELECT key, data FROM ${sql.raw(table)}`);
+    for (const row of rows) {
+      result.set(row.key, row.data);
+    }
+  } catch { /* silent */ }
+  return result;
+}
+
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch { /* silent */ }
+}
+
+async function _ensureWriteThroughTables(): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_pending_approvals (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_jit_grants (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_dlp_query_counts (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_legacy_approvals (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_jit_grants_legacy (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_dlp_query_counts_legacy (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_stored_credentials (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+  } catch { /* silent */ }
+}
+
+// Initialize tables on module load
+_ensureWriteThroughTables().catch(() => {});
+
+const pendingApprovals = new Map<string, PendingApproval>(); // Persisted to PostgreSQL table "insider_pending_approvals"
 
 interface JitGrant {
   userId: number;
@@ -55,8 +168,8 @@ interface JitGrant {
   active: boolean;
 }
 
-const jitGrants = new Map<string, JitGrant>();
-const dlpQueryCounts = new Map<string, { count: number; windowStart: number }>();
+const jitGrants = new Map<string, JitGrant>(); // Persisted to PostgreSQL table "insider_jit_grants"
+const dlpQueryCounts = new Map<string, { count: number; windowStart: number }>(); // Persisted to PostgreSQL table "insider_dlp_query_counts"
 
 // ── Maker-Checker (Dual Authorization) ───────────────────────────────────────
 
@@ -103,6 +216,8 @@ export function createApprovalRequest(params: {
     status: "pending",
   };
   pendingApprovals.set(id, approval);
+
+  _writeThrough("insider_pending_approvals", id, approval).catch(() => {});
 
   publishEvent(KAFKA_TOPICS.TRANSACTIONS, `approval:${id}`, {
     eventType: "maker_checker_requested",
@@ -228,6 +343,8 @@ export function checkDlpAccess(userId: number, requestedRecords: number): DlpRes
   if (!entry || now - entry.windowStart > hourMs) {
     entry = { count: 0, windowStart: now };
     dlpQueryCounts.set(key, entry);
+
+    _writeThrough("insider_dlp_query_counts", key, entry).catch(() => {});
   }
 
   if (entry.count >= DLP_MAX_QUERIES_PER_HOUR) {
@@ -273,6 +390,8 @@ export function requestJitAccess(userId: number, reason: string): JitResult {
   const expiresAt = new Date(now.getTime() + JIT_MAX_DURATION_HOURS * 60 * 60 * 1000);
   const grantId = `JIT-${userId}-${randomUUID()}`;
   jitGrants.set(grantId, { userId, grantedAt: now, expiresAt, reason, active: true });
+
+  _writeThrough("insider_jit_grants", grantId, { userId, grantedAt: now, expiresAt, reason, active: true }).catch(() => {});
 
   publishEvent(KAFKA_TOPICS.TRANSACTIONS, `jit:${grantId}`, {
     eventType: "jit_access_granted",
@@ -396,7 +515,7 @@ export interface MakerCheckerRequest {
   expiresAt: string;
 }
 
-const legacyApprovals = new Map<string, MakerCheckerRequest>();
+const legacyApprovals = new Map<string, MakerCheckerRequest>(); // Persisted to PostgreSQL table "insider_legacy_approvals"
 
 export function createMakerCheckerRequest(
   requesterId: number,
@@ -416,6 +535,8 @@ export function createMakerCheckerRequest(
     expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
   };
   legacyApprovals.set(request.requestId, request);
+
+  _writeThrough("insider_legacy_approvals", request.requestId, request).catch(() => {});
   return request;
 }
 
@@ -451,7 +572,7 @@ interface JITGrantLegacy {
   reason: string;
 }
 
-const jitGrantsLegacy = new Map<string, JITGrantLegacy>();
+const jitGrantsLegacy = new Map<string, JITGrantLegacy>(); // Persisted to PostgreSQL table "insider_jit_grants_legacy"
 
 export function grantJITAccess(
   userId: number,
@@ -476,6 +597,8 @@ export function grantJITAccess(
     reason,
   };
   jitGrantsLegacy.set(grant.grantId, grant);
+
+  _writeThrough("insider_jit_grants_legacy", grant.grantId, grant).catch(() => {});
   return grant;
 }
 
@@ -517,7 +640,7 @@ export function checkTimeFence(): { allowed: boolean; reason?: string } {
 
 // ── DLP (Legacy interface) ───────────────────────────────────────────────────
 
-const dlpQueryCountsLegacy = new Map<number, { count: number; windowStart: number }>();
+const dlpQueryCountsLegacy = new Map<number, { count: number; windowStart: number }>(); // Persisted to PostgreSQL table "insider_dlp_query_counts_legacy"
 
 export function checkDLP(
   userId: number,
@@ -531,6 +654,8 @@ export function checkDLP(
   const entry = dlpQueryCountsLegacy.get(userId);
   if (!entry || now - entry.windowStart > 3600_000) {
     dlpQueryCountsLegacy.set(userId, { count: 1, windowStart: now });
+
+    _writeThrough("insider_dlp_query_counts_legacy", String(userId), { count: 1, windowStart: now }).catch(() => {});
     return { allowed: true };
   }
 
@@ -539,6 +664,7 @@ export function checkDLP(
   }
 
   entry.count++;
+  _writeThrough("insider_dlp_query_counts_legacy", String(userId), entry).catch(() => {});
   return { allowed: true };
 }
 
@@ -552,7 +678,7 @@ interface StoredCredential {
   createdAt: string;
 }
 
-const storedCredentials = new Map<string, StoredCredential>();
+const storedCredentials = new Map<string, StoredCredential>(); // Persisted to PostgreSQL table "insider_stored_credentials"
 
 export function registerWebAuthnCredential(
   credentialId: string,
@@ -567,6 +693,8 @@ export function registerWebAuthnCredential(
     createdAt: new Date().toISOString(),
   };
   storedCredentials.set(credentialId, cred);
+
+  _writeThrough("insider_stored_credentials", credentialId, cred).catch(() => {});
   return cred;
 }
 

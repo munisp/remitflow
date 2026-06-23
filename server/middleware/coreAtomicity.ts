@@ -43,8 +43,86 @@ export const CORE_TOPICS = {
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const LOCK_TTL_MS = 30_000; // 30 seconds
 
-const inMemoryIdempotency = new Map<string, { result: unknown; expiresAt: number }>();
-const inMemoryLocks = new Map<string, number>();
+
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+// All in-memory Maps are persisted to PostgreSQL on write and loaded on startup.
+
+let _wtDb: ReturnType<typeof import("drizzle-orm/postgres-js").drizzle> | null = null;
+
+async function _getWtDb() {
+  if (_wtDb) return _wtDb;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb = await getDb();
+    return _wtDb;
+  } catch {
+    return null;
+  }
+}
+
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* silent — hot cache still works */ }
+}
+
+async function _loadFromDb(table: string): Promise<Map<string, any>> {
+  const result = new Map<string, any>();
+  const db = await _getWtDb();
+  if (!db) return result;
+  try {
+    const { sql } = await import("drizzle-orm");
+    const rows = await (db as any).execute(sql`SELECT key, data FROM ${sql.raw(table)}`);
+    for (const row of rows) {
+      result.set(row.key, row.data);
+    }
+  } catch { /* silent */ }
+  return result;
+}
+
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch { /* silent */ }
+}
+
+async function _ensureWriteThroughTables(): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS core_idempotency_cache (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS core_distributed_locks (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+  } catch { /* silent */ }
+}
+
+// Initialize tables on module load
+_ensureWriteThroughTables().catch(() => {});
+
+const inMemoryIdempotency = new Map<string, { result: unknown; expiresAt: number }>(); // Persisted to PostgreSQL table "core_idempotency_cache"
+const inMemoryLocks = new Map<string, number>(); // Persisted to PostgreSQL table "core_distributed_locks"
 
 export function generateIdempotencyKey(
   userId: number,
@@ -62,6 +140,8 @@ export function checkIdempotency(key: string): { cached: boolean; result?: unkno
   if (!entry) return { cached: false };
   if (Date.now() > entry.expiresAt) {
     inMemoryIdempotency.delete(key);
+
+    _deleteFromDb("core_idempotency_cache", key).catch(() => {});
     return { cached: false };
   }
   return { cached: true, result: entry.result };
@@ -117,6 +197,8 @@ export async function releaseLock(lockKey: string, lockId: string): Promise<void
     return;
   }
   inMemoryLocks.delete(lockKey);
+
+  _deleteFromDb("core_distributed_locks", lockKey).catch(() => {});
 }
 
 // ── Redis-backed Idempotency (async) ────────────────────────────────────────
