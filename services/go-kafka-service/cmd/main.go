@@ -53,7 +53,12 @@ const (
 	TopicBatchPayment    = "remitflow.batch.payment"
 	TopicWalletTopup     = "remitflow.wallet.topup"
 	TopicWalletWithdraw  = "remitflow.wallet.withdraw"
-	TopicStablecoinSwap  = "remitflow.stablecoin.swap"
+	TopicStablecoinSwap    = "remitflow.stablecoin.swap"
+	TopicStablecoinOnramp  = "remitflow.stablecoin.onramp"
+	TopicStablecoinOfframp = "remitflow.stablecoin.offramp"
+	TopicStablecoinBridge  = "remitflow.stablecoin.bridge"
+	TopicStablecoinYield   = "remitflow.stablecoin.yield"
+	TopicFundCompensated   = "remitflow.fund.compensated"
 )
 
 var AllTopics = []string{
@@ -66,6 +71,8 @@ var AllTopics = []string{
 	TopicCBDCTransfer, TopicCBDCReceive,
 	TopicBillPayment, TopicAirtimeTopup, TopicBatchPayment,
 	TopicWalletTopup, TopicWalletWithdraw, TopicStablecoinSwap,
+	TopicStablecoinOnramp, TopicStablecoinOfframp,
+	TopicStablecoinBridge, TopicStablecoinYield, TopicFundCompensated,
 }
 
 // ─── Event Types ──────────────────────────────────────────────────────────────

@@ -15,7 +15,7 @@
  *  11. KYC portability (W3C Verifiable Credentials)
  */
 
-import { createHmac, randomUUID, randomBytes } from "crypto";
+import { createHmac, randomUUID, randomBytes, sign, createPrivateKey, createPublicKey, generateKeyPairSync, KeyObject } from "crypto";
 import { logger } from "./logger";
 
 // ── Fail-Closed Mock Guard ──────────────────────────────────────────────────
@@ -300,14 +300,96 @@ export interface VideoKYCSession {
   recordingUrl?: string;
   verificationResult?: "approved" | "declined" | "needs_review";
   notes?: string;
+  roomConfig?: VideoKYCRoomConfig;
+  sessionToken?: string;
+}
+
+// Ed25519 key pair for video session token signing
+let _videoKycKeyPair: { privateKey: KeyObject; publicKey: KeyObject } | null = null;
+
+function getVideoKycKeyPair(): { privateKey: KeyObject; publicKey: KeyObject } {
+  if (!_videoKycKeyPair) {
+    // Check for externally configured keys first
+    const privKeyPem = process.env.VIDEO_KYC_PRIVATE_KEY;
+    const pubKeyPem = process.env.VIDEO_KYC_PUBLIC_KEY;
+    if (privKeyPem && pubKeyPem) {
+      _videoKycKeyPair = {
+        privateKey: createPrivateKey(privKeyPem),
+        publicKey: createPublicKey(pubKeyPem),
+      };
+    } else {
+      // Generate ephemeral key pair for development
+      const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+      _videoKycKeyPair = { privateKey, publicKey };
+    }
+  }
+  return _videoKycKeyPair;
+}
+
+export interface VideoKYCRoomConfig {
+  iceServers: Array<{ urls: string; username?: string; credential?: string }>;
+  signalingUrl: string;
+  recordingEnabled: boolean;
+  maxDurationSeconds: number;
 }
 
 export function createVideoKYCSession(userId: number, scheduledAt?: string): VideoKYCSession {
+  const sessionId = `VKYC-${randomUUID()}`;
+  const iceServers: Array<{ urls: string; username?: string; credential?: string }> = [
+    { urls: process.env.TURN_SERVER_URL || "stun:stun.l.google.com:19302" },
+  ];
+  const turnUser = process.env.TURN_USERNAME;
+  const turnCred = process.env.TURN_CREDENTIAL;
+  if (turnUser && turnCred) {
+    iceServers.push({
+      urls: process.env.TURN_SERVER_URL || "turn:turn.remitflow.com:3478",
+      username: turnUser,
+      credential: turnCred,
+    });
+  }
+
+  // Sign session token with Ed25519
+  const { privateKey } = getVideoKycKeyPair();
+  const tokenPayload = JSON.stringify({ sessionId, userId, iat: Date.now() });
+  const sessionToken = sign(null, Buffer.from(tokenPayload), privateKey).toString("base64url");
+
   return {
-    sessionId: `VKYC-${randomUUID()}`,
+    sessionId,
     userId,
     status: "scheduled",
     scheduledAt: scheduledAt || new Date(Date.now() + 3600_000).toISOString(),
+    roomConfig: {
+      iceServers,
+      signalingUrl: process.env.SIGNALING_URL || "wss://signal.remitflow.com/kyc",
+      recordingEnabled: true,
+      maxDurationSeconds: 600, // 10 min max
+    },
+    sessionToken,
+  };
+}
+
+export function assignComplianceOfficer(session: VideoKYCSession, agentId: number): VideoKYCSession {
+  return {
+    ...session,
+    agentId,
+    status: "in_progress",
+    startedAt: new Date().toISOString(),
+  };
+}
+
+export function completeVideoKYC(
+  session: VideoKYCSession,
+  result: "approved" | "declined" | "needs_review",
+  notes: string,
+  recordingUrl: string
+): VideoKYCSession {
+  return {
+    ...session,
+    status: result === "approved" ? "completed" : "failed",
+    completedAt: new Date().toISOString(),
+    verificationResult: result,
+    notes,
+    recordingUrl,
   };
 }
 
@@ -568,6 +650,27 @@ export interface VerifiableCredential {
   };
 }
 
+// Ed25519 key pair for W3C Verifiable Credential signing
+let _vcKeyPair: { privateKey: KeyObject; publicKey: KeyObject } | null = null;
+
+function getVCKeyPair(): { privateKey: KeyObject; publicKey: KeyObject } {
+  if (!_vcKeyPair) {
+    const privKeyPem = process.env.VC_SIGNING_PRIVATE_KEY;
+    const pubKeyPem = process.env.VC_SIGNING_PUBLIC_KEY;
+    if (privKeyPem && pubKeyPem) {
+      _vcKeyPair = {
+        privateKey: createPrivateKey(privKeyPem),
+        publicKey: createPublicKey(pubKeyPem),
+      };
+    } else {
+      const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+      _vcKeyPair = { privateKey, publicKey };
+      logger.warn("[VC] Using ephemeral Ed25519 key pair — set VC_SIGNING_PRIVATE_KEY for production");
+    }
+  }
+  return _vcKeyPair;
+}
+
 export function issueVerifiableCredential(
   userId: number,
   kycTier: string,
@@ -577,7 +680,7 @@ export function issueVerifiableCredential(
   const now = new Date();
   const expiry = new Date(now.getTime() + 365 * 86400 * 1000);
 
-  return {
+  const credential = {
     id: `vc:remitflow:kyc:${randomUUID()}`,
     type: ["VerifiableCredential", "KYCVerification"],
     issuer: "did:web:remitflow.com",
@@ -590,12 +693,41 @@ export function issueVerifiableCredential(
       documentTypes,
       jurisdictions,
     },
+  };
+
+  // Sign with Ed25519 — real cryptographic signature
+  const { privateKey } = getVCKeyPair();
+  const dataToSign = JSON.stringify(credential);
+  const signature = sign(null, Buffer.from(dataToSign), privateKey).toString("base64url");
+
+  return {
+    ...credential,
     proof: {
       type: "Ed25519Signature2020",
       created: now.toISOString(),
       proofPurpose: "assertionMethod",
       verificationMethod: "did:web:remitflow.com#key-1",
-      signature: randomBytes(64).toString("hex"),
+      signature,
     },
   };
+}
+
+/**
+ * Verify a Verifiable Credential signature using the issuer's public key.
+ */
+export function verifyVerifiableCredential(vc: VerifiableCredential): boolean {
+  const { publicKey } = getVCKeyPair();
+  const { proof, ...credential } = vc;
+  const dataToVerify = JSON.stringify(credential);
+  try {
+    const { verify: cryptoVerify } = require("crypto");
+    return cryptoVerify(
+      null,
+      Buffer.from(dataToVerify),
+      publicKey,
+      Buffer.from(proof.signature, "base64url")
+    );
+  } catch {
+    return false;
+  }
 }

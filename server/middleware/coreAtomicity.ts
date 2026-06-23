@@ -12,10 +12,12 @@
  *   - Temporal saga compensation hooks
  */
 
-import { createHash, randomUUID } from "crypto";
+import { createHash, randomUUID, randomBytes } from "crypto";
 import { logger } from "../_core/logger";
 import { getRedisClient, REDIS_KEYS } from "./redis";
-import { publishEvent, KAFKA_TOPICS } from "./kafka";
+import { publishEvent, KAFKA_TOPICS, type TransactionEvent } from "./kafka";
+import { tigerBeetle } from "./middlewareIntegration";
+import { createAuditLog } from "../db";
 
 // ── Topics ──────────────────────────────────────────────────────────────────
 export const CORE_TOPICS = {
@@ -41,7 +43,7 @@ export const CORE_TOPICS = {
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const LOCK_TTL_MS = 30_000; // 30 seconds
 
-const inMemoryIdempotency = new Map<string, { result: unknown; expiry: number }>();
+const inMemoryIdempotency = new Map<string, { result: unknown; expiresAt: number }>();
 const inMemoryLocks = new Map<string, number>();
 
 export function generateIdempotencyKey(
@@ -51,6 +53,27 @@ export function generateIdempotencyKey(
 ): string {
   const raw = `${userId}:${operation}:${args.join(":")}`;
   return createHash("sha256").update(raw).digest("hex");
+}
+
+// ── Idempotency Cache ───────────────────────────────────────────────────────
+
+export function checkIdempotency(key: string): { cached: boolean; result?: unknown } {
+  const entry = inMemoryIdempotency.get(key);
+  if (!entry) return { cached: false };
+  if (Date.now() > entry.expiresAt) {
+    inMemoryIdempotency.delete(key);
+    return { cached: false };
+  }
+  return { cached: true, result: entry.result };
+}
+
+export function storeIdempotency(key: string, result: unknown): void {
+  inMemoryIdempotency.set(key, { result, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS });
+}
+
+// ── Operation Reference Generator ───────────────────────────────────────────
+export function generateOpRef(prefix: string, userId: number): string {
+  return `${prefix}-${userId}-${Date.now()}-${randomBytes(3).toString("hex")}`;
 }
 
 // ── Distributed Lock ────────────────────────────────────────────────────────
@@ -96,7 +119,7 @@ export async function releaseLock(lockKey: string, lockId: string): Promise<void
   inMemoryLocks.delete(lockKey);
 }
 
-// ── Idempotency Cache ───────────────────────────────────────────────────────
+// ── Redis-backed Idempotency (async) ────────────────────────────────────────
 
 export async function getIdempotentResult(key: string): Promise<unknown | null> {
   const redis = getRedisClient();
@@ -107,7 +130,7 @@ export async function getIdempotentResult(key: string): Promise<unknown | null> 
     } catch { /* fallthrough */ }
   }
   const entry = inMemoryIdempotency.get(key);
-  if (entry && entry.expiry > Date.now()) return entry.result;
+  if (entry && entry.expiresAt > Date.now()) return entry.result;
   return null;
 }
 
@@ -119,7 +142,7 @@ export async function setIdempotentResult(key: string, result: unknown): Promise
       return;
     } catch { /* fallthrough */ }
   }
-  inMemoryIdempotency.set(key, { result, expiry: Date.now() + IDEMPOTENCY_TTL_MS });
+  inMemoryIdempotency.set(key, { result, expiresAt: Date.now() + IDEMPOTENCY_TTL_MS });
 }
 
 // ── TigerBeetle Double-Entry ────────────────────────────────────────────────
@@ -169,6 +192,36 @@ export async function recordDoubleEntry(params: {
   }
 }
 
+export async function recordCoreDoubleEntry(params: {
+  userId: number;
+  amount: number;
+  featureLabel: string;
+  transferId: string;
+  ledger?: number;
+}): Promise<boolean> {
+  try {
+    const transferBigId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
+    const debitAccountId = BigInt(params.userId);
+    const creditAccountId = BigInt(params.userId + 1_000_000);
+    const amountCents = BigInt(Math.round(params.amount * 100));
+    await tigerBeetle.createTransfer({
+      id: transferBigId,
+      debitAccountId,
+      creditAccountId,
+      amount: amountCents,
+      ledger: params.ledger ?? 1,
+      code: 1,
+    });
+    return true;
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), feature: params.featureLabel },
+      "[CoreAtomicity] TigerBeetle degraded, using DB fallback"
+    );
+    return false;
+  }
+}
+
 // ── Kafka Audit ─────────────────────────────────────────────────────────────
 
 export async function publishFundFlowEvent(
@@ -188,6 +241,101 @@ export async function publishFundFlowEvent(
       throw new Error("Kafka unavailable — fund event lost");
     }
   }
+}
+
+export async function publishCoreEvent(params: {
+  topic: string;
+  userId: number;
+  amount: number;
+  currency: string;
+  featureLabel: string;
+  operationRef: string;
+  eventType?: "created" | "completed" | "failed";
+  metadata?: Record<string, unknown>;
+}): Promise<boolean> {
+  try {
+    const event: TransactionEvent = {
+      eventType: params.eventType ?? "completed",
+      transactionId: params.operationRef,
+      userId: params.userId,
+      amount: params.amount,
+      currency: params.currency,
+      status: params.eventType === "failed" ? "failed" : "completed",
+      timestamp: new Date().toISOString(),
+    };
+    await publishEvent(
+      params.topic as any,
+      params.operationRef,
+      { ...event, feature: params.featureLabel, ...(params.metadata ?? {}) }
+    );
+    return true;
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err), feature: params.featureLabel },
+      "[CoreAtomicity] Kafka publish degraded"
+    );
+    return false;
+  }
+}
+
+// ── Audit + TigerBeetle + Kafka Wrapper ─────────────────────────────────────
+
+export async function auditCoreOperation(params: {
+  userId: number;
+  action: string;
+  description: string;
+  amount: number;
+  currency: string;
+  featureLabel: string;
+  operationRef: string;
+  kafkaTopic: string;
+  metadata?: Record<string, unknown>;
+}): Promise<{
+  tigerBeetleRecorded: boolean;
+  kafkaPublished: boolean;
+  auditLogged: boolean;
+}> {
+  const [tigerBeetleRecorded, kafkaPublished] = await Promise.all([
+    recordCoreDoubleEntry({
+      userId: params.userId,
+      amount: params.amount,
+      featureLabel: params.featureLabel,
+      transferId: params.operationRef,
+    }),
+    publishCoreEvent({
+      topic: params.kafkaTopic,
+      userId: params.userId,
+      amount: params.amount,
+      currency: params.currency,
+      featureLabel: params.featureLabel,
+      operationRef: params.operationRef,
+      metadata: params.metadata,
+    }),
+  ]);
+
+  let auditLogged = false;
+  try {
+    await createAuditLog({
+      userId: params.userId,
+      action: params.action,
+      description: params.description,
+      metadata: {
+        operationRef: params.operationRef,
+        tigerBeetleRecorded,
+        kafkaPublished,
+        feature: params.featureLabel,
+        ...params.metadata,
+      },
+    });
+    auditLogged = true;
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      "[CoreAtomicity] Audit log failed"
+    );
+  }
+
+  return { tigerBeetleRecorded, kafkaPublished, auditLogged };
 }
 
 // ── Composite: Atomic Fund Flow ─────────────────────────────────────────────
