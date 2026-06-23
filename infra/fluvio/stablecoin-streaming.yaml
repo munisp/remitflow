@@ -1,0 +1,98 @@
+# RemitFlow — Fluvio Stablecoin Streaming Configuration
+#
+# Real-time streaming topics for stablecoin operations.
+# SmartModules for filtering, transformation, and alerting.
+
+topics:
+  - name: stablecoin_onramp
+    partitions: 3
+    replication: 2
+    retention_hours: 168  # 7 days
+    description: "Fiat → stablecoin purchase events"
+
+  - name: stablecoin_offramp
+    partitions: 3
+    replication: 2
+    retention_hours: 168
+    description: "Stablecoin → fiat sale events"
+
+  - name: stablecoin_bridge
+    partitions: 3
+    replication: 2
+    retention_hours: 168
+    description: "Cross-chain bridge events"
+
+  - name: stablecoin_yield
+    partitions: 2
+    replication: 2
+    retention_hours: 168
+    description: "Stake/unstake yield events"
+
+  - name: stablecoin_p2p
+    partitions: 3
+    replication: 2
+    retention_hours: 168
+    description: "Peer-to-peer stablecoin send + claim events"
+
+  - name: stablecoin_bill
+    partitions: 2
+    replication: 2
+    retention_hours: 168
+    description: "Bill payment events"
+
+  - name: stablecoin_card
+    partitions: 2
+    replication: 2
+    retention_hours: 168
+    description: "Virtual card transaction events"
+
+  - name: stablecoin_dca
+    partitions: 2
+    replication: 2
+    retention_hours: 168
+    description: "DCA execution events"
+
+  - name: stablecoin_depeg
+    partitions: 1
+    replication: 2
+    retention_hours: 720  # 30 days
+    description: "De-peg detection alerts"
+
+  - name: stablecoin_settlement
+    partitions: 3
+    replication: 2
+    retention_hours: 168
+    description: "Settlement orchestration events"
+
+  - name: stablecoin_webhook
+    partitions: 2
+    replication: 2
+    retention_hours: 168
+    description: "External provider webhook events"
+
+smart_modules:
+  - name: stablecoin-depeg-filter
+    type: filter
+    description: "Filter stablecoin price events that exceed de-peg threshold"
+    config:
+      threshold_pct: 0.5
+      alert_on_breach: true
+
+  - name: stablecoin-large-tx-alert
+    type: filter
+    description: "Alert on stablecoin transactions above $10,000"
+    config:
+      amount_threshold: 10000
+      alert_channel: "pagerduty"
+
+  - name: stablecoin-settlement-enricher
+    type: map
+    description: "Enrich settlement events with provider metadata"
+    config:
+      lookup_provider_metadata: true
+
+  - name: stablecoin-fx-deviation-alert
+    type: filter
+    description: "Alert when FX rate deviates >0.5% from median across sources"
+    config:
+      deviation_threshold_pct: 0.5
