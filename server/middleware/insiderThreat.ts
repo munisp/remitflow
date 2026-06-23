@@ -11,6 +11,7 @@
  *  3. DLP: rate-limit bulk data access on PII tables
  *  4. JIT Access: short-lived admin elevation (max 2h, 3/day)
  */
+import { randomUUID } from "crypto";
 import { logger } from "../_core/logger";
 import { publishEvent, KAFKA_TOPICS } from "./kafka";
 
@@ -268,7 +269,7 @@ export function requestJitAccess(userId: number, reason: string): JitResult {
   }
 
   const expiresAt = new Date(now.getTime() + JIT_MAX_DURATION_HOURS * 60 * 60 * 1000);
-  const grantId = `JIT-${userId}-${Date.now()}`;
+  const grantId = `JIT-${userId}-${randomUUID()}`;
   jitGrants.set(grantId, { userId, grantedAt: now, expiresAt, reason, active: true });
 
   publishEvent(KAFKA_TOPICS.TRANSACTIONS, `jit:${grantId}`, {
