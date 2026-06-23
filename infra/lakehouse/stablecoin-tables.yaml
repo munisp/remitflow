@@ -1,0 +1,133 @@
+# RemitFlow — Lakehouse Stablecoin Analytics Tables
+#
+# Bronze / Silver / Gold layer tables for stablecoin transaction analytics.
+# Format: Apache Iceberg (with Delta Lake compatibility).
+
+namespace: remitflow
+
+tables:
+  # ── Bronze Layer (Raw Ingest) ──────────────────────────────────────────────
+
+  - name: stablecoin_events_bronze
+    layer: bronze
+    format: iceberg
+    description: "Raw stablecoin events from all sources (Kafka, webhooks, oracle)"
+    partition_spec:
+      - name: event_date
+        transform: day
+        source: ingested_at
+    schema:
+      - { name: event_id, type: string, required: true }
+      - { name: event_type, type: string, required: true }
+      - { name: payload, type: string }  # JSON blob
+      - { name: source, type: string }
+      - { name: ingested_at, type: timestamp, required: true }
+      - { name: partition_key, type: string }
+      - { name: checksum, type: string }
+    retention_days: 365
+
+  - name: stablecoin_fx_rates_bronze
+    layer: bronze
+    format: iceberg
+    description: "Raw FX rate observations from all providers"
+    partition_spec:
+      - name: rate_date
+        transform: day
+        source: fetched_at
+    schema:
+      - { name: base, type: string, required: true }
+      - { name: target, type: string, required: true }
+      - { name: rate, type: double, required: true }
+      - { name: source, type: string }
+      - { name: fetched_at, type: timestamp, required: true }
+    retention_days: 365
+
+  # ── Silver Layer (Cleaned / Deduplicated) ──────────────────────────────────
+
+  - name: stablecoin_transactions_silver
+    layer: silver
+    format: iceberg
+    description: "Deduplicated, enriched stablecoin transactions"
+    partition_spec:
+      - name: tx_month
+        transform: month
+        source: created_at
+      - name: flow_type
+        transform: identity
+        source: flow_type
+    schema:
+      - { name: operation_id, type: string, required: true }
+      - { name: flow_type, type: string, required: true }
+      - { name: user_id, type: long, required: true }
+      - { name: stablecoin, type: string, required: true }
+      - { name: fiat_currency, type: string }
+      - { name: amount_usd, type: double, required: true }
+      - { name: fee_usd, type: double }
+      - { name: fx_rate, type: double }
+      - { name: chain, type: string }
+      - { name: status, type: string, required: true }
+      - { name: provider, type: string }
+      - { name: tx_hash, type: string }
+      - { name: created_at, type: timestamp, required: true }
+      - { name: completed_at, type: timestamp }
+
+  - name: stablecoin_depeg_history_silver
+    layer: silver
+    format: iceberg
+    description: "Historical de-peg events with oracle data"
+    partition_spec:
+      - name: alert_month
+        transform: month
+        source: detected_at
+    schema:
+      - { name: symbol, type: string, required: true }
+      - { name: price_usd, type: double, required: true }
+      - { name: deviation_pct, type: double, required: true }
+      - { name: severity, type: string }
+      - { name: source, type: string }
+      - { name: detected_at, type: timestamp, required: true }
+      - { name: resolved_at, type: timestamp }
+
+  # ── Gold Layer (Aggregated / Dashboard-Ready) ──────────────────────────────
+
+  - name: stablecoin_daily_metrics_gold
+    layer: gold
+    format: iceberg
+    description: "Daily aggregated stablecoin metrics for dashboards"
+    partition_spec:
+      - name: metric_date
+        transform: day
+        source: date
+    schema:
+      - { name: date, type: date, required: true }
+      - { name: total_onramp_volume_usd, type: double }
+      - { name: total_offramp_volume_usd, type: double }
+      - { name: total_bridge_volume_usd, type: double }
+      - { name: total_p2p_volume_usd, type: double }
+      - { name: total_yield_deposited_usd, type: double }
+      - { name: total_bill_pay_usd, type: double }
+      - { name: avg_fx_rate_deviation_pct, type: double }
+      - { name: depeg_alerts_count, type: int }
+      - { name: unique_users, type: int }
+      - { name: transaction_count, type: int }
+      - { name: avg_settlement_time_ms, type: double }
+
+  - name: stablecoin_user_metrics_gold
+    layer: gold
+    format: iceberg
+    description: "Per-user stablecoin portfolio metrics"
+    partition_spec:
+      - name: metric_month
+        transform: month
+        source: period_start
+    schema:
+      - { name: user_id, type: long, required: true }
+      - { name: period_start, type: date, required: true }
+      - { name: total_balance_usd, type: double }
+      - { name: onramp_volume_usd, type: double }
+      - { name: offramp_volume_usd, type: double }
+      - { name: yield_earned_usd, type: double }
+      - { name: dca_invested_usd, type: double }
+      - { name: preferred_stablecoin, type: string }
+      - { name: preferred_chain, type: string }
+      - { name: transaction_count, type: int }

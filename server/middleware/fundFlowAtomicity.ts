@@ -55,7 +55,16 @@ export type FundFlowType =
   | "bnpl_installment"
   | "recurring_transfer"
   | "float_replenishment"
-  | "batch_payroll";
+  | "batch_payroll"
+  | "stablecoin_onramp"
+  | "stablecoin_offramp"
+  | "stablecoin_bank_withdrawal"
+  | "stablecoin_p2p"
+  | "stablecoin_bill"
+  | "stablecoin_stake"
+  | "stablecoin_unstake"
+  | "stablecoin_dca"
+  | "stablecoin_virtual_card";
 
 export interface AtomicResult<T> {
   success: boolean;
@@ -286,6 +295,15 @@ function flowTypeToCode(flowType: FundFlowType): number {
     recurring_transfer: 13,
     float_replenishment: 14,
     batch_payroll: 15,
+    stablecoin_onramp: 16,
+    stablecoin_offramp: 17,
+    stablecoin_bank_withdrawal: 18,
+    stablecoin_p2p: 19,
+    stablecoin_bill: 20,
+    stablecoin_stake: 21,
+    stablecoin_unstake: 22,
+    stablecoin_dca: 23,
+    stablecoin_virtual_card: 24,
   };
   return codes[flowType] ?? 0;
 }
