@@ -1,0 +1,197 @@
+# OpenSearch Index Templates — Platform Hardening
+
+index_templates:
+  # KYC Verification Events
+  - name: remitflow-kyc-verifications
+    index_patterns: ["remitflow-kyc-*"]
+    settings:
+      number_of_shards: 3
+      number_of_replicas: 1
+      index.lifecycle.name: kyc-retention-policy
+    mappings:
+      properties:
+        userId:
+          type: integer
+        provider:
+          type: keyword
+        status:
+          type: keyword
+        kycTier:
+          type: keyword
+        documentType:
+          type: keyword
+        country:
+          type: keyword
+        faceMatchScore:
+          type: float
+        livenessScore:
+          type: float
+        amlClear:
+          type: boolean
+        documentExpiry:
+          type: date
+        reScreeningRequired:
+          type: boolean
+        riskScore:
+          type: float
+        padResult:
+          type: object
+          properties:
+            isLive:
+              type: boolean
+            confidence:
+              type: float
+            attackType:
+              type: keyword
+        timestamp:
+          type: date
+
+  # Stablecoin Operations
+  - name: remitflow-stablecoin-ops
+    index_patterns: ["remitflow-stablecoin-*"]
+    settings:
+      number_of_shards: 6
+      number_of_replicas: 1
+    mappings:
+      properties:
+        userId:
+          type: integer
+        operation:
+          type: keyword
+        stablecoin:
+          type: keyword
+        chain:
+          type: keyword
+        amount:
+          type: double
+        feeUsd:
+          type: double
+        fxRate:
+          type: double
+        provider:
+          type: keyword
+        status:
+          type: keyword
+        bridgeId:
+          type: keyword
+        yieldProtocol:
+          type: keyword
+        yieldApy:
+          type: float
+        riskScore:
+          type: float
+        depegDeviation:
+          type: float
+        timestamp:
+          type: date
+
+  # Fund Flow Coordination
+  - name: remitflow-fund-flow
+    index_patterns: ["remitflow-fund-*"]
+    settings:
+      number_of_shards: 6
+      number_of_replicas: 1
+    mappings:
+      properties:
+        transactionId:
+          type: keyword
+        userId:
+          type: integer
+        type:
+          type: keyword
+        amount:
+          type: double
+        currency:
+          type: keyword
+        corridor:
+          type: keyword
+        rail:
+          type: keyword
+        status:
+          type: keyword
+        stepName:
+          type: keyword
+        stepStatus:
+          type: keyword
+        compensationRequired:
+          type: boolean
+        compensationStatus:
+          type: keyword
+        retryCount:
+          type: integer
+        fencingToken:
+          type: keyword
+        rateLockId:
+          type: keyword
+        rateLockValid:
+          type: boolean
+        velocityCount:
+          type: integer
+        settlementBatchId:
+          type: keyword
+        netSettlementAmount:
+          type: double
+        timestamp:
+          type: date
+
+  # Security Events
+  - name: remitflow-security-events
+    index_patterns: ["remitflow-security-*"]
+    settings:
+      number_of_shards: 3
+      number_of_replicas: 1
+    mappings:
+      properties:
+        eventType:
+          type: keyword
+        userId:
+          type: integer
+        severity:
+          type: keyword
+        padConfidence:
+          type: float
+        biometricMatch:
+          type: boolean
+        biometricConfidence:
+          type: float
+        documentFraudScore:
+          type: float
+        adminAnomalyZScore:
+          type: float
+        canaryTripped:
+          type: boolean
+        webauthnCloneDetected:
+          type: boolean
+        geoCountry:
+          type: keyword
+        withinBusinessHours:
+          type: boolean
+        makerCheckerRequired:
+          type: boolean
+        jitAccessGranted:
+          type: boolean
+        dlpBlocked:
+          type: boolean
+        timestamp:
+          type: date
+
+# Lifecycle policies
+lifecycle_policies:
+  - name: kyc-retention-policy
+    phases:
+      hot:
+        min_age: 0d
+        actions:
+          rollover:
+            max_size: 10gb
+            max_age: 30d
+      warm:
+        min_age: 30d
+        actions:
+          readonly: {}
+      cold:
+        min_age: 180d
+        actions:
+          readonly: {}
+      delete:
+        min_age: 2555d  # 7 years (regulatory)

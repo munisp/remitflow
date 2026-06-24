@@ -627,6 +627,7 @@ export const stablecoinEnhancedRouter = router({
 
       const lockBonus = Math.min(input.lockDays / 30 * 0.5, 6.0);
       const effectiveApy = yieldInfo.apy + lockBonus;
+
       const stakeId = generateOrderId("STAKE");
       const unlockDate = input.lockDays > 0 ? new Date(Date.now() + input.lockDays * 86400000) : null;
 

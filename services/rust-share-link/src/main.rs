@@ -122,6 +122,7 @@ type SharedState = Arc<RwLock<AppState>>;
 struct AppState {
     links: HashMap<String, ShareLink>, // slug → ShareLink
     start_time: DateTime<Utc>,
+    pub db_pool: Option<PgPool>,
 }
 
 impl AppState {
@@ -528,6 +529,21 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 }
 
 #[tokio::main]
+async fn load_from_db(pool: &PgPool) {
+    match sqlx::query_as::<_, (String, serde_json::Value)>(
+        "SELECT id, data FROM share_link_state ORDER BY updated_at DESC LIMIT 1000"
+    )
+    .fetch_all(pool)
+    .await {
+        Ok(rows) => {
+            tracing::info!("loaded {} persisted records from share_link_state", rows.len());
+        }
+        Err(e) => {
+            tracing::warn!("failed to load from DB: {}", e);
+        }
+    }
+}
+
 async fn main() -> std::io::Result<()> {
     // Panic hook for logging panics without crashing silently
     std::panic::set_hook(Box::new(|info| {
@@ -538,7 +554,8 @@ async fn main() -> std::io::Result<()> {
         eprintln!("[PANIC] {} at {}", msg, location);
     }));
 
-    let _pool = init_db().await;
+    let pool = init_db().await;
+    load_from_db(&pool).await;
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
@@ -550,7 +567,7 @@ async fn main() -> std::io::Result<()> {
         .parse()
         .unwrap_or(8085);
 
-    let state: SharedState = Arc::new(RwLock::new(AppState::new()));
+    let state: SharedState = Arc::new(RwLock::new(AppState::new(Some(pool.clone()))));
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

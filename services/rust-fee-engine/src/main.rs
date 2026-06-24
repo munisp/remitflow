@@ -75,6 +75,7 @@ struct AppState {
     corridor_fees: HashMap<String, CorridorFee>,
     rail_fees: HashMap<String, RailFee>,
     tier_discounts: HashMap<String, TierDiscount>,
+    pub db_pool: Option<PgPool>,
 }
 
 impl AppState {
@@ -365,6 +366,21 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 }
 
 #[actix_web::main]
+async fn load_from_db(pool: &PgPool) {
+    match sqlx::query_as::<_, (String, serde_json::Value)>(
+        "SELECT id, data FROM fee_engine_state ORDER BY updated_at DESC LIMIT 1000"
+    )
+    .fetch_all(pool)
+    .await {
+        Ok(rows) => {
+            tracing::info!("loaded {} persisted records from fee_engine_state", rows.len());
+        }
+        Err(e) => {
+            tracing::warn!("failed to load from DB: {}", e);
+        }
+    }
+}
+
 async fn main() -> std::io::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         let msg = info.payload().downcast_ref::<&str>().copied()
@@ -374,7 +390,8 @@ async fn main() -> std::io::Result<()> {
         eprintln!("[PANIC] {} at {}", msg, location);
     }));
 
-    let _pool = init_db().await;
+    let pool = init_db().await;
+    load_from_db(&pool).await;
     tracing_subscriber::fmt().json().init();
 
     let port: u16 = std::env::var("FEE_ENGINE_PORT")
@@ -382,7 +399,7 @@ async fn main() -> std::io::Result<()> {
         .parse()
         .unwrap_or(8101);
 
-    let state = web::Data::new(AppState::new());
+    let state = web::Data::new(AppState::new(Some(pool.clone())));
 
     tracing::info!(port = port, "Fee engine starting");
 

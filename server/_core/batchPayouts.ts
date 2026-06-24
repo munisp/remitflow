@@ -20,6 +20,38 @@ import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, r
 import { logger } from "./logger";
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_batchPayoutsts: any = null;
+async function _getWtDb_batchPayoutsts() {
+  if (_wtDb_batchPayoutsts) return _wtDb_batchPayoutsts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_batchPayoutsts = await getDb();
+    return _wtDb_batchPayoutsts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_batchPayoutsts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_batchPayoutsts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 interface BatchPayout {
@@ -105,6 +137,7 @@ export const batchPayoutsRouter = router({
       };
 
       batches.set(batchId, batch);
+      _writeThrough("feature_batch_payouts", String(batchId), batch).catch(() => {});
       persistFeatureRecord("feature_batch_payouts", batchId, { id: batchId, ...(typeof batch === 'object' ? batch : {}) }).catch(() => {});
       logger.info({ batchId, recipients: recipients.length, total: totalAmount }, "Batch payout created");
       FeatureEvents.batchCreated({ batchId, userId: ctx.user.id, recipientCount: recipients.length, totalAmount });

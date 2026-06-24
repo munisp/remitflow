@@ -15,6 +15,38 @@
 import { sql } from "drizzle-orm";
 import { logger } from "./logger";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_featurePersistencets: any = null;
+async function _getWtDb_featurePersistencets() {
+  if (_wtDb_featurePersistencets) return _wtDb_featurePersistencets;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_featurePersistencets = await getDb();
+    return _wtDb_featurePersistencets;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_featurePersistencets();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_featurePersistencets();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Database Access ──────────────────────────────────────────────────────────
 
 let _db: ReturnType<typeof import("drizzle-orm/postgres-js").drizzle> | null = null;
@@ -947,6 +979,7 @@ export function getCircuitBreaker(serviceName: string): {
 } {
   if (!circuits.has(serviceName)) {
     circuits.set(serviceName, { failures: 0, lastFailure: 0, state: "closed", successCount: 0 });
+    _writeThrough("wt_feature_persistence_circuits", String(serviceName), { failures: 0, lastFailure: 0, state: "closed", successCount: 0 }).catch(() => {});
   }
 
   const circuit = circuits.get(serviceName)!;

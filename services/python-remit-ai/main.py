@@ -195,6 +195,21 @@ SWAHILI_PATTERNS = [
 CURRENCY_SYMBOLS = {"$": "USD", "₦": "NGN", "£": "GBP", "€": "EUR", "KSh": "KES", "GH₵": "GHS", "R": "ZAR"}
 
 
+
+def _init_remit_ai_tables():
+    try:
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS remit_ai_entities (
+                key TEXT PRIMARY KEY,
+                data JSONB NOT NULL DEFAULT '{}'::jsonb,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+    except Exception as e:
+        print(f"[DB] Remit AI table init error: {e}")
+
+_init_remit_ai_tables()
+
 class ClassifyRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=500)
     language: str = Field(default="en")

@@ -236,6 +236,7 @@ class SanctionsList:
     """Thread-safe sanctions list with real feed parsing."""
 
     def __init__(self):
+        _init_compliance_svc_tables()
         self._names: Set[str] = set()
         self._aliases: Set[str] = set()
         self._ids: Set[str] = set()
@@ -283,6 +284,16 @@ class SanctionsList:
             log.info("[Sanctions] HMT UK: %d entries loaded", hmt_count)
 
         self._names = new_names
+        # Write-through to PostgreSQL
+        try:
+            import json as _json
+            _db_exec(
+                """INSERT INTO compliance_screening_data (key, data, updated_at) VALUES ('screening_names', %s, NOW())
+                   ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+                (_json.dumps(list(self._names), default=str),),
+            )
+        except Exception:
+            pass
         self._aliases = new_aliases
         self._feed_stats = stats
         self._last_refresh = time.time()

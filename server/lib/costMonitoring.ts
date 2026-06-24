@@ -1,3 +1,35 @@
+
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_costMonitoringts: any = null;
+async function _getWtDb_costMonitoringts() {
+  if (_wtDb_costMonitoringts) return _wtDb_costMonitoringts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_costMonitoringts = await getDb();
+    return _wtDb_costMonitoringts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_costMonitoringts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_costMonitoringts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
 /**
  * Cost Monitoring — P2 Observability 7.8
  * Tracks infrastructure costs, per-transaction unit economics, and budget alerts.
@@ -90,6 +122,7 @@ export function getUnitEconomics(transactionCount: number): {
 
 export function setBudget(name: string, monthlyBudget: number, threshold = 0.8): void {
   budgets.set(name, { name, monthlyBudget, currentSpend: 0, threshold, triggered: false });
+  _writeThrough("wt_cost_monitoring_budgets", String(name), { name, monthlyBudget, currentSpend: 0, threshold, triggered: false }).catch(() => {});
 }
 
 export function checkBudgets(): BudgetAlert[] {

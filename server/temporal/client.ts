@@ -1,36 +1,58 @@
 /**
- * RemitFlow Temporal Client v8
+ * RemitFlow Temporal Client v9 — Production-Hardened
  *
  * Provides a typed Temporal client for tRPC procedures to start workflows.
- * Falls back gracefully when Temporal server is unavailable (dev mode).
+ * FAIL-CLOSED in production: throws when Temporal unavailable for money-critical workflows.
+ * Graceful degradation only in development/test.
  */
 
 import { Connection, Client, type WorkflowHandle } from "@temporalio/client";
 import type { TransferWorkflowInput, KYCWorkflowInput, RecurringPaymentWorkflowInput } from "./workflows";
 import { logger } from '../_core/logger';
+import { TRPCError } from "@trpc/server";
 
 const TEMPORAL_ADDRESS = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
 const TASK_QUEUE = process.env.TEMPORAL_TASK_QUEUE ?? "remitflow-main";
 const NAMESPACE = process.env.TEMPORAL_NAMESPACE ?? "default";
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
 let _client: Client | null = null;
 let _connectionFailed = false;
+let _lastRetryAt = 0;
+const RETRY_INTERVAL_MS = 30_000; // retry connection every 30s
 
 async function getTemporalClient(): Promise<Client | null> {
-  if (_connectionFailed) return null;
   if (_client) return _client;
 
+  // Allow periodic retry instead of permanent failure
+  if (_connectionFailed && Date.now() - _lastRetryAt < RETRY_INTERVAL_MS) {
+    return null;
+  }
+
   try {
+    _lastRetryAt = Date.now();
     const connection = await Connection.connect({
       address: TEMPORAL_ADDRESS,
     });
     _client = new Client({ connection, namespace: NAMESPACE });
+    _connectionFailed = false;
     logger.info("[Temporal Client] Connected to Temporal server");
     return _client;
   } catch (err) {
     _connectionFailed = true;
-    logger.warn("[Temporal Client] Temporal server unavailable (dev mode):", (err as Error).message);
+    logger.warn("[Temporal Client] Temporal server unavailable:", (err as Error).message);
     return null;
+  }
+}
+
+function ensureTemporalOrThrow(client: Client | null, workflowType: string): asserts client is Client {
+  if (!client) {
+    if (IS_PRODUCTION) {
+      throw new TRPCError({
+        code: "SERVICE_UNAVAILABLE",
+        message: `[Temporal] FAIL-CLOSED: Cannot start ${workflowType} — Temporal server unavailable in production`,
+      });
+    }
   }
 }
 
@@ -43,9 +65,12 @@ export async function startTransferWorkflow(
 ): Promise<{ workflowId: string; runId?: string; fallback: boolean }> {
   const client = await getTemporalClient();
 
+  // FAIL-CLOSED in production: transfers MUST go through Temporal saga
+  ensureTemporalOrThrow(client, "TransferWorkflow");
+
   if (!client) {
-    // Fallback: execute synchronously without Temporal
-    logger.warn("[Temporal] Fallback: executing transfer without Temporal orchestration");
+    // Dev-only fallback
+    logger.warn("[Temporal] DEV-ONLY fallback: executing transfer without Temporal orchestration");
     return { workflowId: `fallback-${input.idempotencyKey}`, fallback: true };
   }
 
@@ -61,6 +86,12 @@ export async function startTransferWorkflow(
 
     return { workflowId: handle.workflowId, runId: handle.firstExecutionRunId, fallback: false };
   } catch (err) {
+    if (IS_PRODUCTION) {
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: `[Temporal] FAIL-CLOSED: TransferWorkflow start failed — ${(err as Error).message}`,
+      });
+    }
     logger.error("[Temporal] Failed to start TransferWorkflow:", (err as Error).message);
     return { workflowId: `error-${input.idempotencyKey}`, fallback: true };
   }
@@ -75,6 +106,9 @@ export async function startKYCWorkflow(
 ): Promise<{ workflowId: string; fallback: boolean }> {
   const client = await getTemporalClient();
 
+  // FAIL-CLOSED in production: KYC verification MUST be orchestrated
+  ensureTemporalOrThrow(client, "KYCVerificationWorkflow");
+
   if (!client) {
     return { workflowId: `fallback-kyc-${input.userId}-${Date.now()}`, fallback: true };
   }
@@ -88,6 +122,12 @@ export async function startKYCWorkflow(
 
     return { workflowId: handle.workflowId, fallback: false };
   } catch (err) {
+    if (IS_PRODUCTION) {
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: `[Temporal] FAIL-CLOSED: KYCVerificationWorkflow failed — ${(err as Error).message}`,
+      });
+    }
     logger.error("[Temporal] Failed to start KYCVerificationWorkflow:", (err as Error).message);
     return { workflowId: `error-kyc-${input.userId}`, fallback: true };
   }
@@ -102,6 +142,9 @@ export async function startRecurringPaymentWorkflow(
 ): Promise<{ workflowId: string; fallback: boolean }> {
   const client = await getTemporalClient();
 
+  // FAIL-CLOSED in production: recurring payments MUST be saga-orchestrated
+  ensureTemporalOrThrow(client, "RecurringPaymentWorkflow");
+
   if (!client) {
     return { workflowId: `fallback-rec-${input.scheduleId}`, fallback: true };
   }
@@ -115,6 +158,12 @@ export async function startRecurringPaymentWorkflow(
 
     return { workflowId: handle.workflowId, fallback: false };
   } catch (err) {
+    if (IS_PRODUCTION) {
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: `[Temporal] FAIL-CLOSED: RecurringPaymentWorkflow failed — ${(err as Error).message}`,
+      });
+    }
     logger.error("[Temporal] Failed to start RecurringPaymentWorkflow:", (err as Error).message);
     return { workflowId: `error-rec-${input.scheduleId}`, fallback: true };
   }

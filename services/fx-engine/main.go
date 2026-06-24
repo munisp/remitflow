@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,9 +11,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -75,6 +78,136 @@ type Corridor struct {
 	AvgFeeUSD   float64 `json:"avgFeeUSD"`
 	SpeedHours  float64 `json:"speedHours"`
 	Popular     bool    `json:"popular"`
+}
+
+// ─── PostgreSQL Write-Through Persistence ─────────────────────────────────────
+
+type FxDbPool struct {
+	db    *sql.DB
+	cache sync.Map
+}
+
+var fxDb *FxDbPool
+
+func initFxDB() {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://remitflow:remitflow@localhost:5432/remitflow?sslmode=disable"
+	}
+	isProduction := os.Getenv("NODE_ENV") == "production"
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		if isProduction {
+			log.Fatalf("[FX-DB] FATAL: cannot open database in production: %v", err)
+		}
+		log.Printf("[FX-DB] WARN: database unavailable (%v) — rate history disabled", err)
+		return
+	}
+
+	db.SetMaxOpenConns(20)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		if isProduction {
+			log.Fatalf("[FX-DB] FATAL: cannot ping database in production: %v", err)
+		}
+		log.Printf("[FX-DB] WARN: database ping failed (%v) — rate history disabled", err)
+		return
+	}
+
+	migrations := []string{
+		`CREATE TABLE IF NOT EXISTS fx_quotes (
+			id BIGSERIAL PRIMARY KEY,
+			quote_id TEXT UNIQUE NOT NULL,
+			from_currency TEXT NOT NULL,
+			to_currency TEXT NOT NULL,
+			send_amount NUMERIC(18,4) NOT NULL,
+			receive_amount NUMERIC(18,4) NOT NULL,
+			fx_rate NUMERIC(12,6) NOT NULL,
+			fee NUMERIC(10,4) NOT NULL,
+			spread NUMERIC(8,6) NOT NULL,
+			fsp TEXT NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS fx_executions (
+			id BIGSERIAL PRIMARY KEY,
+			transaction_id TEXT UNIQUE NOT NULL,
+			user_id TEXT NOT NULL,
+			recipient_id TEXT NOT NULL,
+			from_currency TEXT NOT NULL,
+			to_currency TEXT NOT NULL,
+			send_amount NUMERIC(18,4) NOT NULL,
+			receive_amount NUMERIC(18,4) NOT NULL,
+			fx_rate NUMERIC(12,6) NOT NULL,
+			fee NUMERIC(10,4) NOT NULL,
+			fsp TEXT NOT NULL,
+			reference TEXT,
+			status TEXT NOT NULL DEFAULT 'processing',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS fx_rate_history (
+			id BIGSERIAL PRIMARY KEY,
+			base_currency TEXT NOT NULL,
+			rates JSONB NOT NULL,
+			fetched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_fx_quotes_created ON fx_quotes(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_fx_executions_user ON fx_executions(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_fx_rate_history_base ON fx_rate_history(base_currency, fetched_at)`,
+	}
+
+	for _, m := range migrations {
+		if _, err := db.ExecContext(ctx, m); err != nil {
+			log.Printf("[FX-DB] WARN: migration failed: %v", err)
+		}
+	}
+
+	fxDb = &FxDbPool{db: db}
+	log.Printf("[FX-DB] Connected and migrated successfully")
+}
+
+func dbPersistQuote(ctx context.Context, quoteID, from, to, fsp string, send, receive, rate, fee, spread float64, expiresAt int64) {
+	if fxDb == nil {
+		return
+	}
+	_, err := fxDb.db.ExecContext(ctx,
+		`INSERT INTO fx_quotes (quote_id, from_currency, to_currency, send_amount, receive_amount, fx_rate, fee, spread, fsp, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_timestamp($10))
+		 ON CONFLICT (quote_id) DO NOTHING`,
+		quoteID, from, to, send, receive, rate, fee, spread, fsp, expiresAt)
+	if err != nil {
+		log.Printf("[FX-DB] WARN: quote persist failed: %v", err)
+	}
+}
+
+func dbPersistExecution(ctx context.Context, txID, userID, recipientID, from, to, fsp, reference string, amount, receive, rate, fee float64) {
+	if fxDb == nil {
+		return
+	}
+	_, err := fxDb.db.ExecContext(ctx,
+		`INSERT INTO fx_executions (transaction_id, user_id, recipient_id, from_currency, to_currency, send_amount, receive_amount, fx_rate, fee, fsp, reference)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 ON CONFLICT (transaction_id) DO NOTHING`,
+		txID, userID, recipientID, from, to, amount, receive, rate, fee, fsp, reference)
+	if err != nil {
+		log.Printf("[FX-DB] WARN: execution persist failed: %v", err)
+	}
+}
+
+func dbPersistRateHistory(ctx context.Context, base string, rates map[string]float64) {
+	if fxDb == nil {
+		return
+	}
+	data, _ := json.Marshal(rates)
+	_, _ = fxDb.db.ExecContext(ctx,
+		`INSERT INTO fx_rate_history (base_currency, rates) VALUES ($1, $2)`,
+		base, data)
 }
 
 // ─── Globals ──────────────────────────────────────────────────────────────────
@@ -182,6 +315,8 @@ func fetchRates(base string) (map[string]float64, error) {
 	if data, err := json.Marshal(result.Rates); err == nil {
 		cacheSet(cacheKey, string(data), 5*time.Minute)
 	}
+	// Persist rate snapshot to PostgreSQL for historical analysis
+	dbPersistRateHistory(context.Background(), strings.ToUpper(base), result.Rates)
 	return result.Rates, nil
 }
 
@@ -200,7 +335,13 @@ func getMidRate(from, to string) (float64, error) {
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 func handleHealth(c *gin.Context) {
-	c.JSON(200, gin.H{"status": "ok", "service": "fx-engine", "version": "1.0.0"})
+	dbStatus := "disconnected"
+	if fxDb != nil {
+		if err := fxDb.db.PingContext(c.Request.Context()); err == nil {
+			dbStatus = "connected"
+		}
+	}
+	c.JSON(200, gin.H{"status": "ok", "service": "fx-engine", "version": "2.1.0", "database": dbStatus})
 }
 
 func handleRates(c *gin.Context) {
@@ -281,6 +422,12 @@ func handleQuote(c *gin.Context) {
 	}
 
 	roundedRate := math.Round(appliedRate*10000) / 10000
+	expiresAt := time.Now().Add(5 * time.Minute).Unix()
+	quoteID := fmt.Sprintf("QT-%d-%s-%s", time.Now().UnixMilli(), req.From, req.To)
+
+	// Persist quote to PostgreSQL (write-through)
+	dbPersistQuote(c.Request.Context(), quoteID, req.From, req.To, fsp, req.Amount, receiveAmount, roundedRate, fee, spread, expiresAt)
+
 	c.JSON(200, QuoteResponse{
 		From:               req.From,
 		To:                 req.To,
@@ -292,7 +439,7 @@ func handleQuote(c *gin.Context) {
 		TotalCost:          req.Amount,
 		Spread:             spread,
 		FSP:                fsp,
-		ExpiresAt:          time.Now().Add(5 * time.Minute).Unix(),
+		ExpiresAt:          expiresAt,
 		SendAmountSnake:    req.Amount,
 		ReceiveAmountSnake: receiveAmount,
 	})
@@ -326,6 +473,9 @@ func handleExecute(c *gin.Context) {
 
 	log.Printf("[FX] %s", auditEvent)
 
+	// Persist execution to PostgreSQL (write-through)
+	dbPersistExecution(c.Request.Context(), txID, req.UserID, req.RecipientID, req.From, req.To, fsp, req.Reference, req.Amount, receiveAmount, appliedRate, fee)
+
 	c.JSON(200, ExecuteResponse{
 		TransactionID: txID,
 		Status:        "processing",
@@ -358,6 +508,7 @@ func handleCorridors(c *gin.Context) {
 
 func main() {
 	initRedis()
+	initFxDB()
 
 	r := gin.New()
 	r.Use(gin.Logger(), gin.Recovery())

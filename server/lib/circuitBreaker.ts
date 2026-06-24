@@ -10,6 +10,38 @@
 
 import { logger } from "../_core/logger";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_circuitBreakerts: any = null;
+async function _getWtDb_circuitBreakerts() {
+  if (_wtDb_circuitBreakerts) return _wtDb_circuitBreakerts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_circuitBreakerts = await getDb();
+    return _wtDb_circuitBreakerts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_circuitBreakerts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_circuitBreakerts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 type CircuitState = "closed" | "open" | "half_open";
 
 interface CircuitBreakerConfig {

@@ -20,6 +20,38 @@ import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, r
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 import { logger } from "./logger";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_nfcPaymentsts: any = null;
+async function _getWtDb_nfcPaymentsts() {
+  if (_wtDb_nfcPaymentsts) return _wtDb_nfcPaymentsts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_nfcPaymentsts = await getDb();
+    return _wtDb_nfcPaymentsts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_nfcPaymentsts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_nfcPaymentsts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface NFCTerminal {
@@ -160,6 +192,7 @@ export const nfcPaymentsRouter = router({
         createdAt: new Date().toISOString(),
       };
       terminals.set(terminalId, terminal);
+      _writeThrough("feature_nfc_terminals", String(terminalId), terminal).catch(() => {});
       persistFeatureRecord("feature_nfc_terminals", terminalId, { id: terminalId, ...(typeof terminal === 'object' ? terminal : {}) }).catch(() => {});
       FeatureEvents.nfcTerminalRegistered({ terminalId, merchantId: input.merchantId, type: input.terminalType });
       logger.info({ terminalId, type: input.terminalType }, "NFC terminal registered");
@@ -203,6 +236,7 @@ export const nfcPaymentsRouter = router({
         createdAt: new Date().toISOString(),
       };
       nfcTransactions.set(txId, tx);
+      _writeThrough("feature_nfc_transactions", String(txId), tx).catch(() => {});
       persistFeatureRecord("feature_nfc_transactions", txId, { id: txId, ...(typeof tx === 'object' ? tx : {}) }).catch(() => {});
 
       if (!input.offlineMode) {
@@ -245,6 +279,7 @@ export const nfcPaymentsRouter = router({
         offlineQueued: false, createdAt: new Date().toISOString(),
       };
       nfcTransactions.set(txId, tx);
+      _writeThrough("feature_nfc_transactions", String(txId), tx).catch(() => {});
       persistFeatureRecord("feature_nfc_transactions", txId, { id: txId, ...(typeof tx === 'object' ? tx : {}) }).catch(() => {});
 
       createLedgerEntry({
@@ -283,6 +318,7 @@ export const nfcPaymentsRouter = router({
         status: "active", createdAt: new Date().toISOString(),
       };
       nfcTags.set(tagId, tag);
+      _writeThrough("feature_nfc_tags", String(tagId), tag).catch(() => {});
       persistFeatureRecord("feature_nfc_tags", tagId, { id: tagId, ...(typeof tag === 'object' ? tag : {}) }).catch(() => {});
       FeatureEvents.nfcTagProvisioned({ tagId, userId: ctx.user.id.toString(), tagType: input.tagType });
       logger.info({ tagId, tagType: input.tagType }, "NFC tag provisioned");
@@ -318,6 +354,7 @@ export const nfcPaymentsRouter = router({
         offlineQueued: false, createdAt: new Date().toISOString(),
       };
       nfcTransactions.set(txId, tx);
+      _writeThrough("feature_nfc_transactions", String(txId), tx).catch(() => {});
       persistFeatureRecord("feature_nfc_transactions", txId, { id: txId, ...(typeof tx === 'object' ? tx : {}) }).catch(() => {});
 
       createLedgerEntry({
@@ -394,6 +431,7 @@ export const nfcPaymentsRouter = router({
           createdAt: offlineTx.timestamp,
         };
         nfcTransactions.set(txId, tx);
+        _writeThrough("feature_nfc_transactions", String(txId), tx).catch(() => {});
       persistFeatureRecord("feature_nfc_transactions", txId, { id: txId, ...(typeof tx === 'object' ? tx : {}) }).catch(() => {});
         txs.push(tx);
         totalAmount += offlineTx.amount;
@@ -406,6 +444,7 @@ export const nfcPaymentsRouter = router({
         syncedAt: new Date().toISOString(),
       };
       offlineQueue.set(offlineId, batch);
+      _writeThrough("feature_nfc_offline_queue", String(offlineId), batch).catch(() => {});
       persistFeatureRecord("feature_nfc_offline_queue", offlineId, { id: offlineId, ...(typeof batch === 'object' ? batch : {}) }).catch(() => {});
 
       if (totalAmount > 0) {

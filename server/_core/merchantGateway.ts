@@ -25,6 +25,38 @@ import { ENV } from "./env";
 import { logger } from "./logger";
 import { FeatureEvents, createLedgerEntry, enqueueWebhook, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_merchantGatewayts: any = null;
+async function _getWtDb_merchantGatewayts() {
+  if (_wtDb_merchantGatewayts) return _wtDb_merchantGatewayts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_merchantGatewayts = await getDb();
+    return _wtDb_merchantGatewayts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_merchantGatewayts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_merchantGatewayts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 interface MerchantAccount {
@@ -119,6 +151,7 @@ export const merchantGatewayRouter = router({
       };
 
       merchants.set(merchantId, merchant);
+      _writeThrough("feature_merchant_accounts", String(merchantId), merchant).catch(() => {});
       persistFeatureRecord("feature_merchant_accounts", merchantId, { id: merchantId, ...(typeof merchant === 'object' ? merchant : {}) }).catch(() => {});
       logger.info({ merchantId, businessName: input.businessName }, "Merchant registered");
       FeatureEvents.merchantRegistered({ merchantId, userId: ctx.user.id, businessName: input.businessName });
@@ -166,6 +199,7 @@ export const merchantGatewayRouter = router({
       };
 
       intents.set(intentId, intent);
+      _writeThrough("feature_payment_intents", String(intentId), intent).catch(() => {});
       persistFeatureRecord("feature_payment_intents", intentId, { id: intentId, ...(typeof intent === 'object' ? intent : {}) }).catch(() => {});
       return intent;
     }),
