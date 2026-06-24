@@ -2,14 +2,14 @@
  * RemitFlow — Rust Database Persistence Layer (Shared)
  *
  * Production-grade PostgreSQL persistence for all Rust microservices.
- * Replaces in-memory HashMap storage with sqlx write-through pattern.
+ * Uses sqlx runtime queries (not compile-time macros) so no DATABASE_URL
+ * is required at build time.
  *
  * Features:
- *   - Connection pool with health checks
+ *   - Connection pool with health checks (sqlx::PgPool)
  *   - Write-through caching (write to DB first, then cache)
  *   - Automatic schema migration on startup
  *   - Kafka outbox pattern for event publishing
- *   - OpenTelemetry tracing on all queries
  *   - Fail-closed in production when DB unavailable
  *
  * Used by: rust-stablecoin-bridge, rust-p2p-engine, rust-swap-lending-engine,
@@ -18,6 +18,8 @@
  */
 
 use serde::{Deserialize, Serialize};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -56,41 +58,43 @@ impl Default for DbConfig {
 // ─── Database Pool ────────────────────────────────────────────────────────────
 
 pub struct DbPool {
+    pub pool: PgPool,
     config: DbConfig,
-    connected: bool,
-    // In production, this wraps sqlx::PgPool
-    // For compilation without live DB, we use a connection state tracker
     write_count: std::sync::atomic::AtomicU64,
     read_count: std::sync::atomic::AtomicU64,
 }
 
 impl DbPool {
     pub async fn connect(config: DbConfig) -> Result<Self, String> {
-        // Attempt connection — in production binary, this calls:
-        // sqlx::postgres::PgPoolOptions::new()
-        //   .max_connections(config.max_connections)
-        //   .min_connections(config.min_connections)
-        //   .connect_timeout(Duration::from_secs(config.connect_timeout_secs))
-        //   .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-        //   .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-        //   .connect(&config.database_url)
-        //   .await
-
-        let pool = Self {
-            config: config.clone(),
-            connected: true,
-            write_count: std::sync::atomic::AtomicU64::new(0),
-            read_count: std::sync::atomic::AtomicU64::new(0),
-        };
+        let pool = PgPoolOptions::new()
+            .max_connections(config.max_connections)
+            .min_connections(config.min_connections)
+            .acquire_timeout(Duration::from_secs(config.connect_timeout_secs))
+            .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
+            .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
+            .connect(&config.database_url)
+            .await
+            .map_err(|e| {
+                if config.fail_closed {
+                    format!("[DB] FAIL-CLOSED: Cannot connect to PostgreSQL in production: {}", e)
+                } else {
+                    format!("[DB] Connection failed (dev mode, degraded): {}", e)
+                }
+            })?;
 
         eprintln!("[DB] Connected to PostgreSQL (max_conn={}, fail_closed={})",
             config.max_connections, config.fail_closed);
 
-        Ok(pool)
+        Ok(Self {
+            pool,
+            config,
+            write_count: std::sync::atomic::AtomicU64::new(0),
+            read_count: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
-    pub fn is_connected(&self) -> bool {
-        self.connected
+    pub async fn is_connected(&self) -> bool {
+        sqlx::query("SELECT 1").fetch_one(&self.pool).await.is_ok()
     }
 
     pub fn write_count(&self) -> u64 {
@@ -124,20 +128,29 @@ impl<T: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>> WriteThroug
 
     /// Write-through: persist to DB first, then update cache
     pub async fn upsert(&self, key: &str, value: &T) -> Result<(), String> {
-        // 1. Write to PostgreSQL (primary)
-        let json = serde_json::to_string(value)
+        let json = serde_json::to_value(value)
             .map_err(|e| format!("Serialization failed: {}", e))?;
 
-        // Production: INSERT ... ON CONFLICT UPDATE via sqlx
-        // sqlx::query!(
-        //     "INSERT INTO {} (key, data, updated_at) VALUES ($1, $2::jsonb, NOW())
-        //      ON CONFLICT (key) DO UPDATE SET data = $2::jsonb, updated_at = NOW()",
-        //     key, json
-        // ).execute(&self.db.pool).await?;
+        let sql = format!(
+            "INSERT INTO {} (key, data, updated_at) VALUES ($1, $2, NOW()) \
+             ON CONFLICT (key) DO UPDATE SET data = $2, updated_at = NOW()",
+            self.table_name
+        );
+        sqlx::query(&sql)
+            .bind(key)
+            .bind(&json)
+            .execute(&self.db.pool)
+            .await
+            .map_err(|e| {
+                if self.fail_closed {
+                    format!("[DB] FAIL-CLOSED: Write to {} failed: {}", self.table_name, e)
+                } else {
+                    format!("[DB] Write to {} failed (degraded): {}", self.table_name, e)
+                }
+            })?;
 
         self.db.write_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // 2. Update in-memory cache
         let mut cache = self.cache.write().await;
         cache.insert(key.to_string(), value.clone());
 
@@ -146,7 +159,6 @@ impl<T: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>> WriteThroug
 
     /// Read-through: check cache first, then DB
     pub async fn get(&self, key: &str) -> Option<T> {
-        // Check cache
         {
             let cache = self.cache.read().await;
             if let Some(v) = cache.get(key) {
@@ -154,40 +166,60 @@ impl<T: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>> WriteThroug
             }
         }
 
-        // Cache miss: load from DB
-        // Production:
-        // let row = sqlx::query!(
-        //     "SELECT data FROM {} WHERE key = $1", key
-        // ).fetch_optional(&self.db.pool).await.ok()??;
-        // let value: T = serde_json::from_value(row.data)?;
+        let sql = format!("SELECT data FROM {} WHERE key = $1", self.table_name);
+        let row = sqlx::query(&sql)
+            .bind(key)
+            .fetch_optional(&self.db.pool)
+            .await
+            .ok()??;
 
         self.db.read_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        None // DB lookup would happen here in production
+        let data: serde_json::Value = row.try_get("data").ok()?;
+        let value: T = serde_json::from_value(data).ok()?;
+
+        let mut cache = self.cache.write().await;
+        cache.insert(key.to_string(), value.clone());
+
+        Some(value)
     }
 
     /// Load all entries from DB into cache on startup
     pub async fn load_all(&self) -> Result<usize, String> {
-        // Production:
-        // let rows = sqlx::query!("SELECT key, data FROM {}", self.table_name)
-        //     .fetch_all(&self.db.pool).await?;
-        // for row in &rows {
-        //     let value: T = serde_json::from_value(row.data.clone())?;
-        //     cache.insert(row.key.clone(), value);
-        // }
+        let sql = format!("SELECT key, data FROM {}", self.table_name);
+        let rows = sqlx::query(&sql)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(|e| format!("Failed to load from {}: {}", self.table_name, e))?;
 
-        let cache = self.cache.read().await;
-        Ok(cache.len())
+        let mut cache = self.cache.write().await;
+        let mut loaded = 0usize;
+        for row in &rows {
+            let k: String = row.try_get("key")
+                .map_err(|e| format!("Row key read error: {}", e))?;
+            let d: serde_json::Value = row.try_get("data")
+                .map_err(|e| format!("Row data read error: {}", e))?;
+            if let Ok(val) = serde_json::from_value::<T>(d) {
+                cache.insert(k, val);
+                loaded += 1;
+            }
+        }
+        Ok(loaded)
     }
 
     /// Delete with write-through
     pub async fn delete(&self, key: &str) -> Result<bool, String> {
-        // Production:
-        // sqlx::query!("DELETE FROM {} WHERE key = $1", key)
-        //     .execute(&self.db.pool).await?;
+        let sql = format!("DELETE FROM {} WHERE key = $1", self.table_name);
+        let result = sqlx::query(&sql)
+            .bind(key)
+            .execute(&self.db.pool)
+            .await
+            .map_err(|e| format!("Delete from {} failed: {}", self.table_name, e))?;
 
         let mut cache = self.cache.write().await;
-        Ok(cache.remove(key).is_some())
+        cache.remove(key);
+
+        Ok(result.rows_affected() > 0)
     }
 
     pub async fn count(&self) -> usize {
@@ -197,71 +229,90 @@ impl<T: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de>> WriteThroug
 
 // ─── Kafka Outbox Pattern ─────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutboxEvent {
     pub id: String,
     pub topic: String,
     pub key: String,
     pub payload: String,
-    pub created_at: u64,
+    pub created_at: i64,
     pub published: bool,
 }
 
 pub struct KafkaOutbox {
-    events: Arc<RwLock<Vec<OutboxEvent>>>,
     db: Arc<DbPool>,
 }
 
 impl KafkaOutbox {
     pub fn new(db: Arc<DbPool>) -> Self {
-        Self {
-            events: Arc::new(RwLock::new(Vec::new())),
-            db,
-        }
+        Self { db }
     }
 
     /// Append event to outbox (written to DB atomically with business data)
-    pub async fn append(&self, topic: &str, key: &str, payload: &str) -> String {
-        let id = format!("outbox-{}", uuid_v4());
-        let event = OutboxEvent {
-            id: id.clone(),
-            topic: topic.to_string(),
-            key: key.to_string(),
-            payload: payload.to_string(),
-            created_at: now_ms(),
-            published: false,
-        };
+    pub async fn append(&self, topic: &str, key: &str, payload: &str) -> Result<String, String> {
+        let id = format!("outbox-{}", now_ms());
 
-        // Production:
-        // sqlx::query!(
-        //     "INSERT INTO kafka_outbox (id, topic, key, payload, created_at, published)
-        //      VALUES ($1, $2, $3, $4, $5, false)",
-        //     event.id, event.topic, event.key, event.payload, event.created_at
-        // ).execute(&self.db.pool).await?;
+        sqlx::query(
+            "INSERT INTO kafka_outbox (id, topic, key, payload, created_at, published) \
+             VALUES ($1, $2, $3, $4::jsonb, $5, false)"
+        )
+            .bind(&id)
+            .bind(topic)
+            .bind(key)
+            .bind(payload)
+            .bind(now_ms() as i64)
+            .execute(&self.db.pool)
+            .await
+            .map_err(|e| format!("Outbox append failed: {}", e))?;
 
-        let mut events = self.events.write().await;
-        events.push(event);
-        id
+        Ok(id)
     }
 
     /// Mark events as published (called by outbox relay worker)
-    pub async fn mark_published(&self, ids: &[String]) {
-        let mut events = self.events.write().await;
-        for event in events.iter_mut() {
-            if ids.contains(&event.id) {
-                event.published = true;
-            }
+    pub async fn mark_published(&self, ids: &[String]) -> Result<u64, String> {
+        if ids.is_empty() {
+            return Ok(0);
         }
+        let placeholders: Vec<String> = ids.iter().enumerate()
+            .map(|(i, _)| format!("${}", i + 1))
+            .collect();
+        let sql = format!(
+            "UPDATE kafka_outbox SET published = true, published_at = NOW() WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+        let mut query = sqlx::query(&sql);
+        for id in ids {
+            query = query.bind(id);
+        }
+        let result = query.execute(&self.db.pool)
+            .await
+            .map_err(|e| format!("Mark published failed: {}", e))?;
+        Ok(result.rows_affected())
     }
 
     /// Get unpublished events for relay
-    pub async fn get_unpublished(&self, limit: usize) -> Vec<OutboxEvent> {
-        let events = self.events.read().await;
-        events.iter()
-            .filter(|e| !e.published)
-            .take(limit)
-            .cloned()
-            .collect()
+    pub async fn get_unpublished(&self, limit: i64) -> Result<Vec<OutboxEvent>, String> {
+        let rows = sqlx::query(
+            "SELECT id, topic, key, payload::text, created_at, published \
+             FROM kafka_outbox WHERE NOT published ORDER BY created_at ASC LIMIT $1"
+        )
+            .bind(limit)
+            .fetch_all(&self.db.pool)
+            .await
+            .map_err(|e| format!("Fetch unpublished failed: {}", e))?;
+
+        let mut events = Vec::with_capacity(rows.len());
+        for row in &rows {
+            events.push(OutboxEvent {
+                id: row.try_get("id").unwrap_or_default(),
+                topic: row.try_get("topic").unwrap_or_default(),
+                key: row.try_get("key").unwrap_or_default(),
+                payload: row.try_get::<String, _>("payload").unwrap_or_default(),
+                created_at: row.try_get("created_at").unwrap_or(0),
+                published: row.try_get("published").unwrap_or(false),
+            });
+        }
+        Ok(events)
     }
 }
 
@@ -277,9 +328,9 @@ pub struct DbHealth {
 }
 
 impl DbPool {
-    pub fn health(&self) -> DbHealth {
+    pub async fn health(&self) -> DbHealth {
         DbHealth {
-            connected: self.connected,
+            connected: self.is_connected().await,
             writes: self.write_count(),
             reads: self.read_count(),
             pool_size: self.config.max_connections,
@@ -291,7 +342,6 @@ impl DbPool {
 // ─── Schema Migrations ────────────────────────────────────────────────────────
 
 pub const MIGRATIONS: &[&str] = &[
-    // Base tables for all Rust services
     "CREATE TABLE IF NOT EXISTS stablecoin_bridges (
         key VARCHAR(255) PRIMARY KEY,
         data JSONB NOT NULL,
@@ -387,22 +437,17 @@ pub const MIGRATIONS: &[&str] = &[
 ];
 
 pub async fn run_migrations(db: &DbPool) -> Result<(), String> {
-    // Production:
-    // for migration in MIGRATIONS {
-    //     sqlx::query(migration).execute(&db.pool).await
-    //         .map_err(|e| format!("Migration failed: {}", e))?;
-    // }
+    for (i, migration) in MIGRATIONS.iter().enumerate() {
+        sqlx::query(migration)
+            .execute(&db.pool)
+            .await
+            .map_err(|e| format!("Migration {} failed: {}", i + 1, e))?;
+    }
     eprintln!("[DB] Ran {} migrations successfully", MIGRATIONS.len());
     Ok(())
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
-
-fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    format!("{:032x}", t)
-}
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
@@ -413,19 +458,41 @@ fn now_ms() -> u64 {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = DbConfig::default();
-    let db = Arc::new(DbPool::connect(config).await.map_err(|e| e)?);
 
-    run_migrations(&db).await.map_err(|e| e)?;
+    let db = match DbPool::connect(config.clone()).await {
+        Ok(pool) => Arc::new(pool),
+        Err(e) => {
+            if config.fail_closed {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+            eprintln!("[DB] WARNING: {}", e);
+            eprintln!("[DB] Running in degraded mode (dev only)");
+            return Ok(());
+        }
+    };
 
-    // Example: create write-through stores
-    let _bridge_store: WriteThroughStore<serde_json::Value> =
+    run_migrations(&db).await?;
+
+    let bridge_store: WriteThroughStore<serde_json::Value> =
         WriteThroughStore::new("stablecoin_bridges", db.clone());
     let _p2p_store: WriteThroughStore<serde_json::Value> =
         WriteThroughStore::new("p2p_fraud_graph", db.clone());
-    let _outbox = KafkaOutbox::new(db.clone());
+    let outbox = KafkaOutbox::new(db.clone());
 
+    let loaded = bridge_store.load_all().await.unwrap_or(0);
+    eprintln!("[rust-db-persistence] Loaded {} bridge entries from DB", loaded);
+
+    let health = db.health().await;
     eprintln!("[rust-db-persistence] Health server ready on :8199");
-    eprintln!("[rust-db-persistence] DB health: {:?}", serde_json::to_string(&db.health())?);
+    eprintln!("[rust-db-persistence] DB health: {}", serde_json::to_string(&health)?);
+
+    // Verify outbox works
+    let _test_id = outbox.append(
+        "remitflow.db-persistence.health",
+        "startup",
+        r#"{"event":"service_started"}"#,
+    ).await;
 
     Ok(())
 }
