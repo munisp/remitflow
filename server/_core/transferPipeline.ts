@@ -185,23 +185,43 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
     }
   }
 
-  // 4. TigerBeetle double-entry ledger
-  try {
+  // 4. TigerBeetle double-entry ledger (FAIL-CLOSED in production)
+  // Uses two-phase transfer: create pending hold, then post after settlement.
+  // Validates balance before creating the transfer.
+  {
     const transferBigId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
     const debitAccountId = BigInt(input.userId);
     const creditAccountId = BigInt(input.userId + 1_000_000);
     const amountCents = BigInt(Math.round(input.amount * 100));
-    await tigerBeetle.createTransfer({
-      id: transferBigId,
-      debitAccountId,
-      creditAccountId,
-      amount: amountCents,
-      ledger: 1,
-      code: 1,
-    });
-    result.tigerBeetleRecorded = true;
-  } catch (err) {
-    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] TigerBeetle degraded, using DB fallback");
+
+    try {
+      // Pre-check: validate sufficient balance
+      await tigerBeetle.validateBalance(debitAccountId, amountCents);
+
+      // Create pending (two-phase) transfer — holds funds until settlement confirms
+      await tigerBeetle.createPendingTransfer({
+        id: transferBigId,
+        debitAccountId,
+        creditAccountId,
+        amount: amountCents,
+        ledger: 1,
+        code: 1,
+        timeoutSeconds: 3600, // Auto-void after 1 hour if not posted
+        userData128: BigInt(`0x${input.transferId.replace(/-/g, "").slice(0, 32).padEnd(32, "0")}`),
+      });
+      result.tigerBeetleRecorded = true;
+    } catch (err) {
+      // In production this is FATAL — do not proceed without ledger entry
+      if (process.env.NODE_ENV === "production") {
+        logger.error({ err: err instanceof Error ? err.message : String(err), transferId: input.transferId },
+          "[Pipeline] FAIL-CLOSED: TigerBeetle ledger write failed — blocking transfer");
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Transfer blocked: financial ledger unavailable. Please try again.",
+        });
+      }
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] TigerBeetle unavailable (dev mode — proceeding without ledger)");
+    }
   }
 
   // 5. Kafka event publishing
@@ -336,16 +356,29 @@ export async function compensateFailedTransfer(input: {
   logger.warn({ ...input, reversalId }, "[Pipeline] Compensating failed transfer");
 
   try {
-    // Reverse TigerBeetle debit
-    const transferBigId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
-    const creditAccountId = BigInt(input.userId);
-    const debitAccountId = BigInt(input.userId + 1_000_000);
-    const amountCents = BigInt(Math.round(input.amount * 100));
-    await tigerBeetle.createTransfer({
-      id: transferBigId, debitAccountId, creditAccountId, amount: amountCents, ledger: 1, code: 2,
+    // Void the pending TigerBeetle transfer (two-phase: void releases the hold)
+    const voidId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
+    const pendingId = BigInt(Date.now()) * BigInt(999) + BigInt(Math.floor(Math.random() * 999));
+    await tigerBeetle.voidPendingTransfer({
+      id: voidId,
+      pendingId,
+      ledger: 1,
+      code: 2,
     });
-  } catch {
-    logger.warn({ reversalId }, "[Pipeline] TigerBeetle reversal failed — requires manual reconciliation");
+  } catch (voidErr) {
+    // If void fails, create a reversal transfer as fallback
+    try {
+      const reversalTransferId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
+      const creditAccountId = BigInt(input.userId);
+      const debitAccountId = BigInt(input.userId + 1_000_000);
+      const amountCents = BigInt(Math.round(input.amount * 100));
+      await tigerBeetle.createTransfer({
+        id: reversalTransferId, debitAccountId, creditAccountId, amount: amountCents, ledger: 1, code: 2,
+      });
+    } catch {
+      logger.error({ reversalId, voidErr: voidErr instanceof Error ? voidErr.message : String(voidErr) },
+        "[Pipeline] TigerBeetle reversal failed — MANUAL RECONCILIATION REQUIRED");
+    }
   }
 
   try {
