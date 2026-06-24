@@ -69,14 +69,22 @@ export interface SafeConfig {
 
 // ── HTTP Client ─────────────────────────────────────────────────────────────
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
 async function safeRequest<T>(chain: string, path: string, method: string = "GET", body?: unknown): Promise<T> {
   const baseUrl = SAFE_TX_SERVICE_URLS[chain];
   if (!baseUrl) {
+    if (IS_PRODUCTION) {
+      throw new Error(`[GnosisSafe] FAIL-CLOSED: No Safe TX Service URL configured for chain '${chain}' in production`);
+    }
     return mockSafeResponse(path) as T;
   }
 
   const safeAddress = process.env.GNOSIS_SAFE_ADDRESS;
   if (!safeAddress) {
+    if (IS_PRODUCTION) {
+      throw new Error("[GnosisSafe] FAIL-CLOSED: GNOSIS_SAFE_ADDRESS not configured in production — cannot access treasury");
+    }
     return mockSafeResponse(path) as T;
   }
 
@@ -91,7 +99,10 @@ async function safeRequest<T>(chain: string, path: string, method: string = "GET
     if (!response.ok) throw new Error(`Safe API ${response.status}`);
     return (await response.json()) as T;
   } catch (err) {
-    logger.warn({ error: err, chain }, "Safe Transaction Service unavailable — using mock");
+    if (IS_PRODUCTION) {
+      throw new Error(`[GnosisSafe] FAIL-CLOSED: Safe Transaction Service unavailable for chain '${chain}' — ${(err as Error).message}`);
+    }
+    logger.warn({ error: err, chain }, "Safe Transaction Service unavailable — using mock (dev only)");
     return mockSafeResponse(path) as T;
   }
 }

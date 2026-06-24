@@ -100,18 +100,27 @@ const circleBreaker = getCircuitBreaker("circle-api");
 const MAX_RETRIES = 3;
 const RETRY_DELAYS = [1000, 2000, 4000];
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
 async function circleRequest<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<T> {
+  // FAIL-CLOSED: In production, missing API key is a fatal configuration error
   if (!CIRCLE_API_KEY) {
-    logger.warn("Circle API key not configured — returning mock response");
+    if (IS_PRODUCTION) {
+      throw new Error("[Circle] FAIL-CLOSED: CIRCLE_API_KEY not configured in production — cannot process payment");
+    }
+    logger.warn("Circle API key not configured — returning mock response (dev only)");
     return mockCircleResponse(path) as T;
   }
 
   if (!circleBreaker.canRequest()) {
-    logger.warn({ path }, "Circle circuit breaker open — returning mock");
+    if (IS_PRODUCTION) {
+      throw new Error("[Circle] FAIL-CLOSED: Circuit breaker OPEN in production — service degraded");
+    }
+    logger.warn({ path }, "Circle circuit breaker open — returning mock (dev only)");
     return mockCircleResponse(path) as T;
   }
 

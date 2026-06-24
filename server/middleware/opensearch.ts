@@ -79,10 +79,20 @@ export async function logSecurityEvent(event: {
   severity: "low" | "medium" | "high" | "critical"; details: string;
 }): Promise<void> {
   const c = await getRealOSClient();
-  if (!c) return;
+  const IS_PRODUCTION = process.env.NODE_ENV === "production";
+  if (!c) {
+    if (IS_PRODUCTION) {
+      throw new Error("[OpenSearch] FAIL-CLOSED: Cannot index security event — OpenSearch unavailable in production");
+    }
+    return;
+  }
   try {
     await c.index({ index: OS_INDICES.SECURITY_EVENTS, body: { ...event, "@timestamp": new Date().toISOString() } });
-  } catch { /* graceful */ }
+  } catch (err) {
+    if (IS_PRODUCTION) {
+      throw new Error(`[OpenSearch] FAIL-CLOSED: Security event indexing failed — ${(err as Error).message}`);
+    }
+  }
 }
 
 /** Index mappings — defines field types, analyzers, and tokenizers for each index */

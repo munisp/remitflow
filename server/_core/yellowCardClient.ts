@@ -110,13 +110,19 @@ function generateSignature(timestamp: string, method: string, path: string, body
   return createHmac("sha256", YC_API_SECRET).update(message).digest("hex");
 }
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
 async function ycRequest<T>(
   method: string,
   path: string,
   body?: unknown,
 ): Promise<T> {
+  // FAIL-CLOSED: In production, missing API key is a fatal configuration error
   if (!YC_API_KEY) {
-    logger.warn("Yellow Card API key not configured — returning mock response");
+    if (IS_PRODUCTION) {
+      throw new Error("[YellowCard] FAIL-CLOSED: YC_API_KEY not configured in production — cannot process off-ramp");
+    }
+    logger.warn("Yellow Card API key not configured — returning mock response (dev only)");
     return mockYCResponse(path, method) as T;
   }
 

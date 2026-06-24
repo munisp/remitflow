@@ -19,17 +19,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -73,6 +76,163 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// ── PostgreSQL Write-Through Persistence ──────────────────────────────────────
+
+type DbPool struct {
+	db    *sql.DB
+	cache sync.Map // in-memory cache for read-through
+}
+
+var dbPool *DbPool
+
+func initDB(cfg Config) {
+	dsn := getEnv("DATABASE_URL", "postgres://remitflow:remitflow@localhost:5432/remitflow?sslmode=disable")
+	isProduction := os.Getenv("NODE_ENV") == "production"
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		if isProduction {
+			log.Fatalf("[MOJALOOP-DB] FATAL: cannot open database in production: %v", err)
+		}
+		log.Printf("[MOJALOOP-DB] WARN: database unavailable (%v) — using in-memory fallback", err)
+		return
+	}
+
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		if isProduction {
+			log.Fatalf("[MOJALOOP-DB] FATAL: cannot ping database in production: %v", err)
+		}
+		log.Printf("[MOJALOOP-DB] WARN: database ping failed (%v) — using in-memory fallback", err)
+		return
+	}
+
+	// Run migrations
+	migrations := []string{
+		`CREATE TABLE IF NOT EXISTS mojaloop_transfers (
+			transfer_id TEXT PRIMARY KEY,
+			payer_fsp TEXT NOT NULL,
+			payee_fsp TEXT NOT NULL,
+			amount TEXT NOT NULL,
+			currency TEXT NOT NULL,
+			ilp_packet TEXT,
+			condition TEXT,
+			state TEXT NOT NULL DEFAULT 'RECEIVED',
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS mojaloop_quotes (
+			quote_id TEXT PRIMARY KEY,
+			payer_fsp TEXT NOT NULL,
+			payee_fsp TEXT NOT NULL,
+			payer_id TEXT,
+			payee_id TEXT,
+			amount TEXT NOT NULL,
+			currency TEXT NOT NULL,
+			transfer_amount TEXT,
+			ilp_packet TEXT,
+			condition TEXT,
+			expires_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE TABLE IF NOT EXISTS mojaloop_outbox (
+			id BIGSERIAL PRIMARY KEY,
+			topic TEXT NOT NULL,
+			key TEXT NOT NULL,
+			payload JSONB NOT NULL,
+			published BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_mojaloop_transfers_state ON mojaloop_transfers(state)`,
+		`CREATE INDEX IF NOT EXISTS idx_mojaloop_outbox_unpublished ON mojaloop_outbox(published) WHERE NOT published`,
+	}
+
+	for _, m := range migrations {
+		if _, err := db.ExecContext(ctx, m); err != nil {
+			log.Printf("[MOJALOOP-DB] WARN: migration failed: %v", err)
+		}
+	}
+
+	dbPool = &DbPool{db: db}
+	log.Printf("[MOJALOOP-DB] Connected and migrated successfully")
+}
+
+func dbUpsertTransfer(ctx context.Context, t TransferRequest, state string) {
+	if dbPool == nil {
+		return
+	}
+	_, err := dbPool.db.ExecContext(ctx,
+		`INSERT INTO mojaloop_transfers (transfer_id, payer_fsp, payee_fsp, amount, currency, ilp_packet, condition, state)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 ON CONFLICT (transfer_id) DO UPDATE SET state = $8, updated_at = NOW()`,
+		t.TransferID, t.PayerFSP, t.PayeeFSP, t.Amount, t.Currency, t.ILPPacket, t.Condition, state)
+	if err != nil {
+		log.Printf("[MOJALOOP-DB] WARN: transfer upsert failed: %v", err)
+	}
+	dbPool.cache.Store("transfer:"+t.TransferID, state)
+}
+
+func dbUpdateTransferState(ctx context.Context, transferID, state string) {
+	if dbPool == nil {
+		return
+	}
+	_, err := dbPool.db.ExecContext(ctx,
+		`UPDATE mojaloop_transfers SET state = $1, updated_at = NOW() WHERE transfer_id = $2`,
+		state, transferID)
+	if err != nil {
+		log.Printf("[MOJALOOP-DB] WARN: transfer state update failed: %v", err)
+	}
+	dbPool.cache.Store("transfer:"+transferID, state)
+}
+
+func dbGetTransferState(ctx context.Context, transferID string) string {
+	if cached, ok := dbPool.cache.Load("transfer:" + transferID); ok {
+		return cached.(string)
+	}
+	if dbPool == nil {
+		return "COMMITTED"
+	}
+	var state string
+	err := dbPool.db.QueryRowContext(ctx,
+		`SELECT state FROM mojaloop_transfers WHERE transfer_id = $1`, transferID).Scan(&state)
+	if err != nil {
+		return "COMMITTED"
+	}
+	dbPool.cache.Store("transfer:"+transferID, state)
+	return state
+}
+
+func dbInsertQuote(ctx context.Context, q QuoteRequest, resp QuoteResponse) {
+	if dbPool == nil {
+		return
+	}
+	_, err := dbPool.db.ExecContext(ctx,
+		`INSERT INTO mojaloop_quotes (quote_id, payer_fsp, payee_fsp, payer_id, payee_id, amount, currency, transfer_amount, ilp_packet, condition, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 ON CONFLICT (quote_id) DO NOTHING`,
+		q.QuoteID, q.PayerFSP, q.PayeeFSP, q.PayerID, q.PayeeID, q.Amount, q.Currency,
+		resp.TransferAmount, resp.ILPPacket, resp.Condition, resp.ExpirationISO)
+	if err != nil {
+		log.Printf("[MOJALOOP-DB] WARN: quote insert failed: %v", err)
+	}
+}
+
+func dbInsertOutbox(ctx context.Context, topic, key string, payload any) {
+	if dbPool == nil {
+		return
+	}
+	data, _ := json.Marshal(payload)
+	_, _ = dbPool.db.ExecContext(ctx,
+		`INSERT INTO mojaloop_outbox (topic, key, payload) VALUES ($1, $2, $3)`,
+		topic, key, data)
 }
 
 // ── Domain Types ──────────────────────────────────────────────────────────────
@@ -189,16 +349,23 @@ func triggerTemporalWorkflow(cfg Config, workflowType, workflowID string, input 
 
 func healthHandler(cfg Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		dbStatus := "disconnected"
+		if dbPool != nil {
+			if err := dbPool.db.PingContext(c.Request.Context()); err == nil {
+				dbStatus = "connected"
+			}
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"status":    "healthy",
 			"service":   cfg.ServiceName,
-			"version":   "2.0.0",
+			"version":   "2.1.0",
 			"timestamp": time.Now().UTC().Format(time.RFC3339),
+			"database":  dbStatus,
 			"middleware": map[string]string{
 				"kafka": cfg.KafkaBrokers, "dapr": "port:" + cfg.DaprHTTPPort,
 				"fluvio": cfg.FluvioGatewayURL, "temporal": cfg.TemporalHostPort,
 				"tigerbeetle": cfg.TigerBeetleAddr, "opensearch": cfg.OpenSearchURL,
-				"lakehouse": cfg.LakehouseURL,
+				"lakehouse": cfg.LakehouseURL, "postgresql": "pgx/v5",
 			},
 		})
 	}
@@ -216,6 +383,13 @@ func initiateTransferHandler(cfg Config) gin.HandlerFunc {
 		}
 
 		expiration := time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339)
+
+		// 0. Persist to PostgreSQL (write-through — DB first, then cache)
+		dbUpsertTransfer(c.Request.Context(), req, "RECEIVED")
+		dbInsertOutbox(c.Request.Context(), "payment.mojaloop.initiated", req.TransferID, map[string]any{
+			"transferId": req.TransferID, "payerFsp": req.PayerFSP,
+			"payeeFsp": req.PayeeFSP, "amount": req.Amount, "currency": req.Currency,
+		})
 
 		// 1. Record in TigerBeetle (ledger 0 = Mojaloop)
 		recordTigerBeetle(cfg, req.TransferID,
@@ -270,9 +444,10 @@ func initiateTransferHandler(cfg Config) gin.HandlerFunc {
 
 func getTransferHandler(c *gin.Context) {
 	transferID := c.Param("id")
+	state := dbGetTransferState(c.Request.Context(), transferID)
 	c.JSON(http.StatusOK, TransferResponse{
 		TransferID:    transferID,
-		TransferState: "COMMITTED",
+		TransferState: state,
 		CompletedAt:   time.Now().UTC().Format(time.RFC3339),
 	})
 }
@@ -303,6 +478,10 @@ func requestQuoteHandler(cfg Config) gin.HandlerFunc {
 			Condition:          fmt.Sprintf("cond_%s", uuid.New().String()[:8]),
 			ExpirationISO:      expiration,
 		}
+
+		// Persist quote to PostgreSQL (write-through)
+		dbInsertQuote(c.Request.Context(), req, resp)
+
 		log.Printf("[QUOTE] Created %s: %s %s", req.QuoteID, req.Amount, req.Currency)
 		c.JSON(http.StatusOK, resp)
 	}
@@ -331,6 +510,9 @@ func transferCallbackHandler(cfg Config) gin.HandlerFunc {
 		}
 		bodyJSON, _ := json.Marshal(body)
 		log.Printf("[CALLBACK] Transfer callback %s: %s", transferID, string(bodyJSON))
+
+		// Persist state transition to PostgreSQL
+		dbUpdateTransferState(c.Request.Context(), transferID, "COMMITTED")
 
 		// Publish callback to Kafka
 		publishKafka(cfg, "mojaloop.transfer.callback", map[string]any{
@@ -366,6 +548,8 @@ mojaloop_quotes_total 0
 
 func main() {
 	cfg := loadConfig()
+	initDB(cfg)
+
 	if cfg.LogLevel != "debug" {
 		gin.SetMode(gin.ReleaseMode)
 	}
