@@ -21,6 +21,38 @@ import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, r
 import { logger } from "./logger";
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_crossCurrencySwapts: any = null;
+async function _getWtDb_crossCurrencySwapts() {
+  if (_wtDb_crossCurrencySwapts) return _wtDb_crossCurrencySwapts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_crossCurrencySwapts = await getDb();
+    return _wtDb_crossCurrencySwapts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_crossCurrencySwapts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_crossCurrencySwapts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 const STABLECOINS = ["USDT", "USDC", "DAI", "BUSD", "PYUSD", "NGNT", "cUSD"] as const;
@@ -127,6 +159,7 @@ export const crossCurrencySwapRouter = router({
       }
       const quote = calculateSwap(input.fromCoin, input.toCoin, input.fromChain, input.toChain, input.amount);
       quotes.set(quote.quoteId, quote);
+      _writeThrough("feature_swap_quotes", String(quote.quoteId), quote).catch(() => {});
       persistFeatureRecord("feature_swap_quotes", quote.quoteId, { id: quote.quoteId, ...(typeof quote === 'object' ? quote : {}) }).catch(() => {});
       return quote;
     }),
@@ -160,8 +193,10 @@ export const crossCurrencySwapRouter = router({
       };
 
       swaps.set(swapId, execution);
+      _writeThrough("feature_swap_executions", String(swapId), execution).catch(() => {});
       persistFeatureRecord("feature_swap_executions", swapId, { id: swapId, ...(typeof execution === 'object' ? execution : {}) }).catch(() => {});
       quotes.delete(input.quoteId);
+      _deleteFromDb("feature_swap_quotes", String(input.quoteId)).catch(() => {});
       logger.info({ swapId, from: quote.fromCoin, to: quote.toCoin, amount: quote.inputAmount }, "Swap executed");
 
       createLedgerEntry({

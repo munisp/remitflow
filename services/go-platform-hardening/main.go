@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -27,7 +28,79 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 )
+
+var db *sql.DB
+
+func initDB() {
+	dbURL := getEnv("DATABASE_URL", "")
+	if dbURL == "" {
+		log.Println("[Go Platform Hardening] WARNING: DATABASE_URL not set, using in-memory only")
+		return
+	}
+	var err error
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Printf("[Go Platform Hardening] DB connection failed: %v", err)
+		return
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err = db.Ping(); err != nil {
+		log.Printf("[Go Platform Hardening] DB ping failed: %v", err)
+		db = nil
+		return
+	}
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS hardening_audit_chain (
+		id TEXT PRIMARY KEY,
+		data JSONB DEFAULT '{}'::jsonb,
+		updated_at TIMESTAMPTZ DEFAULT NOW()
+	)`)
+	log.Println("[Go Platform Hardening] PostgreSQL write-through enabled")
+}
+
+func dbUpsertAudit(key string, value interface{}) {
+	if db == nil {
+		return
+	}
+	go func() {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return
+		}
+		_, _ = db.Exec(
+			`INSERT INTO hardening_audit_chain (id, data, updated_at) VALUES ($1, $2::jsonb, NOW())
+			ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+			key, string(data),
+		)
+	}()
+}
+
+func loadAuditChainFromDB() {
+	if db == nil {
+		return
+	}
+	rows, err := db.Query(`SELECT id, data FROM hardening_audit_chain ORDER BY updated_at ASC`)
+	if err != nil {
+		log.Printf("[Go Platform Hardening] Failed to load audit chain from DB: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, data string
+		if err := rows.Scan(&id, &data); err != nil {
+			continue
+		}
+		var entry AuditEntry
+		if err := json.Unmarshal([]byte(data), &entry); err != nil {
+			continue
+		}
+		auditChain = append(auditChain, entry)
+	}
+	log.Printf("[Go Platform Hardening] Loaded %d audit entries from DB", len(auditChain))
+}
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
@@ -208,6 +281,7 @@ func appendAuditEntry(action string, userID int, data string) AuditEntry {
 	}
 	entry.Hash = computeHMAC(entry.Action+":"+entry.Data, prevHash)
 	auditChain = append(auditChain, entry)
+	dbUpsertAudit(entry.EntryID, entry)
 	return entry
 }
 
@@ -677,6 +751,8 @@ func handleAuditChain(w http.ResponseWriter, r *http.Request) {
 var startTime = time.Now()
 
 func main() {
+	initDB()
+	loadAuditChainFromDB()
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/health", handleHealth)
@@ -710,5 +786,8 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	server.Shutdown(ctx)
+	if db != nil {
+		db.Close()
+	}
 	log.Println("[Go Platform Hardening] Shut down gracefully")
 }

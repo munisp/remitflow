@@ -5,7 +5,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 )
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -25,6 +28,7 @@ type Config struct {
 	TigerBeetleAddr     string
 	KafkaBrokers        string
 	LogLevel            string
+	DatabaseURL         string
 }
 
 func loadConfig() Config {
@@ -33,6 +37,7 @@ func loadConfig() Config {
 		TigerBeetleAddr: getEnv("TIGERBEETLE_ADDRESSES", "localhost:3000"),
 		KafkaBrokers:    getEnv("KAFKA_BROKERS", "localhost:9092"),
 		LogLevel:        getEnv("LOG_LEVEL", "info"),
+		DatabaseURL:     getEnv("DATABASE_URL", ""),
 	}
 }
 
@@ -88,7 +93,99 @@ type LedgerStats struct {
 	TotalVolume    int64 `json:"totalVolume"`
 }
 
-// ── In-Memory Ledger (TigerBeetle fallback) ───────────────────────────────────
+// ── PostgreSQL-backed Ledger (in-memory hot cache + DB write-through) ──────────
+
+var db *sql.DB
+
+func initDB(databaseURL string) {
+	if databaseURL == "" {
+		log.Println("[LEDGER] WARNING: DATABASE_URL not set, using in-memory only")
+		return
+	}
+	var err error
+	db, err = sql.Open("postgres", databaseURL)
+	if err != nil {
+		log.Printf("[LEDGER] DB connection failed: %v", err)
+		return
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err = db.Ping(); err != nil {
+		log.Printf("[LEDGER] DB ping failed: %v", err)
+		db = nil
+		return
+	}
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS ledger_accounts (
+		id TEXT PRIMARY KEY,
+		data JSONB DEFAULT '{}'::jsonb,
+		updated_at TIMESTAMPTZ DEFAULT NOW()
+	)`)
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS ledger_transfers (
+		id TEXT PRIMARY KEY,
+		data JSONB DEFAULT '{}'::jsonb,
+		updated_at TIMESTAMPTZ DEFAULT NOW()
+	)`)
+	log.Println("[LEDGER] PostgreSQL write-through enabled")
+}
+
+func dbUpsert(table, key string, value interface{}) {
+	if db == nil {
+		return
+	}
+	go func() {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return
+		}
+		_, _ = db.Exec(
+			fmt.Sprintf(`INSERT INTO %s (id, data, updated_at) VALUES ($1, $2::jsonb, NOW())
+			ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`, table),
+			key, string(data),
+		)
+	}()
+}
+
+func loadFromDB(l *InMemoryLedger) {
+	if db == nil {
+		return
+	}
+	rows, err := db.Query(`SELECT id, data FROM ledger_accounts`)
+	if err != nil {
+		log.Printf("[LEDGER] Failed to load accounts from DB: %v", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, data string
+		if err := rows.Scan(&id, &data); err != nil {
+			continue
+		}
+		var acc Account
+		if err := json.Unmarshal([]byte(data), &acc); err != nil {
+			continue
+		}
+		l.accounts[id] = &acc
+	}
+	tRows, err := db.Query(`SELECT id, data FROM ledger_transfers ORDER BY updated_at`)
+	if err != nil {
+		log.Printf("[LEDGER] Failed to load transfers from DB: %v", err)
+		return
+	}
+	defer tRows.Close()
+	for tRows.Next() {
+		var id, data string
+		if err := tRows.Scan(&id, &data); err != nil {
+			continue
+		}
+		var t Transfer
+		if err := json.Unmarshal([]byte(data), &t); err != nil {
+			continue
+		}
+		l.transfers = append(l.transfers, &t)
+	}
+	log.Printf("[LEDGER] Loaded %d accounts, %d transfers from DB", len(l.accounts), len(l.transfers))
+}
 
 type InMemoryLedger struct {
 	mu        sync.RWMutex
@@ -97,10 +194,12 @@ type InMemoryLedger struct {
 }
 
 func NewInMemoryLedger() *InMemoryLedger {
-	return &InMemoryLedger{
+	l := &InMemoryLedger{
 		accounts:  make(map[string]*Account),
 		transfers: make([]*Transfer, 0),
 	}
+	loadFromDB(l)
+	return l
 }
 
 func (l *InMemoryLedger) CreateAccount(req CreateAccountRequest) (*Account, error) {
@@ -116,6 +215,7 @@ func (l *InMemoryLedger) CreateAccount(req CreateAccountRequest) (*Account, erro
 		CreatedAt:   time.Now().UTC(),
 	}
 	l.accounts[acc.ID] = acc
+	dbUpsert("ledger_accounts", acc.ID, acc)
 	return acc, nil
 }
 
@@ -159,6 +259,9 @@ func (l *InMemoryLedger) CreateTransfer(req CreateTransferRequest) (*Transfer, e
 		Timestamp:       time.Now().UTC(),
 	}
 	l.transfers = append(l.transfers, t)
+	dbUpsert("ledger_transfers", t.ID, t)
+	dbUpsert("ledger_accounts", debit.ID, debit)
+	dbUpsert("ledger_accounts", credit.ID, credit)
 	return t, nil
 }
 
@@ -194,8 +297,7 @@ func (l *InMemoryLedger) GetAccountTransfers(accountID string) []*Transfer {
 
 var ledger = NewInMemoryLedger()
 
-// Needed for fmt.Errorf in the ledger
-import "fmt"
+
 
 func healthHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
@@ -285,6 +387,7 @@ ledger_volume_total %d
 
 func main() {
 	cfg := loadConfig()
+	initDB(cfg.DatabaseURL)
 
 	if cfg.LogLevel != "debug" {
 		gin.SetMode(gin.ReleaseMode)
@@ -333,7 +436,9 @@ func main() {
 		log.Fatalf("Shutdown error: %v", err)
 	}
 
-	// Dump final stats
+	if db != nil {
+		db.Close()
+	}
 	stats := ledger.GetStats()
 	statsJSON, _ := json.Marshal(stats)
 	log.Printf("[LEDGER-SERVICE] Final stats: %s", string(statsJSON))

@@ -9,12 +9,81 @@
 //   - WebAuthn sign-count regression detection
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use warp::Filter;
+
+static DB_INITIALIZED: OnceLock<bool> = OnceLock::new();
+
+fn init_db() -> bool {
+    let url = std::env::var("DATABASE_URL").unwrap_or_default();
+    if url.is_empty() {
+        println!("[rust-platform-hardening] WARNING: DATABASE_URL not set");
+        return false;
+    }
+    match postgres::Client::connect(&url, postgres::NoTls) {
+        Ok(mut client) => {
+            let _ = client.execute(
+                "CREATE TABLE IF NOT EXISTS platform_hardening_state (id TEXT PRIMARY KEY, data JSONB DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ DEFAULT NOW())",
+                &[],
+            );
+            println!("[rust-platform-hardening] PostgreSQL write-through enabled");
+            true
+        }
+        Err(e) => {
+            println!("[rust-platform-hardening] DB connection failed: {}", e);
+            false
+        }
+    }
+}
+
+fn db_upsert(key: &str, value: &impl Serialize) {
+    if !*DB_INITIALIZED.get().unwrap_or(&false) {
+        return;
+    }
+    let data = serde_json::to_string(value).unwrap_or_default();
+    let url = std::env::var("DATABASE_URL").unwrap_or_default();
+    let key = key.to_string();
+    std::thread::spawn(move || {
+        if let Ok(mut client) = postgres::Client::connect(&url, postgres::NoTls) {
+            let _ = client.execute(
+                "INSERT INTO platform_hardening_state (id, data, updated_at) VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()",
+                &[&key, &data],
+            );
+        }
+    });
+}
+
+fn load_state_from_db(state: &mut AppState) {
+    let url = std::env::var("DATABASE_URL").unwrap_or_default();
+    if url.is_empty() { return; }
+    if let Ok(mut client) = postgres::Client::connect(&url, postgres::NoTls) {
+        if let Ok(rows) = client.query("SELECT id, data FROM platform_hardening_state", &[]) {
+            for row in &rows {
+                let id: String = row.get(0);
+                let data: String = row.get(1);
+                if id.starts_with("fencing:") {
+                    if let Ok(t) = serde_json::from_str::<FencingToken>(&data) {
+                        let key = id.strip_prefix("fencing:").unwrap_or(&id).to_string();
+                        state.fencing_tokens.insert(key, t);
+                    }
+                } else if id.starts_with("webauthn:") {
+                    if let Ok(c) = serde_json::from_str::<u32>(&data) {
+                        let key = id.strip_prefix("webauthn:").unwrap_or(&id).to_string();
+                        state.webauthn_counts.insert(key, c);
+                    }
+                } else if id.starts_with("spent:") {
+                    let key = id.strip_prefix("spent:").unwrap_or(&id).to_string();
+                    state.spent_hashes.insert(key, true);
+                }
+            }
+            println!("[rust-platform-hardening] Loaded {} entries from DB", rows.len());
+        }
+    }
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -420,7 +489,11 @@ async fn main() {
         .parse()
         .unwrap_or(8260);
 
-    let state = Arc::new(Mutex::new(AppState::new()));
+    let db_ok = init_db();
+    DB_INITIALIZED.get_or_init(|| db_ok);
+    let mut initial_state = AppState::new();
+    load_state_from_db(&mut initial_state);
+    let state = Arc::new(Mutex::new(initial_state));
 
     let health = {
         let state = state.clone();
@@ -466,7 +539,8 @@ async fn main() {
                     issued_at: now,
                     expires_at: now + ttl,
                 };
-                state.lock().unwrap().fencing_tokens.insert(token_str, token.clone());
+                state.lock().unwrap().fencing_tokens.insert(token_str.clone(), token.clone());
+                db_upsert(&format!("fencing:{}", token_str), &token);
                 warp::reply::json(&token)
             })
     };
@@ -565,7 +639,8 @@ async fn main() {
                         "spend_key": spend_key
                     }));
                 }
-                st.spent_hashes.insert(spend_key, true);
+                st.spent_hashes.insert(spend_key.clone(), true);
+                db_upsert(&format!("spent:{}", spend_key), &true);
 
                 let entry = ReceiptEntry {
                     receipt_id: format!("RCT-{}", &hash[..16]),
@@ -597,6 +672,7 @@ async fn main() {
 
                 if !clone_detected {
                     st.webauthn_counts.insert(cred_id.to_string(), new_count);
+                    db_upsert(&format!("webauthn:{}", cred_id), &new_count);
                 }
 
                 warp::reply::json(&WebAuthnCheck {

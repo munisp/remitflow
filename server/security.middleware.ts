@@ -31,6 +31,38 @@ import crypto from "crypto";
 import { Request, Response, NextFunction, Express, RequestHandler } from "express";
 import { logger } from './_core/logger';
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_securitymiddlewarets: any = null;
+async function _getWtDb_securitymiddlewarets() {
+  if (_wtDb_securitymiddlewarets) return _wtDb_securitymiddlewarets;
+  try {
+    const { getDb } = await import("./db.js");
+    _wtDb_securitymiddlewarets = await getDb();
+    return _wtDb_securitymiddlewarets;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_securitymiddlewarets();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_securitymiddlewarets();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ─── ALLOWED ORIGINS ─────────────────────────────────────────────────────────
 // Production domain — MUST be set via REMITFLOW_PRODUCTION_DOMAIN in production.
 const PRODUCTION_DOMAIN = process.env.REMITFLOW_PRODUCTION_DOMAIN || "remitflow.example.com";
@@ -374,6 +406,7 @@ setInterval(() => {
   for (const [key, value] of Array.from(idempotencyCache.entries())) {
     if (now - value.timestamp > 24 * 60 * 60 * 1000) {
       idempotencyCache.delete(key);
+      _deleteFromDb("wt_security.middleware_idempotency_cache", String(key)).catch(() => {});
     }
   }
 }, 5 * 60 * 1000);
@@ -423,6 +456,7 @@ export function velocityCheckMiddleware(req: Request, res: Response, next: NextF
   const entry = velocityTracker.get(key);
   if (!entry || now - entry.firstSeen > windowMs) {
     velocityTracker.set(key, { count: 1, total: 0, firstSeen: now, lastSeen: now });
+    _writeThrough("wt_security.middleware_velocity_tracker", String(key), { count: 1, total: 0, firstSeen: now, lastSeen: now }).catch(() => {});
     return next();
   }
 
@@ -508,10 +542,12 @@ export function recordLoginFailure(ip: string): void {
     entry.count = 0;
   }
   loginAttempts.set(key, entry);
+  _writeThrough("wt_security.middleware_login_attempts", String(key), entry).catch(() => {});
 }
 
 export function clearLoginFailures(ip: string): void {
   loginAttempts.delete(`lockout:${ip}`);
+  _deleteFromDb("wt_security.middleware_login_attempts", String(`lockout:${ip}`)).catch(() => {});
 }
 
 // SQL injection pattern detection (defence-in-depth on top of parameterized queries)

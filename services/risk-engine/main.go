@@ -8,6 +8,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"encoding/json"
 	"log"
@@ -19,7 +20,73 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	_ "github.com/lib/pq"
 )
+
+var riskDB *sql.DB
+
+func initRiskDB() {
+	dbURL := getEnv("DATABASE_URL", "")
+	if dbURL == "" {
+		log.Println("[RISK-ENGINE] WARNING: DATABASE_URL not set, stats will not persist")
+		return
+	}
+	var err error
+	riskDB, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Printf("[RISK-ENGINE] DB connection failed: %v", err)
+		return
+	}
+	riskDB.SetMaxOpenConns(10)
+	riskDB.SetMaxIdleConns(5)
+	riskDB.SetConnMaxLifetime(5 * time.Minute)
+	if err = riskDB.Ping(); err != nil {
+		log.Printf("[RISK-ENGINE] DB ping failed: %v", err)
+		riskDB = nil
+		return
+	}
+	_, _ = riskDB.Exec(`CREATE TABLE IF NOT EXISTS risk_engine_stats (
+		id TEXT PRIMARY KEY,
+		data JSONB DEFAULT '{}'::jsonb,
+		updated_at TIMESTAMPTZ DEFAULT NOW()
+	)`)
+	log.Println("[RISK-ENGINE] PostgreSQL write-through enabled")
+}
+
+func dbUpsertStats(key string, value interface{}) {
+	if riskDB == nil {
+		return
+	}
+	go func() {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return
+		}
+		_, _ = riskDB.Exec(
+			`INSERT INTO risk_engine_stats (id, data, updated_at) VALUES ($1, $2::jsonb, NOW())
+			ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+			key, string(data),
+		)
+	}()
+}
+
+func loadStatsFromDB() {
+	if riskDB == nil {
+		return
+	}
+	var data string
+	err := riskDB.QueryRow(`SELECT data FROM risk_engine_stats WHERE id = 'aggregate_stats'`).Scan(&data)
+	if err != nil {
+		return
+	}
+	var stats RiskStats
+	if json.Unmarshal([]byte(data), &stats) == nil {
+		scorer.mu.Lock()
+		scorer.stats = stats
+		scorer.mu.Unlock()
+		log.Printf("[RISK-ENGINE] Loaded stats from DB: %d scored, %d high-risk, %d rejected", stats.TotalScored, stats.HighRisk, stats.Rejected)
+	}
+}
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -245,6 +312,7 @@ func (rs *RiskScorer) Score(req RiskRequest) RiskResponse {
 		rs.stats.Rejected++
 	}
 	rs.mu.Unlock()
+	dbUpsertStats("aggregate_stats", rs.stats)
 
 	return RiskResponse{
 		TransactionID: req.TransactionID,
@@ -340,6 +408,8 @@ func countriesHandler(c *gin.Context) {
 
 func main() {
 	cfg := loadConfig()
+	initRiskDB()
+	loadStatsFromDB()
 
 	if os.Getenv("GIN_MODE") != "debug" {
 		gin.SetMode(gin.ReleaseMode)

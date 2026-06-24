@@ -20,6 +20,38 @@ import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, r
 import { logger } from "./logger";
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, loadFeatureRecords, updateFeatureRecord } from "./featurePersistence";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_programmablePaymentsts: any = null;
+async function _getWtDb_programmablePaymentsts() {
+  if (_wtDb_programmablePaymentsts) return _wtDb_programmablePaymentsts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_programmablePaymentsts = await getDb();
+    return _wtDb_programmablePaymentsts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_programmablePaymentsts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_programmablePaymentsts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 export const ScheduleType = z.enum(["one_time", "recurring", "conditional", "milestone"]);
@@ -102,6 +134,7 @@ const payments = new Map<string, ProgrammablePayment>();
 
 async function dbPersist(payment: ProgrammablePayment) {
   payments.set(payment.id, payment);
+  _writeThrough("wt_programmable_payments_payments", String(payment.id), payment).catch(() => {});
   persistFeatureRecord(TABLE, payment.id, {
     id: payment.id, userId: payment.userId, type: payment.scheduleType,
     amount: payment.amount, stablecoin: payment.stablecoin, status: payment.status,
@@ -111,6 +144,7 @@ async function dbPersist(payment: ProgrammablePayment) {
 
 async function dbUpdate(payment: ProgrammablePayment) {
   payments.set(payment.id, payment);
+  _writeThrough("wt_programmable_payments_payments", String(payment.id), payment).catch(() => {});
   updateFeatureRecord(TABLE, payment.id, { status: payment.status }).catch(() => {});
 }
 
