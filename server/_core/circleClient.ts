@@ -101,7 +101,6 @@ const MAX_RETRIES = 3;
 const RETRY_DELAYS = [1000, 2000, 4000];
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
-
 async function circleRequest<T>(
   method: string,
   path: string,

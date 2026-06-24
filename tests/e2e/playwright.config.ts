@@ -2,27 +2,45 @@ import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
   testDir: ".",
-  fullyParallel: true,
+  fullyParallel: false, // Financial tests must run sequentially
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
-  reporter: process.env.CI ? "github" : "html",
-  timeout: 30000,
+  workers: 1,
+  reporter: [
+    ["html", { open: "never" }],
+    ["json", { outputFile: "test-results/results.json" }],
+    process.env.CI ? ["github"] : ["list"],
+  ],
+  timeout: 60_000,
+
   use: {
-    baseURL: process.env.APP_URL || "http://localhost:3000",
+    baseURL: process.env.BASE_URL || "http://localhost:3000",
     trace: "on-first-retry",
     screenshot: "only-on-failure",
+    video: "retain-on-failure",
   },
+
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
-    { name: "mobile-chrome", use: { ...devices["Pixel 7"] } },
-    { name: "mobile-safari", use: { ...devices["iPhone 14"] } },
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
+      name: "mobile",
+      use: { ...devices["Pixel 7"] },
+    },
+    {
+      name: "safari",
+      use: { ...devices["Desktop Safari"] },
+    },
   ],
+
   webServer: process.env.CI
     ? undefined
     : {
         command: "npm run dev",
-        port: 3000,
+        url: "http://localhost:3000",
         reuseExistingServer: true,
+        timeout: 30_000,
       },
 });

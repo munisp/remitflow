@@ -31,6 +31,11 @@ export const KAFKA_TOPICS = {
   TIGERBEETLE_RECONCILIATION: "remitflow.tigerbeetle.reconciliation",
   ACCOUNT_EVENTS: "remitflow.account.events",
   ACCOUNT_PROVISIONED: "remitflow.account.provisioned",
+  FUND_FLOW_EVENTS: "remitflow.fund-flow.events",
+  FUND_FLOW_LEDGER: "remitflow.fund-flow.ledger",
+  FUND_FLOW_SAGAS: "remitflow.fund-flow.sagas",
+  FUND_FLOW_DLQ: "remitflow.fund-flow.dlq",
+  FUND_FLOW_RECONCILIATION: "remitflow.fund-flow.reconciliation",
 } as const;
 
 export type KafkaTopic = typeof KAFKA_TOPICS[keyof typeof KAFKA_TOPICS];

@@ -19,7 +19,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -50,6 +53,7 @@ type Config struct {
 	TigerBeetleAddr  string
 	OpenSearchURL    string
 	LakehouseURL     string
+	CoreAPIURL       string
 	ServiceName      string
 }
 
@@ -67,6 +71,7 @@ func loadConfig() Config {
 		TigerBeetleAddr:  getEnv("TIGERBEETLE_ADDR", "localhost:3001"),
 		OpenSearchURL:    getEnv("OPENSEARCH_URL", "http://localhost:9200"),
 		LakehouseURL:     getEnv("LAKEHOUSE_URL", "http://localhost:8090"),
+		CoreAPIURL:       getEnv("CORE_API_URL", "http://localhost:3001"),
 		ServiceName:      "mojaloop-connector",
 	}
 }
@@ -283,7 +288,21 @@ type PartyLookupResponse struct {
 
 // ── Middleware helpers ────────────────────────────────────────────────────────
 
-var httpClient = &http.Client{Timeout: 5 * time.Second}
+// httpClient with connection pooling tuned for 1M+ TPS.
+// MaxIdleConnsPerHost must match the upstream's capacity.
+var httpTransport = &http.Transport{
+	MaxIdleConns:        500,
+	MaxIdleConnsPerHost: 100,
+	MaxConnsPerHost:     200,
+	IdleConnTimeout:     90 * time.Second,
+	TLSHandshakeTimeout: 5 * time.Second,
+	DisableKeepAlives:   false,
+	ForceAttemptHTTP2:   true,
+}
+var httpClient = &http.Client{
+	Timeout:   10 * time.Second,
+	Transport: httpTransport,
+}
 
 func postJSON(url string, payload any) {
 	body, _ := json.Marshal(payload)
@@ -529,8 +548,52 @@ func transferCallbackHandler(cfg Config) gin.HandlerFunc {
 			"transferId": transferID, "callback": body,
 		})
 
+		// Forward to Node.js core API for transfer state advancement
+		go forwardToCore(cfg, transferID, body)
+
 		c.JSON(http.StatusOK, gin.H{"status": "accepted"})
 	}
+}
+
+// forwardToCore sends the Mojaloop callback to the Node.js core webhook handler
+// so that transfer state is advanced from partner_sent → completed.
+// computeWebhookHMAC generates HMAC-SHA256 signature for webhook payloads
+func computeWebhookHMAC(payload []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(payload)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func forwardToCore(cfg Config, transferID string, body map[string]interface{}) {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"transferId":   transferID,
+		"transferState": body["transferState"],
+		"fulfilment":    body["fulfilment"],
+		"completedTimestamp": body["completedTimestamp"],
+	})
+
+	url := fmt.Sprintf("%s/api/webhooks/mojaloop", cfg.CoreAPIURL)
+	req, err := http.NewRequest("POST", url, bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("[CORE-FORWARD] Failed to create request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-By", "mojaloop-connector")
+
+	// Sign the webhook payload with HMAC-SHA256
+	secret := getEnv("WEBHOOK_SECRET_MOJALOOP", "dev-mojaloop-secret-change-in-prod")
+	signature := computeWebhookHMAC(payload, secret)
+	req.Header.Set("X-Webhook-Signature", "sha256="+signature)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[CORE-FORWARD] Failed to forward to core: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	log.Printf("[CORE-FORWARD] Forwarded transfer %s to core → %d", transferID, resp.StatusCode)
 }
 
 func metricsHandler(c *gin.Context) {
@@ -582,11 +645,13 @@ func main() {
 	r.GET("/parties/:type/:id", partyLookupHandler)
 
 	srv := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      r,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
+		MaxHeaderBytes:    1 << 16, // 64KB
 	}
 
 	go func() {

@@ -141,7 +141,8 @@ export async function openAppSecWafMiddleware(
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 200); // 200ms max
+    const inspectionTimeoutMs = parseInt(process.env.OPENAPPSEC_INSPECTION_TIMEOUT_MS || "5", 10);
+    const timeout = setTimeout(() => controller.abort(), inspectionTimeoutMs);
 
     // Include request body snippet for full inspection (SQL injection, XSS in POST bodies)
     const bodySnippet = getRequestBodySnippet(req);

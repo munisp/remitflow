@@ -1,0 +1,176 @@
+# =============================================================================
+# RemitFlow — OpenSearch Performance Tuning
+# Target: Handle 1M+ index operations/sec, sub-100ms search latency
+#
+# OpenSearch indices:
+#   - remitflow-transactions (highest volume: 1M+ docs/day)
+#   - remitflow-audit (compliance: 500K+ docs/day)
+#   - remitflow-fx-rates (time-series: 100K+ docs/day)
+#   - remitflow-users (low volume: 10K docs)
+#   - remitflow-compliance (medium: 50K docs/day)
+#   - remitflow-notifications (medium: 100K docs/day)
+#
+# Hardware target: 3-node cluster, 64GB RAM/node, NVMe storage
+# =============================================================================
+
+# ── Cluster Configuration ────────────────────────────────────────────────────
+cluster:
+  name: remitflow-cluster
+  nodes: 3
+  # Dedicated master nodes: prevent data operations from affecting cluster management
+  master_nodes: 3
+  data_nodes: 3
+  # Minimum master nodes for split-brain prevention
+  minimum_master_nodes: 2
+
+# ── JVM Heap ─────────────────────────────────────────────────────────────────
+jvm:
+  # 50% of RAM, max 31GB (compressed oops limit)
+  heap_size: 16g
+  # G1GC for predictable pause times
+  gc: G1GC
+  gc_options:
+    - "-XX:+UseG1GC"
+    - "-XX:G1HeapRegionSize=16m"
+    - "-XX:InitiatingHeapOccupancyPercent=35"
+    - "-XX:MaxGCPauseMillis=200"
+    - "-XX:+ParallelRefProcEnabled"
+    - "-XX:+ExplicitGCInvokesConcurrent"
+
+# ── Index Settings ───────────────────────────────────────────────────────────
+indices:
+  # Default settings for all RemitFlow indices
+  defaults:
+    number_of_shards: 6
+    number_of_replicas: 1
+    refresh_interval: 5s  # 1s default is too aggressive for high-write
+    codec: best_compression  # zstd for 30-40% size reduction
+    max_result_window: 50000
+
+  # Per-index overrides
+  remitflow-transactions:
+    number_of_shards: 12  # highest volume
+    number_of_replicas: 1
+    refresh_interval: 10s  # batch indexing, search latency OK at 10s
+    translog:
+      durability: async
+      sync_interval: 30s
+      flush_threshold_size: 1024mb
+    merge:
+      policy:
+        max_merged_segment: 5gb
+        segments_per_tier: 10
+        max_merge_at_once: 10
+
+  remitflow-audit:
+    number_of_shards: 6
+    number_of_replicas: 1
+    refresh_interval: 30s  # compliance search not real-time
+    codec: best_compression
+    # ILM: hot → warm → cold → delete
+    lifecycle:
+      hot_phase_days: 7
+      warm_phase_days: 30
+      cold_phase_days: 365
+      delete_phase_days: 2555  # 7 years (regulatory requirement)
+
+  remitflow-fx-rates:
+    number_of_shards: 3
+    number_of_replicas: 1
+    refresh_interval: 1s  # real-time rate search
+    # Rollover: new index daily
+    rollover:
+      max_age: 1d
+      max_docs: 10000000
+      max_size: 10gb
+
+  remitflow-users:
+    number_of_shards: 1
+    number_of_replicas: 2  # high availability for user lookups
+    refresh_interval: 1s
+
+  remitflow-compliance:
+    number_of_shards: 3
+    number_of_replicas: 1
+    refresh_interval: 5s
+
+  remitflow-notifications:
+    number_of_shards: 3
+    number_of_replicas: 1
+    refresh_interval: 10s
+
+# ── Bulk Indexing Optimization ───────────────────────────────────────────────
+bulk:
+  # Thread pool for bulk indexing
+  thread_pool_size: 16  # 2x CPU cores
+  queue_size: 2000
+  # Bulk request size limits
+  max_bulk_size_mb: 100
+  max_bulk_actions: 5000
+  # Flush interval for bulk processor
+  flush_interval_sec: 5
+  # Concurrent bulk requests
+  max_concurrent_requests: 8
+  # Backoff on rejection
+  retry_on_conflict: 3
+  retry_backoff_ms: 100
+
+# ── Search Optimization ──────────────────────────────────────────────────────
+search:
+  # Thread pool for search
+  thread_pool_size: 13  # (cores * 3) / 2 + 1
+  queue_size: 1000
+  # Max concurrent searches
+  max_concurrent_shard_requests: 5
+  # Allow partial results on shard failure
+  allow_partial_results: true
+  # Query cache: 20% of heap
+  query_cache_size: 20%
+  # Field data cache: 30% of heap
+  fielddata_cache_size: 30%
+  # Request cache: enable for dashboard aggregations
+  request_cache_enabled: true
+
+# ── Circuit Breakers ─────────────────────────────────────────────────────────
+circuit_breakers:
+  # Total: 95% of heap
+  total_limit: 95%
+  # Field data: 40% of heap
+  fielddata_limit: 40%
+  # Request: 60% of heap
+  request_limit: 60%
+  # In-flight requests: 100% of heap
+  inflight_limit: 100%
+
+# ── Storage ──────────────────────────────────────────────────────────────────
+storage:
+  # NVMe path
+  data_path: /data/opensearch
+  # mmapfs for NVMe
+  index_store_type: mmapfs
+  # Translog: async for throughput
+  translog_durability: async
+  translog_sync_interval: 5s
+  # Merge scheduler: 6 concurrent merges on NVMe
+  merge_max_threads: 6
+
+# ── Network ──────────────────────────────────────────────────────────────────
+network:
+  # HTTP layer
+  http_max_content_length: 200mb
+  http_max_initial_line_length: 8kb
+  http_compression: true
+  http_pipelining: true
+  http_pipelining_max_events: 10000
+  # Transport layer (inter-node)
+  transport_compress: lz4
+  transport_tcp_keep_alive: true
+
+# ── Monitoring ───────────────────────────────────────────────────────────────
+monitoring:
+  # Prometheus exporter
+  prometheus_enabled: true
+  prometheus_port: 9114
+  # Slow log: queries > 500ms
+  slow_search_threshold_ms: 500
+  slow_index_threshold_ms: 1000

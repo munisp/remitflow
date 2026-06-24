@@ -89,7 +89,14 @@ async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
         try:
-            _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10, command_timeout=60)
+            _pool = await asyncpg.create_pool(
+                DATABASE_URL,
+                min_size=int(os.getenv("DB_POOL_MIN_SIZE", "10")),
+                max_size=int(os.getenv("DB_POOL_MAX_SIZE", "50")),
+                command_timeout=int(os.getenv("DB_COMMAND_TIMEOUT", "120")),
+                max_queries=int(os.getenv("DB_MAX_QUERIES", "50000")),
+                max_inactive_connection_lifetime=float(os.getenv("DB_MAX_INACTIVE_LIFETIME", "300")),
+            )
             logger.info("PostgreSQL connection pool created")
         except Exception as e:
             logger.error(f"Failed to create DB pool: {e}")

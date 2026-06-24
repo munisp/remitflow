@@ -100,8 +100,15 @@ function createFireblocksJwt(path: string, body?: unknown): string {
 
 // ── HTTP Client ─────────────────────────────────────────────────────────────
 
+function isProduction(): boolean {
+  return process.env.NODE_ENV === "production";
+}
+
 async function fbRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
   if (!FB_API_KEY) {
+    if (isProduction()) {
+      throw new Error("Fireblocks custody unavailable: FIREBLOCKS_API_KEY not configured. Cannot sign transaction.");
+    }
     return mockFireblocksResponse(path, method) as T;
   }
 

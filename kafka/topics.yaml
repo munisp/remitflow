@@ -1,98 +1,150 @@
 # RemitFlow Kafka Topic Registry
-# All topics use 6 partitions for high-throughput corridors, 3 for others.
+# Production-grade: 3x replication, partition counts tuned for 1M+ msg/s.
+# Hot topics (transfers): 24 partitions → 24 consumers max parallelism.
+# Warm topics (KYC, AML): 12 partitions.
+# Cold topics (audit, lakehouse): 6 partitions (lower throughput, longer retention).
+# Compression: lz4 on all topics for ~4x size reduction.
 topics:
   - name: remitflow.transfers.created
-    partitions: 6
-    replication: 1
+    partitions: 24
+    replication: 3
     retention_ms: 604800000  # 7 days
+    compression: lz4
+    min_insync_replicas: 2
     description: "Fired when a new transfer is initiated"
 
   - name: remitflow.transfers.completed
-    partitions: 6
-    replication: 1
+    partitions: 24
+    replication: 3
     retention_ms: 2592000000  # 30 days
+    compression: lz4
+    min_insync_replicas: 2
     description: "Fired when a transfer reaches terminal COMPLETED state"
 
   - name: remitflow.transfers.failed
-    partitions: 6
-    replication: 1
+    partitions: 24
+    replication: 3
     retention_ms: 2592000000
+    compression: lz4
+    min_insync_replicas: 2
     description: "Fired when a transfer reaches terminal FAILED state"
 
   - name: remitflow.kyc.verified
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 2592000000
+    compression: lz4
+    min_insync_replicas: 2
     description: "KYC verification passed — triggers account upgrade"
 
   - name: remitflow.kyc.rejected
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 2592000000
+    compression: lz4
+    min_insync_replicas: 2
     description: "KYC verification failed — triggers user notification"
 
   - name: remitflow.aml.flagged
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 7776000000  # 90 days
+    compression: lz4
+    min_insync_replicas: 2
     description: "AML engine flagged a transaction for review"
 
   - name: remitflow.aml.cleared
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 7776000000
+    compression: lz4
+    min_insync_replicas: 2
     description: "AML engine cleared a previously flagged transaction"
 
   - name: remitflow.fx.rates.updated
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 86400000  # 1 day
+    compression: lz4
+    min_insync_replicas: 2
     description: "Live FX rate update from BMATCH or XOF adapter"
 
   - name: remitflow.xof.transfers.created
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 604800000
+    compression: lz4
+    min_insync_replicas: 2
     description: "West African XOF corridor transfer initiated"
 
   - name: remitflow.sme.batch.submitted
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 604800000
+    compression: lz4
+    min_insync_replicas: 2
     description: "SME bulk trade payment batch submitted"
 
   - name: remitflow.hnw.transfer.initiated
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 2592000000
+    compression: lz4
+    min_insync_replicas: 2
     description: "HNW/UHNW private banking transfer initiated"
 
   - name: remitflow.correspondent.settled
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 2592000000
+    compression: lz4
+    min_insync_replicas: 2
     description: "Correspondent bank settlement confirmed"
 
   - name: remitflow.agent.cash_in
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 604800000
+    compression: lz4
+    min_insync_replicas: 2
     description: "Agent network cash-in transaction"
 
   - name: remitflow.notifications.push
-    partitions: 3
-    replication: 1
+    partitions: 12
+    replication: 3
     retention_ms: 86400000
+    compression: lz4
+    min_insync_replicas: 2
     description: "Push notification events for mobile apps"
 
   - name: remitflow.audit.events
-    partitions: 3
-    replication: 1
+    partitions: 6
+    replication: 3
     retention_ms: 31536000000  # 1 year
+    compression: lz4
+    min_insync_replicas: 2
     description: "Immutable audit trail for all financial events"
 
   - name: remitflow.lakehouse.ingest
-    partitions: 3
-    replication: 1
+    partitions: 6
+    replication: 3
     retention_ms: 604800000
+    compression: lz4
+    min_insync_replicas: 2
     description: "Events destined for Lakehouse/Iceberg ingestion"
+
+  - name: remitflow.webhooks.dlq
+    partitions: 6
+    replication: 3
+    retention_ms: 2592000000  # 30 days
+    compression: lz4
+    min_insync_replicas: 2
+    description: "Dead letter queue for failed webhook deliveries"
+
+  - name: remitflow.compliance.filings
+    partitions: 6
+    replication: 3
+    retention_ms: 31536000000  # 1 year
+    compression: lz4
+    min_insync_replicas: 2
+    description: "Regulatory filing events (CTR, STR, Travel Rule)"

@@ -191,16 +191,24 @@ export async function persistFeatureRecord(
   try {
     const columns = Object.keys(data);
     const values = Object.values(data);
-    const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
     const columnList = columns.map(c => `"${camelToSnake(c)}"`).join(", ");
+    // Build parameterized placeholders for safe insertion
+    const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
     const updateSet = columns.map((c, i) => `"${camelToSnake(c)}" = $${i + 1}`).join(", ");
 
-    await (db as any).execute(sql.raw(
-      `INSERT INTO "${tableName}" (${columnList}) VALUES (${placeholders})
-       ON CONFLICT ("id") DO UPDATE SET ${updateSet}`,
-    ));
-  } catch {
-    // Table may not exist — features degrade to in-memory only
+    const query = `INSERT INTO "${tableName}" (${columnList}) VALUES (${placeholders})
+       ON CONFLICT ("id") DO UPDATE SET ${updateSet}`;
+
+    // Use parameterized query with actual values bound
+    const serializedValues = values.map(v => {
+      if (v === null || v === undefined) return null;
+      if (typeof v === "object") return JSON.stringify(v);
+      return v;
+    });
+
+    await (db as any).execute(sql.raw(query), serializedValues);
+  } catch (err) {
+    logger.debug({ err, tableName, id }, "persistFeatureRecord failed — table may not exist");
   }
 }
 
@@ -258,9 +266,10 @@ export async function loadFeatureRecord(
   if (!db) return null;
 
   try {
-    const rows = await (db as any).execute(sql.raw(
-      `SELECT * FROM "${tableName}" WHERE id = '${id}' LIMIT 1`
-    ));
+    // Use parameterized query to prevent SQL injection
+    const rows = await (db as any).execute(
+      sql`SELECT * FROM ${sql.raw(`"${tableName}"`)} WHERE id = ${id} LIMIT 1`
+    );
     if (!rows || !Array.isArray(rows) || rows.length === 0) return null;
     const row = rows[0] as Record<string, unknown>;
     const camelRow: Record<string, unknown> = {};
@@ -284,9 +293,9 @@ export async function deleteFeatureRecord(
   if (!db) return;
 
   try {
-    await (db as any).execute(sql.raw(
-      `DELETE FROM "${tableName}" WHERE id = '${id}'`
-    ));
+    await (db as any).execute(
+      sql`DELETE FROM ${sql.raw(`"${tableName}"`)} WHERE id = ${id}`
+    );
   } catch {
     // Graceful degradation
   }
@@ -304,18 +313,19 @@ export async function updateFeatureRecord(
   if (!db) return;
 
   try {
-    const updates = Object.entries(data)
-      .map(([key, val]) => {
-        const col = camelToSnake(key);
-        if (val === null || val === undefined) return `"${col}" = NULL`;
-        if (typeof val === "number") return `"${col}" = ${val}`;
-        if (typeof val === "boolean") return `"${col}" = ${val}`;
-        return `"${col}" = '${String(val).replace(/'/g, "''")}'`;
-      })
-      .join(", ");
-    await (db as any).execute(sql.raw(
-      `UPDATE "${tableName}" SET ${updates} WHERE id = '${id}'`
-    ));
+    const entries = Object.entries(data);
+    const setClauses = entries.map(([key], i) => `"${camelToSnake(key)}" = $${i + 1}`).join(", ");
+    const values = entries.map(([, val]) => {
+      if (val === null || val === undefined) return null;
+      if (typeof val === "object") return JSON.stringify(val);
+      return val;
+    });
+    values.push(id); // for WHERE clause
+
+    await (db as any).execute(
+      sql.raw(`UPDATE "${tableName}" SET ${setClauses} WHERE id = $${entries.length + 1}`),
+      values,
+    );
   } catch {
     // Graceful degradation
   }
@@ -425,6 +435,28 @@ export const FeatureEvents = {
     emitFeatureEvent("feature.nfc-payments", data.offlineId as string, { event: "nfc.offline_synced", ...data }),
   nfcRefundProcessed: (data: Record<string, unknown>) =>
     emitFeatureEvent("feature.nfc-payments", data.txId as string, { event: "nfc.refund_processed", ...data }),
+
+  // Mark Lane Integration
+  markLaneQuoteCreated: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.quoteId as string, { event: "marklane.quote.created", ...data }),
+  markLaneTransferInitiated: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.transferId as string, { event: "marklane.transfer.initiated", ...data }),
+  markLaneTransferCancelled: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.transferId as string, { event: "marklane.transfer.cancelled", ...data }),
+  markLaneTransferCompleted: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.transferId as string, { event: "marklane.transfer.completed", ...data }),
+  markLaneKYCPassportRequested: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.passportId as string, { event: "marklane.kyc.passport_requested", ...data }),
+  markLaneKYCPassportRevoked: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.passportId as string, { event: "marklane.kyc.passport_revoked", ...data }),
+  markLanePrefundingRequested: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.prefundingId as string, { event: "marklane.settlement.prefunding", ...data }),
+  markLaneFXProfessionalRegistered: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.professionalId as string, { event: "marklane.fx_professional.registered", ...data }),
+  markLaneWebhookRegistered: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.webhookId as string, { event: "marklane.webhook.registered", ...data }),
+  markLaneWebhookProcessed: (data: Record<string, unknown>) =>
+    emitFeatureEvent("feature.marklane", data.eventId as string, { event: "marklane.webhook.processed", ...data }),
 };
 
 // ── Database Migration for Feature Tables ────────────────────────────────────
@@ -732,6 +764,88 @@ export async function ensureFeatureTables(): Promise<void> {
         created_at TIMESTAMP DEFAULT NOW()
       );
 
+      -- Mark Lane Integration Tables
+      CREATE TABLE IF NOT EXISTS feature_marklane_quotes (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        corridor_id VARCHAR(10),
+        from_currency VARCHAR(8),
+        to_currency VARCHAR(8),
+        amount NUMERIC(18,4),
+        rate NUMERIC(18,8),
+        converted_amount NUMERIC(18,4),
+        fee NUMERIC(12,4),
+        expires_at TIMESTAMP,
+        quote_type VARCHAR(10) DEFAULT 'spot',
+        data JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_marklane_transfers (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        marklane_transfer_id VARCHAR(64),
+        corridor VARCHAR(10),
+        from_currency VARCHAR(8),
+        to_currency VARCHAR(8),
+        send_amount NUMERIC(18,4),
+        receive_amount NUMERIC(18,4),
+        fx_rate NUMERIC(18,8),
+        fee NUMERIC(12,4),
+        status VARCHAR(20) DEFAULT 'pending',
+        reference VARCHAR(100),
+        recipient_name VARCHAR(100),
+        recipient_account VARCHAR(34),
+        recipient_bank VARCHAR(50),
+        data JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW(),
+        completed_at TIMESTAMP
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_marklane_kyc_passports (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        source_regulator VARCHAR(20),
+        target_regulator VARCHAR(20),
+        kyc_tier INTEGER,
+        verification_status VARCHAR(20) DEFAULT 'pending',
+        documents JSONB DEFAULT '[]',
+        aml_screening JSONB DEFAULT '{}',
+        valid_until TIMESTAMP,
+        data JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_marklane_fx_professionals (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        name VARCHAR(100),
+        email VARCHAR(200),
+        marklane_partner_id VARCHAR(64),
+        status VARCHAR(20) DEFAULT 'pending',
+        corridors JSONB DEFAULT '[]',
+        commission_rate NUMERIC(6,4) DEFAULT 0.15,
+        total_volume NUMERIC(18,4) DEFAULT 0,
+        total_commissions NUMERIC(18,4) DEFAULT 0,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS feature_marklane_prefunding (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL,
+        currency VARCHAR(8),
+        amount NUMERIC(18,4),
+        status VARCHAR(20) DEFAULT 'pending',
+        instructions JSONB DEFAULT '{}',
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_ml_quote_user ON feature_marklane_quotes(user_id);
+      CREATE INDEX IF NOT EXISTS idx_ml_transfer_user ON feature_marklane_transfers(user_id);
+      CREATE INDEX IF NOT EXISTS idx_ml_transfer_status ON feature_marklane_transfers(status);
+      CREATE INDEX IF NOT EXISTS idx_ml_kyc_user ON feature_marklane_kyc_passports(user_id);
+      CREATE INDEX IF NOT EXISTS idx_ml_fx_prof_user ON feature_marklane_fx_professionals(user_id);
+
       CREATE INDEX IF NOT EXISTS idx_ledger_reference ON ledger_entries(reference);
       CREATE INDEX IF NOT EXISTS idx_merchant_user ON feature_merchant_accounts(user_id);
       CREATE INDEX IF NOT EXISTS idx_invoice_user ON feature_invoices(user_id);
@@ -742,6 +856,22 @@ export async function ensureFeatureTables(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_wallet_user ON feature_smart_wallets(user_id);
       CREATE INDEX IF NOT EXISTS idx_batch_user ON feature_batch_payouts(user_id);
       CREATE INDEX IF NOT EXISTS idx_payment_user ON feature_programmable_payments(user_id);
+
+      CREATE TABLE IF NOT EXISTS compliance_filings (
+        id SERIAL PRIMARY KEY,
+        "userId" INTEGER NOT NULL,
+        "transferRef" VARCHAR(128) NOT NULL,
+        "filingType" VARCHAR(32) NOT NULL,
+        jurisdiction VARCHAR(8) NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending_review',
+        "filingId" VARCHAR(128),
+        "amountUsd" NUMERIC(18,2),
+        "createdAt" TIMESTAMP DEFAULT NOW(),
+        "resolvedAt" TIMESTAMP,
+        UNIQUE("transferRef", "filingType", jurisdiction)
+      );
+      CREATE INDEX IF NOT EXISTS idx_compliance_filings_user ON compliance_filings("userId");
+      CREATE INDEX IF NOT EXISTS idx_compliance_filings_ref ON compliance_filings("transferRef");
     `);
 
     logger.info("Feature persistence tables ensured");

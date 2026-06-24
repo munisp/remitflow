@@ -234,6 +234,7 @@ import { runTransferPipeline } from "./transfer-state-machine.js";
 import { detectStructuring, isGhostBeneficiary, detectRoundTripping } from "./security.attacks.js";
 import { newRailsRouter } from './routers/newRails';
 import { agentOnboardingRouter } from "./routers/agentOnboarding.js";
+import { agentCashPickupRouter, floatReplenishmentRouter } from "./routers/agentCashPickup.js";
 import { posReceiptRouter } from "./routers/posReceipt.js";
 import { transferDisputeRouter } from "./routers/transferDispute.js";
 // v181 — Wire 32 previously orphaned routers
@@ -338,6 +339,9 @@ import { platformV4Router } from "./_core/platformV4Router";
 import { platformV5Router } from "./routers/platformV5Router";
 import { qrPaymentsRouter } from "./_core/qrPayments";
 import { nfcPaymentsRouter } from "./_core/nfcPayments";
+import { markLaneRouter } from "./integrations/marklane/markLaneRouter";
+import { adminRouter as adminDashboardRouter } from "./admin/adminRouter";
+import { insiderThreatRouter } from "./routers/insiderThreatControls";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -379,8 +383,8 @@ async function enforceTransferLimits(userId: number, amount: number, currency: s
   const now = new Date();
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const [dailyRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
-  const [monthlyRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+  const [dailyRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
+  const [monthlyRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
   const dailyUsedUSD = Number(dailyRow?.total ?? 0) / fromRate;
   const monthlyUsedUSD = Number(monthlyRow?.total ?? 0) / fromRate;
   const limitCheck = checkTransferLimit(amountUSD, userTier, dailyUsedUSD, monthlyUsedUSD);
@@ -611,20 +615,20 @@ export const appRouter = router({
           const now = new Date();
           const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
           const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-          const [sentRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
-          const [recvRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, monthStart)));
+          const [sentRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+          const [recvRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, monthStart)));
           sentThisMonth = Number(sentRow?.total ?? 0);
           receivedThisMonth = Number(recvRow?.total ?? 0);
           // Last month totals for real monthly change calculation
-          const [sentLastRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
-          const [recvLastRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
+          const [sentLastRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "send"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
+          const [recvLastRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "receive"), gte(transactions.createdAt, lastMonthStart), lte(transactions.createdAt, monthStart)));
           sentLastMonth = Number(sentLastRow?.total ?? 0);
           receivedLastMonth = Number(recvLastRow?.total ?? 0);
           // Spend by category — query actual transaction types
           const categoryTypes = ["bill", "airtime", "exchange", "topup"] as const;
           for (const cType of categoryTypes) {
             try {
-              const [row] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, cType), gte(transactions.createdAt, monthStart)));
+              const [row] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, cType), gte(transactions.createdAt, monthStart)));
               const val = Number(row?.total ?? 0);
               if (cType === "bill" || cType === "airtime") billsThisMonth += val;
               else if (cType === "exchange") exchangeThisMonth = val;
@@ -633,7 +637,7 @@ export const appRouter = router({
           }
           // Savings contributions this month
           try {
-            const [savRow] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "savings"), gte(transactions.createdAt, monthStart)));
+            const [savRow] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, userId), eq(transactions.type, "savings"), gte(transactions.createdAt, monthStart)));
             savingsThisMonth = Number(savRow?.total ?? 0);
           } catch { /* skip */ }
         } catch { /* ignore monthly query errors in test env */ }
@@ -947,7 +951,7 @@ export const appRouter = router({
       const amtUsdW = input.amount / rateW;
       const limitsW = KYC_TIER_LIMITS[userTierW];
       const dayStartW = new Date(); dayStartW.setHours(0, 0, 0, 0);
-      const [dailyRowW] = await db.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "withdrawal"), gte(transactions.createdAt, dayStartW)));
+      const [dailyRowW] = await db.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "withdrawal"), gte(transactions.createdAt, dayStartW)));
       const dailyUsedW = Number(dailyRowW?.total ?? 0) / rateW;
       if (amtUsdW > limitsW.perTx) throw new TRPCError({ code: "FORBIDDEN", message: `Withdrawal exceeds per-transaction limit of $${limitsW.perTx.toLocaleString()} USD for your KYC tier.` });
       if (dailyUsedW + amtUsdW > limitsW.daily) throw new TRPCError({ code: "FORBIDDEN", message: `Withdrawal would exceed your daily limit of $${limitsW.daily.toLocaleString()} USD. Remaining today: $${Math.max(0, limitsW.daily - dailyUsedW).toFixed(0)}.` });
@@ -1052,7 +1056,7 @@ export const appRouter = router({
         return { workflowId: input.workflowId, status: temporalStatus, sagaSteps, error: result.error, isFallback: false };
       }),
 
-    send: transferSendProcedure.input(z.object({ fromCurrency: z.string().max(8), amount: z.number().positive().max(10_000_000), toCurrency: z.string().max(8), recipientName: z.string().min(1).max(128).trim(), recipientAccount: z.string().max(64).optional(), recipientEmail: z.string().email().max(320).optional(), recipientBank: z.string().max(128).optional(), recipientCountry: z.string().max(64).optional(), deliveryMethod: z.string().max(32).optional(), description: z.string().max(500).optional(), idempotencyKey: z.string().max(200).optional(), totpCode: z.string().length(6).optional() })).mutation(async ({ ctx, input }) => {
+    send: transferSendProcedure.input(z.object({ fromCurrency: z.string().max(8), amount: z.number().positive().max(10_000_000), toCurrency: z.string().max(8), recipientName: z.string().min(1).max(128).trim(), recipientAccount: z.string().max(64).optional(), recipientEmail: z.string().email().max(320).optional(), recipientBank: z.string().max(128).optional(), recipientCountry: z.string().max(64).optional(), deliveryMethod: z.string().max(32).optional(), description: z.string().max(500).optional(), idempotencyKey: z.string().max(200).optional(), totpCode: z.string().length(6).optional(), rateLockToken: z.string().max(64).optional() })).mutation(async ({ ctx, input }) => {
       // ─── 2FA enforcement for high-value transfers (> $1,000 USD equivalent) ───
       const HIGH_VALUE_THRESHOLD_USD = 1000;
       const ratesFor2fa = await getLiveRates("USD");
@@ -1060,30 +1064,31 @@ export const appRouter = router({
       const amountInUsd = input.amount / fromRateUsd;
       if (amountInUsd > HIGH_VALUE_THRESHOLD_USD) {
         const db2fa = await getDb();
-        if (db2fa) {
-          const [userRow] = await db2fa.select().from(users).where(eq(users.id, ctx.user!.id)).limit(1);
-          if (userRow?.totpEnabled) {
-            if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: This transfer exceeds $1,000 USD. Please provide your 6-digit TOTP code to proceed." });
-            const { verifyTOTP } = await import("./totp");
-            const valid = await verifyTOTP(input.totpCode, userRow.totpSecret ?? "");
-            if (!valid) throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code. Please check your authenticator app and try again." });
-          }
+        if (!db2fa) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Unable to verify identity for high-value transfer. Please try again shortly." });
+        const [userRow] = await db2fa.select().from(users).where(eq(users.id, ctx.user!.id)).limit(1);
+        if (userRow?.totpEnabled) {
+          if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: This transfer exceeds $1,000 USD. Please provide your 6-digit TOTP code to proceed." });
+          const { verifyTOTP } = await import("./totp");
+          const valid = await verifyTOTP(input.totpCode, userRow.totpSecret ?? "");
+          if (!valid) throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code. Please check your authenticator app and try again." });
+        } else if (amountInUsd >= 10_000) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "2FA enrollment required for transfers above $10,000 USD. Please enable two-factor authentication in your security settings." });
         }
       }
-      // ─── KYC Tier Limit Enforcement ──────────────────────────────────────────
+      // ─── KYC Tier Limit Enforcement (fail-closed: DB required) ────────────────
       const dbForLimits = await getDb();
-      if (dbForLimits) {
+      if (!dbForLimits) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Unable to verify transfer limits. Please try again shortly." });
+      {
         const [userForLimits] = await dbForLimits.select().from(users).where(eq(users.id, ctx.user!.id)).limit(1);
         const userTier = (userForLimits?.kycTier ?? "tier0") as KycTier;
-        // Get daily and monthly usage
         const now = new Date();
         const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
         const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
         const ratesForLimits = await getLiveRates("USD");
         const fromRateForLimits = ratesForLimits[input.fromCurrency] ?? 1;
         const amountInUsdForLimits = input.amount / fromRateForLimits;
-        const [dailyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
-        const [monthlyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM(from_amount), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
+        const [dailyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, dayStart)));
+        const [monthlyRow] = await dbForLimits.select({ total: sql<string>`COALESCE(SUM("fromAmount"), 0)` }).from(transactions).where(and(eq(transactions.userId, ctx.user!.id), eq(transactions.type, "send"), gte(transactions.createdAt, monthStart)));
         const dailyUsedUSD = Number(dailyRow?.total ?? 0) / fromRateForLimits;
         const monthlyUsedUSD = Number(monthlyRow?.total ?? 0) / fromRateForLimits;
         const limitCheck = checkTransferLimit(amountInUsdForLimits, userTier, dailyUsedUSD, monthlyUsedUSD);
@@ -1227,7 +1232,8 @@ export const appRouter = router({
       }
       // 4. Rust audit log: record compliance pass
       sendPolyglotAuditLog({ userId: ctx.user!.id, action: "TRANSFER_COMPLIANCE_PASS", resource: "transfer", resourceId: transferRef, severity: "info", success: true, details: { complianceDecision: complianceResult.decision, fraudScore: fraudScoreResult.fraudScore, riskLevel: fraudScoreResult.riskLevel } }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
-      // ─── Compute FX rate and tiered fee ──────────────────────────────────────
+      // ─── Compute FX rate and tiered fee (rate locked at quote time) ──────────
+      const fxQuoteTime = Date.now();
       const { rates: liveRates } = await fetchLiveRates("USD");
       const fromRate = liveRates[input.fromCurrency] ?? 1;
       const toRate = liveRates[input.toCurrency] ?? 1;
@@ -1240,11 +1246,31 @@ export const appRouter = router({
         userTierForFee = (userForFee?.kycTier ?? "tier1") as KycTier;
       }
       const amountUsdForFee = input.amount / fromRate;
-      const feeBreakdown = calculateFee(amountUsdForFee, { from: "NG", to: input.recipientCountry ?? "US" }, userTierForFee);
+      const CURRENCY_TO_COUNTRY: Record<string, string> = { CAD: "CA", USD: "US", GBP: "GB", EUR: "EU", NGN: "NG", GHS: "GH", KES: "KE", ZAR: "ZA", BRL: "BR", INR: "IN", CNY: "CN", CNH: "CN" };
+      const senderCountry = CURRENCY_TO_COUNTRY[input.fromCurrency.toUpperCase()] ?? "US";
+      const feeBreakdown = calculateFee(amountUsdForFee, { from: senderCountry, to: input.recipientCountry ?? "US" }, userTierForFee);
       const fee = feeBreakdown.totalFee * fromRate; // convert back to source currency
       const toAmount = (input.amount - fee) * fxRate;
+      // ─── FX rate lock validation: reject if rate moved > 0.5% since quote ──────
+      if (input.rateLockToken) {
+        const { validateRateLock } = await import("./lib/fxRateLock");
+        const lockResult = validateRateLock(input.rateLockToken, ctx.user!.id, input.fromCurrency, input.toCurrency, fxRate);
+        if (!lockResult.valid) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `FX rate has changed since your quote. ${lockResult.reason ?? 'Please request a new quote.'}`,
+          });
+        }
+      }
       const idempotencyKey = input.idempotencyKey ?? `TRF-${ctx.user!.id}-${Date.now()}`;
-
+      // ─── Idempotency guard: reject duplicate transfers within 24h window ──────
+      if (input.idempotencyKey) {
+        const { checkIdempotency } = await import("./fraud.service");
+        const idempCheck = await checkIdempotency(ctx.user!.id, input.idempotencyKey);
+        if (idempCheck.isDuplicate) {
+          throw new TRPCError({ code: "CONFLICT", message: `Duplicate transfer detected (idempotency key already used within 24h). Existing transaction ID: ${idempCheck.existingTxId}` });
+        }
+      }
       // ─── Attempt Temporal workflow (full 6-step saga) ─────────────────────────
       const temporalResult = await startTransferWorkflow({
         userId: ctx.user!.id,
@@ -1300,6 +1326,8 @@ export const appRouter = router({
           description: input.description || `Transfer to ${input.recipientName}`,
           recipientName: input.recipientName, recipientAccount: input.recipientAccount,
           recipientBank: input.recipientBank, recipientCountry: input.recipientCountry,
+          channel: input.deliveryMethod ?? "bank_transfer",
+          metadata: input.deliveryMethod ? JSON.stringify({ deliveryMethod: input.deliveryMethod }) : undefined,
           reference: txRef,
         });
         return { ref: txRef, newBalance: updTransfer.balance };
@@ -1318,7 +1346,9 @@ export const appRouter = router({
           }
           const { rates: ratesForPipeline } = await fetchLiveRates("USD").catch(() => ({ rates: {} as Record<string, number> }));
           const amountUSDForPipeline = input.amount / (ratesForPipeline[input.fromCurrency] ?? 1);
-          const mlFeatures = buildFeatures({ amount_usd: amountUSDForPipeline, source_country: "NG", dest_country: input.recipientCountry ?? "NG", user_kyc_level: kycTierNum, is_new_recipient: false });
+          const CURRENCY_TO_COUNTRY_ML: Record<string, string> = { CAD: "CA", USD: "US", GBP: "GB", EUR: "EU", NGN: "NG", GHS: "GH", KES: "KE", ZAR: "ZA", BRL: "BR", INR: "IN", TZS: "TZ", UGX: "UG", XOF: "SN", XAF: "CM", MWK: "MW", ZMW: "ZM", CNY: "CN", CNH: "CN" };
+          const mlSourceCountry = CURRENCY_TO_COUNTRY_ML[input.fromCurrency.toUpperCase()] ?? "US";
+          const mlFeatures = buildFeatures({ amount_usd: amountUSDForPipeline, source_country: mlSourceCountry, dest_country: input.recipientCountry ?? "NG", user_kyc_level: kycTierNum, is_new_recipient: false });
           const mlFraudResult = scoreFraud(mlFeatures);
           const amlFlagsForPipeline = getAmlFlags(amountUSDForPipeline);
           await runTransferPipeline(ref, ctx.user!.id, { fraudScore: mlFraudResult.score, amlFlags: amlFlagsForPipeline, kycTier: kycTierNum, amountUSD: amountUSDForPipeline });
@@ -1326,16 +1356,21 @@ export const appRouter = router({
           logger.warn({ err: pipelineErr }, "[Transfer] State machine pipeline error (non-blocking):");
         }
       })();
-      // gRPC Ledger: record double-entry in TigerBeetle (non-blocking, best-effort)
-      grpcLedgerTransfer({
-        idempotencyKey,
-        sourceAccountId: `user-${ctx.user!.id}-${input.fromCurrency}`,
-        destinationAccountId: `recipient-${input.recipientAccount ?? ref}-${input.toCurrency}`,
-        amount: input.amount.toFixed(2),
-        currency: input.fromCurrency,
-        reference: ref,
-        description: input.description ?? `Transfer to ${input.recipientName}`,
-      }).catch(err => logger.warn({ errMsg: err?.message }, "[gRPC] Ledger transfer failed (non-blocking):"));
+      // gRPC Ledger: record double-entry in TigerBeetle (mandatory for reconciliation)
+      try {
+        await grpcLedgerTransfer({
+          idempotencyKey,
+          sourceAccountId: `user-${ctx.user!.id}-${input.fromCurrency}`,
+          destinationAccountId: `recipient-${input.recipientAccount ?? ref}-${input.toCurrency}`,
+          amount: input.amount.toFixed(2),
+          currency: input.fromCurrency,
+          reference: ref,
+          description: input.description ?? `Transfer to ${input.recipientName}`,
+        });
+      } catch (ledgerErr) {
+        logger.error({ err: ledgerErr, ref }, "[gRPC] TigerBeetle ledger write failed — creating reconciliation alert");
+        createAuditLog({ userId: ctx.user!.id, action: "LEDGER_SYNC_FAILED", description: `TigerBeetle write failed for ${ref}: ${ledgerErr instanceof Error ? ledgerErr.message : String(ledgerErr)}. Manual reconciliation required.`, severity: "critical" as any }).catch(() => {});
+      }
       sendNotification({ userId: ctx.user!.id, title: "Transfer Sent", message: `Your transfer of ${input.amount.toLocaleString()} ${input.fromCurrency} to ${input.recipientName} has been initiated.`, type: "transfer" }).catch((err: unknown) => { logger.warn({ err: err instanceof Error ? err.message : String(err) }, "Fire-and-forget operation failed"); });
       // Send transfer confirmation email to sender (non-blocking)
       if (ctx.user!.email) {
@@ -1409,14 +1444,42 @@ export const appRouter = router({
         reference: ref,
         completedAt: new Date().toLocaleString(),
       }) }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
+      // ─── Auto-file regulatory compliance (CTR, Travel Rule, NFIU) ────────────
+      import("./lib/complianceAutoFiling").then(({ autoFileCompliance }) =>
+        autoFileCompliance({
+          userId: ctx.user!.id,
+          reference: ref,
+          fromCurrency: input.fromCurrency,
+          toCurrency: input.toCurrency,
+          amount: input.amount,
+          amountUSD: amountInUsd,
+          toAmount,
+          fxRate,
+          fee,
+          recipientName: input.recipientName,
+          recipientAccount: input.recipientAccount,
+          recipientBank: input.recipientBank,
+          recipientCountry: input.recipientCountry,
+          senderName: ctx.user!.name ?? "Unknown",
+          senderEmail: ctx.user!.email ?? undefined,
+          fxQuoteTime,
+        }).then(filings => {
+          if (filings.some(f => f.status === "failed")) {
+            logger.error({ filings: filings.filter(f => f.status === "failed") }, "[ComplianceFiling] One or more regulatory filings failed — manual intervention required");
+          }
+        })
+      ).catch(err => logger.error({ err }, "[ComplianceFiling] Auto-filing module failed"));
       return { success: true, reference: ref, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, fxRate, orchestrated: false, mlRisk: anomalyResult ? { isAnomaly: anomalyResult.isAnomaly, confidence: anomalyResult.confidence, requiresReview: anomalyResult.isAnomaly && anomalyResult.confidence > 0.65 } : null };
     }),
-    quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ input }) => {
+    quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ ctx, input }) => {
       const rates = await getLiveRates("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const fxRate = toRate / fromRate;
       const feeBreakdown = calculateFee(input.amount / fromRate, { from: input.fromCurrency.slice(0, 2), to: input.toCurrency.slice(0, 2) });
       const fee = feeBreakdown.totalFee * fromRate;
       const toAmount = (input.amount - fee) * fxRate;
-      return { fxRate, fee: Math.round(fee * 100) / 100, toAmount: Math.round(toAmount * 100) / 100, fromAmount: input.amount, estimatedTime: "1-3 minutes" };
+      // Generate FX rate lock token (valid for 60 seconds)
+      const { createRateLock } = await import("./lib/fxRateLock");
+      const rateLockToken = createRateLock(ctx.user!.id, input.fromCurrency, input.toCurrency, fxRate);
+      return { fxRate, fee: Math.round(fee * 100) / 100, toAmount: Math.round(toAmount * 100) / 100, fromAmount: input.amount, estimatedTime: "1-3 minutes", rateLockToken, rateLockExpiresInSeconds: 60 };
     }),
   }),
 
@@ -4709,7 +4772,7 @@ Case: #${input.caseId}`,
         const avgResolutionHours = Math.round(Number((resRaw as any[])[0]?.avg_hours ?? 0));
         // Transfer volume per day
         const volRaw = await db.execute(
-          sql`SELECT DATE(created_at) as day, COALESCE(SUM(from_amount), 0) as volume FROM transactions WHERE created_at >= ${since} AND type = 'send' GROUP BY DATE(created_at) ORDER BY day ASC`
+          sql`SELECT DATE("createdAt") as day, COALESCE(SUM("fromAmount"), 0) as volume FROM transactions WHERE "createdAt" >= ${since} AND type = 'send' GROUP BY DATE("createdAt") ORDER BY day ASC`
         );
         const transferVolumePerDay = (volRaw as any[]).map((r: any) => ({ day: String(r.day), volume: Number(r.volume ?? 0) }));
         // Summary counts
@@ -4733,7 +4796,7 @@ Case: #${input.caseId}`,
         );
         const prevAvgResolutionHours = Math.round(Number((prevResRaw as any[])[0]?.avg_hours ?? 0));
         const prevVolRaw = await db.execute(
-          sql`SELECT COALESCE(SUM(from_amount), 0) as volume FROM transactions WHERE created_at >= ${prevSince} AND created_at < ${prevUntil} AND type = 'send'`
+          sql`SELECT COALESCE(SUM("fromAmount"), 0) as volume FROM transactions WHERE "createdAt" >= ${prevSince} AND "createdAt" < ${prevUntil} AND type = 'send'`
         );
         const prevTransferVolume = Number((prevVolRaw as any[])[0]?.volume ?? 0);
         const currTransferVolume = (transferVolumePerDay as any[]).reduce((s: number, r: any) => s + r.volume, 0);
@@ -6874,6 +6937,8 @@ Case: #${input.caseId}`,
   cryptoCustody: router(cryptoCustodyRouter),
   newRails: newRailsRouter,
   agentOnboarding: agentOnboardingRouter,
+  cashPickup: agentCashPickupRouter,
+  floatReplenishment: floatReplenishmentRouter,
   posReceipt: posReceiptRouter,
   transferDispute: transferDisputeRouter,
   // v181 — Previously orphaned routers now wired
@@ -7026,5 +7091,11 @@ Case: #${input.caseId}`,
   // QR & NFC Payment Systems
   qrPayments: qrPaymentsRouter,
   nfcPayments: nfcPaymentsRouter,
+  // Mark Lane Integration (Canadian FX Partner)
+  markLane: markLaneRouter,
+  // Admin Dashboard (compliance ops, transaction investigation, KYC review)
+  adminDashboard: adminDashboardRouter,
+  // Insider Threat Controls (maker-checker, JIT access, DLP, WebAuthn, geo-fencing)
+  insiderThreat: insiderThreatRouter,
 });
 export type AppRouter = typeof appRouter;

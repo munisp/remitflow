@@ -1,0 +1,143 @@
+# =============================================================================
+# RemitFlow APISix — Gateway Tuned for 1M+ req/s
+# =============================================================================
+# APISix uses Nginx/OpenResty under the hood. Key levers:
+#   1. worker_processes: match CPU cores
+#   2. keepalive connections: reduce TCP handshake overhead
+#   3. Minimal plugin set: each plugin adds latency per request
+#   4. Upstream connection pooling: reuse backend connections
+
+apisix:
+  node_listen:
+    - port: 9080
+      enable_http2: true
+    - port: 9443
+      enable_http2: true
+  enable_ipv6: false
+  enable_admin: true
+  admin_listen:
+    ip: 0.0.0.0
+    port: 9180
+
+  ssl:
+    enable: true
+    listen:
+      - port: 9443
+        enable_http2: true
+    ssl_protocols: "TLSv1.2 TLSv1.3"
+    ssl_ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
+
+  # ── Nginx Worker Tuning ──────────────────────────────────────────────────
+  # auto = one worker per CPU core. On 64-core: 64 workers × 1024 conns = 65K concurrent.
+  nginx_config:
+    worker_processes: auto
+    worker_rlimit_nofile: 1048576
+    error_log_level: warn
+    event:
+      worker_connections: 65536
+    http:
+      # Upstream keepalive pool: reuse connections to backend services.
+      # 256 idle connections × N upstreams × M workers.
+      upstream_keepalive: 256
+      upstream_keepalive_requests: 10000
+      upstream_keepalive_timeout: 60
+      # Client body / header buffers
+      client_max_body_size: "16m"
+      client_body_buffer_size: "128k"
+      client_header_buffer_size: "4k"
+      large_client_header_buffers: "4 32k"
+      # Timeouts
+      keepalive_timeout: 65
+      send_timeout: 60
+      proxy_read_timeout: 60
+      proxy_send_timeout: 60
+      proxy_connect_timeout: 5
+      # Gzip
+      gzip: "on"
+      gzip_min_length: 1024
+      gzip_comp_level: 2
+      gzip_types: "application/json application/javascript text/css text/plain"
+      # Access log: buffer for throughput (write every 64KB or 1s)
+      access_log_buffer: 65536
+      access_log_flush: 1
+      # Proxy buffering
+      proxy_buffer_size: "128k"
+      proxy_buffers: "4 256k"
+      proxy_busy_buffers_size: "256k"
+
+  # ── Real IP ────────────────────────────────────────────────────────────────
+  real_ip_header: "X-Forwarded-For"
+  real_ip_from:
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+  real_ip_recursive: "on"
+
+deployment:
+  role: traditional
+  role_traditional:
+    config_provider: etcd
+  etcd:
+    host:
+      - http://apisix-etcd:2379
+    prefix: /apisix
+    timeout: 30
+    # Increase etcd watch buffer for high route change volume.
+    resync_delay: 5
+
+# ── Plugin Configuration ────────────────────────────────────────────────────
+# Only load plugins we actually use. Each unused plugin adds ~0.1ms latency.
+plugins:
+  - real-ip
+  - cors
+  - ip-restriction
+  - request-id
+  - limit-conn
+  - limit-count
+  - limit-req
+  - key-auth
+  - jwt-auth
+  - hmac-auth
+  - forward-auth
+  - proxy-rewrite
+  - proxy-cache
+  - api-breaker
+  - gzip
+  - prometheus
+  - http-logger
+  - kafka-logger
+  - redirect
+  - response-rewrite
+  - traffic-split
+  - grpc-transcode
+  - grpc-web
+  - public-api
+
+plugin_attr:
+  prometheus:
+    export_uri: /apisix/prometheus/metrics
+    metric_prefix: apisix_
+    enable_export_server: true
+    export_addr:
+      ip: 0.0.0.0
+      port: 9091
+  log-rotate:
+    interval: 3600
+    max_kept: 72
+  # Proxy cache: in-memory LRU for frequently accessed endpoints
+  proxy-cache:
+    cache_ttl: 10s
+    cache_zone:
+      - name: disk_cache_one
+        memory_size: 512m
+        disk_size: 2g
+        disk_path: /tmp/apisix-cache
+        cache_levels: "1:2"
+  # Rate limiting: use Redis cluster for distributed counters
+  limit-count:
+    redis_cluster_nodes:
+      - "redis-0:6379"
+      - "redis-1:6379"
+      - "redis-2:6379"
+    redis_cluster_name: "remitflow-redis"
+    redis_cluster_ssl: false
