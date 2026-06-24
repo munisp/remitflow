@@ -21,6 +21,38 @@ import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, r
 import { logger } from "./logger";
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_accountAbstractionts: any = null;
+async function _getWtDb_accountAbstractionts() {
+  if (_wtDb_accountAbstractionts) return _wtDb_accountAbstractionts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_accountAbstractionts = await getDb();
+    return _wtDb_accountAbstractionts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_accountAbstractionts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_accountAbstractionts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 interface SmartWallet {
@@ -106,6 +138,7 @@ export const accountAbstractionRouter = router({
       };
 
       wallets.set(walletId, wallet);
+      _writeThrough("feature_smart_wallets", String(walletId), wallet).catch(() => {});
       persistFeatureRecord("feature_smart_wallets", walletId, { id: walletId, ...(typeof wallet === 'object' ? wallet : {}) }).catch(() => {});
       logger.info({ walletId, address, chain: input.chain }, "Smart wallet created");
 
@@ -195,6 +228,7 @@ export const accountAbstractionRouter = router({
       };
 
       userOps.set(userOpId, op);
+      _writeThrough("feature_user_operations", String(userOpId), op).catch(() => {});
       persistFeatureRecord("feature_user_operations", userOpId, { id: userOpId, ...(typeof op === 'object' ? op : {}) }).catch(() => {});
       wallet.totalGasSponsored += gasCost;
 

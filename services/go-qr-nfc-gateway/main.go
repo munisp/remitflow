@@ -200,14 +200,17 @@ func NewTerminalManager() *TerminalManager {
 	return &TerminalManager{terminals: make(map[string]*Terminal)}
 }
 
-func (tm *TerminalManager) Register(t *Terminal) {
+func (tm *TerminalManager) Register(t *Terminal, dbFn func(string, string, interface{})) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	t.LastHeartbeat = time.Now()
 	tm.terminals[t.ID] = t
+	if dbFn != nil {
+		dbFn("qr_nfc_terminals", t.ID, t)
+	}
 }
 
-func (tm *TerminalManager) Heartbeat(terminalID string) (*Terminal, bool) {
+func (tm *TerminalManager) Heartbeat(terminalID string, dbFn func(string, string, interface{})) (*Terminal, bool) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	t, ok := tm.terminals[terminalID]
@@ -216,6 +219,9 @@ func (tm *TerminalManager) Heartbeat(terminalID string) (*Terminal, bool) {
 	}
 	t.LastHeartbeat = time.Now()
 	t.HeartbeatCount++
+	if dbFn != nil {
+		dbFn("qr_nfc_terminals", t.ID, t)
+	}
 	return t, true
 }
 
@@ -288,13 +294,16 @@ func NewNonceTracker() *NonceTracker {
 	return &NonceTracker{nonces: make(map[string]bool)}
 }
 
-func (nt *NonceTracker) Check(nonce string) bool {
+func (nt *NonceTracker) Check(nonce string, dbFn func(string, string, interface{})) bool {
 	nt.mu.Lock()
 	defer nt.mu.Unlock()
 	if nt.nonces[nonce] {
 		return false
 	}
 	nt.nonces[nonce] = true
+	if dbFn != nil {
+		dbFn("qr_nfc_nonces", nonce, true)
+	}
 	// GC: keep max 100K nonces
 	if len(nt.nonces) > 100000 {
 		count := 0
@@ -477,12 +486,101 @@ type Server struct {
 }
 
 func NewServer(cfg Config) *Server {
-	return &Server{
+	s := &Server{
 		config:    cfg,
 		terminals: NewTerminalManager(),
 		nonces:    NewNonceTracker(),
 		events:    NewEventPublisher(cfg.DaprHTTPPort),
 	}
+	s.initDB()
+	return s
+}
+
+func (s *Server) initDB() {
+	if s.config.PostgresURL == "" {
+		log.Println("[QR/NFC] WARNING: POSTGRES_URL not set, using in-memory only")
+		return
+	}
+	var err error
+	s.db, err = sql.Open("postgres", s.config.PostgresURL)
+	if err != nil {
+		log.Printf("[QR/NFC] DB connection failed: %v", err)
+		return
+	}
+	s.db.SetMaxOpenConns(10)
+	s.db.SetMaxIdleConns(5)
+	s.db.SetConnMaxLifetime(5 * time.Minute)
+	if err = s.db.Ping(); err != nil {
+		log.Printf("[QR/NFC] DB ping failed: %v", err)
+		s.db = nil
+		return
+	}
+	_, _ = s.db.Exec(`CREATE TABLE IF NOT EXISTS qr_nfc_terminals (
+		id TEXT PRIMARY KEY,
+		data JSONB DEFAULT '{}'::jsonb,
+		updated_at TIMESTAMPTZ DEFAULT NOW()
+	)`)
+	_, _ = s.db.Exec(`CREATE TABLE IF NOT EXISTS qr_nfc_nonces (
+		id TEXT PRIMARY KEY,
+		data JSONB DEFAULT '{}'::jsonb,
+		updated_at TIMESTAMPTZ DEFAULT NOW()
+	)`)
+	log.Println("[QR/NFC] PostgreSQL write-through enabled")
+	s.loadTerminalsFromDB()
+	s.loadNoncesFromDB()
+}
+
+func (s *Server) dbUpsert(table, key string, value interface{}) {
+	if s.db == nil {
+		return
+	}
+	go func() {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return
+		}
+		_, _ = s.db.Exec(
+			fmt.Sprintf(`INSERT INTO %s (id, data, updated_at) VALUES ($1, $2::jsonb, NOW())
+			ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`, table),
+			key, string(data),
+		)
+	}()
+}
+
+func (s *Server) loadTerminalsFromDB() {
+	rows, err := s.db.Query(`SELECT id, data FROM qr_nfc_terminals`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, data string
+		if err := rows.Scan(&id, &data); err != nil {
+			continue
+		}
+		var t Terminal
+		if err := json.Unmarshal([]byte(data), &t); err != nil {
+			continue
+		}
+		s.terminals.terminals[id] = &t
+	}
+	log.Printf("[QR/NFC] Loaded %d terminals from DB", len(s.terminals.terminals))
+}
+
+func (s *Server) loadNoncesFromDB() {
+	rows, err := s.db.Query(`SELECT id, data FROM qr_nfc_nonces`)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, data string
+		if err := rows.Scan(&id, &data); err != nil {
+			continue
+		}
+		s.nonces.nonces[id] = true
+	}
+	log.Printf("[QR/NFC] Loaded %d nonces from DB", len(s.nonces.nonces))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -553,7 +651,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate nonce
-	if !s.nonces.Check(req.Nonce) {
+	if !s.nonces.Check(req.Nonce, s.dbUpsert) {
 		writeJSON(w, 409, AuthResponse{
 			Authorized: false, DeclineCode: "DUPLICATE_NONCE",
 			DeclineMsg: "Transaction nonce already used — possible replay",
@@ -625,7 +723,7 @@ func (s *Server) handleRegisterTerminal(w http.ResponseWriter, r *http.Request) 
 	}
 	t.Status = "active"
 	t.FirmwareVer = "1.0.0"
-	s.terminals.Register(&t)
+	s.terminals.Register(&t, s.dbUpsert)
 
 	s.events.Publish("qr-nfc.terminal-registered", map[string]interface{}{
 		"terminalId": t.ID, "merchantId": t.MerchantID, "type": t.Type,
@@ -644,7 +742,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
 	}
-	t, ok := s.terminals.Heartbeat(req.TerminalID)
+	t, ok := s.terminals.Heartbeat(req.TerminalID, s.dbUpsert)
 	if !ok {
 		writeJSON(w, 404, map[string]string{"error": "terminal not found"})
 		return
@@ -678,7 +776,7 @@ func (s *Server) handleOfflineBatch(w http.ResponseWriter, r *http.Request) {
 	totalAmount := 0.0
 
 	for _, tx := range req.Transactions {
-		if !s.nonces.Check(tx.Nonce) {
+		if !s.nonces.Check(tx.Nonce, s.dbUpsert) {
 			duplicates++
 			continue
 		}
@@ -777,5 +875,8 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	httpSrv.Shutdown(ctx)
+	if srv.db != nil {
+		srv.db.Close()
+	}
 	log.Println("[QR/NFC Gateway Go] stopped")
 }

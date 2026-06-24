@@ -20,6 +20,38 @@ import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, r
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 import { logger } from "./logger";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_qrPaymentsts: any = null;
+async function _getWtDb_qrPaymentsts() {
+  if (_wtDb_qrPaymentsts) return _wtDb_qrPaymentsts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_qrPaymentsts = await getDb();
+    return _wtDb_qrPaymentsts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_qrPaymentsts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_qrPaymentsts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface QRCode {
@@ -202,6 +234,7 @@ export const qrPaymentsRouter = router({
         createdAt: new Date().toISOString(),
       };
       qrCodes.set(qrId, qr);
+      _writeThrough("feature_qr_codes", String(qrId), qr).catch(() => {});
       persistFeatureRecord("feature_qr_codes", qrId, { id: qrId, ...(typeof qr === 'object' ? qr : {}) }).catch(() => {});
 
       FeatureEvents.qrCodeCreated({ qrId, userId: ctx.user.id.toString(), type: "static", currency: input.currency });
@@ -264,6 +297,7 @@ export const qrPaymentsRouter = router({
         createdAt: new Date().toISOString(),
       };
       qrCodes.set(qrId, qr);
+      _writeThrough("feature_qr_codes", String(qrId), qr).catch(() => {});
       persistFeatureRecord("feature_qr_codes", qrId, { id: qrId, ...(typeof qr === 'object' ? qr : {}) }).catch(() => {});
 
       createLedgerEntry({
@@ -326,6 +360,7 @@ export const qrPaymentsRouter = router({
         scannedAt: new Date().toISOString(),
       };
       qrScans.set(scanId, scan);
+      _writeThrough("feature_qr_scans", String(scanId), scan).catch(() => {});
       persistFeatureRecord("feature_qr_scans", scanId, { id: scanId, ...(typeof scan === 'object' ? scan : {}) }).catch(() => {});
 
       if (qr.amount) {
@@ -415,6 +450,7 @@ export const qrPaymentsRouter = router({
         createdAt: new Date().toISOString(),
       };
       merchantProfiles.set(profileId, profile);
+      _writeThrough("feature_merchant_qr_profiles", String(profileId), profile).catch(() => {});
       persistFeatureRecord("feature_merchant_qr_profiles", profileId, { id: profileId, ...(typeof profile === 'object' ? profile : {}) }).catch(() => {});
       FeatureEvents.merchantQRRegistered({ profileId, merchantId: input.merchantId, userId: ctx.user.id.toString() });
       return profile;

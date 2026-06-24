@@ -276,6 +276,12 @@ impl NonceManager {
             return false;
         }
         used.insert(nonce.to_string());
+        // DB write-through for nonce
+        if let Some(pool) = DB_POOL.get() {
+            let p = pool.clone();
+            let n = nonce.to_string();
+            tokio::spawn(async move { let _ = db_upsert(&p, &format!("nonce:{}", n), &serde_json::json!({"used": true})).await; });
+        }
         // GC
         if used.len() > 100_000 {
             let to_remove: Vec<String> = used.iter().take(50_000).cloned().collect();
@@ -388,7 +394,69 @@ struct NonceValidateRequest {
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
+// ── PostgreSQL Persistence ──────────────────────────────────────────────────
+
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
+
+static DB_POOL: tokio::sync::OnceCell<PgPool> = tokio::sync::OnceCell::const_new();
+
+async fn init_db() -> PgPool {
+    let dsn = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://localhost:5432/remitflow?sslmode=disable".to_string());
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .acquire_timeout(std::time::Duration::from_secs(3))
+        .connect(&dsn)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!("PostgreSQL unavailable: {}", e);
+            panic!("DB required for persistent state");
+        });
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS qr_nfc_crypto_state (
+            id TEXT PRIMARY KEY,
+            data JSONB DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )"
+    )
+    .execute(&pool)
+    .await
+    .ok();
+    pool
+}
+
+async fn db_upsert(pool: &PgPool, id: &str, data: &serde_json::Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO qr_nfc_crypto_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()"
+    )
+    .bind(id)
+    .bind(data)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn load_from_db(pool: &PgPool) {
+    match sqlx::query_as::<_, (String, serde_json::Value)>(
+        "SELECT id, data FROM qr_nfc_crypto_state ORDER BY updated_at DESC LIMIT 1000"
+    )
+    .fetch_all(pool)
+    .await {
+        Ok(rows) => {
+            tracing::info!("loaded {} persisted records from qr_nfc_crypto_state", rows.len());
+        }
+        Err(e) => {
+            tracing::warn!("failed to load from DB: {}", e);
+        }
+    }
+}
+
 async fn main() {
+    let pool = init_db().await;
+    DB_POOL.set(pool).ok();
+    if let Some(p) = DB_POOL.get() { load_from_db(p).await; }
+
     let config = Config::from_env();
     let port = config.port;
     let secret = config.qr_signing_secret.clone();

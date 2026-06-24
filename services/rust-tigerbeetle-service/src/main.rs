@@ -151,6 +151,13 @@ async fn create_account(
     };
 
     ledger.lock().unwrap().insert(account_id, account);
+    // DB write-through
+    if let Some(pool) = DB_POOL.get() {
+        let p = pool.clone();
+        let k = format!("{}", account_id);
+        let v = serde_json::to_value(&account).unwrap_or_default();
+        tokio::spawn(async move { let _ = db_upsert(&p, &k, &v).await; });
+    }
 
     (axum::http::StatusCode::CREATED, Json(serde_json::json!({
         "account_id": account_id.to_string(),
@@ -220,6 +227,13 @@ async fn initiate_transfer(
         created_at: now,
     };
     transfers.lock().unwrap().push(transfer);
+    // DB write-through
+    if let Some(pool) = DB_POOL.get() {
+        let p = pool.clone();
+        let k = format!("seq:{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+        let v = serde_json::to_value(&transfer).unwrap_or_default();
+        tokio::spawn(async move { let _ = db_upsert(&p, &k, &v).await; });
+    }
 
     info!("[TigerBeetle] Transfer: {} {} -> {} amount={}", req.currency, debit_id, credit_id, req.amount);
 
@@ -272,6 +286,9 @@ async fn get_ledger_stats(
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::time::Instant;
+
+static DB_POOL: tokio::sync::OnceCell<PgPool> = tokio::sync::OnceCell::const_new();
+
 static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 async fn init_db() -> PgPool {
@@ -363,6 +380,21 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 }
 
 #[tokio::main]
+async fn load_from_db(pool: &PgPool) {
+    match sqlx::query_as::<_, (String, serde_json::Value)>(
+        "SELECT id, data FROM tigerbeetle_service_state ORDER BY updated_at DESC LIMIT 1000"
+    )
+    .fetch_all(pool)
+    .await {
+        Ok(rows) => {
+            tracing::info!("loaded {} persisted records from tigerbeetle_service_state", rows.len());
+        }
+        Err(e) => {
+            tracing::warn!("failed to load from DB: {}", e);
+        }
+    }
+}
+
 async fn main() -> std::io::Result<()> {
     // Panic hook for logging panics without crashing silently
     std::panic::set_hook(Box::new(|info| {
@@ -373,7 +405,8 @@ async fn main() -> std::io::Result<()> {
         eprintln!("[PANIC] {} at {}", msg, location);
     }));
 
-    let _pool = init_db().await;
+    let pool = init_db().await;
+    DB_POOL.set(pool).ok();
     tracing_subscriber::fmt().json().init();
 
     let port: u16 = std::env::var("PORT")

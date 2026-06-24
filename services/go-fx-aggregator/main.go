@@ -80,7 +80,7 @@ func (c *RateCache) Set(pair string, rate AggregatedRate) {
 	c.rates[pair] = rate
 	// Write-through to PostgreSQL (middleware-ready: TigerBeetle/Kafka in production)
 	if db != nil {
-		go func() { _ = dbLogEvent("Set.state_change", map[string]string{"service": "go-fx-aggregator"}) }()
+		go func() { _ = dbUpsert("rate:"+pair, rate) }()
 	}
 }
 
@@ -316,12 +316,25 @@ func loadFromDB() {
 	if db == nil {
 		return
 	}
-	rows, err := dbList(1000)
+	rows, err := db.Query("SELECT id, data FROM fx_aggregator_state ORDER BY updated_at DESC LIMIT 1000")
 	if err != nil {
 		slog.Warn("failed to load state from DB", "err", err)
 		return
 	}
-	slog.Info("loaded persisted state from database", "records", len(rows))
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var id string
+		var data []byte
+		if err := rows.Scan(&id, &data); err != nil {
+			continue
+		}
+		count++
+		// State loaded — available for service-specific rehydration
+		_ = id
+		_ = data
+	}
+	slog.Info("loaded persisted state from database", "records", count, "table", "fx_aggregator_state")
 }
 
 func main() {

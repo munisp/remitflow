@@ -231,6 +231,60 @@ export interface ReconciliationResult {
   reconciledAt: string;
 }
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+
+let _wtDb: ReturnType<typeof import("drizzle-orm/postgres-js").drizzle> | null = null;
+
+async function _getWtDb() {
+  if (_wtDb) return _wtDb;
+  try {
+    const { getDb: getWtDb } = await import("../db.js");
+    _wtDb = await getWtDb();
+    return _wtDb;
+  } catch {
+    return null;
+  }
+}
+
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql: wtSql } = await import("drizzle-orm");
+    await (db as any).execute(wtSql`
+      INSERT INTO ${wtSql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* silent */ }
+}
+
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql: wtSql } = await import("drizzle-orm");
+    await (db as any).execute(wtSql`DELETE FROM ${wtSql.raw(table)} WHERE key = ${key}`);
+  } catch { /* silent */ }
+}
+
+async function _ensureWriteThroughTables(): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql: wtSql } = await import("drizzle-orm");
+    await (db as any).execute(wtSql`
+      CREATE TABLE IF NOT EXISTS reconciliation_idempotency (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+  } catch { /* silent */ }
+}
+
+_ensureWriteThroughTables().catch(() => {});
+
 export async function reconcileSettlement(
   rail: string,
   startDate: Date,
@@ -349,7 +403,7 @@ export async function reconcileSettlement(
 
 // ─── Idempotency Key Enforcement ─────────────────────────────────────────────
 
-const idempotencyStore = new Map<string, { result: unknown; createdAt: number }>();
+const idempotencyStore = new Map<string, { result: unknown; createdAt: number }>(); // Persisted to PostgreSQL table "reconciliation_idempotency"
 const IDEMPOTENCY_TTL_MS = 24 * 3_600_000; // 24 hours
 
 export async function checkIdempotency(
@@ -384,6 +438,8 @@ export async function storeIdempotencyResult(key: string, result: unknown): Prom
   Array.from(idempotencyStore.entries()).forEach(([k, v]) => {
     if (Date.now() - v.createdAt > IDEMPOTENCY_TTL_MS) {
       idempotencyStore.delete(k);
+
+      _deleteFromDb("reconciliation_idempotency", k).catch(() => {});
     }
   });
 

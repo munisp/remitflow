@@ -14,6 +14,38 @@ import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, r
 import { logger } from "./logger";
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_savingsVaultts: any = null;
+async function _getWtDb_savingsVaultts() {
+  if (_wtDb_savingsVaultts) return _wtDb_savingsVaultts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_savingsVaultts = await getDb();
+    return _wtDb_savingsVaultts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_savingsVaultts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_savingsVaultts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const VAULT_TIERS: Record<number, { apy: number; minDeposit: number; maxDeposit: number }> = {
@@ -94,6 +126,7 @@ export const savingsVaultRouter = router({
       };
 
       deposits.set(depositId, deposit);
+      _writeThrough("feature_savings_deposits", String(depositId), deposit).catch(() => {});
       persistFeatureRecord("feature_savings_deposits", depositId, { id: depositId, ...(typeof deposit === 'object' ? deposit : {}) }).catch(() => {});
       logger.info({ depositId, amount: input.amount, term: input.termDays, apy: tier.apy }, "Savings deposit created");
       FeatureEvents.savingsDeposited({ depositId, userId: ctx.user.id, amount: input.amount, term: input.termDays });

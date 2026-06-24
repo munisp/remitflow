@@ -611,6 +611,9 @@ CORE_FUND_FLOW_TOPICS = [
     "remitflow.bill.payment", "remitflow.airtime.topup",
     "remitflow.batch.payment", "remitflow.wallet.topup",
     "remitflow.wallet.withdraw", "remitflow.stablecoin.swap",
+    "remitflow.stablecoin.onramp", "remitflow.stablecoin.offramp",
+    "remitflow.stablecoin.bridge", "remitflow.stablecoin.yield",
+    "remitflow.fund.compensated",
 ]
 
 _fund_flow_history: Dict[int, List[Dict[str, Any]]] = defaultdict(list)

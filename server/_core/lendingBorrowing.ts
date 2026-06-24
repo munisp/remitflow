@@ -21,6 +21,38 @@ import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, r
 import { logger } from "./logger";
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_lendingBorrowingts: any = null;
+async function _getWtDb_lendingBorrowingts() {
+  if (_wtDb_lendingBorrowingts) return _wtDb_lendingBorrowingts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_lendingBorrowingts = await getDb();
+    return _wtDb_lendingBorrowingts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_lendingBorrowingts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_lendingBorrowingts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Constants ───────────────────────────────────────────────────────────────
 
 const MARKETS: Record<string, { supplyApy: number; borrowApy: number; ltv: number; liquidationThreshold: number }> = {
@@ -97,6 +129,7 @@ export const lendingBorrowingRouter = router({
       };
 
       positions.set(positionId, position);
+      _writeThrough("feature_lending_positions", String(positionId), position).catch(() => {});
       persistFeatureRecord("feature_lending_positions", positionId, { id: positionId, ...(typeof position === 'object' ? position : {}) }).catch(() => {});
       logger.info({ positionId, coin: input.stablecoin, amount: input.amount }, "Supply position opened");
       FeatureEvents.supplyDeposited({ positionId, userId: ctx.user.id, coin: input.stablecoin, amount: input.amount });
@@ -143,6 +176,7 @@ export const lendingBorrowingRouter = router({
       };
 
       positions.set(positionId, position);
+      _writeThrough("feature_lending_positions", String(positionId), position).catch(() => {});
       persistFeatureRecord("feature_lending_positions", positionId, { id: positionId, ...(typeof position === 'object' ? position : {}) }).catch(() => {});
       logger.info({ positionId, borrow: input.borrowAmount, collateral: input.collateralAmount, hf: healthFactor }, "Borrow position opened");
       FeatureEvents.loanBorrowed({ positionId, userId: ctx.user.id, coin: input.borrowCoin, borrowAmount: input.borrowAmount });

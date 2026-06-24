@@ -11,6 +11,54 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+// PostgreSQL persistence (synchronous, using postgres crate)
+use postgres::{Client, NoTls};
+
+static DB_CLIENT: std::sync::OnceLock<Mutex<Client>> = std::sync::OnceLock::new();
+
+fn init_db() {
+    let dsn = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://localhost:5432/remitflow?sslmode=disable".to_string());
+    match Client::connect(&dsn, NoTls) {
+        Ok(mut client) => {
+            client.batch_execute(
+                "CREATE TABLE IF NOT EXISTS rate_limiter_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB DEFAULT '{}'::jsonb,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )"
+            ).ok();
+            DB_CLIENT.set(Mutex::new(client)).ok();
+            println!("[RATE-LIMITER] PostgreSQL connected, table rate_limiter_state ready");
+        }
+        Err(e) => {
+            eprintln!("[RATE-LIMITER] WARN: PostgreSQL unavailable: {}", e);
+        }
+    }
+}
+
+fn db_upsert(id: &str, data: &serde_json::Value) {
+    if let Some(client) = DB_CLIENT.get() {
+        if let Ok(mut c) = client.lock() {
+            let _ = c.execute(
+                "INSERT INTO rate_limiter_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()",
+                &[&id, &data],
+            );
+        }
+    }
+}
+
+fn load_from_db() {
+    if let Some(client) = DB_CLIENT.get() {
+        if let Ok(mut c) = client.lock() {
+            match c.query("SELECT id, data FROM rate_limiter_state LIMIT 1000", &[]) {
+                Ok(rows) => println!("[RATE-LIMITER] loaded {} persisted records from rate_limiter_state", rows.len()),
+                Err(e) => eprintln!("[RATE-LIMITER] WARN: failed to load from DB: {}", e),
+            }
+        }
+    }
+}
+
 // ── Rate Limit Configuration ──────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -119,6 +167,14 @@ impl AppState {
         let entry = counters.entry(composite_key).or_insert_with(WindowEntry::new);
 
         let (allowed, remaining) = entry.check_and_consume(&config);
+        // Write-through: persist rate limit counter to PostgreSQL
+        let key_for_db = composite_key.clone();
+        let ts_data: Vec<u64> = entry.timestamps.iter()
+            .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs())
+            .collect();
+        std::thread::spawn(move || {
+            db_upsert(&key_for_db, &serde_json::json!({"timestamps": ts_data}));
+        });
 
         *self.total_requests.lock().unwrap() += 1;
         if !allowed {
@@ -203,6 +259,9 @@ fn handle_request(
 }
 
 fn main() {
+    init_db();
+    load_from_db();
+
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "8093".to_string())
         .parse()

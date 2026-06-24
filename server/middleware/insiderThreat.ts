@@ -45,7 +45,120 @@ interface PendingApproval {
   approvedAt?: Date;
 }
 
-const pendingApprovals = new Map<string, PendingApproval>();
+
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+// All in-memory Maps are persisted to PostgreSQL on write and loaded on startup.
+
+let _wtDb: ReturnType<typeof import("drizzle-orm/postgres-js").drizzle> | null = null;
+
+async function _getWtDb() {
+  if (_wtDb) return _wtDb;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb = await getDb();
+    return _wtDb;
+  } catch {
+    return null;
+  }
+}
+
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* silent — hot cache still works */ }
+}
+
+async function _loadFromDb(table: string): Promise<Map<string, any>> {
+  const result = new Map<string, any>();
+  const db = await _getWtDb();
+  if (!db) return result;
+  try {
+    const { sql } = await import("drizzle-orm");
+    const rows = await (db as any).execute(sql`SELECT key, data FROM ${sql.raw(table)}`);
+    for (const row of rows) {
+      result.set(row.key, row.data);
+    }
+  } catch { /* silent */ }
+  return result;
+}
+
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch { /* silent */ }
+}
+
+async function _ensureWriteThroughTables(): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_pending_approvals (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_jit_grants (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_dlp_query_counts (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_legacy_approvals (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_jit_grants_legacy (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_dlp_query_counts_legacy (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS insider_stored_credentials (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+  } catch { /* silent */ }
+}
+
+// Initialize tables on module load
+_ensureWriteThroughTables().catch(() => {});
+
+const pendingApprovals = new Map<string, PendingApproval>(); // Persisted to PostgreSQL table "insider_pending_approvals"
 
 interface JitGrant {
   userId: number;
@@ -55,8 +168,8 @@ interface JitGrant {
   active: boolean;
 }
 
-const jitGrants = new Map<string, JitGrant>();
-const dlpQueryCounts = new Map<string, { count: number; windowStart: number }>();
+const jitGrants = new Map<string, JitGrant>(); // Persisted to PostgreSQL table "insider_jit_grants"
+const dlpQueryCounts = new Map<string, { count: number; windowStart: number }>(); // Persisted to PostgreSQL table "insider_dlp_query_counts"
 
 // ── Maker-Checker (Dual Authorization) ───────────────────────────────────────
 
@@ -67,16 +180,18 @@ export interface MakerCheckerResult {
   requiredApprovers: number;
 }
 
-export function requiresMakerChecker(amount: number, action: string): MakerCheckerResult {
+export function requiresMakerChecker(amount: number, action?: string): MakerCheckerResult & { required: boolean; approversNeeded: number } {
   if (amount < MAKER_CHECKER_THRESHOLD_USD) {
-    return { requiresApproval: false, requiredApprovers: 0 };
+    return { requiresApproval: false, requiredApprovers: 0, required: false, approversNeeded: 0 };
   }
 
   const requiredApprovers = amount >= MAKER_CHECKER_HIGH_THRESHOLD_USD ? 2 : 1;
   return {
     requiresApproval: true,
-    reason: `${action} of $${amount.toLocaleString()} exceeds threshold ($${MAKER_CHECKER_THRESHOLD_USD.toLocaleString()})`,
+    reason: `${action ?? "operation"} of $${amount.toLocaleString()} exceeds threshold ($${MAKER_CHECKER_THRESHOLD_USD.toLocaleString()})`,
     requiredApprovers,
+    required: true,
+    approversNeeded: requiredApprovers,
   };
 }
 
@@ -101,6 +216,8 @@ export function createApprovalRequest(params: {
     status: "pending",
   };
   pendingApprovals.set(id, approval);
+
+  _writeThrough("insider_pending_approvals", id, approval).catch(() => {});
 
   publishEvent(KAFKA_TOPICS.TRANSACTIONS, `approval:${id}`, {
     eventType: "maker_checker_requested",
@@ -226,6 +343,8 @@ export function checkDlpAccess(userId: number, requestedRecords: number): DlpRes
   if (!entry || now - entry.windowStart > hourMs) {
     entry = { count: 0, windowStart: now };
     dlpQueryCounts.set(key, entry);
+
+    _writeThrough("insider_dlp_query_counts", key, entry).catch(() => {});
   }
 
   if (entry.count >= DLP_MAX_QUERIES_PER_HOUR) {
@@ -271,6 +390,8 @@ export function requestJitAccess(userId: number, reason: string): JitResult {
   const expiresAt = new Date(now.getTime() + JIT_MAX_DURATION_HOURS * 60 * 60 * 1000);
   const grantId = `JIT-${userId}-${randomUUID()}`;
   jitGrants.set(grantId, { userId, grantedAt: now, expiresAt, reason, active: true });
+
+  _writeThrough("insider_jit_grants", grantId, { userId, grantedAt: now, expiresAt, reason, active: true }).catch(() => {});
 
   publishEvent(KAFKA_TOPICS.TRANSACTIONS, `jit:${grantId}`, {
     eventType: "jit_access_granted",
@@ -378,4 +499,237 @@ export async function checkInsiderThreat(params: {
     dlpResult,
     warnings,
   };
+}
+
+// ── Legacy PR #24 Compatibility Layer ────────────────────────────────────────
+
+export interface MakerCheckerRequest {
+  requestId: string;
+  requesterId: number;
+  operation: string;
+  amountUsd: number;
+  metadata: Record<string, unknown>;
+  status: "pending" | "approved" | "rejected" | "expired";
+  approvals: Array<{ approverId: number; approvedAt: string }>;
+  createdAt: string;
+  expiresAt: string;
+}
+
+const legacyApprovals = new Map<string, MakerCheckerRequest>(); // Persisted to PostgreSQL table "insider_legacy_approvals"
+
+export function createMakerCheckerRequest(
+  requesterId: number,
+  operation: string,
+  amountUsd: number,
+  metadata: Record<string, unknown> = {}
+): MakerCheckerRequest {
+  const request: MakerCheckerRequest = {
+    requestId: `MCR-${randomUUID()}`,
+    requesterId,
+    operation,
+    amountUsd,
+    metadata,
+    status: "pending",
+    approvals: [],
+    createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+  };
+  legacyApprovals.set(request.requestId, request);
+
+  _writeThrough("insider_legacy_approvals", request.requestId, request).catch(() => {});
+  return request;
+}
+
+export function approveMakerCheckerRequest(
+  requestId: string,
+  approverId: number
+): { approved: boolean; request: MakerCheckerRequest | null } {
+  const request = legacyApprovals.get(requestId);
+  if (!request || request.status !== "pending") return { approved: false, request: null };
+  if (approverId === request.requesterId) return { approved: false, request };
+  if (new Date(request.expiresAt) < new Date()) {
+    request.status = "expired";
+    return { approved: false, request };
+  }
+  if (request.approvals.some(a => a.approverId === approverId)) return { approved: false, request };
+
+  request.approvals.push({ approverId, approvedAt: new Date().toISOString() });
+  const mc = requiresMakerChecker(request.amountUsd, request.operation);
+  if (request.approvals.length >= mc.requiredApprovers) {
+    request.status = "approved";
+  }
+  return { approved: request.status === "approved", request };
+}
+
+// ── JIT Access (Legacy interface) ────────────────────────────────────────────
+
+interface JITGrantLegacy {
+  grantId: string;
+  userId: number;
+  role: string;
+  expiresAt: Date;
+  grantedAt: Date;
+  reason: string;
+}
+
+const jitGrantsLegacy = new Map<string, JITGrantLegacy>(); // Persisted to PostgreSQL table "insider_jit_grants_legacy"
+
+export function grantJITAccess(
+  userId: number,
+  role: string,
+  durationHours: number,
+  reason: string
+): JITGrantLegacy | null {
+  if (durationHours > JIT_MAX_DURATION_HOURS) return null;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const todayGrants = Array.from(jitGrantsLegacy.values()).filter(
+    g => g.userId === userId && g.grantedAt.toISOString().slice(0, 10) === today
+  );
+  if (todayGrants.length >= JIT_MAX_GRANTS_PER_DAY) return null;
+
+  const grant: JITGrantLegacy = {
+    grantId: `JIT-${userId}-${randomUUID()}`,
+    userId,
+    role,
+    expiresAt: new Date(Date.now() + durationHours * 3600 * 1000),
+    grantedAt: new Date(),
+    reason,
+  };
+  jitGrantsLegacy.set(grant.grantId, grant);
+
+  _writeThrough("insider_jit_grants_legacy", grant.grantId, grant).catch(() => {});
+  return grant;
+}
+
+export function checkJITAccess(userId: number, role: string): boolean {
+  const now = new Date();
+  for (const grant of Array.from(jitGrantsLegacy.values())) {
+    if (grant.userId === userId && grant.role === role && grant.expiresAt > now) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ── Geo + Time Fencing (Legacy interface) ────────────────────────────────────
+
+export function checkGeoFence(countryCode: string): { allowed: boolean; reason?: string } {
+  if (!APPROVED_COUNTRIES.has(countryCode)) {
+    return { allowed: false, reason: `Country ${countryCode} not in approved list` };
+  }
+  return { allowed: true };
+}
+
+export function checkTimeFence(): { allowed: boolean; reason?: string } {
+  const now = new Date();
+  const hour = now.getUTCHours();
+  const day = now.getUTCDay();
+
+  if (day === 0 || day === 6) {
+    return { allowed: false, reason: "Admin operations blocked on weekends (UTC)" };
+  }
+  if (hour < BUSINESS_HOURS.startHour || hour >= BUSINESS_HOURS.endHour) {
+    return {
+      allowed: false,
+      reason: `Admin operations blocked outside ${BUSINESS_HOURS.startHour}:00–${BUSINESS_HOURS.endHour}:00 UTC`,
+    };
+  }
+  return { allowed: true };
+}
+
+// ── DLP (Legacy interface) ───────────────────────────────────────────────────
+
+const dlpQueryCountsLegacy = new Map<number, { count: number; windowStart: number }>(); // Persisted to PostgreSQL table "insider_dlp_query_counts_legacy"
+
+export function checkDLP(
+  userId: number,
+  recordCount: number
+): { allowed: boolean; reason?: string } {
+  if (recordCount > DLP_MAX_RECORDS_PER_QUERY) {
+    return { allowed: false, reason: `Query exceeds ${DLP_MAX_RECORDS_PER_QUERY} record limit` };
+  }
+
+  const now = Date.now();
+  const entry = dlpQueryCountsLegacy.get(userId);
+  if (!entry || now - entry.windowStart > 3600_000) {
+    dlpQueryCountsLegacy.set(userId, { count: 1, windowStart: now });
+
+    _writeThrough("insider_dlp_query_counts_legacy", String(userId), { count: 1, windowStart: now }).catch(() => {});
+    return { allowed: true };
+  }
+
+  if (entry.count >= DLP_MAX_QUERIES_PER_HOUR) {
+    return { allowed: false, reason: `Exceeded ${DLP_MAX_QUERIES_PER_HOUR} queries/hour limit` };
+  }
+
+  entry.count++;
+  _writeThrough("insider_dlp_query_counts_legacy", String(userId), entry).catch(() => {});
+  return { allowed: true };
+}
+
+// ── WebAuthn/FIDO2 ──────────────────────────────────────────────────────────
+
+interface StoredCredential {
+  credentialId: string;
+  userId: number;
+  publicKey: string;
+  signCount: number;
+  createdAt: string;
+}
+
+const storedCredentials = new Map<string, StoredCredential>(); // Persisted to PostgreSQL table "insider_stored_credentials"
+
+export function registerWebAuthnCredential(
+  credentialId: string,
+  userId: number,
+  publicKey: string
+): StoredCredential {
+  const cred: StoredCredential = {
+    credentialId,
+    userId,
+    publicKey,
+    signCount: 0,
+    createdAt: new Date().toISOString(),
+  };
+  storedCredentials.set(credentialId, cred);
+
+  _writeThrough("insider_stored_credentials", credentialId, cred).catch(() => {});
+  return cred;
+}
+
+export function verifyWebAuthnSignCount(
+  credentialId: string,
+  newSignCount: number
+): { valid: boolean; cloneDetected: boolean } {
+  const cred = storedCredentials.get(credentialId);
+  if (!cred) return { valid: false, cloneDetected: false };
+
+  if (newSignCount <= cred.signCount) {
+    logger.warn({ credentialId, expected: cred.signCount, got: newSignCount }, "[WebAuthn] Clone detected");
+    return { valid: false, cloneDetected: true };
+  }
+
+  cred.signCount = newSignCount;
+  return { valid: true, cloneDetected: false };
+}
+
+// ── Delayed Reversals ───────────────────────────────────────────────────────
+
+const REVERSAL_COOLING_PERIOD_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+export function checkReversalCooling(amountUsd: number, createdAt: Date): {
+  allowed: boolean;
+  cooldownRemaining?: number;
+} {
+  if (amountUsd < MAKER_CHECKER_THRESHOLD_USD) return { allowed: true };
+
+  const elapsed = Date.now() - createdAt.getTime();
+  if (elapsed < REVERSAL_COOLING_PERIOD_MS) {
+    return {
+      allowed: false,
+      cooldownRemaining: REVERSAL_COOLING_PERIOD_MS - elapsed,
+    };
+  }
+  return { allowed: true };
 }

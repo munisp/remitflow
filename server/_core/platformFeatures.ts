@@ -22,6 +22,38 @@ import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, r
 import { logger } from "./logger";
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_platformFeaturests: any = null;
+async function _getWtDb_platformFeaturests() {
+  if (_wtDb_platformFeaturests) return _wtDb_platformFeaturests;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_platformFeaturests = await getDb();
+    return _wtDb_platformFeaturests;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_platformFeaturests();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_platformFeaturests();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── F11: Stablecoin Payroll ─────────────────────────────────────────────────
 
 interface PayrollRun {
@@ -167,6 +199,7 @@ export const platformFeaturesRouter = router({
         createdAt: new Date().toISOString(),
       };
       payrollRuns.set(runId, run);
+      _writeThrough("feature_payroll_runs", String(runId), run).catch(() => {});
       persistFeatureRecord("feature_payroll_runs", runId, { id: runId, ...(typeof run === 'object' ? run : {}) }).catch(() => {});
       return { runId, totalAmount, employeeCount: input.employees.length, status: "draft" };
     }),
@@ -262,6 +295,7 @@ export const platformFeaturesRouter = router({
         createdAt: new Date().toISOString(),
       };
       limitOrders.set(orderId, order);
+      _writeThrough("feature_limit_orders", String(orderId), order).catch(() => {});
       persistFeatureRecord("feature_limit_orders", orderId, { id: orderId, ...(typeof order === 'object' ? order : {}) }).catch(() => {});
       return order;
     }),
@@ -324,6 +358,7 @@ export const platformFeaturesRouter = router({
         status: "active", createdAt: new Date().toISOString(),
       };
       apiKeys.set(keyId, key);
+      _writeThrough("feature_api_keys", String(keyId), key).catch(() => {});
       persistFeatureRecord("feature_api_keys", keyId, { id: keyId, ...(typeof key === 'object' ? key : {}) }).catch(() => {});
       return { keyId, apiKey: apiKeyValue, permissions: input.permissions };
     }),
@@ -381,6 +416,7 @@ export const platformFeaturesRouter = router({
         status: "pending", createdAt: new Date().toISOString(),
       };
       referralStore.set(ref.referralId, ref);
+      _writeThrough("feature_referrals", String(ref.referralId), ref).catch(() => {});
       persistFeatureRecord("feature_referrals", ref.referralId, { id: ref.referralId, ...(typeof ref === 'object' ? ref : {}) }).catch(() => {});
       return { code, totalReferrals: 0, bonusPerReferral: 5.00, shareLink: `https://remitflow.io/join?ref=${code}` };
     }),
@@ -448,6 +484,7 @@ export const platformFeaturesRouter = router({
         createdAt: now.toISOString(),
       };
       proposals.set(proposalId, proposal);
+      _writeThrough("feature_proposals", String(proposalId), proposal).catch(() => {});
       persistFeatureRecord("feature_proposals", proposalId, { id: proposalId, ...(typeof proposal === 'object' ? proposal : {}) }).catch(() => {});
       return { proposalId, title: input.title, status: "active", endDate: end.toISOString() };
     }),
@@ -505,6 +542,7 @@ export const platformFeaturesRouter = router({
         txHash: `0x${randomBytes(32).toString("hex")}`,
       };
       nftReceipts.set(tokenId, receipt);
+      _writeThrough("feature_nft_receipts", String(tokenId), receipt).catch(() => {});
       persistFeatureRecord("feature_nft_receipts", tokenId, { id: tokenId, ...(typeof receipt === 'object' ? receipt : {}) }).catch(() => {});
       return receipt;
     }),

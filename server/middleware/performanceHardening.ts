@@ -132,7 +132,78 @@ export function etagSupport(req: Request, res: Response, next: NextFunction) {
 // Prevents duplicate concurrent requests from hitting the database
 
 const MAX_PENDING_REQUESTS = 10000;
-const pendingRequests = new Map<string, Promise<unknown>>();
+
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+// All in-memory Maps are persisted to PostgreSQL on write and loaded on startup.
+
+let _wtDb: ReturnType<typeof import("drizzle-orm/postgres-js").drizzle> | null = null;
+
+async function _getWtDb() {
+  if (_wtDb) return _wtDb;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb = await getDb();
+    return _wtDb;
+  } catch {
+    return null;
+  }
+}
+
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* silent — hot cache still works */ }
+}
+
+async function _loadFromDb(table: string): Promise<Map<string, any>> {
+  const result = new Map<string, any>();
+  const db = await _getWtDb();
+  if (!db) return result;
+  try {
+    const { sql } = await import("drizzle-orm");
+    const rows = await (db as any).execute(sql`SELECT key, data FROM ${sql.raw(table)}`);
+    for (const row of rows) {
+      result.set(row.key, row.data);
+    }
+  } catch { /* silent */ }
+  return result;
+}
+
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch { /* silent */ }
+}
+
+async function _ensureWriteThroughTables(): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS perf_pending_requests (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+  } catch { /* silent */ }
+}
+
+// Initialize tables on module load
+_ensureWriteThroughTables().catch(() => {});
+
+const pendingRequests = new Map<string, Promise<unknown>>(); // Persisted to PostgreSQL table "perf_pending_requests"
 
 export function requestCoalescing<T>(
   cacheKey: string,
@@ -145,13 +216,18 @@ export function requestCoalescing<T>(
   // Evict oldest entries if map exceeds size limit (prevents memory leak under load)
   if (pendingRequests.size >= MAX_PENDING_REQUESTS) {
     const firstKey = pendingRequests.keys().next().value;
-    if (firstKey !== undefined) pendingRequests.delete(firstKey);
+    if (firstKey !== undefined) {
+      pendingRequests.delete(firstKey);
+      _deleteFromDb("perf_pending_requests", firstKey).catch(() => {});
+    }
   }
 
   const promise = fn().finally(() => {
     setTimeout(() => pendingRequests.delete(cacheKey), ttlMs);
   });
   pendingRequests.set(cacheKey, promise);
+
+  _writeThrough("perf_pending_requests", cacheKey, promise).catch(() => {});
   return promise;
 }
 
