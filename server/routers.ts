@@ -334,6 +334,7 @@ import { invoicesAndSubscriptionsRouter } from "./_core/invoicesAndSubscriptions
 import { savingsVaultRouter } from "./_core/savingsVault";
 import { remittanceCorridorsRouter } from "./_core/remittanceCorridors";
 import { platformFeaturesRouter } from "./_core/platformFeatures";
+import { platformV4Router } from "./_core/platformV4Router";
 import { qrPaymentsRouter } from "./_core/qrPayments";
 import { nfcPaymentsRouter } from "./_core/nfcPayments";
 
@@ -7019,6 +7020,7 @@ Case: #${input.caseId}`,
   savingsVault: savingsVaultRouter,
   remittanceCorridors: remittanceCorridorsRouter,
   platformFeatures: platformFeaturesRouter,
+  platformV4: platformV4Router,
   // QR & NFC Payment Systems
   qrPayments: qrPaymentsRouter,
   nfcPayments: nfcPaymentsRouter,

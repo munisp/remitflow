@@ -99,6 +99,10 @@ export async function screenSanctions(params: {
   country?: string;
   type?: "individual" | "entity";
 }): Promise<SanctionsScreenResult> {
+  // FAIL-CLOSED in production: never return mock data for sanctions screening
+  if (process.env.NODE_ENV === "production" && !process.env.OFAC_API_KEY) {
+    throw new Error("[FAIL-CLOSED] OFAC_API_KEY not configured — sanctions screening unavailable in production");
+  }
   if (!process.env.OFAC_API_KEY || !complianceBreaker.canRequest()) {
     return mockSanctionsScreen(params.name);
   }
@@ -174,6 +178,10 @@ export async function assessAddressRisk(params: {
   address: string;
   chain: string;
 }): Promise<ChainalysisRiskResult> {
+  // FAIL-CLOSED in production: on-chain transactions MUST have risk assessment
+  if (process.env.NODE_ENV === "production" && !CHAINALYSIS_API_KEY) {
+    throw new Error("[FAIL-CLOSED] CHAINALYSIS_API_KEY not configured — on-chain risk assessment unavailable in production");
+  }
   if (!CHAINALYSIS_API_KEY) {
     return mockChainRisk(params.address, params.chain);
   }
