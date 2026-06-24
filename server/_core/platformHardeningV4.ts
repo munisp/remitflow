@@ -35,6 +35,16 @@ import { emitFeatureEvent } from "./featurePersistence";
 import { sql } from "drizzle-orm";
 import { createHash } from "crypto";
 
+// Helper to transform snake_case JSON response to camelCase
+function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+    result[camelKey] = value;
+  }
+  return result;
+}
+
 // ── Synthetic Identity Detection ────────────────────────────────────────────
 
 export interface SyntheticIdentityInput {
@@ -79,7 +89,16 @@ export async function detectSyntheticIdentity(
     });
 
     if (!response.ok) throw new Error(`Synthetic identity service returned ${response.status}`);
-    const result = await response.json() as SyntheticIdentityResult;
+    const raw = await response.json() as Record<string, unknown>;
+    const result: SyntheticIdentityResult = {
+      isSynthetic: (raw.is_synthetic ?? raw.isSynthetic) as boolean,
+      riskScore: (raw.risk_score ?? raw.riskScore) as number,
+      flags: (raw.flags ?? []) as string[],
+      graphClusterId: (raw.graph_cluster_id ?? raw.graphClusterId) as string | undefined,
+      sharedAttributes: (raw.shared_attributes ?? raw.sharedAttributes ?? []) as string[],
+      recommendation: (raw.recommendation ?? "manual_review") as "approve" | "manual_review" | "reject",
+      analyzedAt: (raw.analyzed_at ?? raw.analyzedAt ?? new Date().toISOString()) as string,
+    };
 
     // Persist result
     await db.execute(sql`
@@ -168,7 +187,14 @@ export async function verifyDocumentAuthenticity(
     });
 
     if (!response.ok) throw new Error(`Document fraud service returned ${response.status}`);
-    const result = await response.json() as DocumentFraudResult;
+    const raw = await response.json() as Record<string, unknown>;
+    const result: DocumentFraudResult = {
+      isAuthentic: (raw.is_authentic ?? raw.isAuthentic) as boolean,
+      confidenceScore: (raw.confidence_score ?? raw.confidenceScore) as number,
+      checks: raw.checks as DocumentFraudResult["checks"],
+      overallVerdict: (raw.overall_verdict ?? raw.overallVerdict) as "authentic" | "suspect" | "fraudulent",
+      analyzedAt: (raw.analyzed_at ?? raw.analyzedAt ?? new Date().toISOString()) as string,
+    };
 
     // Persist result
     await db.execute(sql`
@@ -186,9 +212,22 @@ export async function verifyDocumentAuthenticity(
 
     return result;
   } catch (err) {
-    // Fail-closed: block in production without ML service
+    // Fail-closed: in production, return suspect verdict (never mark as authentic without ML verification)
     if (process.env.NODE_ENV === "production") {
-      throw new Error(`[FAIL-CLOSED] Document fraud ML service unavailable — cannot verify document ${input.documentId}`);
+      logger.error({ error: err, documentId: input.documentId }, "Document fraud ML service unavailable — fail-closed");
+      return {
+        isAuthentic: false,
+        confidenceScore: 0.0,
+        checks: {
+          fontAnalysis: { passed: false, score: 0.0, anomalies: ["service_unavailable"] },
+          edgeArtifacts: { passed: false, score: 0.0, anomalies: ["service_unavailable"] },
+          mrzValidation: { passed: false, score: 0.0, anomalies: ["service_unavailable"] },
+          microprintAnalysis: { passed: false, score: 0.0, anomalies: ["service_unavailable"] },
+          templateMatching: { passed: false, score: 0.0, anomalies: ["service_unavailable"] },
+        },
+        overallVerdict: "suspect",
+        analyzedAt: new Date().toISOString(),
+      };
     }
     // Development: return neutral result
     return {
@@ -233,7 +272,8 @@ export async function submitEDDInformation(db: any, submission: EDDSubmission): 
 
   // Risk scoring based on declared sources
   let riskLevel: "low" | "medium" | "high" = "low";
-  if (submission.sourceOfWealth === "other" || submission.sourceOfFunds === "other") {
+  const highRiskSources = ["other", "political_office", "crypto_trading", "gambling"];
+  if (highRiskSources.includes(submission.sourceOfWealth) || highRiskSources.includes(submission.sourceOfFunds)) {
     riskLevel = "high";
   } else if (submission.sourceOfWealth === "inheritance" || submission.sourceOfFunds === "gift") {
     riskLevel = "medium";
@@ -724,7 +764,13 @@ export async function selectRailWithFailover(
     });
 
     if (!response.ok) throw new Error(`Smart routing service returned ${response.status}`);
-    const decision = await response.json() as FailoverDecision;
+    const raw = await response.json() as Record<string, unknown>;
+    const decision: FailoverDecision = {
+      selectedRail: (raw.selected_rail ?? raw.selectedRail) as string,
+      fallbackRails: (raw.fallback_rails ?? raw.fallbackRails ?? []) as string[],
+      reason: (raw.reason ?? "") as string,
+      healthScores: (raw.health_scores ?? raw.healthScores ?? {}) as Record<string, number>,
+    };
 
     await db.execute(sql`
       INSERT INTO routing_decisions (corridor, amount, currency, selected_rail, fallback_rails, reason, decided_at)
@@ -1193,7 +1239,11 @@ export async function triggerLakehousePipeline(layer: "bronze" | "silver" | "gol
     });
 
     if (!response.ok) throw new Error(`Lakehouse trigger failed: ${response.status}`);
-    return await response.json() as { jobId: string; status: string };
+    const raw = await response.json() as Record<string, unknown>;
+    return {
+      jobId: (raw.job_id ?? raw.jobId ?? `${layer}_${Date.now()}`) as string,
+      status: (raw.status ?? "unknown") as string,
+    };
   } catch (err) {
     logger.warn({ error: err, layer }, "Lakehouse pipeline trigger failed");
     return { jobId: `mock_${layer}_${Date.now()}`, status: "skipped" };
