@@ -405,6 +405,9 @@ async fn fx_rate_publisher(store: StreamStore) {
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::time::Instant;
+
+static DB_POOL: tokio::sync::OnceCell<PgPool> = tokio::sync::OnceCell::const_new();
+
 static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 async fn init_db() -> PgPool {
@@ -496,6 +499,21 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 }
 
 #[tokio::main]
+async fn load_from_db(pool: &PgPool) {
+    match sqlx::query_as::<_, (String, serde_json::Value)>(
+        "SELECT id, data FROM fluvio_service_state ORDER BY updated_at DESC LIMIT 1000"
+    )
+    .fetch_all(pool)
+    .await {
+        Ok(rows) => {
+            tracing::info!("loaded {} persisted records from fluvio_service_state", rows.len());
+        }
+        Err(e) => {
+            tracing::warn!("failed to load from DB: {}", e);
+        }
+    }
+}
+
 async fn main() -> std::io::Result<()> {
     // Panic hook for logging panics without crashing silently
     std::panic::set_hook(Box::new(|info| {
@@ -506,7 +524,8 @@ async fn main() -> std::io::Result<()> {
         eprintln!("[PANIC] {} at {}", msg, location);
     }));
 
-    let _pool = init_db().await;
+    let pool = init_db().await;
+    DB_POOL.set(pool).ok();
     tracing_subscriber::fmt().json().init();
 
     let port: u16 = std::env::var("PORT")

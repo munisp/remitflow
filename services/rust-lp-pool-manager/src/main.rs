@@ -28,6 +28,75 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 use uuid::Uuid;
 
+static DB_POOL: OnceLock<Option<postgres::Client>> = OnceLock::new();
+
+fn init_db() {
+    let url = std::env::var("DATABASE_URL").unwrap_or_default();
+    if url.is_empty() {
+        println!("[rust-lp-pool-manager] WARNING: DATABASE_URL not set, using in-memory only");
+        DB_POOL.get_or_init(|| None);
+        return;
+    }
+    match postgres::Client::connect(&url, postgres::NoTls) {
+        Ok(mut client) => {
+            let _ = client.execute(
+                "CREATE TABLE IF NOT EXISTS lp_pool_state (id TEXT PRIMARY KEY, data JSONB DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ DEFAULT NOW())",
+                &[],
+            );
+            println!("[rust-lp-pool-manager] PostgreSQL write-through enabled");
+            DB_POOL.get_or_init(|| Some(client));
+        }
+        Err(e) => {
+            println!("[rust-lp-pool-manager] DB connection failed: {}", e);
+            DB_POOL.get_or_init(|| None);
+        }
+    }
+}
+
+fn db_upsert(key: &str, value: &impl Serialize) {
+    // Note: postgres::Client is not Sync so we serialize on caller thread
+    // In production, use tokio-postgres for async
+    if let Some(Some(_)) = DB_POOL.get() {
+        let data = serde_json::to_string(value).unwrap_or_default();
+        let url = std::env::var("DATABASE_URL").unwrap_or_default();
+        let key = key.to_string();
+        std::thread::spawn(move || {
+            if let Ok(mut client) = postgres::Client::connect(&url, postgres::NoTls) {
+                let _ = client.execute(
+                    "INSERT INTO lp_pool_state (id, data, updated_at) VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()",
+                    &[&key, &data],
+                );
+            }
+        });
+    }
+}
+
+fn load_from_db(state: &mut PoolState) {
+    let url = std::env::var("DATABASE_URL").unwrap_or_default();
+    if url.is_empty() {
+        return;
+    }
+    if let Ok(mut client) = postgres::Client::connect(&url, postgres::NoTls) {
+        if let Ok(rows) = client.query("SELECT id, data FROM lp_pool_state", &[]) {
+            for row in &rows {
+                let id: String = row.get(0);
+                let data: String = row.get(1);
+                if id.starts_with("balance:") {
+                    if let Ok(b) = serde_json::from_str::<PoolBalance>(&data) {
+                        let key = id.strip_prefix("balance:").unwrap_or(&id).to_string();
+                        state.balances.insert(key, b);
+                    }
+                } else if id == "positions" {
+                    if let Ok(p) = serde_json::from_str::<Vec<Position>>(&data) {
+                        state.positions = p;
+                    }
+                }
+            }
+            println!("[rust-lp-pool-manager] Loaded {} entries from DB", rows.len());
+        }
+    }
+}
+
 static REBALANCE_COUNT: AtomicU64 = AtomicU64::new(0);
 static _PROCESS_START: OnceLock<Instant> = OnceLock::new();
 
@@ -138,7 +207,7 @@ fn get_pool_state() -> &'static Mutex<PoolState> {
         for (id, name, tier, coins) in providers {
             for (coin, available) in coins {
                 let key = format!("{}-{}", id, coin);
-                let daily_volume = available * 0.1; // 10% utilized
+                let daily_volume = available * 0.1;
                 let collateral_required = daily_volume * 2.0;
                 balances.insert(key, PoolBalance {
                     provider: name.to_string(),
@@ -156,7 +225,9 @@ fn get_pool_state() -> &'static Mutex<PoolState> {
             }
         }
 
-        Mutex::new(PoolState { balances, positions: Vec::new() })
+        let mut state = PoolState { balances, positions: Vec::new() };
+        load_from_db(&mut state);
+        Mutex::new(state)
     })
 }
 
@@ -308,6 +379,7 @@ async fn execute_rebalance(req: web::Json<RebalanceRequest>) -> impl Responder {
         balance.utilization_percent = (balance.reserved / balance.total) * 100.0;
         balance.last_updated = chrono::Utc::now().to_rfc3339();
 
+        db_upsert(&format!("balance:{}", key), balance);
         REBALANCE_COUNT.fetch_add(1, Ordering::Relaxed);
 
         HttpResponse::Ok().json(serde_json::json!({
@@ -442,6 +514,7 @@ async fn collateral_status() -> impl Responder {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let _ = process_start();
+    init_db();
     let port = std::env::var("LP_POOL_MANAGER_PORT").unwrap_or_else(|_| "8117".into());
     let bind_addr = format!("0.0.0.0:{}", port);
 

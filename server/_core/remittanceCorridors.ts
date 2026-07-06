@@ -14,6 +14,38 @@ import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, r
 import { logger } from "./logger";
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_remittanceCorridorsts: any = null;
+async function _getWtDb_remittanceCorridorsts() {
+  if (_wtDb_remittanceCorridorsts) return _wtDb_remittanceCorridorsts;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_remittanceCorridorsts = await getDb();
+    return _wtDb_remittanceCorridorsts;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_remittanceCorridorsts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_remittanceCorridorsts();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 // ── Live FX Rate Fetcher with Cache ──────────────────────────────────────────
 
 const FALLBACK_RATES: Record<string, number> = {
@@ -248,6 +280,7 @@ export const remittanceCorridorsRouter = router({
       };
 
       transfers.set(transferId, transfer);
+      _writeThrough("feature_corridor_transfers", String(transferId), transfer).catch(() => {});
       persistFeatureRecord("feature_corridor_transfers", transferId, { id: transferId, ...(typeof transfer === 'object' ? transfer : {}) }).catch(() => {});
       logger.info({ transferId, corridor: corridor.id, amount: input.amount }, "Corridor remittance sent");
       FeatureEvents.corridorTransferSent({ transferId, corridorId: corridor.id, userId: ctx.user.id, amount: input.amount });

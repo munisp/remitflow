@@ -4,6 +4,38 @@
  */
 import { randomBytes } from "crypto";
 
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+let _wtDb_referralEnginets: any = null;
+async function _getWtDb_referralEnginets() {
+  if (_wtDb_referralEnginets) return _wtDb_referralEnginets;
+  try {
+    const { getDb } = await import("../db.js");
+    _wtDb_referralEnginets = await getDb();
+    return _wtDb_referralEnginets;
+  } catch { return null; }
+}
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb_referralEnginets();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* hot cache still works */ }
+}
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb_referralEnginets();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch {}
+}
+
+
 interface Referral {
   id: string;
   referrerId: number;
@@ -53,6 +85,7 @@ export function generateReferralCode(userId: number): string {
 
   const code = `RF-${userId.toString(36).toUpperCase()}-${randomBytes(3).toString("hex").toUpperCase()}`;
   userCodes.set(userId, code);
+  _writeThrough("wt_referral_engine_user_codes", String(userId), code).catch(() => {});
   return code;
 }
 
@@ -74,6 +107,7 @@ export function createReferral(referrerId: number, refereeEmail: string): Referr
   };
 
   referrals.set(referral.id, referral);
+  _writeThrough("wt_referral_engine_referrals", String(referral.id), referral).catch(() => {});
   return referral;
 }
 

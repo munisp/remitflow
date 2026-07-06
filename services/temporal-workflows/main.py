@@ -19,6 +19,10 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 import uvicorn
 
+import psycopg2
+import psycopg2.pool
+import psycopg2.extras
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -64,7 +68,64 @@ class WorkflowType(str, Enum):
 
 
 # In-memory workflow registry (Temporal client fallback)
-workflow_registry: Dict[str, Dict] = {}
+# workflow_registry — persisted to PostgreSQL table "temporal_workflow_registry" (see _db_workflow_registry_* helpers)
+
+class _DbWorkflowRegistry:
+    """PostgreSQL-backed store replacing in-memory dict 'workflow_registry'."""
+    TABLE = "temporal_workflow_registry"
+
+    def get(self, key: str) -> dict | None:
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else None
+
+    def __getitem__(self, key: str) -> dict:
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, value) -> None:
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key: str) -> None:
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        rows = _db_exec(f"SELECT key FROM {self.TABLE}")
+        return [r["key"] for r in rows]
+
+    def values(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE}")
+        return [dict(r["data"]) for r in rows]
+
+    def items(self):
+        rows = _db_exec(f"SELECT key, data FROM {self.TABLE}")
+        return [(r["key"], dict(r["data"])) for r in rows]
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key: str, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d: dict) -> None:
+        for k, v in d.items():
+            self[k] = v
+
+workflow_registry = _DbWorkflowRegistry()
 
 # ── Workflow Implementations ──────────────────────────────────────────────────
 
@@ -628,6 +689,21 @@ async def list_workflow_types():
 async def startup():
     logger.info(f"[TEMPORAL-WORKFLOWS] Started on port {PORT}")
     logger.info(f"[TEMPORAL-WORKFLOWS] Temporal host: {TEMPORAL_HOST} (using in-memory fallback)")
+
+
+
+def init_pg_tables():
+    """Create PostgreSQL tables for persistent state."""
+    try:
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS temporal_workflow_registry (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+    except Exception as e:
+        print(f"[DB] Table init error: {e}")
 
 
 if __name__ == "__main__":

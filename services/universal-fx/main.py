@@ -29,6 +29,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import httpx
 
+import psycopg2
+import psycopg2.pool
+import psycopg2.extras
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("universal-fx")
 
@@ -42,6 +46,42 @@ app.add_middleware(
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 PORT = int(os.environ.get("PORT", "8084"))
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://localhost:5432/remitflow")
+
+_pg_pool: psycopg2.pool.ThreadedConnectionPool | None = None
+
+
+def _get_pg_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pg_pool
+    if _pg_pool is None or _pg_pool.closed:
+        _pg_pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn=2, maxconn=10, dsn=DATABASE_URL,
+        )
+    return _pg_pool
+
+
+def _db_exec(query: str, params: tuple = ()) -> list[dict]:
+    pool = _get_pg_pool()
+    conn = pool.getconn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, params)
+            rows = [dict(r) for r in cur.fetchall()] if cur.description else []
+            conn.commit()
+            return rows
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        pool.putconn(conn)
+
+
+def _db_one(query: str, params: tuple = ()) -> dict | None:
+    rows = _db_exec(query, params)
+    return rows[0] if rows else None
+
+
 RATE_LOCK_TTL = int(os.environ.get("RATE_LOCK_TTL_SECONDS", "900"))  # 15 min
 SLIPPAGE_BPS = float(os.environ.get("SLIPPAGE_BPS", "50"))  # 0.5%
 RATE_CACHE_TTL = int(os.environ.get("RATE_CACHE_TTL_SECONDS", "300"))  # 5 min
@@ -122,9 +162,123 @@ CRYPTO_ASSETS = {
 }
 
 # ─── In-memory rate cache ──────────────────────────────────────────────────────
-_rate_cache: Dict[str, float] = {}  # asset → USD rate
+# _rate_cache — persisted to PostgreSQL table "fx_rate_cache" (see _db__rate_cache_* helpers)
+
+class _DbRateCache:
+    """PostgreSQL-backed store replacing in-memory dict '_rate_cache'."""
+    TABLE = "fx_rate_cache"
+
+    def get(self, key: str) -> dict | None:
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else None
+
+    def __getitem__(self, key: str) -> dict:
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, value) -> None:
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key: str) -> None:
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        rows = _db_exec(f"SELECT key FROM {self.TABLE}")
+        return [r["key"] for r in rows]
+
+    def values(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE}")
+        return [dict(r["data"]) for r in rows]
+
+    def items(self):
+        rows = _db_exec(f"SELECT key, data FROM {self.TABLE}")
+        return [(r["key"], dict(r["data"])) for r in rows]
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key: str, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d: dict) -> None:
+        for k, v in d.items():
+            self[k] = v
+
+_rate_cache = _DbRateCache()
 _cache_updated_at: float = 0.0
-_rate_locks: Dict[str, dict] = {}  # lock_id → lock entry
+# _rate_locks — persisted to PostgreSQL table "fx_rate_locks" (see _db__rate_locks_* helpers)
+
+class _DbRateLocks:
+    """PostgreSQL-backed store replacing in-memory dict '_rate_locks'."""
+    TABLE = "fx_rate_locks"
+
+    def get(self, key: str) -> dict | None:
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else None
+
+    def __getitem__(self, key: str) -> dict:
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, value) -> None:
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key: str) -> None:
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        rows = _db_exec(f"SELECT key FROM {self.TABLE}")
+        return [r["key"] for r in rows]
+
+    def values(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE}")
+        return [dict(r["data"]) for r in rows]
+
+    def items(self):
+        rows = _db_exec(f"SELECT key, data FROM {self.TABLE}")
+        return [(r["key"], dict(r["data"])) for r in rows]
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key: str, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d: dict) -> None:
+        for k, v in d.items():
+            self[k] = v
+
+_rate_locks = _DbRateLocks()
 
 # Fallback rates (used when all feeds fail — offline resilience)
 FALLBACK_RATES: Dict[str, float] = {
@@ -461,6 +615,28 @@ async def corridor_info(from_asset: str, to_asset: str):
         "isStale": is_stale,
         "ttlSeconds": RATE_LOCK_TTL,
     }
+
+
+
+def init_pg_tables():
+    """Create PostgreSQL tables for persistent state."""
+    try:
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS fx_rate_cache (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS fx_rate_locks (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+    except Exception as e:
+        print(f"[DB] Table init error: {e}")
 
 
 if __name__ == "__main__":

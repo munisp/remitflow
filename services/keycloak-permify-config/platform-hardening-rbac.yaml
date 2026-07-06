@@ -1,0 +1,174 @@
+# Keycloak + Permify RBAC — Platform Hardening
+# Fine-grained authorization for all hardened operations
+
+keycloak:
+  realm: remitflow
+  clients:
+    - client_id: remitflow-platform
+      roles:
+        # KYC Roles
+        - kyc_operator
+        - kyc_reviewer
+        - kyc_admin
+        - ubo_analyst
+        # Stablecoin Roles
+        - stablecoin_operator
+        - stablecoin_admin
+        - yield_manager
+        - bridge_operator
+        # Fund Flow Roles
+        - fund_flow_operator
+        - settlement_manager
+        - compensation_operator
+        - treasury_admin
+        # Security Roles
+        - security_analyst
+        - security_admin
+        - compliance_officer
+        - fraud_analyst
+        # Administrative
+        - platform_admin
+        - super_admin
+
+  # JIT Access eligible roles
+  jit_roles:
+    - role: super_admin
+      max_duration_hours: 1
+      max_grants_per_day: 2
+      requires_approval_from: [platform_admin]
+    - role: treasury_admin
+      max_duration_hours: 2
+      max_grants_per_day: 3
+      requires_approval_from: [platform_admin, compliance_officer]
+    - role: compliance_officer
+      max_duration_hours: 2
+      max_grants_per_day: 3
+      requires_approval_from: [security_admin]
+
+permify:
+  schema:
+    entities:
+      # KYC Operations
+      - name: kyc_verification
+        relations:
+          owner: user
+          reviewer: user
+          approver: user
+        permissions:
+          submit: owner
+          review: reviewer or kyc_reviewer
+          approve: approver or kyc_admin
+          reject: approver or kyc_admin
+
+      - name: ubo_analysis
+        relations:
+          analyst: user
+          approver: user
+        permissions:
+          initiate: analyst or ubo_analyst
+          review: analyst or ubo_analyst
+          approve: approver or kyc_admin
+
+      # Stablecoin Operations
+      - name: stablecoin_operation
+        relations:
+          operator: user
+          approver: user
+        permissions:
+          execute_under_10k: operator or stablecoin_operator
+          execute_over_10k: operator and maker_checker_approved
+          approve_maker_checker: approver or stablecoin_admin
+          manage_yield: yield_manager
+          execute_bridge: bridge_operator or stablecoin_admin
+
+      - name: virtual_card
+        relations:
+          holder: user
+          issuer: user
+        permissions:
+          issue: issuer or stablecoin_admin
+          freeze: issuer or stablecoin_admin or security_admin
+          cancel: issuer or stablecoin_admin
+
+      # Fund Flow Operations
+      - name: settlement_batch
+        relations:
+          creator: user
+          approver: user
+          executor: user
+        permissions:
+          create: creator or settlement_manager
+          approve: approver or treasury_admin
+          execute: executor or treasury_admin
+          reconcile: settlement_manager or treasury_admin
+
+      - name: compensation_retry
+        relations:
+          operator: user
+        permissions:
+          initiate: operator or compensation_operator
+          escalate: operator or fund_flow_operator
+          override: treasury_admin
+
+      # Security Operations
+      - name: admin_action
+        relations:
+          actor: user
+          reviewer: user
+        permissions:
+          perform: actor and geo_time_fence_passed
+          review_audit: reviewer or security_analyst
+          access_canary_report: security_admin
+          manage_jit: security_admin or platform_admin
+
+      - name: data_export
+        relations:
+          requester: user
+        permissions:
+          export_small: requester and dlp_check_passed  # <100 records
+          export_large: requester and maker_checker_approved and dlp_check_passed
+          export_full: super_admin and maker_checker_approved
+
+  # Maker-Checker policies
+  maker_checker_policies:
+    - operation: "stablecoin.offramp"
+      threshold_usd: 10000
+      approvers_needed: 1
+      approver_roles: [stablecoin_admin, treasury_admin]
+      expiry_hours: 24
+
+    - operation: "stablecoin.bridge"
+      threshold_usd: 5000
+      approvers_needed: 1
+      approver_roles: [stablecoin_admin, bridge_operator]
+      expiry_hours: 4
+
+    - operation: "settlement.execute"
+      threshold_usd: 50000
+      approvers_needed: 2
+      approver_roles: [treasury_admin, platform_admin]
+      expiry_hours: 12
+
+    - operation: "data.export.bulk"
+      threshold_records: 100
+      approvers_needed: 1
+      approver_roles: [compliance_officer, security_admin]
+      expiry_hours: 2
+
+    - operation: "compensation.override"
+      always_required: true
+      approvers_needed: 2
+      approver_roles: [treasury_admin, platform_admin]
+      expiry_hours: 4
+
+  # Geo + Time Fencing
+  geo_time_fence:
+    approved_countries: [US, CA, GB, NG, GH, KE, ZA, DE, FR, NL]
+    business_hours_utc:
+      start: "06:00"
+      end: "22:00"
+    business_days: [MON, TUE, WED, THU, FRI]
+    break_glass:
+      enabled: true
+      requires: [super_admin, webauthn_verification]
+      audit: mandatory

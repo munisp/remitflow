@@ -255,17 +255,13 @@ const escrowPlanRouter = router({
       const installmentAmount = (totalPriceUsd * (1 - depositPct / 100)) / input.installmentCount;
       const planId = genId("ESCROW");
 
-      // Create TigerBeetle escrow account
+      // Create TigerBeetle escrow account (FAIL-CLOSED in production)
       const escrowAccountId = BigInt(Date.now());
-      try {
-        await tigerBeetle.createAccounts([{
-          id: escrowAccountId,
-          ledger: ESCROW_LEDGER,
-          code: ESCROW_CODE,
-        }]);
-      } catch (e: unknown) {
-        logger.warn({ err: e instanceof Error ? e.message : String(e) }, "[PropertyEscrow] TigerBeetle account creation (non-fatal)");
-      }
+      await tigerBeetle.createAccounts([{
+        id: escrowAccountId,
+        ledger: ESCROW_LEDGER,
+        code: ESCROW_CODE,
+      }]);
 
       // Insert escrow plan
       const [plan] = await db.insert(propertyEscrowPlans).values({
@@ -408,25 +404,22 @@ const escrowPlanRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: `Insufficient USD balance. Required: $${depositUsd.toFixed(2)}` });
       }
 
-      await db.update(wallets).set({
-        balance: String(Number(wallet.balance) - depositUsd),
+      const [debitedDeposit] = await db.update(wallets).set({
+        balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) - ${depositUsd} AS VARCHAR)`,
         updatedAt: new Date(),
-      }).where(eq(wallets.id, wallet.id)).returning();
+      }).where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${depositUsd}`)).returning();
+      if (!debitedDeposit) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
 
-      // Lock deposit in TigerBeetle
-      try {
-        await tigerBeetle.createTransfer({
-          id: BigInt(Date.now()),
-          debitAccountId: BigInt(ctx.user.id),
-          creditAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
-          amount: BigInt(Math.round(depositUsd * 100)),
-          ledger: ESCROW_LEDGER,
-          code: ESCROW_CODE,
-          pending: true,
-        });
-      } catch (e: unknown) {
-        logger.warn({ err: e instanceof Error ? e.message : String(e) }, "[PropertyEscrow] TigerBeetle deposit lock (non-fatal)");
-      }
+      // Lock deposit in TigerBeetle (FAIL-CLOSED — escrow MUST be ledger-backed)
+      await tigerBeetle.createPendingTransfer({
+        id: BigInt(Date.now()),
+        debitAccountId: BigInt(ctx.user.id),
+        creditAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
+        amount: BigInt(Math.round(depositUsd * 100)),
+        ledger: ESCROW_LEDGER,
+        code: ESCROW_CODE,
+        timeoutSeconds: 86400, // 24h timeout for escrow holds
+      });
 
       // Record transaction
       await db.insert(transactions).values({
@@ -501,25 +494,22 @@ const escrowPlanRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: `Insufficient balance. Required: $${amount.toFixed(2)}` });
       }
 
-      await db.update(wallets).set({
-        balance: String(Number(wallet.balance) - amount),
+      const [debitedInstallment] = await db.update(wallets).set({
+        balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) - ${amount} AS VARCHAR)`,
         updatedAt: new Date(),
-      }).where(eq(wallets.id, wallet.id)).returning();
+      }).where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${amount}`)).returning();
+      if (!debitedInstallment) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
 
-      // Lock in TigerBeetle
-      try {
-        await tigerBeetle.createTransfer({
-          id: BigInt(Date.now()),
-          debitAccountId: BigInt(ctx.user.id),
-          creditAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
-          amount: BigInt(Math.round(amount * 100)),
-          ledger: ESCROW_LEDGER,
-          code: ESCROW_CODE,
-          pending: true,
-        });
-      } catch (e: unknown) {
-        logger.warn({ err: e instanceof Error ? e.message : String(e) }, "[PropertyEscrow] TigerBeetle installment lock (non-fatal)");
-      }
+      // Lock in TigerBeetle (FAIL-CLOSED — installment MUST be ledger-backed)
+      await tigerBeetle.createPendingTransfer({
+        id: BigInt(Date.now()),
+        debitAccountId: BigInt(ctx.user.id),
+        creditAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
+        amount: BigInt(Math.round(amount * 100)),
+        ledger: ESCROW_LEDGER,
+        code: ESCROW_CODE,
+        timeoutSeconds: 86400,
+      });
 
       // Record transaction
       const [tx] = await db.insert(transactions).values({
@@ -686,23 +676,18 @@ const milestoneRouter = router({
 
       const releaseAmount = Number(milestone.releaseAmountUsd);
 
-      // Release funds from TigerBeetle escrow to builder
-      let tbTransferId: bigint | null = null;
-      try {
-        tbTransferId = BigInt(Date.now());
-        const [builder] = await db.select().from(builderProfiles).where(eq(builderProfiles.id, plan.builderId)).limit(1);
-        await tigerBeetle.createTransfer({
-          id: tbTransferId,
-          debitAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
-          creditAccountId: BigInt(builder?.userId ?? 0),
-          amount: BigInt(Math.round(releaseAmount * 100)),
-          ledger: ESCROW_LEDGER,
-          code: ESCROW_CODE,
-          pending: false, // Posted (final) — funds released to builder
-        });
-      } catch (e: unknown) {
-        logger.warn({ err: e instanceof Error ? e.message : String(e) }, "[PropertyEscrow] TigerBeetle release (non-fatal)");
-      }
+      // Release funds from TigerBeetle escrow to builder (FAIL-CLOSED)
+      const tbTransferId = BigInt(Date.now());
+      const [builderForTb] = await db.select().from(builderProfiles).where(eq(builderProfiles.id, plan.builderId)).limit(1);
+      await tigerBeetle.createTransfer({
+        id: tbTransferId,
+        debitAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
+        creditAccountId: BigInt(builderForTb?.userId ?? 0),
+        amount: BigInt(Math.round(releaseAmount * 100)),
+        ledger: ESCROW_LEDGER,
+        code: ESCROW_CODE,
+        pending: false, // Posted (final) — funds released to builder
+      });
 
       // Credit builder's wallet
       const [builder] = await db.select().from(builderProfiles).where(eq(builderProfiles.id, plan.builderId)).limit(1);
@@ -710,7 +695,7 @@ const milestoneRouter = router({
         const [builderWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, builder.userId), eq(wallets.currency, "USD"))).limit(1);
         if (builderWallet) {
           await db.update(wallets).set({
-            balance: String(Number(builderWallet.balance) + releaseAmount),
+            balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${releaseAmount} AS VARCHAR)`,
             updatedAt: new Date(),
           }).where(eq(wallets.id, builderWallet.id)).returning();
         }
@@ -878,7 +863,7 @@ const propertyDisputeRouter = router({
           const [buyerWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, plan.buyerId), eq(wallets.currency, "USD"))).limit(1);
           if (buyerWallet) {
             await db.update(wallets).set({
-              balance: String(Number(buyerWallet.balance) + input.refundAmountUsd),
+              balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${input.refundAmountUsd} AS VARCHAR)`,
               updatedAt: new Date(),
             }).where(eq(wallets.id, buyerWallet.id)).returning();
           }
@@ -943,7 +928,7 @@ const propertyDisputeRouter = router({
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
       if (wallet) {
         await db.update(wallets).set({
-          balance: String(Number(wallet.balance) + refundAmount),
+          balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${refundAmount} AS VARCHAR)`,
           updatedAt: new Date(),
         }).where(eq(wallets.id, wallet.id)).returning();
       }

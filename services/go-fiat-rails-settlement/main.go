@@ -178,6 +178,7 @@ func getRailBreaker(rail string) *CircuitBreaker {
 	}
 	b := NewCircuitBreaker(5, 60*time.Second)
 	breakers[rail] = b
+	if db != nil { go func() { _ = dbUpsert("breaker:"+rail, b) }() }
 	return b
 }
 
@@ -209,6 +210,7 @@ func (m *Metrics) RecordPayout(rail string, latencyMs int64, success bool) {
 		m.payoutsFailed++
 	}
 	m.railLatencies[rail] = append(m.railLatencies[rail], latencyMs)
+	if db != nil { go func() { _ = dbUpsert("latency:"+rail, m.railLatencies[rail]) }() }
 	if len(m.railLatencies[rail]) > 1000 {
 		m.railLatencies[rail] = m.railLatencies[rail][500:]
 	}

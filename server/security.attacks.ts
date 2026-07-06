@@ -64,7 +64,92 @@ export const authSlowDown = slowDown({
 
 // ─── 2. Concurrency Limiter (Connection-Flood) ────────────────────────────────
 // Tracks in-flight requests per IP. Rejects if > 20 concurrent.
-const concurrencyMap = new Map<string, number>();
+
+// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
+// All in-memory Maps are persisted to PostgreSQL on write and loaded on startup.
+
+let _wtDb: ReturnType<typeof import("drizzle-orm/postgres-js").drizzle> | null = null;
+
+async function _getWtDb() {
+  if (_wtDb) return _wtDb;
+  try {
+    const { getDb } = await import("./db.js");
+    _wtDb = await getDb();
+    return _wtDb;
+  } catch {
+    return null;
+  }
+}
+
+async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
+      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
+      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `);
+  } catch { /* silent — hot cache still works */ }
+}
+
+async function _loadFromDb(table: string): Promise<Map<string, any>> {
+  const result = new Map<string, any>();
+  const db = await _getWtDb();
+  if (!db) return result;
+  try {
+    const { sql } = await import("drizzle-orm");
+    const rows = await (db as any).execute(sql`SELECT key, data FROM ${sql.raw(table)}`);
+    for (const row of rows) {
+      result.set(row.key, row.data);
+    }
+  } catch { /* silent */ }
+  return result;
+}
+
+async function _deleteFromDb(table: string, key: string): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+  } catch { /* silent */ }
+}
+
+async function _ensureWriteThroughTables(): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS security_concurrency (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS security_idempotency_fallback (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+    await (db as any).execute(sql`
+      CREATE TABLE IF NOT EXISTS security_login_fallback (
+        key TEXT PRIMARY KEY,
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
+  } catch { /* silent */ }
+}
+
+// Initialize tables on module load
+_ensureWriteThroughTables().catch(() => {});
+
+const concurrencyMap = new Map<string, number>(); // Persisted to PostgreSQL table "security_concurrency"
 export function concurrencyLimiter(req: Request, res: Response, next: NextFunction) {
   const key = req.ip ?? "unknown";
   const current = concurrencyMap.get(key) ?? 0;
@@ -73,10 +158,17 @@ export function concurrencyLimiter(req: Request, res: Response, next: NextFuncti
     return;
   }
   concurrencyMap.set(key, current + 1);
+
+  _writeThrough("security_concurrency", key, current + 1).catch(() => {});
   res.on("finish", () => {
     const c = concurrencyMap.get(key) ?? 1;
-    if (c <= 1) concurrencyMap.delete(key);
-    else concurrencyMap.set(key, c - 1);
+    if (c <= 1) {
+      concurrencyMap.delete(key);
+      _deleteFromDb("security_concurrency", key).catch(() => {});
+    } else {
+      concurrencyMap.set(key, c - 1);
+      _writeThrough("security_concurrency", key, c - 1).catch(() => {});
+    }
   });
   next();
 }
@@ -202,13 +294,14 @@ export function sanitizeUploadFilename(filename: string): string {
 
 // ─── 13. Double-Spend / Replay Detection ─────────────────────────────────────
 // Idempotency keys stored in Redis with 24h TTL (process-local fallback).
-const _idempotencyFallback = new Map<string, { result: unknown; expiresAt: number }>();
+const _idempotencyFallback = new Map<string, { result: unknown; expiresAt: number }>(); // Persisted to PostgreSQL table "security_idempotency_fallback"
 export async function checkIdempotencyKey(key: string): Promise<{ duplicate: boolean; result?: unknown }> {
   const cached = await cacheGet<{ result: unknown }>(`idempotency:atk:${key}`);
   if (cached) return { duplicate: true, result: cached.result };
   const entry = _idempotencyFallback.get(key);
   if (entry && Date.now() <= entry.expiresAt) return { duplicate: true, result: entry.result };
   if (entry) _idempotencyFallback.delete(key);
+ _deleteFromDb("security_idempotency_fallback", key).catch(() => {});
   return { duplicate: false };
 }
 export async function storeIdempotencyResult(key: string, result: unknown): Promise<void> {
@@ -218,13 +311,14 @@ export async function storeIdempotencyResult(key: string, result: unknown): Prom
     const now = Date.now();
     for (const [k, v] of Array.from(_idempotencyFallback.entries())) {
       if (now > v.expiresAt) _idempotencyFallback.delete(k);
+ _deleteFromDb("security_idempotency_fallback", k).catch(() => {});
     }
   }
 }
 
 // ─── 14. Account-Takeover (ATO) Detection ────────────────────────────────────
 interface LoginEvent { ip: string; ua: string; ts: number }
-const _loginFallback = new Map<number, LoginEvent[]>();
+const _loginFallback = new Map<number, LoginEvent[]>(); // Persisted to PostgreSQL table "security_login_fallback"
 
 export async function detectATO(
   userId: number,
@@ -252,6 +346,8 @@ export async function detectATO(
   history = history.slice(-100);
   await cacheSet(redisKey, history, 7200);
   _loginFallback.set(userId, history);
+
+  _writeThrough("security_login_fallback", String(userId), history).catch(() => {});
   return { suspicious: false };
 }
 

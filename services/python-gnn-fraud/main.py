@@ -477,7 +477,64 @@ def train_model(epochs: int = EPOCHS) -> Dict[str, Any]:
 _model: Optional[GNNFraudDetector] = None
 _graph_x: Optional[torch.Tensor] = None
 _graph_edge_index: Optional[torch.Tensor] = None
-_metadata: Dict[str, Any] = {}
+# _metadata — persisted to PostgreSQL table "gnn_fraud_metadata" (see _db__metadata_* helpers)
+
+class _DbMetadata:
+    """PostgreSQL-backed store replacing in-memory dict '_metadata'."""
+    TABLE = "gnn_fraud_metadata"
+
+    def get(self, key: str) -> dict | None:
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else None
+
+    def __getitem__(self, key: str) -> dict:
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, value) -> None:
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key: str) -> None:
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        rows = _db_exec(f"SELECT key FROM {self.TABLE}")
+        return [r["key"] for r in rows]
+
+    def values(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE}")
+        return [dict(r["data"]) for r in rows]
+
+    def items(self):
+        rows = _db_exec(f"SELECT key, data FROM {self.TABLE}")
+        return [(r["key"], dict(r["data"])) for r in rows]
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key: str, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d: dict) -> None:
+        for k, v in d.items():
+            self[k] = v
+
+_metadata = _DbMetadata()
 
 
 async def load_or_train():
@@ -718,6 +775,21 @@ async def trigger_train():
     _metadata = train_model()
     await load_or_train()
     return {"status": "trained", "data_source": data_source, **{k: v for k, v in _metadata.items() if k != "history"}}
+
+
+
+def init_pg_tables():
+    """Create PostgreSQL tables for persistent state."""
+    try:
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS gnn_fraud_metadata (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+    except Exception as e:
+        print(f"[DB] Table init error: {e}")
 
 
 if __name__ == "__main__":

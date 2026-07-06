@@ -175,7 +175,7 @@ export const stablecoinEnhancedRouter = router({
 
       if (stableWallet) {
         await db.update(stablecoinWallets)
-          .set({ balance: (Number(stableWallet.balance) + stablecoinAmount).toFixed(8), updatedAt: new Date() })
+          .set({ balance: sql`CAST(CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) + ${stablecoinAmount} AS VARCHAR)`, updatedAt: new Date() })
           .where(eq(stablecoinWallets.id, stableWallet.id))
           .returning();
       } else {
@@ -379,7 +379,7 @@ export const stablecoinEnhancedRouter = router({
 
       // Debit stablecoin wallet
       const [updStable] = await db.update(stablecoinWallets)
-        .set({ balance: (Number(stableWallet.balance) - input.stablecoinAmount).toFixed(8), updatedAt: new Date() })
+        .set({ balance: sql`CAST(CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) - ${input.stablecoinAmount} AS VARCHAR)`, updatedAt: new Date() })
         .where(and(eq(stablecoinWallets.id, stableWallet.id), sql`CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) >= ${input.stablecoinAmount}`))
         .returning();
       if (!updStable) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
@@ -391,7 +391,7 @@ export const stablecoinEnhancedRouter = router({
 
       if (fiatWallet) {
         await db.update(wallets)
-          .set({ balance: (Number(fiatWallet.balance) + netFiatAmount).toFixed(2), updatedAt: new Date() })
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${netFiatAmount} AS VARCHAR)`, updatedAt: new Date() })
           .where(eq(wallets.id, fiatWallet.id))
           .returning();
       } else {
@@ -541,11 +541,12 @@ export const stablecoinEnhancedRouter = router({
         metadata: { bankName: input.bankName, payoutRail: input.payoutRail },
       });
 
-      // Debit stablecoin wallet
-      await db.update(stablecoinWallets)
-        .set({ balance: (Number(stableWallet.balance) - input.stablecoinAmount).toFixed(8), updatedAt: new Date() })
-        .where(eq(stablecoinWallets.id, stableWallet.id))
+      // Pessimistic debit stablecoin wallet
+      const [debitedStable] = await db.update(stablecoinWallets)
+        .set({ balance: sql`CAST(CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) - ${input.stablecoinAmount} AS VARCHAR)`, updatedAt: new Date() })
+        .where(and(eq(stablecoinWallets.id, stableWallet.id), sql`CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) >= ${input.stablecoinAmount}`))
         .returning();
+      if (!debitedStable) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
 
       // Record transaction
       await db.insert(transactions).values({
@@ -643,11 +644,12 @@ export const stablecoinEnhancedRouter = router({
       const lockBonus = Math.min(input.lockDays / 30 * 0.5, 6.0);
       const effectiveApy = yieldInfo.apy + lockBonus;
 
-      // Debit wallet (move to staking pool)
-      await db.update(stablecoinWallets)
-        .set({ balance: (Number(wallet.balance) - input.amount).toFixed(8), updatedAt: new Date() })
-        .where(eq(stablecoinWallets.id, wallet.id))
+      // Pessimistic debit (move to staking pool)
+      const [debitedStake] = await db.update(stablecoinWallets)
+        .set({ balance: sql`CAST(CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) - ${input.amount} AS VARCHAR)`, updatedAt: new Date() })
+        .where(and(eq(stablecoinWallets.id, wallet.id), sql`CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) >= ${input.amount}`))
         .returning();
+      if (!debitedStake) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
 
       const stakeId = generateOrderId("STAKE");
       const unlockDate = input.lockDays > 0 ? new Date(Date.now() + input.lockDays * 86400000) : null;
@@ -714,7 +716,7 @@ export const stablecoinEnhancedRouter = router({
 
       if (wallet) {
         await db.update(stablecoinWallets)
-          .set({ balance: (Number(wallet.balance) + input.amount).toFixed(8), updatedAt: new Date() })
+          .set({ balance: sql`CAST(CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) + ${input.amount} AS VARCHAR)`, updatedAt: new Date() })
           .where(eq(stablecoinWallets.id, wallet.id))
           .returning();
       } else {
@@ -837,11 +839,12 @@ export const stablecoinEnhancedRouter = router({
         description: `Bill: ${input.billType} — ${input.billerName}`,
       });
 
-      // Debit
-      await db.update(stablecoinWallets)
-        .set({ balance: (Number(wallet.balance) - totalDebit).toFixed(8), updatedAt: new Date() })
-        .where(eq(stablecoinWallets.id, wallet.id))
+      // Pessimistic debit
+      const [debitedBill] = await db.update(stablecoinWallets)
+        .set({ balance: sql`CAST(CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) - ${totalDebit} AS VARCHAR)`, updatedAt: new Date() })
+        .where(and(eq(stablecoinWallets.id, wallet.id), sql`CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) >= ${totalDebit}`))
         .returning();
+      if (!debitedBill) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
 
       await db.insert(transactions).values({
         userId: ctx.user.id,
@@ -1021,11 +1024,12 @@ export const stablecoinEnhancedRouter = router({
 
       const bridgeId = generateOrderId("BRIDGE");
 
-      // Update wallet network
-      await db.update(stablecoinWallets)
-        .set({ balance: (Number(wallet.balance) - bridgeFee).toFixed(8), network: input.toChain, updatedAt: new Date() })
-        .where(eq(stablecoinWallets.id, wallet.id))
+      // Pessimistic debit bridge fee
+      const [debitedBridge] = await db.update(stablecoinWallets)
+        .set({ balance: sql`CAST(CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) - ${bridgeFee} AS VARCHAR)`, network: input.toChain, updatedAt: new Date() })
+        .where(and(eq(stablecoinWallets.id, wallet.id), sql`CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) >= ${bridgeFee}`))
         .returning();
+      if (!debitedBridge) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance for bridge fee (concurrent update)" });
 
       await db.insert(transactions).values({
         userId: ctx.user.id,
@@ -1132,22 +1136,22 @@ export const stablecoinEnhancedRouter = router({
 
       const [recipient] = await db.select().from(users).where(recipientCondition).limit(1);
 
-      // Debit sender
-      await db.update(stablecoinWallets)
-        .set({ balance: (Number(wallet.balance) - totalDebit).toFixed(8), updatedAt: new Date() })
-        .where(eq(stablecoinWallets.id, wallet.id))
+      // Pessimistic debit sender
+      const [debitedP2P] = await db.update(stablecoinWallets)
+        .set({ balance: sql`CAST(CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) - ${totalDebit} AS VARCHAR)`, updatedAt: new Date() })
+        .where(and(eq(stablecoinWallets.id, wallet.id), sql`CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) >= ${totalDebit}`))
         .returning();
+      if (!debitedP2P) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
 
       let recipientCredited = false;
       if (recipient) {
-        // Credit recipient's stablecoin wallet
         const [recvWallet] = await db.select().from(stablecoinWallets)
           .where(and(eq(stablecoinWallets.userId, recipient.id), eq(stablecoinWallets.symbol, input.stablecoin)))
           .limit(1);
 
         if (recvWallet) {
           await db.update(stablecoinWallets)
-            .set({ balance: (Number(recvWallet.balance) + input.amount).toFixed(8), updatedAt: new Date() })
+            .set({ balance: sql`CAST(CAST(${stablecoinWallets.balance} AS DECIMAL(18,8)) + ${input.amount} AS VARCHAR)`, updatedAt: new Date() })
             .where(eq(stablecoinWallets.id, recvWallet.id))
             .returning();
         } else {
