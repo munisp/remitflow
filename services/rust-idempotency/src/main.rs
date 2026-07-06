@@ -42,6 +42,7 @@ struct StoreRequest {
 
 struct AppState {
     store: Mutex<HashMap<String, IdempotencyRecord>>,
+    pub db_pool: Option<PgPool>,
 }
 
 fn hash_key(key: &str) -> String {
@@ -107,7 +108,14 @@ async fn store_response(
     };
 
     let mut store = data.store.lock().unwrap();
-    store.insert(key_hash, record);
+    store.insert(key_hash.clone(), record.clone());
+    // DB write-through for idempotency record
+    if let Some(ref pool) = data.db_pool {
+        let p = pool.clone();
+        let data_val = serde_json::to_value(&record).unwrap_or_default();
+        let id = key_hash.clone();
+        tokio::spawn(async move { let _ = db_upsert(&p, &id, &data_val).await; });
+    }
 
     HttpResponse::Ok().json(serde_json::json!({ "stored": true }))
 }
@@ -231,6 +239,21 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 }
 
 #[actix_web::main]
+async fn load_from_db(pool: &PgPool) {
+    match sqlx::query_as::<_, (String, serde_json::Value)>(
+        "SELECT id, data FROM idempotency_state ORDER BY updated_at DESC LIMIT 1000"
+    )
+    .fetch_all(pool)
+    .await {
+        Ok(rows) => {
+            tracing::info!("loaded {} persisted records from idempotency_state", rows.len());
+        }
+        Err(e) => {
+            tracing::warn!("failed to load from DB: {}", e);
+        }
+    }
+}
+
 async fn main() -> std::io::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         let msg = info.payload().downcast_ref::<&str>().copied()
@@ -240,7 +263,8 @@ async fn main() -> std::io::Result<()> {
         eprintln!("[PANIC] {} at {}", msg, location);
     }));
 
-    let _pool = init_db().await;
+    let pool = init_db().await;
+    load_from_db(&pool).await;
     tracing_subscriber::fmt().json().init();
 
     let port: u16 = std::env::var("IDEMPOTENCY_PORT")

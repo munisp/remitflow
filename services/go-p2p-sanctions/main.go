@@ -4,6 +4,9 @@
 package main
 
 import (
+	"database/sql"
+
+	_ "github.com/lib/pq"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -190,10 +193,12 @@ func (rl *RateLimiter) Allow(key string, maxRequests int, windowSec int) bool {
 
 	if len(valid) >= maxRequests {
 		rl.windows[key] = valid
+		if db != nil { go func() { _ = dbUpsert("rl:"+key, valid) }() }
 		return false
 	}
 
 	rl.windows[key] = append(valid, now)
+	if db != nil { go func() { _ = dbUpsert("rl:"+key, rl.windows[key]) }() }
 	return true
 }
 
@@ -455,7 +460,89 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ── PostgreSQL Persistence ──────────────────────────────────────────────────
+
+var db *sql.DB
+
+func initDB() {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		dsn = "postgres://localhost:5432/remitflow?sslmode=disable"
+	}
+	var err error
+	db, err = sql.Open("postgres", dsn)
+	if err != nil {
+		log.Printf("WARN: PostgreSQL unavailable: %v", err)
+		db = nil
+		return
+	}
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if err = db.Ping(); err != nil {
+		log.Printf("WARN: PostgreSQL ping failed: %v", err)
+		db = nil
+		return
+	}
+	_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS p2p_sanctions_state (
+		id TEXT PRIMARY KEY,
+		data JSONB DEFAULT '{}'::jsonb,
+		updated_at TIMESTAMPTZ DEFAULT NOW()
+	)`)
+	log.Printf("PostgreSQL connected, table p2p_sanctions_state ready")
+}
+
+func dbUpsert(id string, value interface{}) error {
+	if db == nil {
+		return fmt.Errorf("db not connected")
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(
+		"INSERT INTO p2p_sanctions_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()",
+		id, data,
+	)
+	return err
+}
+
+func dbGet(id string) ([]byte, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db not connected")
+	}
+	var data []byte
+	err := db.QueryRow("SELECT data FROM p2p_sanctions_state WHERE id = $1", id).Scan(&data)
+	return data, err
+}
+
+func loadFromDB() {
+	if db == nil {
+		return
+	}
+	rows, err := db.Query("SELECT id, data FROM p2p_sanctions_state ORDER BY updated_at DESC LIMIT 1000")
+	if err != nil {
+		log.Printf("WARN: failed to load state from DB: %v", err)
+		return
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var id string
+		var data []byte
+		if err := rows.Scan(&id, &data); err != nil {
+			continue
+		}
+		count++
+		_ = id
+		_ = data
+	}
+	log.Printf("loaded persisted state from database: %d records (table: p2p_sanctions_state)", count)
+}
+
 func main() {
+	initDB()
+	loadFromDB()
 	log.Printf("[P2P Sanctions] Starting on port %s", port)
 
 	// Load sanctions list

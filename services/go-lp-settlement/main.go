@@ -160,6 +160,47 @@ var (
 	settlementsMu    sync.RWMutex
 )
 
+func dbUpsertSettlement(key string, value interface{}) {
+	if db == nil {
+		return
+	}
+	go func() {
+		data, err := json.Marshal(value)
+		if err != nil {
+			return
+		}
+		_, _ = db.Exec(
+			`INSERT INTO lp_settlements (id, data, updated_at) VALUES ($1, $2::jsonb, NOW())
+			ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+			key, string(data),
+		)
+	}()
+}
+
+func loadSettlementsFromDB() {
+	if db == nil {
+		return
+	}
+	rows, err := db.Query(`SELECT id, data FROM lp_settlements`)
+	if err != nil {
+		slog.Warn("failed to load settlements from DB", "error", err)
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, data string
+		if err := rows.Scan(&id, &data); err != nil {
+			continue
+		}
+		var s SettlementResult
+		if err := json.Unmarshal([]byte(data), &s); err != nil {
+			continue
+		}
+		settlements[id] = &s
+	}
+	slog.Info("loaded settlements from DB", "count", len(settlements))
+}
+
 func init() {
 	providers = map[string]*LPProvider{
 		"mock": {
@@ -182,6 +223,7 @@ func init() {
 		},
 	}
 	settlements = make(map[string]*SettlementResult)
+	loadSettlementsFromDB()
 }
 
 // ── FX Rates ────────────────────────────────────────────────────────────────
@@ -269,6 +311,7 @@ func executeSettlement(req SettlementRequest) (*SettlementResult, error) {
 	settlementsMu.Lock()
 	settlements[settlementID] = result
 	settlementsMu.Unlock()
+	dbUpsertSettlement(settlementID, result)
 
 	slog.Info("settlement executed",
 		"settlementId", settlementID,
@@ -355,6 +398,12 @@ func main() {
 			slog.Warn("database ping failed", "error", pingErr)
 		} else {
 			slog.Info("database connected")
+			_, _ = db.Exec(`CREATE TABLE IF NOT EXISTS lp_settlements (
+				id TEXT PRIMARY KEY,
+				data JSONB DEFAULT '{}'::jsonb,
+				updated_at TIMESTAMPTZ DEFAULT NOW()
+			)`)
+			loadSettlementsFromDB()
 		}
 	}
 

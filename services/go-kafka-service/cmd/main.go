@@ -42,6 +42,23 @@ const (
 	TopicSettlement          = "remitflow.settlement"
 	TopicWebhook             = "remitflow.webhooks"
 	TopicDLQ                 = "remitflow.dlq" // Dead Letter Queue
+
+	// Core fund flow topics (from coreAtomicity middleware)
+	TopicSavingsDeposit  = "remitflow.savings.deposit"
+	TopicSavingsWithdraw = "remitflow.savings.withdraw"
+	TopicCBDCTransfer    = "remitflow.cbdc.transfer"
+	TopicCBDCReceive     = "remitflow.cbdc.receive"
+	TopicBillPayment     = "remitflow.bill.payment"
+	TopicAirtimeTopup    = "remitflow.airtime.topup"
+	TopicBatchPayment    = "remitflow.batch.payment"
+	TopicWalletTopup     = "remitflow.wallet.topup"
+	TopicWalletWithdraw  = "remitflow.wallet.withdraw"
+	TopicStablecoinSwap    = "remitflow.stablecoin.swap"
+	TopicStablecoinOnramp  = "remitflow.stablecoin.onramp"
+	TopicStablecoinOfframp = "remitflow.stablecoin.offramp"
+	TopicStablecoinBridge  = "remitflow.stablecoin.bridge"
+	TopicStablecoinYield   = "remitflow.stablecoin.yield"
+	TopicFundCompensated   = "remitflow.fund.compensated"
 )
 
 var AllTopics = []string{
@@ -50,6 +67,12 @@ var AllTopics = []string{
 	TopicNotification, TopicAuditLog, TopicKYCUpdate,
 	TopicPaymentRailCIPS, TopicPaymentRailUPI, TopicPaymentRailPIX,
 	TopicPaymentRailMojaloop, TopicSettlement, TopicWebhook, TopicDLQ,
+	TopicSavingsDeposit, TopicSavingsWithdraw,
+	TopicCBDCTransfer, TopicCBDCReceive,
+	TopicBillPayment, TopicAirtimeTopup, TopicBatchPayment,
+	TopicWalletTopup, TopicWalletWithdraw, TopicStablecoinSwap,
+	TopicStablecoinOnramp, TopicStablecoinOfframp,
+	TopicStablecoinBridge, TopicStablecoinYield, TopicFundCompensated,
 }
 
 // ─── Event Types ──────────────────────────────────────────────────────────────
@@ -89,6 +112,18 @@ type FXRateEvent struct {
 	Rate         float64 `json:"rate"`
 	Source       string  `json:"source"`
 	Timestamp    int64   `json:"timestamp"`
+}
+
+type CoreFundFlowEvent struct {
+	EventType     string                 `json:"eventType"`
+	TransactionID string                 `json:"transactionId"`
+	UserID        int64                  `json:"userId"`
+	Amount        float64                `json:"amount"`
+	Currency      string                 `json:"currency"`
+	Status        string                 `json:"status"`
+	Timestamp     string                 `json:"timestamp"`
+	Feature       string                 `json:"feature"`
+	Metadata      map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ─── Producer ─────────────────────────────────────────────────────────────────
@@ -380,6 +415,19 @@ func main() {
 		log.Fatalf("[Kafka] Consumer error: %v", err)
 	}
 
+	coreFundFlowHandler := func(topicLabel string) func([]byte) error {
+		return func(data []byte) error {
+			var ev CoreFundFlowEvent
+			if err := json.Unmarshal(data, &ev); err != nil {
+				return err
+			}
+			log.Printf("[Kafka] %s: txn=%s user=%d amount=%.2f %s status=%s",
+				topicLabel, ev.TransactionID, ev.UserID, ev.Amount, ev.Currency, ev.Status)
+			_ = dbLogEvent(topicLabel, ev)
+			return nil
+		}
+	}
+
 	handlers := map[string]func([]byte) error{
 		TopicTransferInitiated: func(data []byte) error {
 			var ev TransferEvent
@@ -388,7 +436,6 @@ func main() {
 			}
 			log.Printf("[Kafka] Transfer initiated: %s rail=%s amount=%.2f %s",
 				ev.TransactionID, ev.Rail, ev.Amount, ev.FromCurrency)
-			// In production: trigger compliance screening, notify user, update DB
 			return nil
 		},
 		TopicComplianceAlert: func(data []byte) error {
@@ -411,6 +458,16 @@ func main() {
 			log.Printf("[Kafka] FX rate: %s/%s = %.6f", ev.FromCurrency, ev.ToCurrency, ev.Rate)
 			return nil
 		},
+		TopicSavingsDeposit:  coreFundFlowHandler("SAVINGS_DEPOSIT"),
+		TopicSavingsWithdraw: coreFundFlowHandler("SAVINGS_WITHDRAW"),
+		TopicCBDCTransfer:    coreFundFlowHandler("CBDC_TRANSFER"),
+		TopicCBDCReceive:     coreFundFlowHandler("CBDC_RECEIVE"),
+		TopicBillPayment:     coreFundFlowHandler("BILL_PAYMENT"),
+		TopicAirtimeTopup:    coreFundFlowHandler("AIRTIME_TOPUP"),
+		TopicBatchPayment:    coreFundFlowHandler("BATCH_PAYMENT"),
+		TopicWalletTopup:     coreFundFlowHandler("WALLET_TOPUP"),
+		TopicWalletWithdraw:  coreFundFlowHandler("WALLET_WITHDRAW"),
+		TopicStablecoinSwap:  coreFundFlowHandler("STABLECOIN_SWAP"),
 	}
 
 	go func() {

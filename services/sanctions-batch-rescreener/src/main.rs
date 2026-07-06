@@ -25,6 +25,63 @@ use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use warp::Filter;
 
+async fn init_rescreener_db(database_url: &str) {
+    if database_url.is_empty() {
+        eprintln!("[sanctions-batch-rescreener] WARNING: DATABASE_URL not set for history persistence");
+        return;
+    }
+    match postgres::Client::connect(database_url, postgres::NoTls) {
+        Ok(mut client) => {
+            let _ = client.execute(
+                "CREATE TABLE IF NOT EXISTS rescreener_history (id TEXT PRIMARY KEY, data JSONB DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ DEFAULT NOW())",
+                &[],
+            );
+            eprintln!("[sanctions-batch-rescreener] PostgreSQL write-through enabled");
+        }
+        Err(e) => {
+            eprintln!("[sanctions-batch-rescreener] DB connection failed: {}", e);
+        }
+    }
+}
+
+fn db_upsert_run(database_url: &str, run: &RescreenRun) {
+    if database_url.is_empty() { return; }
+    let data = serde_json::to_string(run).unwrap_or_default();
+    let key = run.run_id.clone();
+    let url = database_url.to_string();
+    std::thread::spawn(move || {
+        if let Ok(mut client) = postgres::Client::connect(&url, postgres::NoTls) {
+            let _ = client.execute(
+                "INSERT INTO rescreener_history (id, data, updated_at) VALUES ($1, $2::jsonb, NOW()) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()",
+                &[&key, &data],
+            );
+        }
+    });
+}
+
+fn load_history_from_db(database_url: &str) -> Vec<RescreenRun> {
+    if database_url.is_empty() { return Vec::new(); }
+    match postgres::Client::connect(database_url, postgres::NoTls) {
+        Ok(mut client) => {
+            match client.query("SELECT id, data FROM rescreener_history ORDER BY updated_at DESC LIMIT 100", &[]) {
+                Ok(rows) => {
+                    let mut history = Vec::new();
+                    for row in &rows {
+                        let data: String = row.get(1);
+                        if let Ok(run) = serde_json::from_str::<RescreenRun>(&data) {
+                            history.push(run);
+                        }
+                    }
+                    eprintln!("[sanctions-batch-rescreener] Loaded {} history entries from DB", history.len());
+                    history
+                }
+                Err(_) => Vec::new()
+            }
+        }
+        Err(_) => Vec::new()
+    }
+}
+
 const DEFAULT_PORT: u16 = 8122;
 const DEFAULT_BATCH_SIZE: usize = 100;
 const DEFAULT_PARALLELISM: usize = 10;
@@ -340,6 +397,7 @@ async fn run_batch_rescreen(state: SharedState) {
             run.duration_ms = Some(duration);
         }
         if let Some(run) = s.current_run.clone() {
+            db_upsert_run(&s.config.database_url, &run);
             s.history.push(run);
         }
     }
@@ -354,10 +412,13 @@ async fn run_batch_rescreen(state: SharedState) {
 
 #[tokio::main]
 async fn main() {
+    let cfg = RescreenConfig::default();
+    init_rescreener_db(&cfg.database_url).await;
+    let loaded_history = load_history_from_db(&cfg.database_url);
     let state: SharedState = Arc::new(Mutex::new(AppState {
-        config: RescreenConfig::default(),
+        config: cfg,
         current_run: None,
-        history: Vec::new(),
+        history: loaded_history,
         http_client: reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
             .build()

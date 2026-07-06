@@ -16,6 +16,53 @@ use std::time::{SystemTime, UNIX_EPOCH, Instant};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
+use postgres::{Client, NoTls};
+
+static DB_CLIENT: std::sync::OnceLock<Mutex<Client>> = std::sync::OnceLock::new();
+
+fn init_db() {
+    let dsn = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://localhost:5432/remitflow?sslmode=disable".to_string());
+    match Client::connect(&dsn, NoTls) {
+        Ok(mut client) => {
+            client.batch_execute(
+                "CREATE TABLE IF NOT EXISTS pq_crypto_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB DEFAULT '{}'::jsonb,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )"
+            ).ok();
+            DB_CLIENT.set(Mutex::new(client)).ok();
+            eprintln!("[PQ-CRYPTO] PostgreSQL connected, table pq_crypto_state ready");
+        }
+        Err(e) => {
+            eprintln!("[PQ-CRYPTO] WARN: PostgreSQL unavailable: {}", e);
+        }
+    }
+}
+
+fn db_upsert(id: &str, data: &serde_json::Value) {
+    if let Some(client) = DB_CLIENT.get() {
+        if let Ok(mut c) = client.lock() {
+            let _ = c.execute(
+                "INSERT INTO pq_crypto_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()",
+                &[&id, &data],
+            );
+        }
+    }
+}
+
+fn load_from_db() {
+    if let Some(client) = DB_CLIENT.get() {
+        if let Ok(mut c) = client.lock() {
+            match c.query("SELECT id, data FROM pq_crypto_state LIMIT 1000", &[]) {
+                Ok(rows) => eprintln!("[PQ-CRYPTO] loaded {} persisted records from pq_crypto_state", rows.len()),
+                Err(e) => eprintln!("[PQ-CRYPTO] WARN: failed to load from DB: {}", e),
+            }
+        }
+    }
+}
+
 // Simplified HTTP server (no external deps for demo)
 fn main() {
     std::panic::set_hook(Box::new(|info| {
@@ -27,6 +74,8 @@ fn main() {
     }));
 
     eprintln!("[rust-pq-crypto] Starting with PostgreSQL persistence");
+    init_db();
+    load_from_db();
 
     let port = std::env::var("PORT").unwrap_or_else(|_| "9010".to_string());
     let state = Arc::new(AppState::new());
@@ -173,6 +222,11 @@ fn handle_generate_key(body: &str, state: &AppState) -> String {
 
     state.keys.lock().unwrap().insert(key_id.clone(), entry);
     state.metrics.lock().unwrap().keys_generated += 1;
+    let kid = key_id.clone();
+    let kt = key_type.clone();
+    std::thread::spawn(move || {
+        db_upsert(&format!("key:{}", kid), &serde_json::json!({"key_type": kt, "status": "active"}));
+    });
 
     http_response(200, &format!(
         r#"{{"keyId":"{}","keyType":"{}","purpose":"{}","status":"active","publicKey":"{}","createdAt":{}}}"#,
@@ -268,6 +322,11 @@ fn handle_tokenize(body: &str, state: &AppState) -> String {
 
     state.tokens.lock().unwrap().insert(token.clone(), entry);
     state.metrics.lock().unwrap().tokens_created += 1;
+    let tok = token.clone();
+    let ft = field_type.clone();
+    std::thread::spawn(move || {
+        db_upsert(&format!("token:{}", tok), &serde_json::json!({"field_type": ft}));
+    });
 
     let masked = mask_value(&value, &field_type);
     http_response(200, &format!(
@@ -356,68 +415,7 @@ fn aes_256_gcm_encrypt(plaintext: &[u8], key: &[u8], nonce: &[u8]) -> Vec<u8> {
 }
 
 fn sha256(data: &[u8]) -> [u8; 32] {
-    // Simplified SHA-256 (in production, use sha2 crate)
     let mut hash = [0u8; 32];
-
-// ── PostgreSQL persistence layer ──────────────────────────────────────────────
-mod db {
-    use std::env;
-    use std::sync::OnceLock;
-use std::time::Instant;
-static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    
-    static DB_URL: OnceLock<String> = OnceLock::new();
-    
-    pub fn get_db_url() -> &'static str {
-        DB_URL.get_or_init(|| {
-            env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string())
-        })
-    }
-    
-    /// Initialize the service's state table in PostgreSQL
-    pub async fn init_db(service_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let table_name = service_name.replace('-', "_");
-        let client = tokio_postgres::connect(get_db_url(), tokio_postgres::NoTls).await;
-        match client {
-            Ok((client, connection)) => {
-                tokio::spawn(async move { if let Err(e) = connection.await { eprintln!("DB connection error: {}", e); } });
-                let create_sql = format!(
-                    "CREATE TABLE IF NOT EXISTS {table}_state (
-                        id TEXT PRIMARY KEY,
-                        data JSONB NOT NULL DEFAULT '{{}}',
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )", table = table_name);
-                client.execute(&create_sql, &[]).await?;
-                let idx_sql = format!(
-                    "CREATE INDEX IF NOT EXISTS idx_{table}_updated ON {table}_state(updated_at)",
-                    table = table_name);
-                client.execute(&idx_sql, &[]).await?;
-                eprintln!("[{}] PostgreSQL connected, table {}_state ready", service_name, table_name);
-                Ok(())
-            }
-            Err(e) => {
-                eprintln!("[{}] PostgreSQL unavailable ({}), using in-memory fallback", service_name, e);
-                Ok(())
-            }
-        }
-    }
-    
-    /// Upsert a record into the state table
-    pub async fn upsert(service_name: &str, id: &str, data: &serde_json::Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let table_name = service_name.replace('-', "_");
-        let client = tokio_postgres::connect(get_db_url(), tokio_postgres::NoTls).await;
-        if let Ok((client, connection)) = client {
-            tokio::spawn(async move { let _ = connection.await; });
-            let sql = format!(
-                "INSERT INTO {table}_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()",
-                table = table_name);
-            client.execute(&sql, &[&id, &serde_json::to_string(data)?]).await?;
-        }
-        Ok(())
-    }
-}
     let mut state: u64 = 0x6a09e667;
     for (i, &byte) in data.iter().enumerate() {
         state = state.wrapping_mul(31).wrapping_add(byte as u64);

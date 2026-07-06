@@ -197,14 +197,356 @@ class WorkflowRun:
     training_samples: int = 0
 
 
-_workflows: Dict[str, WorkflowRun] = {}
-_schedules: Dict[str, Dict] = {}
-_drift_state: Dict[str, Dict] = {}
-_feedback_store: Dict[str, List[Dict]] = {}  # model_name → predictions
+# _workflows — persisted to PostgreSQL table "ml_retraining_workflows" (see _db__workflows_* helpers)
+
+class _DbWorkflows:
+    """PostgreSQL-backed store replacing in-memory dict '_workflows'."""
+    TABLE = "ml_retraining_workflows"
+
+    def get(self, key: str) -> dict | None:
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else None
+
+    def __getitem__(self, key: str) -> dict:
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, value) -> None:
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key: str) -> None:
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        rows = _db_exec(f"SELECT key FROM {self.TABLE}")
+        return [r["key"] for r in rows]
+
+    def values(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE}")
+        return [dict(r["data"]) for r in rows]
+
+    def items(self):
+        rows = _db_exec(f"SELECT key, data FROM {self.TABLE}")
+        return [(r["key"], dict(r["data"])) for r in rows]
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key: str, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d: dict) -> None:
+        for k, v in d.items():
+            self[k] = v
+
+_workflows = _DbWorkflows()
+# _schedules — persisted to PostgreSQL table "ml_retraining_schedules" (see _db__schedules_* helpers)
+
+class _DbSchedules:
+    """PostgreSQL-backed store replacing in-memory dict '_schedules'."""
+    TABLE = "ml_retraining_schedules"
+
+    def get(self, key: str) -> dict | None:
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else None
+
+    def __getitem__(self, key: str) -> dict:
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, value) -> None:
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key: str) -> None:
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        rows = _db_exec(f"SELECT key FROM {self.TABLE}")
+        return [r["key"] for r in rows]
+
+    def values(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE}")
+        return [dict(r["data"]) for r in rows]
+
+    def items(self):
+        rows = _db_exec(f"SELECT key, data FROM {self.TABLE}")
+        return [(r["key"], dict(r["data"])) for r in rows]
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key: str, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d: dict) -> None:
+        for k, v in d.items():
+            self[k] = v
+
+_schedules = _DbSchedules()
+# _drift_state — persisted to PostgreSQL table "ml_drift_state" (see _db__drift_state_* helpers)
+
+class _DbDriftState:
+    """PostgreSQL-backed store replacing in-memory dict '_drift_state'."""
+    TABLE = "ml_drift_state"
+
+    def get(self, key: str) -> dict | None:
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else None
+
+    def __getitem__(self, key: str) -> dict:
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, value) -> None:
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key: str) -> None:
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        rows = _db_exec(f"SELECT key FROM {self.TABLE}")
+        return [r["key"] for r in rows]
+
+    def values(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE}")
+        return [dict(r["data"]) for r in rows]
+
+    def items(self):
+        rows = _db_exec(f"SELECT key, data FROM {self.TABLE}")
+        return [(r["key"], dict(r["data"])) for r in rows]
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key: str, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d: dict) -> None:
+        for k, v in d.items():
+            self[k] = v
+
+_drift_state = _DbDriftState()
+# _feedback_store — persisted to PostgreSQL table "ml_feedback_store" (see _db__feedback_store_* helpers)
+
+class _DbFeedbackStore:
+    """PostgreSQL-backed store replacing in-memory dict '_feedback_store'."""
+    TABLE = "ml_feedback_store"
+
+    def get(self, key: str) -> dict | None:
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else None
+
+    def __getitem__(self, key: str) -> dict:
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, value) -> None:
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key: str) -> None:
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        rows = _db_exec(f"SELECT key FROM {self.TABLE}")
+        return [r["key"] for r in rows]
+
+    def values(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE}")
+        return [dict(r["data"]) for r in rows]
+
+    def items(self):
+        rows = _db_exec(f"SELECT key, data FROM {self.TABLE}")
+        return [(r["key"], dict(r["data"])) for r in rows]
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key: str, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d: dict) -> None:
+        for k, v in d.items():
+            self[k] = v
+
+_feedback_store = _DbFeedbackStore()
 _continuous_training_active = False
 _continuous_training_thread: Optional[threading.Thread] = None
-_last_retrain_time: Dict[str, float] = {}
-_champion_metrics: Dict[str, Dict[str, float]] = {}  # current best metrics per model
+# _last_retrain_time — persisted to PostgreSQL table "ml_last_retrain_time" (see _db__last_retrain_time_* helpers)
+
+class _DbLastRetrainTime:
+    """PostgreSQL-backed store replacing in-memory dict '_last_retrain_time'."""
+    TABLE = "ml_last_retrain_time"
+
+    def get(self, key: str) -> dict | None:
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else None
+
+    def __getitem__(self, key: str) -> dict:
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, value) -> None:
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key: str) -> None:
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        rows = _db_exec(f"SELECT key FROM {self.TABLE}")
+        return [r["key"] for r in rows]
+
+    def values(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE}")
+        return [dict(r["data"]) for r in rows]
+
+    def items(self):
+        rows = _db_exec(f"SELECT key, data FROM {self.TABLE}")
+        return [(r["key"], dict(r["data"])) for r in rows]
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key: str, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d: dict) -> None:
+        for k, v in d.items():
+            self[k] = v
+
+_last_retrain_time = _DbLastRetrainTime()
+# _champion_metrics — persisted to PostgreSQL table "ml_champion_metrics" (see _db__champion_metrics_* helpers)
+
+class _DbChampionMetrics:
+    """PostgreSQL-backed store replacing in-memory dict '_champion_metrics'."""
+    TABLE = "ml_champion_metrics"
+
+    def get(self, key: str) -> dict | None:
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else None
+
+    def __getitem__(self, key: str) -> dict:
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key: str, value) -> None:
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key: str) -> bool:
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key: str) -> None:
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        rows = _db_exec(f"SELECT key FROM {self.TABLE}")
+        return [r["key"] for r in rows]
+
+    def values(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE}")
+        return [dict(r["data"]) for r in rows]
+
+    def items(self):
+        rows = _db_exec(f"SELECT key, data FROM {self.TABLE}")
+        return [(r["key"], dict(r["data"])) for r in rows]
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key: str, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d: dict) -> None:
+        for k, v in d.items():
+            self[k] = v
+
+_champion_metrics = _DbChampionMetrics()
 
 
 # ─── Platform Data Loading ───────────────────────────────────────────────────
@@ -1010,6 +1352,56 @@ def data_source_status():
 
     loader.close()
     return sources
+
+
+
+def init_pg_tables():
+    """Create PostgreSQL tables for persistent state."""
+    try:
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS ml_retraining_workflows (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS ml_retraining_schedules (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS ml_drift_state (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS ml_feedback_store (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS ml_last_retrain_time (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS ml_champion_metrics (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+    except Exception as e:
+        print(f"[DB] Table init error: {e}")
 
 
 if __name__ == "__main__":

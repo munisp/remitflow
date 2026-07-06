@@ -30,6 +30,10 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import psycopg2
+import psycopg2.pool
+import psycopg2.extras
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("qr-nfc-analytics")
 
@@ -95,10 +99,154 @@ class FraudSignal:
 
 # ── In-Memory Analytics Store ─────────────────────────────────────────────────
 
-qr_scans: list[QRScanEvent] = []
-nfc_transactions: list[NFCTxEvent] = []
-fraud_signals: list[FraudSignal] = []
-terminal_metrics: dict[str, TerminalMetrics] = {}
+# qr_scans — persisted to PostgreSQL table "qr_scan_events"
+
+class _DbQrScansList:
+    TABLE = "qr_scan_events"
+
+    def append(self, item) -> None:
+        import json as _json
+        data = item if isinstance(item, dict) else item.__dict__ if hasattr(item, "__dict__") else {"value": item}
+        _db_exec(
+            f"INSERT INTO {self.TABLE} (data) VALUES (%s)",
+            (_json.dumps(data, default=str),),
+        )
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def __iter__(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE} ORDER BY created_at ASC")
+        return iter([dict(r["data"]) for r in rows])
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            rows = _db_exec(f"SELECT data FROM {self.TABLE} ORDER BY created_at ASC")
+            return [dict(r["data"]) for r in rows][idx]
+        rows = _db_exec(f"SELECT data FROM {self.TABLE} ORDER BY created_at ASC LIMIT 1 OFFSET %s", (idx,))
+        return dict(rows[0]["data"]) if rows else None
+
+qr_scans = _DbQrScansList()
+# nfc_transactions — persisted to PostgreSQL table "nfc_tx_events"
+
+class _DbNfcTransactionsList:
+    TABLE = "nfc_tx_events"
+
+    def append(self, item) -> None:
+        import json as _json
+        data = item if isinstance(item, dict) else item.__dict__ if hasattr(item, "__dict__") else {"value": item}
+        _db_exec(
+            f"INSERT INTO {self.TABLE} (data) VALUES (%s)",
+            (_json.dumps(data, default=str),),
+        )
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def __iter__(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE} ORDER BY created_at ASC")
+        return iter([dict(r["data"]) for r in rows])
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            rows = _db_exec(f"SELECT data FROM {self.TABLE} ORDER BY created_at ASC")
+            return [dict(r["data"]) for r in rows][idx]
+        rows = _db_exec(f"SELECT data FROM {self.TABLE} ORDER BY created_at ASC LIMIT 1 OFFSET %s", (idx,))
+        return dict(rows[0]["data"]) if rows else None
+
+nfc_transactions = _DbNfcTransactionsList()
+# fraud_signals — persisted to PostgreSQL table "fraud_signal_events"
+
+class _DbFraudSignalsList:
+    TABLE = "fraud_signal_events"
+
+    def append(self, item) -> None:
+        import json as _json
+        data = item if isinstance(item, dict) else item.__dict__ if hasattr(item, "__dict__") else {"value": item}
+        _db_exec(
+            f"INSERT INTO {self.TABLE} (data) VALUES (%s)",
+            (_json.dumps(data, default=str),),
+        )
+
+    def __len__(self) -> int:
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def __iter__(self):
+        rows = _db_exec(f"SELECT data FROM {self.TABLE} ORDER BY created_at ASC")
+        return iter([dict(r["data"]) for r in rows])
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            rows = _db_exec(f"SELECT data FROM {self.TABLE} ORDER BY created_at ASC")
+            return [dict(r["data"]) for r in rows][idx]
+        rows = _db_exec(f"SELECT data FROM {self.TABLE} ORDER BY created_at ASC LIMIT 1 OFFSET %s", (idx,))
+        return dict(rows[0]["data"]) if rows else None
+
+fraud_signals = _DbFraudSignalsList()
+# terminal_metrics — persisted to PostgreSQL table "terminal_metrics_store"
+
+class _DbTerminalMetrics:
+    TABLE = "terminal_metrics_store"
+
+    def get(self, key, default=None):
+        row = _db_one(f"SELECT data FROM {self.TABLE} WHERE key = %s", (str(key),))
+        return dict(row["data"]) if row else default
+
+    def __getitem__(self, key):
+        val = self.get(str(key))
+        if val is None:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key, value):
+        import json as _json
+        _db_exec(
+            f"""INSERT INTO {self.TABLE} (key, data, updated_at) VALUES (%s, %s, NOW())
+                ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()""",
+            (str(key), _json.dumps(value, default=str)),
+        )
+
+    def __contains__(self, key):
+        return self.get(str(key)) is not None
+
+    def __delitem__(self, key):
+        _db_exec(f"DELETE FROM {self.TABLE} WHERE key = %s", (str(key),))
+
+    def keys(self):
+        return [r["key"] for r in _db_exec(f"SELECT key FROM {self.TABLE}")]
+
+    def values(self):
+        return [dict(r["data"]) for r in _db_exec(f"SELECT data FROM {self.TABLE}")]
+
+    def items(self):
+        return [(r["key"], dict(r["data"])) for r in _db_exec(f"SELECT key, data FROM {self.TABLE}")]
+
+    def __len__(self):
+        row = _db_one(f"SELECT COUNT(*) AS cnt FROM {self.TABLE}")
+        return row["cnt"] if row else 0
+
+    def pop(self, key, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            self.__delitem__(str(key))
+            return val
+        return default
+
+    def update(self, d):
+        for k, v in d.items():
+            self[k] = v
+
+    def setdefault(self, key, default=None):
+        val = self.get(str(key))
+        if val is not None:
+            return val
+        self[key] = default
+        return default
+
+terminal_metrics = _DbTerminalMetrics()
 
 # Velocity tracking
 scanner_velocity: dict[str, list[float]] = defaultdict(list)  # scanner_id -> [timestamps]
@@ -502,7 +650,44 @@ class AnalyticsHandler(BaseHTTPRequestHandler):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+
+def init_pg_tables():
+    """Create PostgreSQL tables for persistent state."""
+    try:
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS qr_scan_events (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS nfc_tx_events (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS fraud_signal_events (
+            id SERIAL PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS terminal_metrics_store (
+            key TEXT PRIMARY KEY,
+            data JSONB NOT NULL DEFAULT '{}'::jsonb,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+    except Exception as e:
+        print(f"[DB] Table init error: {e}")
+
+
 def main():
+    init_pg_tables()
     server = HTTPServer(("0.0.0.0", PORT), AnalyticsHandler)
     logger.info(f"[QR/NFC Analytics Python] listening on :{PORT}")
     logger.info(f"[QR/NFC Analytics Python] endpoints: /api/analytics/{{qr,nfc,fraud,terminals,heatmap,dashboard}}, /api/events/{{qr-scan,nfc-tx,offline-batch}}, /api/fraud/check")

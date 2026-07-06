@@ -70,20 +70,29 @@ pub struct QueryParams {
 pub struct AppState {
     pub events: Mutex<VecDeque<AuditEvent>>,
     pub total_received: Mutex<u64>,
+    pub db_pool: Option<PgPool>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(pool: Option<PgPool>) -> Self {
         Self {
             events: Mutex::new(VecDeque::with_capacity(RING_BUFFER_CAPACITY)),
             total_received: Mutex::new(0),
+            db_pool: pool,
         }
     }
 
     pub fn push_event(&self, event: AuditEvent) {
         let mut buf = self.events.lock().unwrap();
         if buf.len() >= RING_BUFFER_CAPACITY { buf.pop_front(); }
-        buf.push_back(event);
+        buf.push_back(event.clone());
+        // DB write-through for event
+        if let Some(ref pool) = self.db_pool {
+            let p = pool.clone();
+            let data = serde_json::to_value(&event).unwrap_or_default();
+            let id = event.id.to_string();
+            tokio::spawn(async move { let _ = db_upsert(&p, &id, &data).await; });
+        }
         *self.total_received.lock().unwrap() += 1;
     }
 
@@ -315,6 +324,21 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
 }
 
 #[tokio::main]
+async fn load_from_db(pool: &PgPool) {
+    match sqlx::query_as::<_, (String, serde_json::Value)>(
+        "SELECT id, data FROM audit_service_state ORDER BY updated_at DESC LIMIT 1000"
+    )
+    .fetch_all(pool)
+    .await {
+        Ok(rows) => {
+            tracing::info!("loaded {} persisted records from audit_service_state", rows.len());
+        }
+        Err(e) => {
+            tracing::warn!("failed to load from DB: {}", e);
+        }
+    }
+}
+
 async fn main() -> std::io::Result<()> {
     // Panic hook for logging panics without crashing silently
     std::panic::set_hook(Box::new(|info| {
@@ -325,10 +349,11 @@ async fn main() -> std::io::Result<()> {
         eprintln!("[PANIC] {} at {}", msg, location);
     }));
 
-    let _pool = init_db().await;
+    let pool = init_db().await;
+    load_from_db(&pool).await;
     tracing_subscriber::fmt().with_env_filter(env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string())).init();
     let port: u16 = env::var("PORT").unwrap_or_else(|_| "8082".to_string()).parse().unwrap_or(8082);
-    let state = Arc::new(AppState::new());
+    let state = Arc::new(AppState::new(Some(pool.clone())));
     let app = Router::new()
         .route("/audit/log", post(create_audit_event))
         .route("/audit/batch", post(batch_create_audit_events))
@@ -367,7 +392,7 @@ use std::time::Instant;
 static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
     fn build_app() -> Router {
-        let state = Arc::new(AppState::new());
+        let state = Arc::new(AppState::new(None));
         Router::new()
             .route("/audit/log", post(create_audit_event))
             .route("/audit/batch", post(batch_create_audit_events))
@@ -421,7 +446,7 @@ static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new()
 
     #[tokio::test]
     async fn test_ring_buffer_eviction() {
-        let state = Arc::new(AppState::new());
+        let state = Arc::new(AppState::new(None));
         for i in 0..(RING_BUFFER_CAPACITY + 100) {
             let id = Uuid::new_v4().to_string();
             let ts = Utc::now();

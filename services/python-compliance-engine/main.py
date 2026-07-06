@@ -168,13 +168,94 @@ class ComplianceMetrics:
 
 # ─── Sanctions Database (In-memory + DB-backed) ─────────────────────────────────
 
+
+def _init_compliance_tables():
+    """Create persistent tables for compliance engine."""
+    try:
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS sanctions_entries (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                list_source TEXT,
+                country TEXT,
+                dob TEXT,
+                document_numbers JSONB DEFAULT '[]'::jsonb,
+                aliases JSONB DEFAULT '[]'::jsonb,
+                entity_type TEXT DEFAULT 'individual',
+                added_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        _db_exec("""
+            CREATE TABLE IF NOT EXISTS sanctions_name_index (
+                key TEXT PRIMARY KEY,
+                entry_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+    except Exception as e:
+        print(f"[DB] Compliance table init error: {e}")
+
 class SanctionsDatabase:
     """Production sanctions list management with fuzzy matching."""
 
     def __init__(self):
+        _init_compliance_tables()
         self.entries: list[SanctionsEntry] = []
         self.name_index: dict[str, list[int]] = {}
-        self._load_consolidated_list()
+        self._load_from_db()
+        if not self.entries:
+            self._load_consolidated_list()
+
+    def _load_from_db(self):
+        """Load sanctions entries from PostgreSQL."""
+        try:
+            rows = _db_exec("SELECT * FROM sanctions_entries ORDER BY id")
+            for row in rows:
+                entry = SanctionsEntry(
+                    name=row.get("name", ""),
+                    list_source=row.get("list_source", ""),
+                    country=row.get("country", ""),
+                    dob=row.get("dob"),
+                    document_numbers=list(row.get("document_numbers", [])),
+                    aliases=list(row.get("aliases", [])),
+                    entity_type=row.get("entity_type", "individual"),
+                )
+                self.entries.append(entry)
+            # Load name index
+            idx_rows = _db_exec("SELECT key, entry_ids FROM sanctions_name_index")
+            for r in idx_rows:
+                self.name_index[r["key"]] = list(r["entry_ids"])
+        except Exception as e:
+            print(f"[DB] Load sanctions entries error: {e}")
+
+    def _persist_entry(self, entry: SanctionsEntry):
+        """Persist a single sanctions entry to PostgreSQL."""
+        import json
+        try:
+            _db_exec(
+                """INSERT INTO sanctions_entries (name, list_source, country, dob, document_numbers, aliases, entity_type)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (entry.name, entry.list_source, entry.country, entry.dob,
+                 json.dumps(entry.document_numbers if hasattr(entry, 'document_numbers') else []),
+                 json.dumps(entry.aliases if hasattr(entry, 'aliases') else []),
+                 entry.entity_type if hasattr(entry, 'entity_type') else 'individual'),
+            )
+        except Exception as e:
+            print(f"[DB] Persist sanctions entry error: {e}")
+
+    def _persist_name_index(self):
+        """Persist name index to PostgreSQL."""
+        import json
+        try:
+            for key, ids in self.name_index.items():
+                _db_exec(
+                    """INSERT INTO sanctions_name_index (key, entry_ids, updated_at)
+                       VALUES (%s, %s, NOW())
+                       ON CONFLICT (key) DO UPDATE SET entry_ids = EXCLUDED.entry_ids, updated_at = NOW()""",
+                    (key, json.dumps(ids)),
+                )
+        except Exception as e:
+            print(f"[DB] Persist name index error: {e}")
 
     def _load_consolidated_list(self):
         """Load sanctions entries from known lists."""

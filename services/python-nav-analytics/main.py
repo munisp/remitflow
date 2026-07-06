@@ -204,7 +204,14 @@ USER_SEGMENTS = ["diaspora_sender", "marketplace_seller", "investor", "family_ma
 
 class EventStore:
     def __init__(self):
+        _init_nav_tables()
         self.events: List[Dict[str, Any]] = []
+        # Load existing events from PostgreSQL
+        try:
+            rows = _db_exec("SELECT data FROM nav_analytics_events ORDER BY created_at ASC")
+            self.events = [dict(r["data"]) for r in rows]
+        except Exception:
+            pass
         self.start_time = datetime.now(timezone.utc)
         self._seed_demo_events()
 
@@ -250,6 +257,12 @@ class EventStore:
 
     def add(self, event: Dict[str, Any]):
         self.events.append(event)
+        # Persist event to PostgreSQL
+        try:
+            import json as _json
+            _db_exec("INSERT INTO nav_analytics_events (data) VALUES (%s)", (_json.dumps(event, default=str),))
+        except Exception:
+            pass
 
     def add_batch(self, events: List[Dict[str, Any]]):
         self.events.extend(events)
