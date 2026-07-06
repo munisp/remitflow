@@ -53,13 +53,13 @@ const (
 
 // Transfer codes
 const (
-	TransferCodeStandard   = 1
-	TransferCodeReversal   = 2
-	TransferCodeFee        = 3
-	TransferCodeEscrowLock = 4
+	TransferCodeStandard      = 1
+	TransferCodeReversal      = 2
+	TransferCodeFee           = 3
+	TransferCodeEscrowLock    = 4
 	TransferCodeEscrowRelease = 5
-	TransferCodeFX         = 6
-	TransferCodePayroll    = 7
+	TransferCodeFX            = 6
+	TransferCodePayroll       = 7
 )
 
 // Transfer flags (TigerBeetle two-phase protocol)
@@ -153,6 +153,10 @@ func minorToAmount(minor int64) float64 {
 func initDB() *sql.DB {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
+		// FAIL-CLOSED: never fall back to hardcoded credentials in production.
+		if os.Getenv("NODE_ENV") == "production" || os.Getenv("GO_ENV") == "production" {
+			log.Fatalf("[ledger-service] DATABASE_URL is required in production")
+		}
 		dbURL = "postgresql://remitflow:remitflow123@localhost:5432/remitflow?sslmode=disable"
 	}
 
@@ -250,16 +254,16 @@ func (s *LedgerService) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]interface{}{
 		"status":                status,
-		"service":              "go-ledger-service",
-		"version":             "v2.0.0-production",
+		"service":               "go-ledger-service",
+		"version":               "v2.0.0-production",
 		"tigerbeetle_connected": true,
-		"postgres_connected":   pgOK,
-		"kafka_connected":      true,
-		"fail_closed":         s.isProduction,
-		"two_phase_enabled":   true,
-		"dapr_enabled":        true,
-		"temporal_enabled":    true,
-		"timestamp":           time.Now().UTC().Format(time.RFC3339),
+		"postgres_connected":    pgOK,
+		"kafka_connected":       true,
+		"fail_closed":           s.isProduction,
+		"two_phase_enabled":     true,
+		"dapr_enabled":          true,
+		"temporal_enabled":      true,
+		"timestamp":             time.Now().UTC().Format(time.RFC3339),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
@@ -383,6 +387,18 @@ func (s *LedgerService) handleCreateTransfer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Reject non-positive amounts. A negative amount would pass the balance
+	// pre-check (available < negative is false) and reverse the fund flow.
+	if req.Amount <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "INVALID_AMOUNT",
+			"amount":  req.Amount,
+			"message": "Transfer amount must be greater than zero",
+		})
+		return
+	}
+
 	// Idempotency check
 	if req.IdempotencyKey != "" {
 		var existingID string
@@ -453,13 +469,24 @@ func (s *LedgerService) handleCreateTransfer(w http.ResponseWriter, r *http.Requ
 	if req.IdempotencyKey != "" {
 		idempKey = &req.IdempotencyKey
 	}
-	_, err = s.db.Exec(
+
+	// Insert the transfer and update balances atomically: a crash between the
+	// insert and the balance updates would otherwise leave the ledger inconsistent.
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: begin tx failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "TRANSFER_FAILED", "message": "Failed to persist transfer — operation blocked"})
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err = tx.Exec(
 		`INSERT INTO ledger_transfers (id, debit_account_id, credit_account_id, amount, ledger, code, flags, timeout, status, idempotency_key)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		transferID, req.DebitAccountID, req.CreditAccountID,
 		fmt.Sprintf("%d", amountMinor), 1, code, flags, req.TimeoutSeconds, status, idempKey,
-	)
-	if err != nil {
+	); err != nil {
 		log.Printf("[ledger-service] FAIL-CLOSED: Transfer persistence failed: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -469,22 +496,38 @@ func (s *LedgerService) handleCreateTransfer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Update balances
+	// Update balances (within the same transaction)
+	var balErr error
 	if req.Pending {
-		s.db.Exec("UPDATE ledger_accounts SET debits_pending = debits_pending + $1, updated_at = NOW() WHERE id = $2",
-			fmt.Sprintf("%d", amountMinor), req.DebitAccountID)
-		s.db.Exec("UPDATE ledger_accounts SET credits_pending = credits_pending + $1, updated_at = NOW() WHERE id = $2",
-			fmt.Sprintf("%d", amountMinor), req.CreditAccountID)
+		if _, balErr = tx.Exec("UPDATE ledger_accounts SET debits_pending = debits_pending + $1, updated_at = NOW() WHERE id = $2",
+			fmt.Sprintf("%d", amountMinor), req.DebitAccountID); balErr == nil {
+			_, balErr = tx.Exec("UPDATE ledger_accounts SET credits_pending = credits_pending + $1, updated_at = NOW() WHERE id = $2",
+				fmt.Sprintf("%d", amountMinor), req.CreditAccountID)
+		}
 	} else {
-		s.db.Exec("UPDATE ledger_accounts SET debits_posted = debits_posted + $1, updated_at = NOW() WHERE id = $2",
-			fmt.Sprintf("%d", amountMinor), req.DebitAccountID)
-		s.db.Exec("UPDATE ledger_accounts SET credits_posted = credits_posted + $1, updated_at = NOW() WHERE id = $2",
-			fmt.Sprintf("%d", amountMinor), req.CreditAccountID)
+		if _, balErr = tx.Exec("UPDATE ledger_accounts SET debits_posted = debits_posted + $1, updated_at = NOW() WHERE id = $2",
+			fmt.Sprintf("%d", amountMinor), req.DebitAccountID); balErr == nil {
+			_, balErr = tx.Exec("UPDATE ledger_accounts SET credits_posted = credits_posted + $1, updated_at = NOW() WHERE id = $2",
+				fmt.Sprintf("%d", amountMinor), req.CreditAccountID)
+		}
+	}
+	if balErr != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: balance update failed: %v", balErr)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "TRANSFER_FAILED", "message": "Failed to update balances — operation blocked"})
+		return
+	}
+
+	if err = tx.Commit(); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: commit failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "TRANSFER_FAILED", "message": "Failed to commit transfer — operation blocked"})
+		return
 	}
 
 	// Emit Kafka event
 	s.publishEvent(status, transferID, map[string]interface{}{
-		"event":              "transfer_" + status,
+		"event":             "transfer_" + status,
 		"transfer_id":       transferID,
 		"debit_account_id":  req.DebitAccountID,
 		"credit_account_id": req.CreditAccountID,
@@ -538,6 +581,15 @@ func (s *LedgerService) handlePostPending(w http.ResponseWriter, r *http.Request
 			"pending_transfer_id": req.PendingTransferID,
 		})
 		return
+	} else if err != nil {
+		// Any other DB error must not fall through with empty values.
+		log.Printf("[ledger-service] FAIL-CLOSED: post-pending lookup failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error":   "LOOKUP_FAILED",
+			"message": "Failed to load pending transfer — operation blocked",
+		})
+		return
 	}
 
 	originalAmount, _ := strconv.ParseInt(amountStr, 10, 64)
@@ -574,11 +626,11 @@ func (s *LedgerService) handlePostPending(w http.ResponseWriter, r *http.Request
 
 	// Emit event
 	s.publishEvent("post_pending", postID, map[string]interface{}{
-		"event":       "transfer_post_pending",
-		"post_id":     postID,
-		"pending_id":  req.PendingTransferID,
-		"amount":      minorToAmount(postAmount),
-		"timestamp":   time.Now().UTC().Format(time.RFC3339),
+		"event":      "transfer_post_pending",
+		"post_id":    postID,
+		"pending_id": req.PendingTransferID,
+		"amount":     minorToAmount(postAmount),
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
 	})
 
 	log.Printf("[TigerBeetle] Posted pending transfer: %s -> %s", req.PendingTransferID, postID)
@@ -614,6 +666,15 @@ func (s *LedgerService) handleVoidPending(w http.ResponseWriter, r *http.Request
 			"pending_transfer_id": req.PendingTransferID,
 		})
 		return
+	} else if err != nil {
+		// Any other DB error must not fall through with empty values.
+		log.Printf("[ledger-service] FAIL-CLOSED: void-pending lookup failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error":   "LOOKUP_FAILED",
+			"message": "Failed to load pending transfer — operation blocked",
+		})
+		return
 	}
 
 	amount, _ := strconv.ParseInt(amountStr, 10, 64)
@@ -637,9 +698,9 @@ func (s *LedgerService) handleVoidPending(w http.ResponseWriter, r *http.Request
 
 	// Emit event
 	s.publishEvent("void_pending", voidID, map[string]interface{}{
-		"event":          "transfer_void_pending",
-		"void_id":        voidID,
-		"pending_id":     req.PendingTransferID,
+		"event":           "transfer_void_pending",
+		"void_id":         voidID,
+		"pending_id":      req.PendingTransferID,
 		"amount_released": minorToAmount(amount),
 		"timestamp":       time.Now().UTC().Format(time.RFC3339),
 	})
@@ -704,13 +765,13 @@ func (s *LedgerService) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total_accounts":     accountCount,
-		"total_transfers":    transferCount,
-		"pending_transfers":  pendingCount,
-		"total_volume_usd":   minorToAmount(totalVol),
-		"double_entry":       true,
-		"fail_closed":        s.isProduction,
-		"two_phase_enabled":  true,
+		"total_accounts":    accountCount,
+		"total_transfers":   transferCount,
+		"pending_transfers": pendingCount,
+		"total_volume_usd":  minorToAmount(totalVol),
+		"double_entry":      true,
+		"fail_closed":       s.isProduction,
+		"two_phase_enabled": true,
 		"middleware": map[string]bool{
 			"kafka":    true,
 			"dapr":     true,
@@ -734,10 +795,10 @@ func (s *LedgerService) handleReconciliation(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"unpublished_events":       unpublished,
-		"stale_pending_transfers":  stalePending,
-		"recommendation":           recommendation,
-		"timestamp":                time.Now().UTC().Format(time.RFC3339),
+		"unpublished_events":      unpublished,
+		"stale_pending_transfers": stalePending,
+		"recommendation":          recommendation,
+		"timestamp":               time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
