@@ -337,6 +337,7 @@ import { platformFeaturesRouter } from "./_core/platformFeatures";
 import { platformV4Router } from "./_core/platformV4Router";
 import { qrPaymentsRouter } from "./_core/qrPayments";
 import { nfcPaymentsRouter } from "./_core/nfcPayments";
+import { complianceRouter } from "./routers/complianceRouter";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -7024,5 +7025,7 @@ Case: #${input.caseId}`,
   // QR & NFC Payment Systems
   qrPayments: qrPaymentsRouter,
   nfcPayments: nfcPaymentsRouter,
+  // Phase 2 Compliance Suite (Travel Rule, SAR/STR, PEP, Data Residency, Audit)
+  complianceV2: complianceRouter,
 });
 export type AppRouter = typeof appRouter;
