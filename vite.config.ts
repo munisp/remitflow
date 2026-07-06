@@ -1,6 +1,7 @@
 import { jsxLocPlugin } from "@builder.io/vite-plugin-jsx-loc";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { defineConfig, type Plugin, type ViteDevServer } from "vite";
@@ -151,6 +152,65 @@ function vitePluginManusDebugCollector(): Plugin {
   };
 }
 
+// =============================================================================
+// Build Metadata — inject BUILD_HASH + BUILD_TIMESTAMP for cache busting
+// Every production build gets a unique content-derived hash. The service worker
+// and client-side stale-detection both key off this value.
+// =============================================================================
+
+const BUILD_TIMESTAMP = new Date().toISOString();
+
+function generateBuildHash(): string {
+  const src = path.resolve(import.meta.dirname, "client", "src");
+  const hash = createHash("sha256");
+  hash.update(BUILD_TIMESTAMP);
+  try {
+    const walk = (dir: string) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) walk(path.join(dir, entry.name));
+        else if (/\.(tsx?|jsx?|css)$/.test(entry.name)) {
+          hash.update(fs.readFileSync(path.join(dir, entry.name)));
+        }
+      }
+    };
+    walk(src);
+  } catch { /* fallback to timestamp only */ }
+  return hash.digest("hex").slice(0, 12);
+}
+
+const BUILD_HASH = generateBuildHash();
+
+function vitePluginBuildMetadata(): Plugin {
+  return {
+    name: "remitflow-build-metadata",
+    config(_, { command }) {
+      if (command === "build") {
+        return {
+          define: {
+            "__BUILD_HASH__": JSON.stringify(BUILD_HASH),
+            "__BUILD_TIMESTAMP__": JSON.stringify(BUILD_TIMESTAMP),
+          },
+        };
+      }
+      return {
+        define: {
+          "__BUILD_HASH__": JSON.stringify("dev"),
+          "__BUILD_TIMESTAMP__": JSON.stringify(BUILD_TIMESTAMP),
+        },
+      };
+    },
+    // Write build manifest for deployment scripts
+    closeBundle() {
+      const manifest = { hash: BUILD_HASH, timestamp: BUILD_TIMESTAMP, version: `v-${BUILD_HASH}` };
+      const outDir = path.resolve(import.meta.dirname, "dist", "public");
+      try {
+        fs.mkdirSync(outDir, { recursive: true });
+        fs.writeFileSync(path.join(outDir, "build-manifest.json"), JSON.stringify(manifest, null, 2));
+      } catch { /* non-fatal */ }
+    },
+  };
+}
+
 const pwaPlugin = VitePWA({
   registerType: "autoUpdate",
   injectRegister: "auto",
@@ -272,6 +332,7 @@ const plugins = [
   tailwindcss(),
   vitePluginManusRuntime(),
   vitePluginManusDebugCollector(),
+  vitePluginBuildMetadata(),
   pwaPlugin,
 ];
 export default defineConfig({
@@ -291,6 +352,11 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       output: {
+        // Content-hash filenames guarantee unique URLs per build.
+        // Browsers cache these immutably; new deploys produce new hashes.
+        entryFileNames: 'assets/[name]-[hash].js',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash][extname]',
         manualChunks(id: string) {
           if (id.includes('node_modules/react-dom') || id.includes('node_modules/react/')) return 'vendor-react';
           if (id.includes('node_modules/@radix-ui')) return 'vendor-ui';

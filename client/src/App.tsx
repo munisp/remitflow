@@ -7,6 +7,7 @@ import { lazy, Suspense } from "react";
 import { PWAInstallPrompt, PWAOfflineBanner, PWAUpdateBanner } from "./components/PWAInstallPrompt";
 import { MobileBottomNav } from "./components/MobileBottomNav";
 import { ConnectionQualityIndicator } from "./components/ConnectionQualityIndicator";
+import { useVersionCheck } from "./hooks/useVersionCheck";
 import { Loader2 } from "lucide-react";
 const AMLBatchEnginePage = lazy(() => import("@/pages/AMLBatchEnginePage"));
 const PBACPolicies = lazy(() => import("@/pages/PBACPolicies"));
@@ -747,11 +748,17 @@ function Router() {
   );
 }
 
+function VersionChecker() {
+  useVersionCheck();
+  return null;
+}
+
 function App() {
   return (
     <ErrorBoundary>
       <ThemeProvider defaultTheme="light" switchable={true}>
         <TooltipProvider>
+          <VersionChecker />
           <PWAOfflineBanner />
           <PWAUpdateBanner />
           <Toaster richColors position="top-right" />
