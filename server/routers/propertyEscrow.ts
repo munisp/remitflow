@@ -410,16 +410,26 @@ const escrowPlanRouter = router({
       }).where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${depositUsd}`)).returning();
       if (!debitedDeposit) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
 
-      // Lock deposit in TigerBeetle (FAIL-CLOSED — escrow MUST be ledger-backed)
-      await tigerBeetle.createPendingTransfer({
-        id: BigInt(Date.now()),
-        debitAccountId: BigInt(ctx.user.id),
-        creditAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
-        amount: BigInt(Math.round(depositUsd * 100)),
-        ledger: ESCROW_LEDGER,
-        code: ESCROW_CODE,
-        timeoutSeconds: 86400, // 24h timeout for escrow holds
-      });
+      // Lock deposit in TigerBeetle (FAIL-CLOSED — escrow MUST be ledger-backed).
+      // If the ledger hold fails, refund the wallet debit so the buyer is not
+      // left short without an escrow record, then propagate the failure.
+      try {
+        await tigerBeetle.createPendingTransfer({
+          id: BigInt(Date.now()),
+          debitAccountId: BigInt(ctx.user.id),
+          creditAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
+          amount: BigInt(Math.round(depositUsd * 100)),
+          ledger: ESCROW_LEDGER,
+          code: ESCROW_CODE,
+          timeoutSeconds: 86400, // 24h timeout for escrow holds
+        });
+      } catch (err) {
+        await db.update(wallets).set({
+          balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${depositUsd} AS VARCHAR)`,
+          updatedAt: new Date(),
+        }).where(eq(wallets.id, wallet.id));
+        throw err;
+      }
 
       // Record transaction
       await db.insert(transactions).values({
@@ -461,6 +471,8 @@ const escrowPlanRouter = router({
         featureLabel: "property_escrow_deposit",
         transferId: `ESCROW-DEP-${plan.planId}`,
         description: `Escrow deposit: $${depositUsd.toFixed(2)} for plan ${plan.planId}`,
+        // Escrow already created its own ledger-backed hold above — do not double-book.
+        skipLedger: true,
         metadata: { planId: plan.planId, depositPct: Number(plan.depositPct) },
       });
 
@@ -500,16 +512,25 @@ const escrowPlanRouter = router({
       }).where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${amount}`)).returning();
       if (!debitedInstallment) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
 
-      // Lock in TigerBeetle (FAIL-CLOSED — installment MUST be ledger-backed)
-      await tigerBeetle.createPendingTransfer({
-        id: BigInt(Date.now()),
-        debitAccountId: BigInt(ctx.user.id),
-        creditAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
-        amount: BigInt(Math.round(amount * 100)),
-        ledger: ESCROW_LEDGER,
-        code: ESCROW_CODE,
-        timeoutSeconds: 86400,
-      });
+      // Lock in TigerBeetle (FAIL-CLOSED — installment MUST be ledger-backed).
+      // Refund the wallet debit if the ledger hold fails, then propagate.
+      try {
+        await tigerBeetle.createPendingTransfer({
+          id: BigInt(Date.now()),
+          debitAccountId: BigInt(ctx.user.id),
+          creditAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
+          amount: BigInt(Math.round(amount * 100)),
+          ledger: ESCROW_LEDGER,
+          code: ESCROW_CODE,
+          timeoutSeconds: 86400,
+        });
+      } catch (err) {
+        await db.update(wallets).set({
+          balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${amount} AS VARCHAR)`,
+          updatedAt: new Date(),
+        }).where(eq(wallets.id, wallet.id));
+        throw err;
+      }
 
       // Record transaction
       const [tx] = await db.insert(transactions).values({

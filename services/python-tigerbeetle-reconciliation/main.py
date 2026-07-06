@@ -152,6 +152,16 @@ class Discrepancy:
 
 # ─── TigerBeetle Service Client ──────────────────────────────────────────────
 
+def _to_minor(value) -> int:
+    """Convert a float major-unit balance to integer minor units (10^6).
+
+    Uses round() rather than int() truncation: the ledger services return
+    balances as floats, and e.g. 0.07 * 1_000_000 == 69999.99999999999, so a
+    plain int() cast would truncate to 69999 and manufacture a phantom 1-unit
+    drift (or mask a real one) during reconciliation.
+    """
+    return int(round(float(value or 0) * 1_000_000))
+
 def fetch_tb_account_balance(account_id: str) -> Optional[AccountBalance]:
     """Fetch account balance from Rust TigerBeetle service."""
     try:
@@ -165,10 +175,10 @@ def fetch_tb_account_balance(account_id: str) -> Optional[AccountBalance]:
                 return None
             return AccountBalance(
                 account_id=account_id,
-                debits_pending=int(float(data.get("debits_pending", 0)) * 1_000_000),
-                debits_posted=int(float(data.get("debits_posted", 0)) * 1_000_000),
-                credits_pending=int(float(data.get("credits_pending", 0)) * 1_000_000),
-                credits_posted=int(float(data.get("credits_posted", 0)) * 1_000_000),
+                debits_pending=_to_minor(data.get("debits_pending", 0)),
+                debits_posted=_to_minor(data.get("debits_posted", 0)),
+                credits_pending=_to_minor(data.get("credits_pending", 0)),
+                credits_posted=_to_minor(data.get("credits_posted", 0)),
             )
     except Exception as e:
         logger.warning(f"Failed to fetch TB balance for {account_id}: {e}")
@@ -187,10 +197,10 @@ def fetch_go_account_balance(account_id: str) -> Optional[AccountBalance]:
                 return None
             return AccountBalance(
                 account_id=account_id,
-                debits_pending=int(float(data.get("debits_pending", 0)) * 1_000_000),
-                debits_posted=int(float(data.get("debits_posted", 0)) * 1_000_000),
-                credits_pending=int(float(data.get("credits_pending", 0)) * 1_000_000),
-                credits_posted=int(float(data.get("credits_posted", 0)) * 1_000_000),
+                debits_pending=_to_minor(data.get("debits_pending", 0)),
+                debits_posted=_to_minor(data.get("debits_posted", 0)),
+                credits_pending=_to_minor(data.get("credits_pending", 0)),
+                credits_posted=_to_minor(data.get("credits_posted", 0)),
             )
     except Exception as e:
         logger.warning(f"Failed to fetch Go ledger balance for {account_id}: {e}")
