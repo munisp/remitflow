@@ -242,6 +242,9 @@ grep "export function\|export async function\|export const" server/_core/kycHard
 - The Python platform-hardening service (port 8270) is the easiest to test at runtime (no auth required, starts quickly, has biometrics/anomaly/canary/liquidity endpoints)
 - The Python reconciliation engine (port 8170) has insider threat analytics (collusion, FX verification, admin anomaly)
 - Go and Rust services may not have standalone `go.mod` — verify structurally via grep, not compilation
+- **Rust sqlx testing:** When verifying Rust DB persistence, check these 6 things: (1) `grep -c "// sqlx" = 0` (no commented-out SQL), (2) `grep -c "sqlx::query(" >= 9` (live runtime calls), (3) `pub pool: PgPool` field exists (not `connected: bool` stub), (4) `Cargo.toml` has `sqlx` with `postgres` feature, (5) HashMap used only for cache (`Arc<RwLock<HashMap>>`) not primary storage (`Arc<Mutex<HashMap>>`), (6) `std::process::exit(1)` for fail-closed in production
+- **sqlx compile-time vs runtime:** `sqlx::query!()` (macro) requires `DATABASE_URL` at compile time — use `sqlx::query()` (function) for runtime-only queries when no DB available during build. This is a common issue in CI/CD environments
+- **Vitest baseline drift:** Base branch vitest failures may drift by 1-2 between merge resolutions. The baseline as of PR #32 is ~175-177. Check that no NEW test names appear in failures (compare test names, not just count)
 - For tRPC route testing, vitest is more reliable than trying to boot the dev server without env vars
 - Always test BOTH positive (should detect) AND negative (should not detect) cases to catch inverted logic
 - When writing adversarial tests, read the actual implementation first to get correct function names, field names, and return types — don't assume
