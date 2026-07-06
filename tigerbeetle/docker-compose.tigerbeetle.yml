@@ -1,40 +1,133 @@
 version: '3.8'
+# TigerBeetle — 3-replica VSR cluster for 1M+ financial TPS
+# VSR (Viewstamped Replication) provides consensus without leader election.
+# Batch up to 8190 operations per request for maximum throughput.
 services:
-  tigerbeetle:
+  tigerbeetle-0:
     image: ghcr.io/tigerbeetle/tigerbeetle:0.16.11
-    container_name: remitflow-tigerbeetle
+    container_name: remitflow-tigerbeetle-0
     command: >
       start
-      --addresses=0.0.0.0:3001
+      --addresses=0.0.0.0:3001,tigerbeetle-1:3001,tigerbeetle-2:3001
+      --cache-grid-bytes=4294967296
       /data/0_0.tigerbeetle
     ports:
       - "3001:3001"
     volumes:
-      - tigerbeetle-data:/data
+      - tigerbeetle-data-0:/data
     networks:
       - remitflow-net
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      memlock:
+        soft: -1
+        hard: -1
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 16G
+        reservations:
+          cpus: "2"
+          memory: 8G
     healthcheck:
       test: ["CMD-SHELL", "echo 'ping' | nc -w 1 localhost 3001 || exit 1"]
-      interval: 30s
-      timeout: 10s
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  tigerbeetle-1:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.16.11
+    container_name: remitflow-tigerbeetle-1
+    command: >
+      start
+      --addresses=tigerbeetle-0:3001,0.0.0.0:3001,tigerbeetle-2:3001
+      --cache-grid-bytes=4294967296
+      /data/0_1.tigerbeetle
+    ports:
+      - "3002:3001"
+    volumes:
+      - tigerbeetle-data-1:/data
+    networks:
+      - remitflow-net
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      memlock:
+        soft: -1
+        hard: -1
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 16G
+        reservations:
+          cpus: "2"
+          memory: 8G
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'ping' | nc -w 1 localhost 3001 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  tigerbeetle-2:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.16.11
+    container_name: remitflow-tigerbeetle-2
+    command: >
+      start
+      --addresses=tigerbeetle-0:3001,tigerbeetle-1:3001,0.0.0.0:3001
+      --cache-grid-bytes=4294967296
+      /data/0_2.tigerbeetle
+    ports:
+      - "3003:3001"
+    volumes:
+      - tigerbeetle-data-2:/data
+    networks:
+      - remitflow-net
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      memlock:
+        soft: -1
+        hard: -1
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 16G
+        reservations:
+          cpus: "2"
+          memory: 8G
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'ping' | nc -w 1 localhost 3001 || exit 1"]
+      interval: 15s
+      timeout: 5s
       retries: 5
 
   tigerbeetle-init:
     image: ghcr.io/tigerbeetle/tigerbeetle:0.16.11
     container_name: remitflow-tigerbeetle-init
-    command: >
-      format
-      --cluster=0
-      --replica=0
-      --replica-count=1
-      /data/0_0.tigerbeetle
+    entrypoint: >
+      sh -c '
+        for i in 0 1 2; do
+          if [ ! -f /data/0_$$i.tigerbeetle ]; then
+            tigerbeetle format --cluster=0 --replica=$$i --replica-count=3 /data/0_$$i.tigerbeetle;
+          fi;
+        done
+      '
     volumes:
-      - tigerbeetle-data:/data
+      - tigerbeetle-data-0:/data
     networks:
       - remitflow-net
 
 volumes:
-  tigerbeetle-data:
+  tigerbeetle-data-0:
+  tigerbeetle-data-1:
+  tigerbeetle-data-2:
 
 networks:
   remitflow-net:

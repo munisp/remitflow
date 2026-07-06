@@ -315,6 +315,101 @@ services:
       timeout: 10s
       retries: 3
 
+  # ═══ INFRASTRUCTURE SERVICES (profile: full) ════════════════════════════════
+
+  temporal:
+    image: temporalio/auto-setup:1.24
+    profiles: ["full", "monitoring"]
+    ports:
+      - "7233:7233"
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_USER: remitflow
+      POSTGRES_PWD: remitflow_dev
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8233:8080"
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      - temporal
+
+  temporal-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["full", "monitoring"]
+    command: ["node", "--loader", "ts-node/esm", "server/temporal/worker.ts"]
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_TASK_QUEUE: remitflow-main
+      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+      WORKER_HEALTH_PORT: "8080"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      temporal:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+
+  pgbouncer:
+    image: edoburu/pgbouncer:1.22.0
+    profiles: ["full", "monitoring"]
+    ports:
+      - "6432:6432"
+    environment:
+      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 1000
+      DEFAULT_POOL_SIZE: 50
+      MIN_POOL_SIZE: 10
+      RESERVE_POOL_SIZE: 10
+      RESERVE_POOL_TIMEOUT: 3
+      SERVER_IDLE_TIMEOUT: 600
+      LOG_CONNECTIONS: 0
+      LOG_DISCONNECTIONS: 0
+      AUTH_TYPE: plain
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 6432 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  vault:
+    image: hashicorp/vault:1.15
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8200:8200"
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: remitflow-dev-token
+      VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
 volumes:
   pgdata:
   grafanadata:

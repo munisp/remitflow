@@ -1,0 +1,100 @@
+# =============================================================================
+# RemitFlow Permify — Configuration for 1M+ permission checks/sec
+# =============================================================================
+# Permify is used for RBAC/ReBAC across RemitFlow.
+# Key optimization: aggressive caching + connection pooling.
+
+server:
+  http:
+    enabled: true
+    port: 3478
+    cors:
+      allowed-origins: ["*"]
+      allowed-headers: ["*"]
+  grpc:
+    port: 3476
+    # Increase max message size for batch operations
+    max-recv-msg-size: 33554432
+    max-send-msg-size: 33554432
+
+# ── Database ─────────────────────────────────────────────────────────────────
+database:
+  engine: postgres
+  uri: "${PERMIFY_DATABASE_URI}"
+  auto_migrate: true
+  max_open_connections: 100
+  max_idle_connections: 50
+  max_connection_lifetime: "300s"
+  max_connection_idle_time: "60s"
+  # Garbage collection interval for stale data
+  garbage_collection:
+    enabled: true
+    interval: "3m"
+    window: "720h"
+    timeout: "5m"
+
+# ── Caching (critical for throughput) ────────────────────────────────────────
+# Schema cache: store authorization model in memory.
+# Permission cache: store computed permission results.
+# Without caching, every check() hits the DB → 10ms latency.
+# With caching: <1ms for cached results → 1M+ checks/sec.
+cache:
+  engine: redis
+  redis:
+    address: "redis-cluster:6379"
+    password: "${REDIS_PASSWORD}"
+    # Schema cache
+    schema:
+      max_size: 10000
+      ttl: "1h"
+    # Permission decision cache
+    check:
+      max_size: 1000000
+      ttl: "5m"
+    # Relationship lookup cache
+    lookup:
+      max_size: 500000
+      ttl: "5m"
+
+# ── Rate Limiting ────────────────────────────────────────────────────────────
+rate_limiter:
+  enabled: true
+  rate: 100000
+  burst: 200000
+
+# ── Service ──────────────────────────────────────────────────────────────────
+service:
+  circuit_breaker: true
+  schema:
+    cache:
+      number_of_counters: 100000
+      max_cost: "100mb"
+  permission:
+    concurrency_limit: 1000
+    bulk_limit: 100
+    bulk_entity_limit: 100
+    bulk_subject_limit: 100
+
+# ── Profiler ─────────────────────────────────────────────────────────────────
+profiler:
+  enabled: false
+  port: 6060
+
+# ── Telemetry ────────────────────────────────────────────────────────────────
+meter:
+  enabled: true
+  exporter: otlp
+  endpoint: "jaeger:4317"
+
+tracer:
+  enabled: true
+  exporter: otlp
+  endpoint: "jaeger:4317"
+  # Low sampling rate for high throughput
+  sampling_ratio: 0.01
+
+# ── Logger ───────────────────────────────────────────────────────────────────
+logger:
+  level: "warn"
+  output: "stdout"
+  enabled: true

@@ -12,6 +12,8 @@ const FRAUD_CONFIG = {
   VELOCITY_MAX_TRANSACTIONS: 10,
   VELOCITY_MAX_AMOUNT_USD: 10000,
   HIGH_RISK_COUNTRIES: ["AF", "BY", "CF", "CD", "CU", "ER", "IR", "IQ", "LY", "ML", "MM", "NI", "KP", "SO", "SS", "SD", "SY", "VE", "YE", "ZW"],
+  ELEVATED_RISK_COUNTRIES: ["PK", "HT", "JM", "PA", "TT", "VN", "AL", "BB", "BF", "CM", "GI", "JO", "MZ", "PH", "SN", "TZ", "UG", "VU", "ZW"],
+  MODERATE_RISK_COUNTRIES: ["NG", "GH", "KE", "ZA", "BR", "IN", "MX", "CN", "RU", "TR", "EG", "TH", "ID", "BD", "CO", "PE"],
   SANCTIONS_LISTS: ["OFAC_SDN", "EU_CONSOLIDATED", "UN_CONSOLIDATED", "HMT_OFSI"],
   RISK_THRESHOLDS: { LOW: 30, MEDIUM: 60, HIGH: 80, CRITICAL: 95 },
   MODEL_VERSION: "v2.4.1",
@@ -264,6 +266,13 @@ export function scoreFraud(features: FraudFeatures): FraudScoreResult {
 }
 
 // ─── Feature Builder (from transaction context) ────────────────────────────────
+function computeCountryRiskScore(country: string): number {
+  if (FRAUD_CONFIG.HIGH_RISK_COUNTRIES.includes(country)) return 85;
+  if (FRAUD_CONFIG.ELEVATED_RISK_COUNTRIES.includes(country)) return 60;
+  if (FRAUD_CONFIG.MODERATE_RISK_COUNTRIES.includes(country)) return 40;
+  return 15; // Low-risk (OECD/developed economies)
+}
+
 export function buildFeatures(params: {
   amount_usd: number;
   source_country: string;
@@ -282,13 +291,15 @@ export function buildFeatures(params: {
   same_recipient_24h_count?: number;
   same_amount_24h_count?: number;
   cross_border_24h_count?: number;
+  corridor_fraud_rate_30d?: number;
+  corridor_avg_amount?: number;
 }): FraudFeatures {
   const now = new Date();
   const hour = now.getHours();
   const dow = now.getDay();
 
-  const sourceRisk = FRAUD_CONFIG.HIGH_RISK_COUNTRIES.includes(params.source_country) ? 85 : 20;
-  const destRisk = FRAUD_CONFIG.HIGH_RISK_COUNTRIES.includes(params.dest_country) ? 85 : 20;
+  const sourceRisk = computeCountryRiskScore(params.source_country);
+  const destRisk = computeCountryRiskScore(params.dest_country);
 
   return {
     amount_usd: params.amount_usd,
@@ -306,9 +317,9 @@ export function buildFeatures(params: {
     user_kyc_level: params.user_kyc_level ?? 2,
     source_country_risk_score: sourceRisk,
     dest_country_risk_score: destRisk,
-    corridor_fraud_rate_30d: 0.02,
-    corridor_avg_amount: 800,
-    is_high_risk_corridor: sourceRisk > 70 || destRisk > 70,
+    corridor_fraud_rate_30d: params.corridor_fraud_rate_30d ?? 0.02,
+    corridor_avg_amount: params.corridor_avg_amount ?? 800,
+    is_high_risk_corridor: sourceRisk >= 60 || destRisk >= 60,
     is_new_recipient: params.is_new_recipient ?? false,
     recipient_transaction_count: params.is_new_recipient ? 0 : 5,
     recipient_country_risk: destRisk,

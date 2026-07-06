@@ -20,6 +20,7 @@ import { mojaloopTransfer, pixTransfer, upiTransfer, initiateTransfer } from "./
 import { logger } from './_core/logger';
 import { sendEmail, buildTransferCompletedEmail, buildTransferFailedEmail } from "./email.service.js";
 import { safeParseAmount } from "./lib/safeDecimal";
+import { withTransferLock } from "./lib/transferLock.js";
 
 export type TransferState =
   | "pending"      // initial DB state before pipeline starts
@@ -116,15 +117,58 @@ export async function advanceTransferState(
     requiresManualReview?: boolean;
   } = {}
 ): Promise<StateTransitionResult> {
+  // For reversal transitions, acquire a distributed lock to prevent
+  // race conditions with concurrent operations (e.g., agent disbursement)
+  if (targetState === "reversed") {
+    return withTransferLock(transferRef, "reverse transfer", () =>
+      advanceTransferStateInternal(transferRef, userId, targetState, options)
+    );
+  }
+  return advanceTransferStateInternal(transferRef, userId, targetState, options);
+}
+
+async function advanceTransferStateInternal(
+  transferRef: string,
+  userId: number,
+  targetState: TransferState,
+  options: {
+    failureReason?: string;
+    partnerReference?: string;
+    requiresManualReview?: boolean;
+  } = {}
+): Promise<StateTransitionResult> {
   const db = await getDb();
   if (!db) throw new Error("Database unavailable");
 
   // Fetch current state from metadata.pipelineState (or fall back to status column)
   const rows = await db.execute(
-    sql`SELECT id, status, reference, metadata FROM transactions WHERE reference = ${transferRef} LIMIT 1`
+    sql`SELECT id, status, reference, metadata, channel FROM transactions WHERE reference = ${transferRef} LIMIT 1`
   );
   const txn = (rows as any[])[0];
   if (!txn) throw new Error(`Transfer ${transferRef} not found`);
+
+  // FIX #6: Block reversal on cash_pickup transfers that have active pickup assignments
+  if (targetState === "reversed") {
+    const channel = txn.channel as string | undefined;
+    const meta = typeof txn.metadata === "string" ? JSON.parse(txn.metadata || "{}") : (txn.metadata ?? {});
+    const deliveryMethod = channel ?? (meta as Record<string, unknown>)?.deliveryMethod;
+    if (deliveryMethod === "cash_pickup") {
+      const pickupRows = await db.execute(
+        sql`SELECT status FROM cash_pickup_assignments WHERE transfer_reference = ${transferRef} LIMIT 1`
+      );
+      const pickup = (pickupRows.rows ?? pickupRows)?.[0] as any;
+      if (pickup && (pickup.status === "pending" || pickup.status === "completed")) {
+        return {
+          success: false,
+          previousState: "completed" as TransferState,
+          newState: "completed" as TransferState,
+          message: pickup.status === "completed"
+            ? "Cannot reverse: cash has already been disbursed to the recipient via agent pickup."
+            : "Cannot reverse: a pickup assignment is pending. Cancel the pickup first.",
+        };
+      }
+    }
+  }
 
   // Determine current pipeline state from metadata, fall back to status
   let currentMeta: Record<string, unknown> = {};
@@ -303,11 +347,16 @@ export async function runTransferPipeline(
       return;
     }
     // Step 2: AML check
+    // CTR_REQUIRED and TRAVEL_RULE are informational filing requirements — they
+    // must NOT block the transfer.  Only genuinely suspicious flags (SAR_REVIEW
+    // with high risk, or EDD_REQUIRED for sanctioned corridors) should hold.
     await advanceTransferState(transferRef, userId, "aml_check");
     await delay(STATE_DURATION_MS.aml_check!);
-    if (context.amlFlags.length > 0 && context.amountUSD >= 10_000) {
+    const INFORMATIONAL_FLAGS = new Set(["CTR_REQUIRED", "TRAVEL_RULE"]);
+    const blockingAmlFlags = context.amlFlags.filter(f => !INFORMATIONAL_FLAGS.has(f));
+    if (blockingAmlFlags.length > 0 && context.amountUSD >= 10_000) {
       await advanceTransferState(transferRef, userId, "failed", {
-        failureReason: `AML hold: ${context.amlFlags.join(", ")}. Manual review required.`,
+        failureReason: `AML hold: ${blockingAmlFlags.join(", ")}. Manual review required.`,
         requiresManualReview: true,
       });
       return;
@@ -334,14 +383,47 @@ export async function runTransferPipeline(
         toAmount: transactions.toAmount,
         recipientAccount: transactions.recipientAccount,
         recipientName: transactions.recipientName,
+        recipientBank: transactions.recipientBank,
         fromCurrency: transactions.fromCurrency,
+        channel: transactions.channel,
+        metadata: transactions.metadata,
       }).from(transactions).where(eq(transactions.reference, transferRef)).limit(1);
       if (txRow) {
         const country = (txRow.recipientCountry ?? "").toLowerCase();
         const currency = (txRow.toCurrency ?? "").toUpperCase();
         const amount = safeParseAmount(txRow.toAmount ?? "0");
+        // Detect cash_pickup delivery method from channel or metadata
+        const metaObj = typeof txRow.metadata === "string" ? JSON.parse(txRow.metadata || "{}") : (txRow.metadata ?? {});
+        const deliveryMethod = txRow.channel ?? (metaObj as Record<string, unknown>)?.deliveryMethod ?? "bank_transfer";
         try {
-          if (currency === "BRL" || country.includes("brazil")) {
+          const fromCur = (txRow.fromCurrency ?? "").toUpperCase();
+          if (deliveryMethod === "cash_pickup") {
+            // Cash pickup: do NOT route to external payment rail.
+            // Funds stay on-platform until agent disburses via verifyAndDisburse.
+            // Mark as awaiting_pickup — the agent's cashPickup.verifyAndDisburse will
+            // call advanceTransferState(ref, "completed") after verification.
+            partnerRef = `CP-${Date.now()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+            logger.info(`[TransferStateMachine] Cash pickup — awaiting agent disbursement for ${transferRef}`);
+          } else
+          if (fromCur === "CAD" && ["NGN","KES","GHS","TZS","UGX","XOF","ZAR","XAF"].includes(currency)) {
+            // Mark Lane FX Bridge (Canadian corridor → African destination)
+            const { initiateMarkLaneTransfer } = await import("./integrations/marklane/markLaneClient");
+            const mlResult = await initiateMarkLaneTransfer({
+              fromCurrency: "CAD",
+              toCurrency: currency,
+              amount,
+              senderName: txRow.recipientName ?? "RemitFlow User",
+              senderEmail: "",
+              recipientName: txRow.recipientName ?? "Unknown",
+              recipientAccount: txRow.recipientAccount ?? "unknown",
+              recipientBank: txRow.recipientBank ?? "unknown",
+              recipientCountry: country || "NG",
+              corridor: `CA-${currency.slice(0, 2)}`,
+              purpose: "remittance",
+              idempotencyKey: transferRef,
+            });
+            partnerRef = mlResult.transferId;
+          } else if (currency === "BRL" || country.includes("brazil")) {
             // PIX (Brazil)
             const pixResult = await pixTransfer({
               pixKey: txRow.recipientAccount ?? `cpf-${Date.now()}`,
@@ -380,18 +462,21 @@ export async function runTransferPipeline(
             partnerRef = genericResult.transferId;
           }
         } catch (railErr) {
-          logger.warn(`[TransferStateMachine] Payment rail error for ${transferRef}:`, railErr);
-          // Non-fatal: use generated reference, partner_sent still proceeds
+          logger.error(`[TransferStateMachine] Payment rail error for ${transferRef}:`, railErr);
+          await advanceTransferState(transferRef, userId, "failed", {
+            failureReason: `Payment rail disbursement failed: ${railErr instanceof Error ? railErr.message : String(railErr)}. Funds will be returned to sender wallet.`,
+            requiresManualReview: true,
+          });
+          return;
         }
       }
     }
     await advanceTransferState(transferRef, userId, "partner_sent", {
       partnerReference: partnerRef,
     });
-    // Note: partner_sent → completed is triggered by webhook/callback from partner network
-    // For demo/simulation, we advance to completed after a delay
-    await delay(STATE_DURATION_MS.partner_sent!);
-    await advanceTransferState(transferRef, userId, "completed");
+    // partner_sent → completed is triggered by webhook/callback from partner network.
+    // Do NOT auto-advance — the payment rail webhook handler calls
+    // advanceTransferState(ref, userId, "completed") when settlement is confirmed.
   } catch (err) {
     logger.error(`[TransferStateMachine] Pipeline error for ${transferRef}:`, err);
     await advanceTransferState(transferRef, userId, "failed", {

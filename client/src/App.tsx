@@ -172,7 +172,13 @@ const SendToCameroon = lazy(() => import("./pages/SendToCameroon"));
 const SendToSouthAfrica = lazy(() => import("./pages/SendToSouthAfrica"));
 const SendToUganda = lazy(() => import("./pages/SendToUganda"));
 const SendToTanzania = lazy(() => import("./pages/SendToTanzania"));
+const SendToChina = lazy(() => import("./pages/SendToChina"));
+const SendToBrazil = lazy(() => import("./pages/SendToBrazil"));
+const SendToIndia = lazy(() => import("./pages/SendToIndia"));
 const DiasporaUK = lazy(() => import("./pages/DiasporaUK"));
+const TermsOfService = lazy(() => import("./pages/TermsOfService"));
+const PrivacyPolicy = lazy(() => import("./pages/PrivacyPolicy"));
+const CookiePolicy = lazy(() => import("./pages/CookiePolicy"));
 // v81 PWA Features Showcase
 const PWAFeatures = lazy(() => import("./pages/PWAFeatures"));
 // v82 Production Features
@@ -503,7 +509,13 @@ function Router() {
         <Route path="/send-to-south-africa" component={SendToSouthAfrica} />
         <Route path="/send-to-uganda" component={SendToUganda} />
         <Route path="/send-to-tanzania" component={SendToTanzania} />
+        <Route path="/send-to-china" component={SendToChina} />
+        <Route path="/send-to-brazil" component={SendToBrazil} />
+        <Route path="/send-to-india" component={SendToIndia} />
         <Route path="/diaspora-uk" component={DiasporaUK} />
+        <Route path="/terms-of-service" component={TermsOfService} />
+        <Route path="/privacy-policy" component={PrivacyPolicy} />
+        <Route path="/cookie-policy" component={CookiePolicy} />
         {/* v30 Admin Home */}
         <Route path="/admin" component={AdminHome} />
         {/* v81 PWA Features Showcase */}

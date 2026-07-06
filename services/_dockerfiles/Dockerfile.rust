@@ -1,0 +1,51 @@
+# Multi-stage Dockerfile for RemitFlow Rust microservices
+#
+# Usage:
+#   docker build -f services/_dockerfiles/Dockerfile.rust \
+#     --build-arg SERVICE_NAME=rust-kyc-compliance-bridge \
+#     -t remitflow/rust-kyc-compliance-bridge:latest \
+#     ./services/rust-kyc-compliance-bridge
+#
+# Works for all Rust services in /services/rust-*
+
+ARG RUST_VERSION=1.77
+ARG SERVICE_NAME=rust-service
+
+# ── Build Stage ────────────────────────────────────────────────────────────────
+
+FROM rust:${RUST_VERSION}-slim-bookworm AS builder
+
+ARG SERVICE_NAME
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Cache dependencies via cargo-chef pattern
+COPY Cargo.toml Cargo.lock* ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs \
+    && cargo build --release 2>/dev/null || true \
+    && rm -rf src
+
+# Copy source and build
+COPY . .
+RUN cargo build --release \
+    && strip target/release/$(ls target/release/ | grep -v '\.d$' | grep -v deps | head -1) 2>/dev/null || true
+
+# Find the binary (name varies per service)
+RUN cp target/release/$(basename $(find target/release -maxdepth 1 -type f -executable | grep -v '\.d$' | head -1)) /app/service
+
+# ── Runtime Stage ──────────────────────────────────────────────────────────────
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /app/service /service
+
+USER nonroot:nonroot
+
+EXPOSE 8080
+
+ENTRYPOINT ["/service"]

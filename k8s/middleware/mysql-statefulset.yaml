@@ -1,0 +1,187 @@
+# MySQL 8.0 StatefulSet — Mojaloop Central Ledger database tuned for 1M+ TPS
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-perf-config
+  namespace: remitflow
+data:
+  my.cnf: |
+    [mysqld]
+    innodb_buffer_pool_size = 180G
+    innodb_buffer_pool_instances = 16
+    innodb_redo_log_capacity = 16G
+    innodb_log_buffer_size = 256M
+    innodb_flush_log_at_trx_commit = 2
+    innodb_flush_method = O_DIRECT
+    innodb_io_capacity = 20000
+    innodb_io_capacity_max = 40000
+    innodb_read_io_threads = 16
+    innodb_write_io_threads = 16
+    innodb_page_cleaners = 8
+    innodb_thread_concurrency = 0
+    innodb_change_buffering = none
+    innodb_adaptive_hash_index = ON
+    max_connections = 5000
+    thread_cache_size = 256
+    table_open_cache = 8192
+    sort_buffer_size = 4M
+    join_buffer_size = 8M
+    tmp_table_size = 256M
+    max_heap_table_size = 256M
+    binlog_format = ROW
+    binlog_row_image = MINIMAL
+    sync_binlog = 0
+    gtid_mode = ON
+    enforce_gtid_consistency = ON
+    max_allowed_packet = 64M
+    character_set_server = utf8mb4
+    collation_server = utf8mb4_0900_ai_ci
+    performance_schema = ON
+    slow_query_log = ON
+    long_query_time = 0.1
+    local_infile = OFF
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: remitflow
+  labels:
+    app: mysql
+    tier: database
+spec:
+  serviceName: mysql-service
+  replicas: 3
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+        tier: database
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9104"
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          ports:
+            - containerPort: 3306
+              name: mysql
+              protocol: TCP
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: root-password
+            - name: MYSQL_DATABASE
+              value: "remitflow"
+            - name: MYSQL_USER
+              value: "remitflow"
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secrets
+                  key: user-password
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+            - name: config
+              mountPath: /etc/mysql/conf.d/perf.cnf
+              subPath: my.cnf
+          resources:
+            requests:
+              memory: "16Gi"
+              cpu: "4"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+          readinessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+            initialDelaySeconds: 30
+            periodSeconds: 30
+        - name: mysqld-exporter
+          image: prom/mysqld-exporter:v0.15.1
+          ports:
+            - containerPort: 9104
+              name: metrics
+          env:
+            - name: DATA_SOURCE_NAME
+              value: "exporter:exporter@(localhost:3306)/"
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - mysql
+              topologyKey: kubernetes.io/hostname
+      volumes:
+        - name: config
+          configMap:
+            name: mysql-perf-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3-nvme
+        resources:
+          requests:
+            storage: 200Gi
+---
+# MySQL headless service
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-service
+  namespace: remitflow
+  labels:
+    app: mysql
+spec:
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+    - port: 3306
+      targetPort: 3306
+      name: mysql
+---
+# MySQL read-write service (primary)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-primary
+  namespace: remitflow
+  labels:
+    app: mysql
+spec:
+  type: ClusterIP
+  selector:
+    app: mysql
+    statefulset.kubernetes.io/pod-name: mysql-0
+  ports:
+    - port: 3306
+      targetPort: 3306
+      name: mysql

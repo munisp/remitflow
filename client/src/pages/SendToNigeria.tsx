@@ -54,9 +54,9 @@ const config: CorridorConfig = {
   relatedCorridors: [
     { flag: "🇬🇭", country: "Ghana", route: "/send-to-ghana" },
     { flag: "🇰🇪", country: "Kenya", route: "/send-to-kenya" },
-    { flag: "🇸🇳", country: "Senegal", route: "/send-to-senegal" },
-    { flag: "🇨🇲", country: "Cameroon", route: "/send-to-cameroon" },
-    { flag: "🇿🇦", country: "South Africa", route: "/send-to-south-africa" },
+    { flag: "🇨🇳", country: "China", route: "/send-to-china" },
+    { flag: "🇧🇷", country: "Brazil", route: "/send-to-brazil" },
+    { flag: "🇮🇳", country: "India", route: "/send-to-india" },
   ],
 };
 

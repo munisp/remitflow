@@ -27,13 +27,20 @@ routes:
         expose_headers: "X-Request-ID"
         max_age: 3600
         allow_credential: true
-      # Rate limiting — global 1000 req/min per IP
+      # Rate limiting — global 100K req/min per IP (1M+ TPS gateway)
       limit-count:
-        count: 1000
+        count: 100000
         time_window: 60
         key: "remote_addr"
         rejected_code: 429
         rejected_msg: '{"error":"rate_limit_exceeded","message":"Too many requests"}'
+      # Connection limiting — prevent single IP from exhausting connections
+      limit-conn:
+        conn: 5000
+        burst: 2500
+        default_conn_delay: 0.1
+        key: "remote_addr"
+        rejected_code: 503
       # Prometheus metrics collection
       prometheus:
         prefer_name: true
@@ -51,7 +58,7 @@ routes:
         _meta:
           disable: false
       limit-count:
-        count: 20
+        count: 60
         time_window: 60
         key: "remote_addr"
         rejected_code: 429
@@ -70,7 +77,7 @@ routes:
         _meta:
           disable: false
       limit-count:
-        count: 10
+        count: 1000
         time_window: 60
         key: "remote_addr"
         rejected_code: 429
@@ -130,7 +137,45 @@ routes:
       nodes:
         "app:3000": 1
 
-upstreams: []
+  # ── Webhook endpoints — high throughput from payment rails ────────────────
+  - id: "remitflow-webhooks"
+    uri: "/api/webhooks/*"
+    methods: ["POST"]
+    upstream:
+      type: roundrobin
+      nodes:
+        "app:3000": 1
+      timeout:
+        connect: 3
+        send: 30
+        read: 30
+      keepalive_pool:
+        size: 256
+        idle_timeout: 60
+        requests: 10000
+    plugins:
+      limit-count:
+        count: 50000
+        time_window: 60
+        key: "remote_addr"
+        rejected_code: 429
+
+upstreams:
+  - id: "remitflow-upstream"
+    type: roundrobin
+    nodes:
+      "app:3000": 1
+    timeout:
+      connect: 3
+      send: 30
+      read: 30
+    keepalive_pool:
+      size: 256
+      idle_timeout: 60
+      requests: 10000
+    retries: 2
+    retry_timeout: 5
+
 services: []
 
 #END

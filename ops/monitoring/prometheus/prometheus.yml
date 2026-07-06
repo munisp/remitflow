@@ -44,6 +44,17 @@ scrape_configs:
     static_configs:
       - targets: ["host.docker.internal:8124"]
 
+  # Mark Lane Integration Services
+  - job_name: "remitflow-go-marklane-fx-bridge"
+    static_configs:
+      - targets: ["host.docker.internal:8128"]
+  - job_name: "remitflow-rust-kyc-compliance-bridge"
+    static_configs:
+      - targets: ["host.docker.internal:8129"]
+  - job_name: "remitflow-python-settlement-recon"
+    static_configs:
+      - targets: ["host.docker.internal:8130"]
+
   # Infrastructure
   - job_name: "postgres"
     static_configs:

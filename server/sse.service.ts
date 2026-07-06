@@ -110,6 +110,7 @@ export interface UserSseEvent {
     | "login_new_device" | "password_changed" | "2fa_enabled" | "2fa_disabled"
     | "rate_alert_hit" | "low_balance" | "referral_bonus" | "card_transaction"
     | "fx_alert" | "bulk_action"
+    | "cash_pickup_assigned" | "cash_pickup_completed" | "pickup_code_regenerated" | "float_topup_approved"
     | "ping" | "notification";
   payload: Record<string, unknown>;
   timestamp: string;

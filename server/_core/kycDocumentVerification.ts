@@ -118,6 +118,9 @@ function selectProvider(country: string): "onfido" | "smile_identity" {
 
 async function onfidoRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
   if (!ONFIDO_API_KEY) {
+    if (isProduction()) {
+      throw new Error("KYC provider unavailable: ONFIDO_API_KEY not configured");
+    }
     return mockVerificationResponse(path) as T;
   }
 
@@ -186,7 +189,21 @@ async function createOnfidoVerification(req: VerificationRequest): Promise<Verif
       createdAt: new Date().toISOString(),
     };
   } catch (err) {
-    logger.warn({ error: err }, "Onfido API failed — returning mock");
+    logger.error({ error: err }, "Onfido API failed");
+    if (isProduction()) {
+      return {
+        checkId: `failed-${randomBytes(8).toString("hex")}`,
+        provider: "onfido",
+        status: "needs_review",
+        documentVerified: false,
+        faceMatchScore: 0,
+        livenessScore: 0,
+        amlClear: false,
+        extractedData: {},
+        reasons: ["KYC verification provider error — queued for manual review"],
+        createdAt: new Date().toISOString(),
+      };
+    }
     return createMockVerification(req);
   }
 }
@@ -195,6 +212,9 @@ async function createOnfidoVerification(req: VerificationRequest): Promise<Verif
 
 async function createSmileVerification(req: VerificationRequest): Promise<VerificationResult> {
   if (!SMILE_PARTNER_ID || !SMILE_API_KEY) {
+    if (isProduction()) {
+      throw new Error("KYC provider unavailable: SMILE_PARTNER_ID/SMILE_API_KEY not configured");
+    }
     return createMockVerification(req);
   }
 
@@ -242,7 +262,21 @@ async function createSmileVerification(req: VerificationRequest): Promise<Verifi
       createdAt: new Date().toISOString(),
     };
   } catch (err) {
-    logger.warn({ error: err }, "Smile Identity API failed — returning mock");
+    logger.error({ error: err }, "Smile Identity API failed");
+    if (isProduction()) {
+      return {
+        checkId: `failed-${randomBytes(8).toString("hex")}`,
+        provider: "smile_identity",
+        status: "needs_review",
+        documentVerified: false,
+        faceMatchScore: 0,
+        livenessScore: 0,
+        amlClear: false,
+        extractedData: {},
+        reasons: ["KYC verification provider error — queued for manual review"],
+        createdAt: new Date().toISOString(),
+      };
+    }
     return createMockVerification(req);
   }
 }
@@ -259,6 +293,12 @@ function mapDocumentTypeToSmile(docType: DocumentType): string {
     ghana_card: "GHANA_CARD",
   };
   return mapping[docType] || "NATIONAL_ID";
+}
+
+// ── Environment Check ────────────────────────────────────────────────────────
+
+function isProduction(): boolean {
+  return process.env.NODE_ENV === "production";
 }
 
 // ── Mock ────────────────────────────────────────────────────────────────────
@@ -336,7 +376,21 @@ export async function getVerificationStatus(
     };
   }
 
-  // Mock / no API key
+  // No API key — fail-closed in production
+  if (isProduction()) {
+    return {
+      checkId,
+      provider,
+      status: "needs_review",
+      documentVerified: false,
+      faceMatchScore: 0,
+      livenessScore: 0,
+      amlClear: false,
+      extractedData: {},
+      reasons: ["KYC provider unavailable — verification pending manual review"],
+      createdAt: new Date().toISOString(),
+    };
+  }
   return {
     checkId,
     provider,
@@ -346,7 +400,7 @@ export async function getVerificationStatus(
     livenessScore: 98,
     amlClear: true,
     extractedData: {},
-    reasons: ["Mock verification complete"],
+    reasons: ["Mock verification complete (dev mode)"],
     createdAt: new Date().toISOString(),
     completedAt: new Date().toISOString(),
   };

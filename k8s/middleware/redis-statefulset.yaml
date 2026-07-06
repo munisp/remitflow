@@ -1,0 +1,166 @@
+# Redis Cluster StatefulSet — 6-node (3 masters + 3 replicas) for 1M+ ops/s
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: remitflow
+  labels:
+    app: redis
+    tier: cache
+spec:
+  serviceName: redis
+  replicas: 6
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        tier: cache
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          command:
+            - redis-server
+            - /conf/redis.conf
+            - --requirepass
+            - $(REDIS_PASSWORD)
+          ports:
+            - containerPort: 6379
+              name: redis
+            - containerPort: 16379
+              name: cluster-bus
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: redis-password
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /conf
+          resources:
+            requests:
+              memory: "32Gi"
+              cpu: "2"
+            limits:
+              memory: "34Gi"
+              cpu: "4"
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "-a", "$(REDIS_PASSWORD)", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "-a", "$(REDIS_PASSWORD)", "ping"]
+            initialDelaySeconds: 20
+            periodSeconds: 30
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.57.0
+          ports:
+            - containerPort: 9121
+              name: metrics
+          env:
+            - name: REDIS_ADDR
+              value: "localhost:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: redis-password
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "50m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+      volumes:
+        - name: config
+          configMap:
+            name: redis-cluster-config
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - redis
+                topologyKey: kubernetes.io/hostname
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 50Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-cluster-config
+  namespace: remitflow
+data:
+  redis.conf: |
+    cluster-enabled yes
+    cluster-config-file nodes.conf
+    cluster-node-timeout 5000
+    cluster-require-full-coverage no
+    maxmemory 32gb
+    maxmemory-policy allkeys-lfu
+    io-threads 4
+    io-threads-do-reads yes
+    appendonly yes
+    appendfsync everysec
+    no-appendfsync-on-rewrite yes
+    lazyfree-lazy-eviction yes
+    lazyfree-lazy-expire yes
+    lazyfree-lazy-server-del yes
+    lazyfree-lazy-user-del yes
+    activedefrag yes
+    tcp-backlog 65535
+    slowlog-log-slower-than 5000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-cluster
+  namespace: remitflow
+spec:
+  clusterIP: None
+  ports:
+    - port: 6379
+      name: redis
+    - port: 16379
+      name: cluster-bus
+    - port: 9121
+      name: metrics
+  selector:
+    app: redis
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  namespace: remitflow
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: redis

@@ -1,0 +1,231 @@
+# RemitFlow — Kubernetes Network Policies
+# Implements zero-trust networking: deny-all default, whitelist required paths
+
+---
+# Default deny all ingress and egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: remitflow
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# API server: allow ingress from ingress controller, egress to DB/Redis/Kafka
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-server
+  namespace: remitflow
+spec:
+  podSelector:
+    matchLabels:
+      app: remitflow-api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 3001
+    # Health checks from kubelet
+    - from: []
+      ports:
+        - protocol: TCP
+          port: 3001
+  egress:
+    # PostgreSQL (Aurora)
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/16 # VPC CIDR
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Kafka
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+    # Temporal
+    - to:
+        - podSelector:
+            matchLabels:
+              app: temporal-frontend
+      ports:
+        - protocol: TCP
+          port: 7233
+    # Vault
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: vault
+      ports:
+        - protocol: TCP
+          port: 8200
+    # DNS
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # External APIs (Circle, Onfido, OFAC, etc.) via HTTPS
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# Redis: only accept connections from API server
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis
+  namespace: remitflow
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: remitflow-api
+      ports:
+        - protocol: TCP
+          port: 6379
+
+---
+# Kafka: accept from API server and Temporal workers
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kafka
+  namespace: remitflow
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: remitflow-api
+        - podSelector:
+            matchLabels:
+              app: temporal-worker
+      ports:
+        - protocol: TCP
+          port: 9092
+
+---
+# Vault: accept from API server only
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vault
+  namespace: remitflow
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: vault
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: remitflow-api
+      ports:
+        - protocol: TCP
+          port: 8200
+
+---
+# Polyglot services: accept from API server only
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: polyglot-services
+  namespace: remitflow
+spec:
+  podSelector:
+    matchExpressions:
+      - key: tier
+        operator: In
+        values: ["polyglot"]
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: remitflow-api
+      ports:
+        - protocol: TCP
+          port: 8128
+        - protocol: TCP
+          port: 8129
+        - protocol: TCP
+          port: 8130
+  egress:
+    # PostgreSQL
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/16
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # DNS
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53

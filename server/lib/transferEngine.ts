@@ -643,7 +643,7 @@ export async function executeTransfer(req: TransferRequest & { idempotencyKey?: 
     const railMap: Record<string, string> = {
       bank_transfer: "bank_transfer",
       mobile_money: "mobile_money",
-      cash_pickup: "bank_transfer",
+      cash_pickup: "cash_pickup",
       wallet: "bank_transfer",
     };
     const paymentResult = await initiatePayment({

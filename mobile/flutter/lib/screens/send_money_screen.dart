@@ -1,6 +1,8 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import '../services/api_service.dart';
+import '../services/offline_queue.dart';
 
 class SendMoneyScreen extends StatefulWidget {
   const SendMoneyScreen({super.key});
@@ -38,17 +40,48 @@ class _SendMoneyScreenState extends State<SendMoneyScreen> {
   double get _converted => double.tryParse(_amountCtrl.text) != null ? double.parse(_amountCtrl.text) * _rate : 0;
   double get _fee => double.tryParse(_amountCtrl.text) != null ? double.parse(_amountCtrl.text) * 0.015 : 0;
 
+  Future<bool> _checkConnectivity() async {
+    try {
+      final result = await InternetAddress.lookup('remitflow.com');
+      return result.isNotEmpty && result[0].rawAddress.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _send() async {
     if (_step == 'form') { setState(() => _step = 'confirm'); return; }
     setState(() => _loading = true);
+
+    final payload = {
+      'amount': double.parse(_amountCtrl.text),
+      'currency': _fromCurrency,
+      'recipientEmail': _emailCtrl.text,
+      'note': _noteCtrl.text,
+      'rail': 'SWIFT',
+    };
+
+    final isOnline = await _checkConnectivity();
+    if (!isOnline) {
+      await OfflineQueue.enqueue(
+        operationType: 'transfer',
+        endpoint: 'transactions.send',
+        payload: payload,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Transfer queued offline. Will send when connectivity is restored.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        setState(() => _step = 'success');
+      }
+      return;
+    }
+
     try {
-      await apiService.mutate('transactions.send', {
-        'amount': double.parse(_amountCtrl.text),
-        'currency': _fromCurrency,
-        'recipientEmail': _emailCtrl.text,
-        'note': _noteCtrl.text,
-        'rail': 'SWIFT',
-      });
+      await apiService.mutate('transactions.send', payload);
       if (mounted) setState(() => _step = 'success');
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString()), backgroundColor: Colors.red));
