@@ -5,7 +5,7 @@
 
 // Core Banking API
 export const VITE_CORE_BANKING_URL =
-  import.meta.env.VITE_CORE_BANKING_URL || "https://54link.upi.dev";
+  import.meta.env.VITE_CORE_BANKING_URL || "https://54remit.upi.dev";
 
 // Tenant ID
 export const VITE_TENANT_ID = import.meta.env.VITE_TENANT_ID || "remittance";

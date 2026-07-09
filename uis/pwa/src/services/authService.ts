@@ -1,14 +1,14 @@
 /**
  * Authentication Service
  * Handles authentication with Keycloak via core banking auth service
- * Based on 54link core banking authentication pattern
+ * Based on 54remit core banking authentication pattern
  */
 
 import { getTenantHeadersFromStorage } from "./tenant/getTenantHeaders";
 import { tenantService } from "./tenant/tenantService";
 
 const CORE_BANKING_BASE =
-  import.meta.env.VITE_CORE_BANKING_URL || "https://54link.upi.dev";
+  import.meta.env.VITE_CORE_BANKING_URL || "https://54remit.upi.dev";
 
 export interface LoginCredentials {
   email: string;

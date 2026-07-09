@@ -4,7 +4,7 @@
  */
 
 // WISE_API_BASE_URL and WISE_API_TOKEN no longer used for exchange rates;
-// rates are now served directly by the 54link backend.
+// rates are now served directly by the 54remit backend.
 import { normalizePaymentHubCurrency } from "../lib/paymentHubCurrency";
 import { useOfflineStore } from "../stores/offlineStore";
 import {
@@ -16,7 +16,7 @@ import {
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
   import.meta.env.VITE_CORE_BANKING_URL ||
-  "https://54link.upi.dev";
+  "https://54remit.upi.dev";
 
 // Error types
 export class ApiError extends Error {
@@ -454,7 +454,7 @@ export const exchangeRateService = {
         to: raw.quote_currency,
         rate: rateValue,
         inverseRate: rateValue > 0 ? 1 / rateValue : 0,
-        provider: "54link",
+        provider: "54remit",
         lastUpdated: raw.updated_at || raw.created_at,
         validUntil: new Date(Date.now() + 60000).toISOString(),
       };
@@ -471,7 +471,7 @@ export const exchangeRateService = {
     from: string,
     to: string,
   ): Promise<ApiResponse<ExchangeRate>> => {
-    // Use 54link exchange rates API, scoped by tenant via headers
+    // Use 54remit exchange rates API, scoped by tenant via headers
     const res = await api.get<BackendExchangeRate[]>(
       `/exchange-rates/exchange-rates?from=${from}&to=${to}`,
     );
@@ -493,7 +493,7 @@ export const exchangeRateService = {
       to: raw.quote_currency || to,
       rate: rateValue,
       inverseRate: rateValue > 0 ? 1 / rateValue : 0,
-      provider: "54link",
+      provider: "54remit",
       lastUpdated: raw.updated_at || raw.created_at,
       validUntil: new Date(Date.now() + 60000).toISOString(),
     };
@@ -1310,7 +1310,7 @@ export interface ExchangeRate {
   validUntil: string;
 }
 
-// Raw exchange rate shape as returned by the 54link backend
+// Raw exchange rate shape as returned by the 54remit backend
 interface BackendExchangeRate {
   id: number;
   tenant_id: string;

@@ -129,8 +129,8 @@ const allAccounts = await accountService.getAccounts(); // ✅ Only returns user
 
 ```bash
 # Test endpoint returns only user's accounts
-curl -X GET "https://54link.upi.dev/account/account/user/all" \
-  -H "x-tenant-id: 54link" \
+curl -X GET "https://54remit.upi.dev/account/account/user/all" \
+  -H "x-tenant-id: 54remit" \
   -H "x-keycloak-id: YOUR_USER_ID" \
   -H "x-ledger-id: 1" \
   -H "Authorization: Bearer YOUR_TOKEN"
@@ -182,10 +182,10 @@ curl -X GET "https://54link.upi.dev/account/account/user/all" \
 cd /home/tani/Documents/54link/54link_core_banking/services/account-service
 
 # 1. Build new image
-docker build -t registry.digitalocean.com/talentgraph-auth/54link-account-service:0.0.17 .
+docker build -t registry.digitalocean.com/talentgraph-auth/54remit-account-service:0.0.17 .
 
 # 2. Push to registry
-docker push registry.digitalocean.com/talentgraph-auth/54link-account-service:0.0.17
+docker push registry.digitalocean.com/talentgraph-auth/54remit-account-service:0.0.17
 
 # 3. Update helm values
 cd ../../infrastructure/charts/account-service

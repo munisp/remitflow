@@ -28,7 +28,7 @@ spec:
       serviceAccountName: temporal-access-service
       containers:
         - name: temporal-access-service
-          image: 54agent/temporal-access-service:latest
+          image: 54remit/temporal-access-service:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080

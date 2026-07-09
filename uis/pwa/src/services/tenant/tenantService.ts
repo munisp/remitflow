@@ -1,11 +1,11 @@
 /**
  * Tenant Service
  * Manages tenant configuration and headers for API requests
- * Based on 54link core banking tenant management pattern
+ * Based on 54remit core banking tenant management pattern
  */
 
 const CORE_BANKING_BASE =
-  import.meta.env.VITE_CORE_BANKING_URL || "https://54link.upi.dev";
+  import.meta.env.VITE_CORE_BANKING_URL || "https://54remit.upi.dev";
 
 export interface TenantContact {
   id: string;

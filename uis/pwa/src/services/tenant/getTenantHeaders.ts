@@ -1,7 +1,7 @@
 /**
  * Get Tenant Headers Utility
  * Extracts required headers from tenant configuration for API requests
- * Based on 54link core banking pattern
+ * Based on 54remit core banking pattern
  *
  * Returns headers: x-tenant-id, x-ledger-id, x-mint-id, x-mint-account-id,
  *                  x-keycloak-realm, x-keycloak-pub-key

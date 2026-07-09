@@ -1,6 +1,6 @@
 # Authentication and Tenant Management - Remittance Banking UI
 
-This document explains the authentication and tenant management implementation for the 54link remittance banking PWA.
+This document explains the authentication and tenant management implementation for the 54remit remittance banking PWA.
 
 ## Overview
 
@@ -56,7 +56,7 @@ The remittance banking UI now uses the core banking auth service with Keycloak i
 Create a `.env` file in the root of the PWA:
 
 ```env
-VITE_CORE_BANKING_URL=https://54link.upi.dev
+VITE_CORE_BANKING_URL=https://54remit.upi.dev
 VITE_TENANT_ID=remittance
 VITE_DEMO_MODE=false
 ```
@@ -196,7 +196,7 @@ Logout does NOT clear:
 
 ### Agent Banking UIs
 
-- Use `54agent` tenant ID
+- Use `54remit` tenant ID
 - Include agent-specific fields (agent_id, uin, business_name)
 - Use agent-service endpoints
 

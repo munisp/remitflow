@@ -2,7 +2,7 @@
 
 ## Overview
 
-The remittance UI has been successfully updated to integrate with the **54link Core Banking Account Service**, providing full multi-currency account management capabilities. Users can now create and manage accounts in multiple currencies directly from the remittance application.
+The remittance UI has been successfully updated to integrate with the **54remit Core Banking Account Service**, providing full multi-currency account management capabilities. Users can now create and manage accounts in multiple currencies directly from the remittance application.
 
 ## What Changed
 
@@ -174,7 +174,7 @@ These are automatically managed by the authentication service.
 Ensure these are set in your `.env` file:
 
 ```env
-VITE_CORE_BANKING_URL=https://54link.upi.dev
+VITE_CORE_BANKING_URL=https://54remit.upi.dev
 VITE_TENANT_ID=remittance
 ```
 

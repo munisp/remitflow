@@ -1,5 +1,5 @@
 /**
- * Account Service - Integration with 54link Core Banking Account Service
+ * Account Service - Integration with 54remit Core Banking Account Service
  * Handles multi-currency account management from core banking system
  */
 

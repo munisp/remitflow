@@ -17,8 +17,8 @@ echo ""
 # Note: You may need to add authentication headers if required
 # -H "Authorization: Bearer YOUR_TOKEN"
 
-curl -v -X POST "https://54agent.upi.dev/auth/permissions/check-permission?permission=${PERMISSION}&entity_type=${ENTITY_TYPE}&entity_id=${ENTITY_ID}&user_id=${USER_ID}" \
+curl -v -X POST "https://54remit.upi.dev/auth/permissions/check-permission?permission=${PERMISSION}&entity_type=${ENTITY_TYPE}&entity_id=${ENTITY_ID}&user_id=${USER_ID}" \
   -H "Content-Type: application/json" \
   -H "x-tenant-id: ${TENANT_ID}" \
-  -H "x-keycloak-realm: 54agent" \
+  -H "x-keycloak-realm: 54remit" \
   -H "x-keycloak-pub-key: MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA..." | jq .

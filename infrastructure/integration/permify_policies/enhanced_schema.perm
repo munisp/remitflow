@@ -1,4 +1,4 @@
-// Enhanced Permify Schema for 54agent Banking Platform
+// Enhanced Permify Schema for 54remit Banking Platform
 // v5 - All relations are @user typed; entity relations removed from permission rules entirely.
 // Complex cross-entity access (account_extended, transaction_workflow, api_key)
 // is modelled with flat @user relations — membership written by application layer.

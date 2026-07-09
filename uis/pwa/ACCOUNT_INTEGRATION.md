@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the integration of the **54link Core Banking Account Service** into the remittance UI, enabling full multi-currency account management capabilities.
+This document describes the integration of the **54remit Core Banking Account Service** into the remittance UI, enabling full multi-currency account management capabilities.
 
 ## What's New
 
@@ -218,7 +218,7 @@ interface Account {
 ### Environment Variables
 
 ```env
-VITE_CORE_BANKING_URL=https://54link.upi.dev
+VITE_CORE_BANKING_URL=https://54remit.upi.dev
 VITE_TENANT_ID=remittance
 ```
 
@@ -265,7 +265,7 @@ Previous implementation used a separate wallet service with different data struc
 Test account creation:
 
 ```bash
-curl -X POST https://54link.upi.dev/account/account \
+curl -X POST https://54remit.upi.dev/account/account \
   -H "Content-Type: application/json" \
   -H "x-tenant-id: remittance" \
   -H "x-keycloak-id: user-id" \

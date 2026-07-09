@@ -2,7 +2,7 @@ apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
   name: pubsub
-  namespace: 54link
+  namespace: 54remit
 spec:
   type: pubsub.redis
   version: v1
