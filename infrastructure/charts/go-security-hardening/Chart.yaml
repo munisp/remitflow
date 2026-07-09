@@ -1,0 +1,6 @@
+apiVersion: v2
+name: go-security-hardening
+description: go-security-hardening Helm chart (go)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

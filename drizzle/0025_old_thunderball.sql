@@ -1,1 +1,0 @@
-ALTER TABLE "partner_webhooks" ALTER COLUMN "signing_secret" SET DATA TYPE varchar(128);

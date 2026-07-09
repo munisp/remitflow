@@ -1,0 +1,56 @@
+replicaCount: 1
+image:
+  repository: registry.digitalocean.com/talentgraph-auth/54remit-revenue-analytics
+  pullPolicy: IfNotPresent
+  tag: 0.1.0
+nameOverride: ''
+fullnameOverride: ''
+serviceAccount:
+  create: false
+  name: 54remit
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8083
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 500Mi
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+volumes: []
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+dapr:
+  appId: revenue-analytics
+  appPort: 8083
+  enableMetrics: true
+  enabled: true
+  metricsPort: 9099
+  sidecarListenAddresses: "0.0.0.0"
+  cpu-request: 100m
+  cpu-limit: 300m
+  memory-request: 250Mi
+  memory-limit: 1000Mi
+# Auto-generated: env var names below were discovered via source grep
+# (os.Getenv / env::var / os.getenv across revenue-analytics's codebase), so this list
+# reflects what the service actually reads — not a guess. Known non-secret
+# infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
+# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+#   helm upgrade --install revenue-analytics infrastructure/charts/revenue-analytics \
+#     -n 54remit -f infrastructure/values-secrets/revenue-analytics.yaml
+# (a gitignored, per-environment file).
+secrets:
+  {}

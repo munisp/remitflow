@@ -1,0 +1,60 @@
+replicaCount: 1
+image:
+  repository: registry.digitalocean.com/talentgraph-auth/54remit-transfer-engine
+  pullPolicy: IfNotPresent
+  tag: 0.1.0
+nameOverride: ''
+fullnameOverride: ''
+serviceAccount:
+  create: false
+  name: 54remit
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 50051
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 500Mi
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+volumes: []
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+dapr:
+  appId: transfer-engine
+  appPort: 50051
+  # transfer-engine serves gRPC, not HTTP — see services/transfer-engine/main.go.
+  appProtocol: grpc
+  enableMetrics: true
+  enabled: true
+  metricsPort: 9099
+  sidecarListenAddresses: "0.0.0.0"
+  cpu-request: 100m
+  cpu-limit: 300m
+  memory-request: 250Mi
+  memory-limit: 1000Mi
+# Auto-generated: env var names below were discovered via source grep
+# (os.Getenv / env::var / os.getenv across transfer-engine's codebase), so this list
+# reflects what the service actually reads — not a guess. Known non-secret
+# infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
+# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+#   helm upgrade --install transfer-engine infrastructure/charts/transfer-engine \
+#     -n 54remit -f infrastructure/values-secrets/transfer-engine.yaml
+# (a gitignored, per-environment file).
+secrets:
+  DATABASE_URL: "CHANGE_ME"
+  GRPC_PORT: "50051"
+  METRICS_PORT: "9090"

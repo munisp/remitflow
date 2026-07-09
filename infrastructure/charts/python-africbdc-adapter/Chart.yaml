@@ -1,0 +1,6 @@
+apiVersion: v2
+name: python-africbdc-adapter
+description: python-africbdc-adapter Helm chart (python)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

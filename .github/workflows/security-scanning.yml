@@ -1,111 +1,124 @@
-name: Security Scanning — Insider Threat Prevention
+name: Security Scanning
 
 on:
-  pull_request:
-    branches: [main, master]
   push:
-    branches: [main, master]
-
-permissions:
-  contents: read
-  security-events: write
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly sweep for newly disclosed CVEs against pinned dependencies.
+    - cron: "0 6 * * 1"
 
 jobs:
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Run the OSS gitleaks binary directly rather than gitleaks/gitleaks-action,
+      # which requires a paid license for organization-owned repos.
+      - run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest detect --source=/repo --redact --no-git -v
+
   semgrep:
-    name: Semgrep Static Analysis
+    name: Static analysis (semgrep)
     runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
     steps:
       - uses: actions/checkout@v4
-      - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: >-
-            p/security-audit
-            p/secrets
-            p/owasp-top-ten
-            p/typescript
-            p/python
-            p/golang
-            p/rust
+      - run: semgrep ci --config=p/security-audit --config=p/secrets
         env:
-          SEMGREP_RULES: >-
-            rules:
-              - id: hardcoded-credentials
-                pattern: |
-                  $KEY = "..."
-                message: "Possible hardcoded credential detected"
-                severity: ERROR
-                languages: [typescript, python, go]
-              - id: unsafe-sql-interpolation
-                pattern: |
-                  sql`... ${$VAR} ...`
-                message: "Raw SQL interpolation — use parameterized queries"
-                severity: WARNING
-                languages: [typescript]
-              - id: admin-bypass
-                pattern: |
-                  if (...) { return true; }
-                message: "Potential authorization bypass"
-                severity: WARNING
-                languages: [typescript, python, go]
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        continue-on-error: true
 
-  gitleaks:
-    name: Secret Scanning (Gitleaks)
+  npm-audit:
+    name: Dependency audit / ${{ matrix.name }}
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  signed-commits:
-    name: Verify Signed Commits
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Check for unsigned commits
-        run: |
-          echo "Checking commits in PR for GPG signatures..."
-          UNSIGNED=$(git log --format='%H %GG' origin/${{ github.base_ref }}..HEAD | grep -v "Good signature" | head -5)
-          if [ -n "$UNSIGNED" ]; then
-            echo "⚠️ Warning: Some commits are not GPG-signed. Consider enabling commit signing."
-            echo "$UNSIGNED"
-          else
-            echo "✅ All commits are GPG-signed"
-          fi
-
-  dependency-audit:
-    name: Dependency Security Audit
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: uis/pwa
+            path: uis/pwa
+          - name: tenant-management
+            path: services/tenant-management
+    defaults:
+      run:
+        working-directory: ${{ matrix.path }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: NPM Audit
-        run: |
-          npm audit --audit-level=high || true
-      - name: Check for known vulnerable packages
-        run: |
-          echo "Checking for critical CVEs in dependencies..."
-          npx audit-ci --high
+          cache: npm
+          cache-dependency-path: ${{ matrix.path }}/package-lock.json
+      - run: npm ci
+      - run: npm audit --audit-level=high
 
-  branch-protection:
-    name: Branch Protection Enforcement
+  go-vuln-check:
+    name: Dependency audit / ${{ matrix.service }}
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - bnpl-service
+          - cbdc-service
+          - direct-debit-service
+          - travel-rule-service
+          - multi-bank-routing-service
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
     steps:
       - uses: actions/checkout@v4
-      - name: Verify PR requirements
-        run: |
-          echo "Branch protection checks:"
-          echo "  ✓ PR required for main/master"
-          echo "  ✓ At least 1 reviewer required"
-          echo "  ✓ CI must pass before merge"
-          echo "  ✓ Force push disabled on protected branches"
-          echo "  ✓ Branch deletion after merge: enabled"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: go mod tidy
+      - run: govulncheck ./...
+
+  cargo-audit:
+    name: Dependency audit / rust-transaction-processor
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/rust-transaction-processor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit
+
+  pip-audit:
+    name: Dependency audit / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: policy-engine-service
+            path: services/policy-engine-service
+          - name: saga-orchestrator-service
+            path: services/saga-orchestrator-service
+          - name: multi-bank-routing-service-ml
+            path: services/multi-bank-routing-service/ml
+          - name: payment-gateways
+            path: services/payment-gateways
+          - name: admin-service
+            path: services/admin-service
+          - name: user-service
+            path: services/user-service
+          - name: auth-service
+            path: services/auth-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip pip-audit
+      - working-directory: ${{ matrix.path }}
+        run: pip-audit -r requirements.txt

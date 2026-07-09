@@ -1,8 +1,0 @@
-# QA results are generated at runtime — don't commit them
-**/results/*.json
-**/results/*.xml
-**/backups/*
-
-# But keep the directories
-!**/results/.gitkeep
-!**/backups/.gitkeep

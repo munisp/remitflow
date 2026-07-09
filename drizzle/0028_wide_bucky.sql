@@ -1,1 +1,0 @@
-ALTER TYPE "public"."tx_status" ADD VALUE 'initiated' BEFORE 'pending';

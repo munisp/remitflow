@@ -1,0 +1,6 @@
+apiVersion: v2
+name: kyc-event-consumer
+description: kyc-event-consumer Helm chart (python)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

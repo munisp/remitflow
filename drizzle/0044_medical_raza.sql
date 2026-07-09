@@ -1,1 +1,0 @@
-CREATE UNIQUE INDEX "idempotencyKeys_key_unique_idx" ON "idempotency_keys" USING btree ("key");

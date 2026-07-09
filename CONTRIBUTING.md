@@ -1,109 +1,32 @@
-# Contributing to RemitFlow
+# Contributing
 
-Thank you for contributing! This guide covers our development workflow, code standards, and how to submit changes.
+## Repository layout
 
-## Development Setup
+- `services/` — independent Go, Rust, and Python microservices. Each is self-contained: its own `go.mod`/`Cargo.toml`/`requirements.txt`, its own `Dockerfile` (where containerized), no shared code across services today.
+- `services/payment-gateways/` — one directory per payment rail/provider, each with its own `client.py`/`service.py` pair.
+- `uis/pwa` — the customer/agent-facing Progressive Web App (Vite + React + TypeScript + Tailwind).
+- `infrastructure/` — Helm charts (`charts/`), a chart generator (`templates/template-chart`, driven by `00_provision_chart.sh`), APISIX gateway config (`apisix-resources/`), Dapr manifests (`manifests/dapr/`), and Permify authorization policies (`integration/permify_policies/`).
+- `.github/workflows/` — CI (lint/build/test), security scanning, and deploy pipelines.
 
-```bash
-# Prerequisites: Node.js 22+, pnpm 10+, PostgreSQL 16+
-pnpm install
-cp .env.example .env  # Configure DATABASE_URL, JWT_SECRET, etc.
-pnpm db:push           # Push schema to database
-pnpm dev               # Start dev server at http://localhost:3000
-```
+## Local setup
 
-## Code Style
+1. Pick the service you're working on and follow its Quick Start entry in the root [README.md](README.md).
+2. If you're touching `infrastructure/` scripts, copy `infrastructure/.env.example` to `infrastructure/.env`, fill in real values (ask a teammate with cluster access — do not invent or reuse values from git history), and `source infrastructure/.env` before running any numbered script.
+3. Never commit real secrets. `infrastructure/.env` and `infrastructure/config/docker.json` are gitignored for this reason — if a script needs a new secret, add it as an env var and document it in `infrastructure/.env.example`, don't inline it.
 
-- **TypeScript strict mode** — `npx tsc --noEmit` must pass with 0 errors
-- **React** — Functional components only, hooks for state management
-- **Tailwind CSS** — Use design tokens from `index.css`, prefer shadcn/ui components
-- **tRPC** — All API calls must be type-safe via tRPC. No raw fetch() for backend calls
-- **i18n** — All user-facing strings must use `useTranslation()` from react-i18next
-- **Error handling** — All tRPC queries must have `onError` handlers. All pages must show loading states
-- **Imports** — Use `@/` alias for client imports. Keep imports organized: React → third-party → local
+## Code style by language
 
-## File Structure
+- **Go**: `go vet ./...` and `go build ./...` must pass. Match the existing services' dependency versions (gin 1.9.1, sqlx, lib/pq 1.10.9, kafka-go, zap, prometheus client) unless there's a specific reason to diverge.
+- **Rust**: `cargo build` and `cargo clippy` must pass without new warnings.
+- **Python**: services use FastAPI + Pydantic v2. Keep `requirements.txt` in sync with actual imports.
+- **Frontend**: `npm run lint` (ESLint) and `npm run build` (`tsc && vite build`) must pass.
 
-```
-client/src/
-  pages/          # 317 route pages (one per route)
-  components/     # Shared UI components
-  hooks/          # Custom React hooks
-  lib/            # Utilities (trpc, haptics, currency, etc.)
-  contexts/       # React contexts (Theme, Auth)
-  i18n/           # Translation files (14 languages)
-server/
-  _core/          # Express app, middleware, logger
-  routers/        # tRPC routers (72 modules)
-  routers.ts      # Main router aggregation
-  db.ts           # Drizzle ORM configuration
-  security.middleware.ts  # OWASP Top 10 security middleware
-drizzle/
-  schema.ts       # Database schema (Drizzle tables)
-  migrations/     # SQL migration files
-services/         # Polyglot microservices (Go, Rust, Python)
-```
+## Commit messages
 
-## Branch Naming
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`type(scope): summary`), enforced by `.commitlintrc.json`. Valid scopes match the service/domain being touched (see that file for the full list) — use `infra` for `infrastructure/` changes and `security` for anything touching secrets, auth, or dependency vulnerabilities.
 
-- `feature/` — New features
-- `fix/` — Bug fixes
-- `chore/` — Maintenance, refactoring
-- `docs/` — Documentation only
+## Before opening a PR
 
-## Commit Messages
-
-Use conventional commits:
-```
-feat: add delivery speed options to send flow
-fix: dashboard showing undefined NaN for transactions
-chore: consolidate docker-compose files
-docs: add architecture diagram to README
-```
-
-## Pull Request Process
-
-1. Create a feature branch from `main`
-2. Write/update tests for your changes
-3. Ensure all checks pass:
-   - `npx tsc --noEmit` (TypeScript)
-   - `pnpm test` (Vitest)
-   - No console errors in browser
-4. Update documentation if adding new features
-5. Request review from at least one team member
-6. Squash and merge after approval
-
-## Testing
-
-```bash
-pnpm test                    # Run all tests
-pnpm test --run --reporter=verbose  # Verbose output
-pnpm test -- path/to/test    # Run specific test
-```
-
-### Test Categories
-- **Unit tests** — `server/*.test.ts` (tRPC router tests)
-- **Smoke tests** — `server/smoke*.test.ts` (API endpoint verification)
-- **Load tests** — `tests/k6/` (k6 performance tests)
-
-## Database Changes
-
-1. Edit `drizzle/schema.ts` to add/modify tables
-2. Run `pnpm db:push` to apply changes (development)
-3. For production: create a migration file in `drizzle/migrations/`
-
-## Security
-
-- Never commit secrets or credentials
-- Use environment variables for all sensitive values
-- All admin routes require RBAC verification
-- Stack traces are stripped in production responses
-- CSP headers are enforced via Helmet middleware
-
-## i18n
-
-When adding user-facing text:
-1. Add the English key to `client/src/i18n/en.json`
-2. Use `t('key')` in the component
-3. Add translations for all 14 supported languages:
-   EN, ES, FR, PT, AR, YO, IG, HA, PCM, SW, AM, AK, WO, FF
+- New/changed services: add or update tests so `.github/workflows/ci.yml`'s matrix job for that service has something to run.
+- Infrastructure script changes: do not run `helm upgrade`/`kubectl apply` against the live cluster from a local machine as part of a PR — that's what `.github/workflows/deploy.yml` is for. Validate script logic locally (e.g. `bash -n script.sh`, dry-run flags) instead.
+- If you're adding a new backend service, provision its Helm chart with `infrastructure/00_provision_chart.sh` and add it to the relevant matrix in `.github/workflows/ci.yml` / `deploy.yml`.

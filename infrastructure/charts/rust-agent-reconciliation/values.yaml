@@ -1,0 +1,62 @@
+replicaCount: 1
+image:
+  repository: registry.digitalocean.com/talentgraph-auth/54remit-rust-agent-reconciliation
+  pullPolicy: IfNotPresent
+  tag: 0.1.0
+nameOverride: ''
+fullnameOverride: ''
+serviceAccount:
+  create: false
+  name: 54remit
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8098
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 500Mi
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+volumes: []
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+dapr:
+  appId: rust-agent-reconciliation
+  appPort: 8098
+  enableMetrics: true
+  enabled: true
+  metricsPort: 9099
+  sidecarListenAddresses: "0.0.0.0"
+  cpu-request: 100m
+  cpu-limit: 300m
+  memory-request: 250Mi
+  memory-limit: 1000Mi
+# Auto-generated: env var names below were discovered via source grep
+# (os.Getenv / env::var / os.getenv across rust-agent-reconciliation's codebase), so this list
+# reflects what the service actually reads — not a guess. Known non-secret
+# infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
+# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+#   helm upgrade --install rust-agent-reconciliation infrastructure/charts/rust-agent-reconciliation \
+#     -n 54remit -f infrastructure/values-secrets/rust-agent-reconciliation.yaml
+# (a gitignored, per-environment file).
+secrets:
+  CASH_OUT_ALERT_FLOOR_NGN: "CHANGE_ME"
+  DATABASE_URL: "CHANGE_ME"
+  HIGH_TX_COUNT_THRESHOLD: "CHANGE_ME"
+  LARGE_TX_THRESHOLD_NGN: "CHANGE_ME"
+  MAJOR_DISCREPANCY_PCT: "CHANGE_ME"
+  MINOR_DISCREPANCY_PCT: "CHANGE_ME"
+  PORT: "8098"

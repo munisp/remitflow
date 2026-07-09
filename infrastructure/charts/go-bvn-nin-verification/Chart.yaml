@@ -1,0 +1,6 @@
+apiVersion: v2
+name: go-bvn-nin-verification
+description: go-bvn-nin-verification Helm chart (go)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

@@ -1,0 +1,37 @@
+{
+  "common": {
+    "save": "Enregistrer",
+    "cancel": "Annuler",
+    "loading": "Chargement...",
+    "retry": "Réessayer",
+    "close": "Fermer"
+  },
+  "offline": {
+    "backOnline": "De retour en ligne ! Synchronisation en cours...",
+    "offline": "Vous êtes hors ligne. Ne vous inquiétez pas, vos données sont enregistrées localement.",
+    "slowConnection": "Connexion lente détectée. Certaines fonctionnalités peuvent mettre plus de temps à se charger.",
+    "pending": "{{count}} en attente",
+    "syncing": "Synchronisation..."
+  },
+  "security": {
+    "title": "Sécurité",
+    "subtitle": "Gérez les paramètres de sécurité de votre compte",
+    "twoFactorAuth": "Authentification à deux facteurs",
+    "enable2fa": "Activer la 2FA",
+    "disable2fa": "Désactiver la 2FA",
+    "verificationCode": "Entrez le code de vérification",
+    "scanQrCode": "Scannez le code QR ci-dessous avec votre application d'authentification (Google Authenticator, Authy, etc.)"
+  },
+  "loginHistory": {
+    "title": "Historique des connexions IP",
+    "subtitle": "Suivez les tentatives de connexion et repérez les activités suspectes sur votre compte",
+    "suspiciousActivity": "Activité de connexion suspecte",
+    "recentAttempts": "Tentatives de connexion récentes",
+    "noHistory": "Aucun historique de connexion enregistré pour le moment.",
+    "success": "Réussi",
+    "failed": "Échoué"
+  },
+  "language": {
+    "label": "Langue"
+  }
+}

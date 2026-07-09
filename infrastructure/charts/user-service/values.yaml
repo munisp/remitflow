@@ -1,0 +1,64 @@
+replicaCount: 1
+image:
+  repository: registry.digitalocean.com/talentgraph-auth/54remit-user-service
+  pullPolicy: IfNotPresent
+  tag: 0.1.0
+nameOverride: ''
+fullnameOverride: ''
+serviceAccount:
+  create: false
+  name: 54remit
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 500Mi
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+volumes: []
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+dapr:
+  appId: user-service
+  appPort: 80
+  enableMetrics: true
+  enabled: true
+  metricsPort: 9099
+  sidecarListenAddresses: "0.0.0.0"
+  cpu-request: 100m
+  cpu-limit: 300m
+  memory-request: 250Mi
+  memory-limit: 1000Mi
+# ⚠️ Do not commit real values here — see admin-service/values.yaml's comment
+# for the override convention.
+secrets:
+  DATABASE_URI: "CHANGE_ME"
+  AUDIT_SVC_URL: "http://audit-service:8000"
+  DAPR_PUBSUB_NAME: "pubsub"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka-service:9092"
+  KAFKA_SECURITY_PROTOCOL: "PLAINTEXT"
+  KAFKA_SASL_MECHANISM: ""
+  KAFKA_SASL_USERNAME: ""
+  KAFKA_SASL_PASSWORD: ""
+  INTERNAL_API_BASE_URL: "CHANGE_ME"
+  VERIFICATION_SERVICE_URL: "CHANGE_ME"
+  VERIFICATION_CLIENT_ID: "CHANGE_ME"
+  VERIFICATION_CLIENT_SECRET: "CHANGE_ME"
+  KYC_REDIRECT_URL: "CHANGE_ME"
+  APP_ENV: "production"
+  ROOT_PATH: "/"

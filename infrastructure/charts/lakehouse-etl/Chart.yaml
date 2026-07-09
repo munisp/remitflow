@@ -1,0 +1,6 @@
+apiVersion: v2
+name: lakehouse-etl
+description: lakehouse-etl Helm chart (python)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

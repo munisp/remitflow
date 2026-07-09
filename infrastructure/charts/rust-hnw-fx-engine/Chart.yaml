@@ -1,0 +1,6 @@
+apiVersion: v2
+name: rust-hnw-fx-engine
+description: rust-hnw-fx-engine Helm chart (rust)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

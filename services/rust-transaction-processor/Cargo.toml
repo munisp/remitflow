@@ -1,0 +1,51 @@
+[package]
+name = "rust-transaction-processor"
+version = "2.0.0"
+edition = "2021"
+authors = ["RemitFlow Platform Team"]
+description = "Ultra-low-latency Rust transaction processing engine for RemitFlow"
+license = "Apache-2.0"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Web framework
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# UUID generation
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Metrics
+prometheus = "0.13"
+
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[[bin]]
+name = "transaction-processor"
+path = "src/main.rs"
