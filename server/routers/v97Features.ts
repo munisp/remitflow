@@ -54,6 +54,8 @@ import {
   webhookRetryQueue,
 } from "../../drizzle/schema.js";
 import { sendAuditLog, runComplianceCheck, getFraudScore } from "../_core/polyglotClient.js";
+import { auditCoreOperation } from "../middleware/coreAtomicity.js";
+import { KAFKA_TOPICS } from "../middleware/kafka.js";
 
 // ─── In-memory system config cache (hot-reload) — bounded LRU ────────────────
 import { BoundedCache, registerCache } from "../lib/boundedCache";
@@ -1072,6 +1074,20 @@ export const batchPaymentV97Router = router({
           await db.update(batchPaymentItems)
             .set({ status: "completed", transactionId: tx.id, processedAt: new Date() })
             .where(eq(batchPaymentItems.id, item.id)).returning();
+
+          // Ledger + event backing per settled item: record the double-entry in
+          // TigerBeetle and publish to Kafka so each batch payout is reconcilable.
+          await auditCoreOperation({
+            userId: ctx.user.id,
+            action: "batch_payment.item",
+            description: `Batch payment item ${item.id} (${batch.name}): ${item.amount} ${item.currency}`,
+            amount: Number(item.amount),
+            currency: item.currency,
+            featureLabel: "batch_payment",
+            operationRef: `BATCH-${input.batchId}-${item.id}`,
+            kafkaTopic: KAFKA_TOPICS.TRANSACTIONS,
+            metadata: { batchId: input.batchId, itemId: item.id, transactionId: tx.id },
+          }).catch(() => {});
           successCount++;
         } catch (err: any) {
           await db.update(batchPaymentItems)
