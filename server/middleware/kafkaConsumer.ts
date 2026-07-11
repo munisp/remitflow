@@ -311,6 +311,17 @@ export async function startKafkaConsumers(): Promise<void> {
     logger.info(`Kafka consumers started for ${handlers.length} topics`);
   } catch (err) {
     logger.warn({ err: (err as Error).message }, "Kafka consumers not started (broker unavailable)");
+    // If subscribe/run failed after connect(), disconnect the orphaned consumer
+    // so it doesn't leak a broker connection / consumer-group slot.
+    if (_consumer) {
+      try {
+        await _consumer.disconnect();
+      } catch {
+        /* best-effort cleanup */
+      }
+      _consumer = null;
+    }
+    _consumerRunning = false;
   }
 }
 
