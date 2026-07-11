@@ -575,7 +575,7 @@ const paymentOrchestrationRouter = router({
       return {
         success: true, verified: true, paymentId: paymentRef, status: "processing",
         rail: input.rail, estimatedCompletion: new Date(Date.now() + 3600000).toISOString(),
-        trackingUrl: `/transfer-tracking?ref=PAY-${Date.now()}`,
+        trackingUrl: `/transfer-tracking?ref=${paymentRef}`,
       };
     }),
 });
