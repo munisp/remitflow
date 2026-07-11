@@ -1334,6 +1334,16 @@ async function gracefulShutdown(signal: string) {
   // Stop WebSocket broadcaster
   stopServicesHealthWS();
 
+  // Drain Kafka consumers FIRST — their handlers depend on DB (getDb/createAuditLog)
+  // and Redis, so they must finish before those resources are torn down. The producer
+  // is disconnected later since it has no DB/Redis dependency.
+  try {
+    await stopKafkaConsumers();
+    logger.info("[Shutdown] Kafka consumers stopped");
+  } catch (err: any) {
+    logger.warn({ errMsg: err.message }, "[Shutdown] Kafka consumer stop warning:");
+  }
+
   // Disconnect Redis
   try {
     const { disconnectRedis } = await import("../middleware/redis");
@@ -1353,9 +1363,7 @@ async function gracefulShutdown(signal: string) {
   }
 
   try {
-    // Stop Kafka consumers before disconnecting the producer
-    await stopKafkaConsumers();
-    // Disconnect Kafka producer
+    // Disconnect Kafka producer (no DB/Redis dependency; consumers already drained above)
     await disconnectKafka();
     logger.info("[Shutdown] Kafka disconnected");
   } catch (err: any) {
