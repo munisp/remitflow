@@ -18,6 +18,8 @@ import { sendPushToUser } from "./pushNotifications";
 import { ENV } from "./_core/env";
 import { logger } from './_core/logger';
 import { safeParseAmount } from "./lib/safeDecimal";
+import { auditCoreOperation } from "./middleware/coreAtomicity";
+import { KAFKA_TOPICS } from "./middleware/kafka";
 
 // ─── Transactional email helper (Resend) ──────────────────────────────────────
 async function sendTransactionalEmail(opts: {
@@ -346,6 +348,23 @@ export function registerStripeWebhook(app: Express) {
                   reference: `STRIPE_${session.id}`,
                 } as any);
               });
+
+              // Ledger + event backing for the top-up: record the funds entering
+              // the platform in TigerBeetle (double-entry) and publish to Kafka so
+              // the wallet credit is reconcilable, not just a bare balance mutation.
+              await auditCoreOperation({
+                userId,
+                action: "wallet.topup",
+                description: `Stripe card top-up: ${amountPaid} ${walletCurrency}`,
+                amount: amountPaid,
+                currency: walletCurrency,
+                featureLabel: "stripe_wallet_topup",
+                operationRef: `STRIPE_${session.id}`,
+                kafkaTopic: KAFKA_TOPICS.TRANSACTIONS,
+                metadata: { source: "stripe", sessionId: session.id, type: "topup" },
+              }).catch((err) =>
+                logger.warn({ err: err?.message, sessionId: session.id }, "[Stripe Webhook] Top-up ledger/event recording failed")
+              );
 
               // SSE real-time notification
               broadcastUserEvent(userId, {

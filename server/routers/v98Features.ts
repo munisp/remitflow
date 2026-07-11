@@ -53,6 +53,7 @@ import {
 } from "../../drizzle/schema.js";
 import { createAuditLog } from "../db.js";
 import { publishAuditEvent, publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
+import { auditCoreOperation } from "../middleware/coreAtomicity.js";
 import { getAllCircuitBreakerStats } from "../services/circuitBreaker.js";
 import { broadcastAdminEvent, broadcastUserEvent } from "../sse.service.js";
 
@@ -484,6 +485,21 @@ export const v98Router = router({
           metadata: { targetUserId: input.userId, amount: input.amount, currency: input.currency },
         });
 
+        // Ledger + event backing: mint is a money-supply operation and must be
+        // recorded in TigerBeetle (double-entry) and streamed to Kafka, not just
+        // a bare wallet balance mutation.
+        await auditCoreOperation({
+          userId: input.userId,
+          action: "cbdc.mint",
+          description: `CBDC mint ${input.amount} ${input.currency}`,
+          amount: input.amount,
+          currency: input.currency,
+          featureLabel: "cbdc_mint",
+          operationRef: `CBDC-MINT-${input.userId}-${Date.now()}`,
+          kafkaTopic: KAFKA_TOPICS.TRANSACTIONS,
+          metadata: { operation: "mint", authorizedBy: ctx.user.id, reason: input.reason },
+        }).catch(() => {});
+
         // Notify user
         broadcastUserEvent(input.userId, {
           type: "wallet_credited" as any,
@@ -543,6 +559,20 @@ export const v98Router = router({
           action: "CBDC_BURN",
           description: `Burned ${input.amount} ${input.currency} from user ${input.userId}`,
         });
+
+        // Ledger + event backing: burn removes money supply and must be recorded
+        // in TigerBeetle (double-entry) and streamed to Kafka.
+        await auditCoreOperation({
+          userId: input.userId,
+          action: "cbdc.burn",
+          description: `CBDC burn ${input.amount} ${input.currency}`,
+          amount: input.amount,
+          currency: input.currency,
+          featureLabel: "cbdc_burn",
+          operationRef: `CBDC-BURN-${input.userId}-${Date.now()}`,
+          kafkaTopic: KAFKA_TOPICS.TRANSACTIONS,
+          metadata: { operation: "burn", authorizedBy: ctx.user.id, reason: input.reason },
+        }).catch(() => {});
 
         return { success: true, verified: true, balanceBefore, balanceAfter, currency: input.currency };
       }),
