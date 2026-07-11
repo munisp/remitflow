@@ -17,6 +17,7 @@ import { openAppSecHeadersMiddleware, openAppSecWafMiddleware, getSecurityVulner
 import { startScheduler } from "../scheduler";
 import { startMicroservices } from "./microservices";
 import { ensureTopicsExist, disconnectKafka } from "../middleware/kafka";
+import { startKafkaConsumers, stopKafkaConsumers } from "../middleware/kafkaConsumer";
 import { metricsHandler } from "../metrics";
 import { registerMojaloopWebhooks } from "../mojaloop.webhook";
 import { registerPaymentRailWebhooks } from "../payment-rail-webhooks";
@@ -1279,7 +1280,9 @@ async function startServer() {
     // Start automated daily reconciliation scheduler
     import("../lib/reconciliationScheduler").then(({ startReconciliationScheduler }) => startReconciliationScheduler()).catch(err => logger.warn({ errMsg: err?.message }, "[Reconciliation] Scheduler init failed (non-blocking):"));
     // Initialize Kafka topics (non-blocking, graceful fallback if Kafka unavailable)
-    ensureTopicsExist().catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic init failed (non-blocking):"));
+    ensureTopicsExist()
+      .then(() => startKafkaConsumers())
+      .catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic/consumer init failed (non-blocking):"));
     // Start webhook retry scheduler (exponential backoff for failed payment callbacks)
     try {
       const { ensureWebhookQueueTable, startWebhookRetryScheduler } = await import("../lib/webhookRetryQueue.js");
@@ -1350,6 +1353,8 @@ async function gracefulShutdown(signal: string) {
   }
 
   try {
+    // Stop Kafka consumers before disconnecting the producer
+    await stopKafkaConsumers();
     // Disconnect Kafka producer
     await disconnectKafka();
     logger.info("[Shutdown] Kafka disconnected");

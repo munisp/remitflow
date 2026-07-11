@@ -261,6 +261,7 @@ const handlers: ConsumerHandler[] = [
 // ─── Consumer Management ─────────────────────────────────────────────────────
 
 let _consumerRunning = false;
+let _consumer: { disconnect: () => Promise<void> } | null = null;
 const _stats = {
   messagesProcessed: 0,
   messagesErrored: 0,
@@ -280,6 +281,7 @@ export async function startKafkaConsumers(): Promise<void> {
 
     const consumer = kafka.consumer({ groupId: CONSUMER_GROUP });
     await consumer.connect();
+    _consumer = consumer;
 
     for (const h of handlers) {
       await consumer.subscribe({ topic: h.topic, fromBeginning: false });
@@ -309,6 +311,19 @@ export async function startKafkaConsumers(): Promise<void> {
     logger.info(`Kafka consumers started for ${handlers.length} topics`);
   } catch (err) {
     logger.warn({ err: (err as Error).message }, "Kafka consumers not started (broker unavailable)");
+  }
+}
+
+export async function stopKafkaConsumers(): Promise<void> {
+  if (!_consumer) return;
+  try {
+    await _consumer.disconnect();
+    logger.info("Kafka consumers disconnected");
+  } catch (err) {
+    logger.warn({ err: (err as Error).message }, "Kafka consumer disconnect warning");
+  } finally {
+    _consumer = null;
+    _consumerRunning = false;
   }
 }
 
