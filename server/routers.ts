@@ -467,6 +467,7 @@ function calculateNextRun(frequency: string, startDate: string, dayOfWeek?: numb
   return next;
 }
 
+import { healthRouter } from "./routers/health";
 export const appRouter = router({
   auth: router({
     me: protectedProcedure.query(({ ctx }) => ctx.user),
@@ -7097,5 +7098,7 @@ Case: #${input.caseId}`,
   adminDashboard: adminDashboardRouter,
   // Insider Threat Controls (maker-checker, JIT access, DLP, WebAuthn, geo-fencing)
   insiderThreat: insiderThreatRouter,
+  // Platform Health (all 12 integrations)
+  platformHealth: healthRouter,
 });
 export type AppRouter = typeof appRouter;

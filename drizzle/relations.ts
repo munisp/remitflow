@@ -246,3 +246,13 @@ export const fraudAlertsRelations = relations(fraudAlerts, ({ one }) => ({
 export const notificationPreferencesRelations = relations(notificationPreferences, ({ one }) => ({
   user: one(users, { fields: [notificationPreferences.userId], references: [users.id] }),
 }));
+
+import { keycloakSessions, tigerbeetleAccounts } from "./schema.integrations";
+
+export const keycloakSessionsRelations = relations(keycloakSessions, ({ one }) => ({
+  user: one(users, { fields: [keycloakSessions.userId], references: [users.id] }),
+}));
+
+export const tigerbeetleAccountsRelations = relations(tigerbeetleAccounts, ({ one }) => ({
+  user: one(users, { fields: [tigerbeetleAccounts.userId], references: [users.id] }),
+}));

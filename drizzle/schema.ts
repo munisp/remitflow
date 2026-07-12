@@ -5410,3 +5410,9 @@ export const p2pTransfers = pgTable("p2p_transfers", {
   index("p2p_transfers_idempotency_idx").on(t.idempotencyKey),
   index("p2p_transfers_corridor_idx").on(t.corridorCode),
 ]);
+
+// ─── External Integrations ───────────────────────────────────────────────────
+export * from "./schema.integrations";
+
+// ─── Insert Types ────────────────────────────────────────────────────────────
+export * from "./schema.types";
