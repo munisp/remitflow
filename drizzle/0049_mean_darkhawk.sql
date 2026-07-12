@@ -1,1 +1,0 @@
-ALTER TABLE "compliance_alerts" ADD COLUMN "sar_deadline" timestamp;

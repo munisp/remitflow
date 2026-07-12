@@ -1,0 +1,37 @@
+{
+  "common": {
+    "save": "Save",
+    "cancel": "Cancel",
+    "loading": "Loading...",
+    "retry": "Retry",
+    "close": "Close"
+  },
+  "offline": {
+    "backOnline": "Back online! Syncing your data...",
+    "offline": "You're offline. Don't worry, your data is saved locally.",
+    "slowConnection": "Slow connection detected. Some features may take longer to load.",
+    "pending": "{{count}} pending",
+    "syncing": "Syncing..."
+  },
+  "security": {
+    "title": "Security",
+    "subtitle": "Manage your account security settings",
+    "twoFactorAuth": "Two-Factor Authentication",
+    "enable2fa": "Enable 2FA",
+    "disable2fa": "Disable 2FA",
+    "verificationCode": "Enter verification code",
+    "scanQrCode": "Scan the QR code below with your authenticator app (Google Authenticator, Authy, etc.)"
+  },
+  "loginHistory": {
+    "title": "IP Login History",
+    "subtitle": "Track login attempts and spot suspicious activity on your account",
+    "suspiciousActivity": "Suspicious login activity",
+    "recentAttempts": "Recent Login Attempts",
+    "noHistory": "No login history recorded yet.",
+    "success": "Success",
+    "failed": "Failed"
+  },
+  "language": {
+    "label": "Language"
+  }
+}

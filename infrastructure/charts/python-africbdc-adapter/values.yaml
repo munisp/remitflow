@@ -1,0 +1,73 @@
+replicaCount: 1
+image:
+  repository: registry.digitalocean.com/talentgraph-auth/54remit-python-africbdc-adapter
+  pullPolicy: IfNotPresent
+  tag: 0.1.0
+nameOverride: ''
+fullnameOverride: ''
+serviceAccount:
+  create: false
+  name: 54remit
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 500Mi
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+volumes: []
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+dapr:
+  appId: python-africbdc-adapter
+  appPort: 8080
+  enableMetrics: true
+  enabled: true
+  metricsPort: 9099
+  sidecarListenAddresses: "0.0.0.0"
+  cpu-request: 100m
+  cpu-limit: 300m
+  memory-request: 250Mi
+  memory-limit: 1000Mi
+# Auto-generated: env var names below were discovered via source grep
+# (os.Getenv / env::var / os.getenv across python-africbdc-adapter's codebase), so this list
+# reflects what the service actually reads — not a guess. Known non-secret
+# infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
+# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+#   helm upgrade --install python-africbdc-adapter infrastructure/charts/python-africbdc-adapter \
+#     -n 54remit -f infrastructure/values-secrets/python-africbdc-adapter.yaml
+# (a gitignored, per-environment file).
+secrets:
+  AFRIGO_ENDPOINT: "CHANGE_ME"
+  DAPR_HTTP_PORT: "3500"
+  DATABASE_URL: "CHANGE_ME"
+  ECEDI_API_KEY: "CHANGE_ME"
+  ECEDI_ENDPOINT: "CHANGE_ME"
+  ENAIRA_API_KEY: "CHANGE_ME"
+  ENAIRA_ENDPOINT: "CHANGE_ME"
+  FLUVIO_GATEWAY_URL: "CHANGE_ME"
+  KAFKA_BROKERS: "kafka-service:9092"
+  KHOKHA_API_KEY: "CHANGE_ME"
+  KHOKHA_ENDPOINT: "CHANGE_ME"
+  LAKEHOUSE_URL: "CHANGE_ME"
+  MOJALOOP_HUB_URL: "CHANGE_ME"
+  OPENSEARCH_URL: "CHANGE_ME"
+  PORT: "8080"
+  REDIS_ADDR: "CHANGE_ME"
+  TEMPORAL_HOST_PORT: "CHANGE_ME"
+  TIGERBEETLE_ADDR: "CHANGE_ME"

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: rust-device-fingerprint
+description: rust-device-fingerprint Helm chart (rust)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

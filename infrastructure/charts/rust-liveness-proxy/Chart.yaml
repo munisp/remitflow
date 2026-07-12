@@ -1,0 +1,6 @@
+apiVersion: v2
+name: rust-liveness-proxy
+description: rust-liveness-proxy Helm chart (rust)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

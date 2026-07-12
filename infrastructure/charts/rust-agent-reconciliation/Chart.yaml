@@ -1,0 +1,6 @@
+apiVersion: v2
+name: rust-agent-reconciliation
+description: rust-agent-reconciliation Helm chart (rust)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

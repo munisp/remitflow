@@ -4,14 +4,45 @@
     "type-enum": [
       2,
       "always",
-      ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert", "security", "infra"]
+      [
+        "feat",
+        "fix",
+        "docs",
+        "style",
+        "refactor",
+        "perf",
+        "test",
+        "build",
+        "ci",
+        "chore",
+        "revert",
+        "security",
+        "infra"
+      ]
     ],
     "scope-enum": [
-      1,
+      2,
       "always",
-      ["api", "frontend", "db", "kyc", "transfer", "wallet", "fx", "compliance", "admin", "auth", "notifications", "analytics", "devops", "security", "testing", "docs", "i18n", "mobile", "pwa"]
-    ],
-    "subject-max-length": [2, "always", 100],
-    "body-max-line-length": [1, "always", 200]
+      [
+        "bnpl",
+        "cbdc",
+        "direct-debit",
+        "multi-bank-routing",
+        "payment-gateways",
+        "policy-engine",
+        "rust-transaction-processor",
+        "saga-orchestrator",
+        "travel-rule",
+        "pwa",
+        "infra",
+        "apisix",
+        "helm",
+        "dapr",
+        "permify",
+        "security",
+        "ci",
+        "docs"
+      ]
+    ]
   }
 }

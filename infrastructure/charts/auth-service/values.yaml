@@ -1,0 +1,80 @@
+replicaCount: 1
+image:
+  repository: registry.digitalocean.com/talentgraph-auth/54remit-auth-service
+  pullPolicy: IfNotPresent
+  tag: 0.1.0
+nameOverride: ''
+fullnameOverride: ''
+serviceAccount:
+  create: false
+  name: 54remit
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
+resources:
+  requests:
+    cpu: 150m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 750Mi
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+volumes: []
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+dapr:
+  appId: auth-service
+  appPort: 80
+  enableMetrics: true
+  enabled: true
+  metricsPort: 9099
+  sidecarListenAddresses: "0.0.0.0"
+  cpu-request: 100m
+  cpu-limit: 300m
+  memory-request: 250Mi
+  memory-limit: 1000Mi
+# ⚠️ Do not commit real values here — see admin-service/values.yaml's comment
+# for the override convention. This service holds the most sensitive
+# credentials of the three (Keycloak admin password, superadmin bootstrap
+# secret) — treat its override file with extra care (e.g. sealed-secrets or
+# a secrets manager, not a plain gitignored yaml, once one is adopted).
+secrets:
+  DATABASE_URI: "CHANGE_ME"
+  AUDIT_SVC_URL: "http://audit-service:8000"
+  DAPR_PUBSUB_NAME: "pubsub"
+  KAFKA_BOOTSTRAP_SERVERS: "kafka-service:9092"
+  KAFKA_SECURITY_PROTOCOL: "PLAINTEXT"
+  KAFKA_SASL_MECHANISM: ""
+  KAFKA_SASL_USERNAME: ""
+  KAFKA_SASL_PASSWORD: ""
+  INTERNAL_API_BASE_URL: "CHANGE_ME"
+  KEYCLOAK_BASE_URL: "CHANGE_ME"
+  KEYCLOAK_ADMIN_USERNAME: "CHANGE_ME"
+  KEYCLOAK_ADMIN_PASSWORD: "CHANGE_ME"
+  DEFAULT_KEYCLOAK_REALM: "54remit"
+  DEFAULT_KEYCLOAK_PUBLIC_KEY: "CHANGE_ME"
+  DEFAULT_TENANT_ID: "54remit"
+  SYSTEM_SEED_TOKEN: "CHANGE_ME"
+  DEFAULT_SUPER_ADMIN_NAME: "CHANGE_ME"
+  DEFAULT_SUPER_ADMIN_EMAIL: "CHANGE_ME"
+  DEFAULT_SUPER_ADMIN_PASSWORD: "CHANGE_ME"
+  PERMIFY_URL: "http://permify:3476"
+  PERMIFY_DEFAULT_TENANT: "54remit"
+  PERMIFY_WRITE_ATTEMPTS: "15"
+  BLOCK_VPN: "true"
+  BLOCK_TOR: "true"
+  BLOCK_DATACENTER: "false"
+  REDIS_URL: "CHANGE_ME"
+  APP_ENV: "production"
+  ROOT_PATH: "/"

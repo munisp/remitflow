@@ -1,0 +1,6 @@
+apiVersion: v2
+name: fraud-ml
+description: fraud-ml Helm chart (python)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

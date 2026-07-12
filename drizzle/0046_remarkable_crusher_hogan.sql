@@ -1,1 +1,0 @@
-ALTER TABLE "kyc_liveness_audit" ADD COLUMN "corridor_code" varchar(5) DEFAULT '';

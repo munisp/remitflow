@@ -1,0 +1,58 @@
+replicaCount: 1
+image:
+  repository: registry.digitalocean.com/talentgraph-auth/54remit-python-synthetic-monitor
+  pullPolicy: IfNotPresent
+  tag: 0.1.0
+nameOverride: ''
+fullnameOverride: ''
+serviceAccount:
+  create: false
+  name: 54remit
+podAnnotations: {}
+podLabels: {}
+podSecurityContext: {}
+securityContext: {}
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8201
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 500Mi
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 80
+volumes: []
+volumeMounts: []
+nodeSelector: {}
+tolerations: []
+affinity: {}
+dapr:
+  appId: python-synthetic-monitor
+  appPort: 8201
+  enableMetrics: true
+  enabled: true
+  metricsPort: 9099
+  sidecarListenAddresses: "0.0.0.0"
+  cpu-request: 100m
+  cpu-limit: 300m
+  memory-request: 250Mi
+  memory-limit: 1000Mi
+# Auto-generated: env var names below were discovered via source grep
+# (os.Getenv / env::var / os.getenv across python-synthetic-monitor's codebase), so this list
+# reflects what the service actually reads — not a guess. Known non-secret
+# infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
+# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+#   helm upgrade --install python-synthetic-monitor infrastructure/charts/python-synthetic-monitor \
+#     -n 54remit -f infrastructure/values-secrets/python-synthetic-monitor.yaml
+# (a gitignored, per-environment file).
+secrets:
+  DATABASE_URL: "CHANGE_ME"
+  REMITFLOW_BASE_URL: "CHANGE_ME"
+  SYNTHETIC_MONITOR_PORT: "CHANGE_ME"

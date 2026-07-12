@@ -1,0 +1,123 @@
+entity user {}
+
+entity platform {
+
+  // ===== ROLES =====
+  relation super_admin         @user
+  relation tenant_manager      @user
+  relation operations_manager  @user
+  relation risk_manager        @user
+  relation internal_auditor    @user
+  relation it_admin            @user
+  relation relationship_manager @user
+  relation compliance_officer  @user
+  relation support_agent       @user
+
+  // super_admin has every permission; add god_mode to any new permission instead
+  // of listing super_admin explicitly each time.
+  permission god_mode = super_admin
+
+  // ===== CORE PERMISSIONS =====
+  permission view_all_data  = god_mode or internal_auditor
+  permission manage_employees = god_mode or it_admin
+  permission manage_tenants = god_mode or it_admin or tenant_manager or relationship_manager
+  permission provide_support  = god_mode or support_agent
+  permission enable_features  = god_mode or it_admin
+  permission system_lockdown  = god_mode or compliance_officer
+}
+
+entity tenants {
+
+  // ===== ROLES =====
+  relation super_admin          @user
+  relation branch_manager       @user
+  relation operations_manager   @user
+  relation risk_manager         @user
+  relation internal_auditor     @user
+  relation it_admin             @user
+  relation relationship_manager @user
+  relation trade_finance_admin  @user
+  relation vault_manager        @user
+  relation treasury_manager     @user
+  relation loan_officer         @user
+  relation compliance_officer   @user
+  relation support_agent        @user
+  relation teller               @user
+  relation fraud_analyst        @user
+
+  // super_admin has every permission; add god_mode to any new permission instead
+  // of listing super_admin explicitly each time.
+  permission god_mode = super_admin
+
+  // ===== VISIBILITY =====
+  permission view_all_data   = god_mode or internal_auditor or operations_manager
+  permission view_branch_data = god_mode or branch_manager
+
+  // ===== STAFF & CUSTOMER MANAGEMENT =====
+  permission manage_employees                = god_mode or it_admin
+  permission manage_customers                = god_mode or relationship_manager or operations_manager
+  permission suspend_or_reactivate_customers = god_mode or operations_manager or compliance_officer
+  permission verify_kyc                      = god_mode or compliance_officer
+
+  // ===== TELLER & VAULT =====
+  permission teller_actions     = god_mode or branch_manager or operations_manager or teller
+  permission teller_management  = god_mode or branch_manager or operations_manager
+  permission vault_management   = god_mode or vault_manager or treasury_manager
+
+  // ===== TRANSACTIONS =====
+  permission initiate_transactions    = god_mode or operations_manager or teller
+  permission approve_or_reject        = god_mode or branch_manager or treasury_manager or risk_manager or loan_officer
+  permission reverse_transactions     = god_mode or operations_manager or internal_auditor
+  permission manage_transaction_limits = god_mode or risk_manager or compliance_officer
+
+  // ===== LOANS & APPLICATIONS =====
+  permission applications       = god_mode or loan_officer or relationship_manager
+  permission approve_loans      = god_mode or risk_manager or compliance_officer or loan_officer
+  permission manage_loan_limits = god_mode or risk_manager
+
+  // ===== BANKING PRODUCTS =====
+  permission manage_esusu  = god_mode or operations_manager
+  permission islamic_banking = god_mode or operations_manager or compliance_officer or loan_officer
+  permission agric_banking   = god_mode or operations_manager or loan_officer
+  permission lpo_management  = god_mode or trade_finance_admin or loan_officer
+
+  // ===== CARDS =====
+  permission card_issuance    = god_mode or operations_manager
+  permission card_management  = god_mode or operations_manager
+  permission control_cards    = god_mode or operations_manager or risk_manager
+  permission dispute_management = god_mode or operations_manager or compliance_officer
+
+  // ===== RISK, AUDIT & COMPLIANCE =====
+  permission view_audit_logs        = god_mode or internal_auditor or compliance_officer or fraud_analyst
+  permission export_audit_logs      = god_mode or internal_auditor
+  permission flag_suspicious_activity = god_mode or risk_manager or compliance_officer or fraud_analyst
+  permission manage_fraud_cases     = god_mode or fraud_analyst or risk_manager
+
+  // ===== ANALYTICS & GOVERNANCE =====
+  permission view_analytics              = god_mode or operations_manager or fraud_analyst
+  permission temporal_access_management  = god_mode or it_admin
+
+  // ===== FINANCE & INTEGRATIONS =====
+  permission billing_management = god_mode or treasury_manager
+  permission coa_management     = god_mode or treasury_manager
+  permission erp_management     = god_mode or it_admin
+
+  // ===== COMMUNICATION =====
+  permission communication_hub_management = god_mode or support_agent or operations_manager
+
+  // ===== EMERGENCY =====
+  permission emergency_override = god_mode or compliance_officer
+}
+
+entity esusu_group {
+
+  // ===== ROLES =====
+  relation admin  @user
+  relation owner  @user
+  relation member @user
+
+  // ===== PERMISSIONS =====
+  permission manage    = admin or owner
+  permission view      = admin or owner or member
+  permission contribute = admin or owner or member
+}

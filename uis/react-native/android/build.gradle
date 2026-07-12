@@ -1,0 +1,35 @@
+buildscript {
+    ext {
+        buildToolsVersion = "34.0.0"
+        minSdkVersion = 24
+        compileSdkVersion = 34
+        targetSdkVersion = 34
+        ndkVersion = "25.1.8937393"
+        kotlinVersion = "1.8.0"
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    }
+}
+
+apply plugin: "com.facebook.react.rootproject"
+
+// Some native modules (react-native-gesture-handler, reanimated, etc.) don't
+// pin an explicit androidx.core version; Gradle's conflict resolution then
+// picks the newest one requested across the graph (1.16.0), which requires
+// AGP 8.6.0+/compileSdk 35 — newer than what RN 0.73.4's template ships.
+// Force a version compatible with our AGP 8.1.1 / compileSdk 34 instead.
+allprojects {
+    configurations.all {
+        resolutionStrategy {
+            force "androidx.core:core:1.13.0"
+            force "androidx.core:core-ktx:1.13.0"
+        }
+    }
+}

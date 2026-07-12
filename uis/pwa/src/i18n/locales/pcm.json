@@ -1,0 +1,37 @@
+{
+  "common": {
+    "save": "Save am",
+    "cancel": "Cancel am",
+    "loading": "E dey load...",
+    "retry": "Try again",
+    "close": "Close am"
+  },
+  "offline": {
+    "backOnline": "You don back online! We dey sync your data...",
+    "offline": "You dey offline. No worry, we don save your data for your device.",
+    "slowConnection": "Network slow small. Some features fit take time to load.",
+    "pending": "{{count}} dey wait",
+    "syncing": "E dey sync..."
+  },
+  "security": {
+    "title": "Security",
+    "subtitle": "Manage your account security settings",
+    "twoFactorAuth": "Two-Factor Authentication",
+    "enable2fa": "Enable 2FA",
+    "disable2fa": "Disable 2FA",
+    "verificationCode": "Enter the verification code",
+    "scanQrCode": "Use your authenticator app (Google Authenticator, Authy, etc.) scan the QR code wey dey below"
+  },
+  "loginHistory": {
+    "title": "IP Login History",
+    "subtitle": "Track login wey people try do and see any activity wey no correct for your account",
+    "suspiciousActivity": "Login activity wey no correct",
+    "recentAttempts": "Recent Login Attempts",
+    "noHistory": "No login history dey yet.",
+    "success": "E work",
+    "failed": "E no work"
+  },
+  "language": {
+    "label": "Language"
+  }
+}

@@ -1,0 +1,43 @@
+# account-service
+apiVersion: apisix.apache.org/v2
+kind: ApisixRoute
+metadata:
+  name: 54remit-account-service-route
+  namespace: 54remit
+spec:
+  ingressClassName: appsec-apisix-prod
+  http:
+    - name: rule-1
+      priority: 10
+      match:
+        hosts:
+          - 54remit.upi.dev
+        paths:
+          - /account/*
+      backends:
+        - serviceName: account-service
+          servicePort: 80
+      plugins:
+        - name: proxy-rewrite
+          enable: true
+          config:
+            regex_uri:
+              - "^/account(?:/system)?/(.*)"
+              - "/$1"
+        - name: cors
+          enable: true
+          config:
+            allow_origins: "*"
+            allow_methods: "*"
+            allow_headers: "*"
+            expose_headers: "*"
+        # - name: 54remit-access-plugin
+        #   enable: true
+        #   config:
+        #     authorizer_url: "http://auth-service/token"
+        #     mint_account_url: "http://account-service/system/get-mint-account"
+        #     keycloak_public_key_url: "http://tenant-management/tenant/keycloak-public-key/"
+        # - name: ucard-jwt-payload-decoder
+        #   enable: true
+        #   config:
+        #     authorizer_url: "http://auth-service.54remit.svc.cluster.local/token/validate"

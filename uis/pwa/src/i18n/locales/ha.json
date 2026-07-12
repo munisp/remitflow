@@ -1,0 +1,37 @@
+{
+  "common": {
+    "save": "Ajiye",
+    "cancel": "Soke",
+    "loading": "Ana lodi...",
+    "retry": "Sake gwadawa",
+    "close": "Rufe"
+  },
+  "offline": {
+    "backOnline": "An dawo kan layi! Ana daidaita bayanan ku...",
+    "offline": "Ba ku kan layi ba. Kada ku damu, an ajiye bayanan ku a na'urar ku.",
+    "slowConnection": "An gano jinkirin haɗin intanet. Wasu fasalulluka na iya ɗaukar lokaci kafin su loda.",
+    "pending": "{{count}} suna jira",
+    "syncing": "Ana daidaitawa..."
+  },
+  "security": {
+    "title": "Tsaro",
+    "subtitle": "Sarrafa saitunan tsaron asusun ku",
+    "twoFactorAuth": "Tabbatarwa Sau Biyu",
+    "enable2fa": "Kunna 2FA",
+    "disable2fa": "Kashe 2FA",
+    "verificationCode": "Shigar da lambar tabbatarwa",
+    "scanQrCode": "Duba lambar QR da ke ƙasa da app ɗin tabbatarwa (Google Authenticator, Authy, da sauransu)"
+  },
+  "loginHistory": {
+    "title": "Tarihin Shiga na IP",
+    "subtitle": "Bibiyar yunƙurin shiga da gano ayyukan tuhuma a asusun ku",
+    "suspiciousActivity": "Ayyukan shiga masu tuhuma",
+    "recentAttempts": "Yunƙurin Shiga na Kwanan Nan",
+    "noHistory": "Babu tarihin shiga da aka rubuta tukuna.",
+    "success": "Nasara",
+    "failed": "Ya Kasa"
+  },
+  "language": {
+    "label": "Harshe"
+  }
+}

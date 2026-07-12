@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tenant-management
+description: Multi-tenant provisioning, branding, feature flags, and branch management Helm chart
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

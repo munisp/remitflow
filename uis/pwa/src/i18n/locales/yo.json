@@ -1,0 +1,37 @@
+{
+  "common": {
+    "save": "Fi pamọ́",
+    "cancel": "Fagilé",
+    "loading": "Ń ṣíṣẹ́...",
+    "retry": "Túnṣe",
+    "close": "Ti"
+  },
+  "offline": {
+    "backOnline": "O ti pada síbí lórí ayélujára! À ń mú dátà rẹ dọ́gba...",
+    "offline": "O kò sí lórí ayélujára. Má ṣàníyàn, a ti fi dátà rẹ pamọ́ sórí ẹ̀rọ.",
+    "slowConnection": "A rí ìsopọ̀ ayélujára tí kò yára. Àwọn ẹyà kan lè gba àkókò kí wọ́n tó ṣiṣẹ́.",
+    "pending": "{{count}} ń dúró",
+    "syncing": "À ń mú dọ́gba..."
+  },
+  "security": {
+    "title": "Ààbò",
+    "subtitle": "Ṣàkóso àwọn ètò ààbò àkọọ́lẹ̀ rẹ",
+    "twoFactorAuth": "Ìjẹ́rìí Ìlọ́po Méjì",
+    "enable2fa": "Mú 2FA ṣiṣẹ́",
+    "disable2fa": "Pa 2FA",
+    "verificationCode": "Tẹ àmì ìjẹ́rìí sí i",
+    "scanQrCode": "Fi app ìjẹ́rìí rẹ ka àmì QR tí ó wà nísàlẹ̀ (Google Authenticator, Authy, àti bẹ́ẹ̀ bẹ́ẹ̀ lọ)"
+  },
+  "loginHistory": {
+    "title": "Ìtàn Wíwọlé IP",
+    "subtitle": "Tọpa àwọn ìgbìyànjú wíwọlé kí o sì mọ àwọn ìṣe tí kò bójúmu ní àkọọ́lẹ̀ rẹ",
+    "suspiciousActivity": "Ìṣe wíwọlé tí kò bójúmu",
+    "recentAttempts": "Àwọn Ìgbìyànjú Wíwọlé Àìpẹ́",
+    "noHistory": "Kò sí ìtàn wíwọlé tí a kọ sílẹ̀ síbẹ̀.",
+    "success": "Àṣeyọrí",
+    "failed": "Ó Kùnà"
+  },
+  "language": {
+    "label": "Èdè"
+  }
+}

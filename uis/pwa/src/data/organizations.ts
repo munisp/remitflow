@@ -1,0 +1,338 @@
+// Nigerian Organizations for Donations/Giving
+export interface Organization {
+  id: string;
+  name: string;
+  type: "Religious" | "NGO";
+  religion?: "Christian" | "Muslim";
+  account: string;
+  bank: string;
+  description?: string;
+}
+
+export const NIGERIAN_ORGANIZATIONS: Organization[] = [
+  // Christian Organizations
+  {
+    id: "rccg",
+    name: "Redeemed Christian Church of God (RCCG)",
+    type: "Religious",
+    religion: "Christian",
+    account: "0123456789",
+    bank: "First Bank",
+    description: "One of Nigeria's largest Pentecostal churches",
+  },
+  {
+    id: "winners",
+    name: "Living Faith Church (Winners Chapel)",
+    type: "Religious",
+    religion: "Christian",
+    account: "0234567890",
+    bank: "Zenith Bank",
+    description: "International Christian ministry",
+  },
+  {
+    id: "deeper-life",
+    name: "Deeper Life Bible Church",
+    type: "Religious",
+    religion: "Christian",
+    account: "0345678901",
+    bank: "GTBank",
+  },
+  {
+    id: "mountain-fire",
+    name: "Mountain of Fire and Miracles (MFM)",
+    type: "Religious",
+    religion: "Christian",
+    account: "0456789012",
+    bank: "Access Bank",
+  },
+  {
+    id: "daystar",
+    name: "Daystar Christian Centre",
+    type: "Religious",
+    religion: "Christian",
+    account: "0567890123",
+    bank: "UBA",
+  },
+  {
+    id: "houseontherock",
+    name: "The House On The Rock Church",
+    type: "Religious",
+    religion: "Christian",
+    account: "0678901234",
+    bank: "Stanbic IBTC",
+  },
+  {
+    id: "christ-embassy",
+    name: "Christ Embassy (Believers LoveWorld)",
+    type: "Religious",
+    religion: "Christian",
+    account: "0789012345",
+    bank: "First Bank",
+  },
+  {
+    id: "salvation-ministries",
+    name: "Salvation Ministries",
+    type: "Religious",
+    religion: "Christian",
+    account: "0890123456",
+    bank: "Zenith Bank",
+  },
+  // Muslim Organizations
+  {
+    id: "nscia",
+    name: "Nigerian Supreme Council for Islamic Affairs (NSCIA)",
+    type: "Religious",
+    religion: "Muslim",
+    account: "0901234567",
+    bank: "Jaiz Bank",
+    description: "Apex Islamic organization in Nigeria",
+  },
+  {
+    id: "national-mosque",
+    name: "National Mosque of Nigeria (Abuja)",
+    type: "Religious",
+    religion: "Muslim",
+    account: "1012345678",
+    bank: "First Bank",
+  },
+  {
+    id: "central-mosque-lagos",
+    name: "Lagos Central Mosque",
+    type: "Religious",
+    religion: "Muslim",
+    account: "1123456789",
+    bank: "Zenith Bank",
+  },
+  {
+    id: "jibwis",
+    name: "Jama'atu Izalatul Bid'ah Wa'ikamatis Sunnah (JIBWIS)",
+    type: "Religious",
+    religion: "Muslim",
+    account: "1234567891",
+    bank: "Jaiz Bank",
+  },
+  {
+    id: "nasfat",
+    name: "Nasrul-Lahi-l-Fatih Society (NASFAT)",
+    type: "Religious",
+    religion: "Muslim",
+    account: "2345678902",
+    bank: "GTBank",
+    description: "Islamic organization promoting education and welfare",
+  },
+  {
+    id: "ansar-ud-deen",
+    name: "Ansar-Ud-Deen Society of Nigeria",
+    type: "Religious",
+    religion: "Muslim",
+    account: "3456789013",
+    bank: "Access Bank",
+  },
+  {
+    id: "tariqa",
+    name: "Tariqa Tijaniyya Foundation Nigeria",
+    type: "Religious",
+    religion: "Muslim",
+    account: "4567890124",
+    bank: "UBA",
+  },
+  // NGOs
+  {
+    id: "red-cross",
+    name: "Nigerian Red Cross Society",
+    type: "NGO",
+    account: "1234567890",
+    bank: "GTBank",
+    description: "Humanitarian organization providing emergency relief",
+  },
+  {
+    id: "unicef-nigeria",
+    name: "UNICEF Nigeria",
+    type: "NGO",
+    account: "2345678901",
+    bank: "First Bank",
+    description: "Supporting children's rights and welfare",
+  },
+  {
+    id: "sos-nigeria",
+    name: "SOS Children's Villages Nigeria",
+    type: "NGO",
+    account: "3456789012",
+    bank: "Access Bank",
+    description: "Caring for children who have lost parental care",
+  },
+  {
+    id: "nannm",
+    name: "Nigerian Association of Nurses and Midwives (NANNM) Welfare Fund",
+    type: "NGO",
+    account: "4567890123",
+    bank: "UBA",
+  },
+  {
+    id: "actionaid",
+    name: "ActionAid Nigeria",
+    type: "NGO",
+    account: "5678901234",
+    bank: "Zenith Bank",
+    description: "Fighting poverty and injustice",
+  },
+  {
+    id: "cece-yara",
+    name: "Cece Yara Foundation (Child Protection)",
+    type: "NGO",
+    account: "6789012345",
+    bank: "GTBank",
+    description: "Protecting children from abuse and exploitation",
+  },
+  {
+    id: "jos-widows",
+    name: "Widows and Orphans Empowerment Organisation (WEWE)",
+    type: "NGO",
+    account: "7890123456",
+    bank: "Stanbic IBTC",
+  },
+  {
+    id: "project-pink-blue",
+    name: "Project Pink Blue (Cancer Awareness)",
+    type: "NGO",
+    account: "8901234567",
+    bank: "First Bank",
+    description: "Raising cancer awareness and supporting patients",
+  },
+  {
+    id: "orphanage-lagos",
+    name: "Lagos State Orphanage Support",
+    type: "NGO",
+    account: "9012345678",
+    bank: "Access Bank",
+  },
+  {
+    id: "slum2school",
+    name: "Slum2School Africa",
+    type: "NGO",
+    account: "0123456780",
+    bank: "Zenith Bank",
+    description: "Providing education for underprivileged children",
+  },
+];
+
+// Data plans for mobile operators
+export const DATA_PLANS = {
+  MTN: [
+    { id: "mtn-1gb", name: "1GB - 1 Day", amount: 350, validity: "1 Day" },
+    { id: "mtn-2gb", name: "2GB - 2 Days", amount: 700, validity: "2 Days" },
+    {
+      id: "mtn-1gb-week",
+      name: "1GB - 7 Days",
+      amount: 500,
+      validity: "7 Days",
+    },
+    {
+      id: "mtn-2gb-month",
+      name: "2GB - 30 Days",
+      amount: 1200,
+      validity: "30 Days",
+    },
+    {
+      id: "mtn-5gb-month",
+      name: "5GB - 30 Days",
+      amount: 2500,
+      validity: "30 Days",
+    },
+    {
+      id: "mtn-10gb-month",
+      name: "10GB - 30 Days",
+      amount: 3500,
+      validity: "30 Days",
+    },
+    {
+      id: "mtn-20gb-month",
+      name: "20GB - 30 Days",
+      amount: 5000,
+      validity: "30 Days",
+    },
+  ],
+  Glo: [
+    { id: "glo-1gb", name: "1.2GB - 1 Day", amount: 300, validity: "1 Day" },
+    { id: "glo-2gb", name: "2.5GB - 2 Days", amount: 500, validity: "2 Days" },
+    {
+      id: "glo-3gb-week",
+      name: "3GB - 7 Days",
+      amount: 1000,
+      validity: "7 Days",
+    },
+    {
+      id: "glo-5gb-month",
+      name: "5.8GB - 30 Days",
+      amount: 2000,
+      validity: "30 Days",
+    },
+    {
+      id: "glo-10gb-month",
+      name: "10GB - 30 Days",
+      amount: 3000,
+      validity: "30 Days",
+    },
+    {
+      id: "glo-18gb-month",
+      name: "18GB - 30 Days",
+      amount: 5000,
+      validity: "30 Days",
+    },
+  ],
+  Airtel: [
+    { id: "airtel-1gb", name: "1GB - 1 Day", amount: 350, validity: "1 Day" },
+    { id: "airtel-2gb", name: "2GB - 3 Days", amount: 700, validity: "3 Days" },
+    {
+      id: "airtel-1.5gb-month",
+      name: "1.5GB - 30 Days",
+      amount: 1000,
+      validity: "30 Days",
+    },
+    {
+      id: "airtel-3gb-month",
+      name: "3GB - 30 Days",
+      amount: 1500,
+      validity: "30 Days",
+    },
+    {
+      id: "airtel-6gb-month",
+      name: "6GB - 30 Days",
+      amount: 2500,
+      validity: "30 Days",
+    },
+    {
+      id: "airtel-11gb-month",
+      name: "11GB - 30 Days",
+      amount: 4000,
+      validity: "30 Days",
+    },
+  ],
+  "9mobile": [
+    { id: "9mobile-1gb", name: "1GB - 1 Day", amount: 350, validity: "1 Day" },
+    {
+      id: "9mobile-1.5gb-week",
+      name: "1.5GB - 7 Days",
+      amount: 1000,
+      validity: "7 Days",
+    },
+    {
+      id: "9mobile-2gb-month",
+      name: "2GB - 30 Days",
+      amount: 1200,
+      validity: "30 Days",
+    },
+    {
+      id: "9mobile-4.5gb-month",
+      name: "4.5GB - 30 Days",
+      amount: 2000,
+      validity: "30 Days",
+    },
+    {
+      id: "9mobile-11gb-month",
+      name: "11GB - 30 Days",
+      amount: 3500,
+      validity: "30 Days",
+    },
+  ],
+};

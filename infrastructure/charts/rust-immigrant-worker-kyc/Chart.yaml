@@ -1,0 +1,6 @@
+apiVersion: v2
+name: rust-immigrant-worker-kyc
+description: rust-immigrant-worker-kyc Helm chart (rust)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
