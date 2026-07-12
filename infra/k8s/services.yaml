@@ -1,0 +1,721 @@
+###############################################################################
+# RemitFlow — Kubernetes Service Manifests
+# ══════════════════════════════════════════
+# Deployments and Services for all polyglot microservices.
+# Apply with: kubectl apply -f infra/k8s/services.yaml -n remitflow
+###############################################################################
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remitflow
+  labels:
+    app.kubernetes.io/managed-by: kubectl
+    environment: production
+
+---
+# ─── TigerBeetle Bridge (Rust) ────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tb-bridge
+  namespace: remitflow
+  labels:
+    app: tb-bridge
+    language: rust
+    tier: service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tb-bridge
+  template:
+    metadata:
+      labels:
+        app: tb-bridge
+        language: rust
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8200"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+        - name: tb-bridge
+          image: remitflow/tb-bridge:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8200
+              name: http
+          env:
+            - name: TB_BRIDGE_PORT
+              value: "8200"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: database-url
+            - name: RUST_LOG
+              value: info
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tb-bridge
+  namespace: remitflow
+spec:
+  selector:
+    app: tb-bridge
+  ports:
+    - port: 8200
+      targetPort: 8200
+      name: http
+
+---
+# ─── Fluvio Consumer (Rust) ───────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluvio-consumer
+  namespace: remitflow
+  labels:
+    app: fluvio-consumer
+    language: rust
+    tier: service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fluvio-consumer
+  template:
+    metadata:
+      labels:
+        app: fluvio-consumer
+        language: rust
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8300"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: fluvio-consumer
+          image: remitflow/fluvio-consumer:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8300
+              name: http
+          env:
+            - name: FLUVIO_HTTP_BRIDGE_PORT
+              value: "8300"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: database-url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: redis-url
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8300
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8300
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluvio-consumer
+  namespace: remitflow
+spec:
+  selector:
+    app: fluvio-consumer
+  ports:
+    - port: 8300
+      targetPort: 8300
+      name: http
+
+---
+# ─── Crypto Utils (Rust) ──────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crypto-utils
+  namespace: remitflow
+  labels:
+    app: crypto-utils
+    language: rust
+    tier: service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: crypto-utils
+  template:
+    metadata:
+      labels:
+        app: crypto-utils
+        language: rust
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: crypto-utils
+          image: remitflow/crypto-utils:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8202
+              name: http
+          env:
+            - name: CRYPTO_UTILS_PORT
+              value: "8202"
+            - name: MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: crypto-master-key
+            - name: HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: crypto-hmac-key
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8202
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8202
+            initialDelaySeconds: 5
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: crypto-utils
+  namespace: remitflow
+spec:
+  selector:
+    app: crypto-utils
+  ports:
+    - port: 8202
+      targetPort: 8202
+      name: http
+
+---
+# ─── APISIX Manager (Go) ──────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apisix-manager
+  namespace: remitflow
+  labels:
+    app: apisix-manager
+    language: go
+    tier: service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: apisix-manager
+  template:
+    metadata:
+      labels:
+        app: apisix-manager
+        language: go
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8100"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: apisix-manager
+          image: remitflow/apisix-manager:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8100
+              name: http
+          env:
+            - name: APISIX_MANAGER_PORT
+              value: "8100"
+            - name: APISIX_ADMIN_URL
+              value: "http://apisix:9180"
+            - name: APISIX_ADMIN_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: apisix-admin-key
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: database-url
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8100
+            initialDelaySeconds: 15
+            periodSeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apisix-manager
+  namespace: remitflow
+spec:
+  selector:
+    app: apisix-manager
+  ports:
+    - port: 8100
+      targetPort: 8100
+      name: http
+
+---
+# ─── Rate Limiter (Go) ────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rate-limiter
+  namespace: remitflow
+  labels:
+    app: rate-limiter
+    language: go
+    tier: service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rate-limiter
+  template:
+    metadata:
+      labels:
+        app: rate-limiter
+        language: go
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8101"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: rate-limiter
+          image: remitflow/rate-limiter:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8101
+              name: http
+          env:
+            - name: RATE_LIMITER_PORT
+              value: "8101"
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: redis-url
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8101
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rate-limiter
+  namespace: remitflow
+spec:
+  selector:
+    app: rate-limiter
+  ports:
+    - port: 8101
+      targetPort: 8101
+      name: http
+
+---
+# ─── AML Scorer (Python) ──────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aml-scorer
+  namespace: remitflow
+  labels:
+    app: aml-scorer
+    language: python
+    tier: service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: aml-scorer
+  template:
+    metadata:
+      labels:
+        app: aml-scorer
+        language: python
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8103"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: aml-scorer
+          image: remitflow/aml-scorer:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8103
+              name: http
+          env:
+            - name: AML_SCORER_PORT
+              value: "8103"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: database-url
+            - name: AML_MODEL_VERSION
+              value: "1.0.0"
+            - name: AML_THRESHOLD_CRITICAL
+              value: "81"
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8103
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8103
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aml-scorer
+  namespace: remitflow
+spec:
+  selector:
+    app: aml-scorer
+  ports:
+    - port: 8103
+      targetPort: 8103
+      name: http
+
+---
+# ─── Lakehouse Sync (Python) ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakehouse
+  namespace: remitflow
+  labels:
+    app: lakehouse
+    language: python
+    tier: service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lakehouse
+  template:
+    metadata:
+      labels:
+        app: lakehouse
+        language: python
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: lakehouse
+          image: remitflow/lakehouse:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8102
+              name: http
+          env:
+            - name: LAKEHOUSE_PORT
+              value: "8102"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: database-url
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: remitflow-config
+                  key: s3-endpoint
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: s3-access-key
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: s3-secret-key
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 4Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8102
+            initialDelaySeconds: 30
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lakehouse
+  namespace: remitflow
+spec:
+  selector:
+    app: lakehouse
+  ports:
+    - port: 8102
+      targetPort: 8102
+      name: http
+
+---
+# ─── Compliance Reporter (Python) ─────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: compliance-reporter
+  namespace: remitflow
+  labels:
+    app: compliance-reporter
+    language: python
+    tier: service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: compliance-reporter
+  template:
+    metadata:
+      labels:
+        app: compliance-reporter
+        language: python
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+      containers:
+        - name: compliance-reporter
+          image: remitflow/compliance-reporter:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8104
+              name: http
+          env:
+            - name: COMPLIANCE_REPORTER_PORT
+              value: "8104"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: database-url
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8104
+            initialDelaySeconds: 30
+            periodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: compliance-reporter
+  namespace: remitflow
+spec:
+  selector:
+    app: compliance-reporter
+  ports:
+    - port: 8104
+      targetPort: 8104
+      name: http
+
+---
+# ─── Secrets Template ─────────────────────────────────────────────────────────
+# IMPORTANT: Replace all values with real secrets before applying to production.
+# Use Sealed Secrets or External Secrets Operator in production.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: remitflow-secrets
+  namespace: remitflow
+type: Opaque
+stringData:
+  database-url: "postgres://remitflow:CHANGE_ME@postgres:5432/remitflow"
+  redis-url: "redis://:CHANGE_ME@redis:6379"
+  crypto-master-key: "CHANGE_ME_64_HEX_CHARS_0000000000000000000000000000000000000000"
+  crypto-hmac-key: "CHANGE_ME_64_HEX_CHARS_0000000000000000000000000000000000000000"
+  apisix-admin-key: "CHANGE_ME"
+  s3-access-key: "CHANGE_ME"
+  s3-secret-key: "CHANGE_ME"
+  jwt-secret: "CHANGE_ME_MIN_32_CHARS"
+  session-secret: "CHANGE_ME_MIN_32_CHARS"
+  keycloak-client-secret: "CHANGE_ME"
+  keycloak-admin-password: "CHANGE_ME"
+
+---
+# ─── ConfigMap ────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: remitflow-config
+  namespace: remitflow
+data:
+  s3-endpoint: "http://minio:9000"
+  lakehouse-bucket: "remitflow-lakehouse"
+  temporal-address: "temporal:7233"
+  temporal-namespace: "remitflow"
+  keycloak-url: "http://keycloak:8080"
+  keycloak-realm: "remitflow"
+  aml-threshold-critical: "81"
+  feature-aml-scoring: "true"
+  feature-tigerbeetle: "true"
+  feature-fluvio: "true"
+  feature-lakehouse-sync: "true"
+
+---
+# ─── HorizontalPodAutoscaler ──────────────────────────────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: aml-scorer-hpa
+  namespace: remitflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: aml-scorer
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fluvio-consumer-hpa
+  namespace: remitflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fluvio-consumer
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

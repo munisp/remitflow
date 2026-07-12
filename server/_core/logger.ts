@@ -30,7 +30,7 @@ const _pino = pino({
         },
       }
     : undefined,
-  redact: {
+    redact: {
     paths: [
       "req.headers.authorization",
       "req.headers.cookie",
@@ -40,6 +40,22 @@ const _pino = pino({
       "*.apiKey",
       "*.p256dhKey",
       "*.authKey",
+      // PII fields
+      "*.email",
+      "*.phone",
+      "*.phoneNumber",
+      "*.phone_number",
+      "*.accountNumber",
+      "*.account_number",
+      "*.routingNumber",
+      "*.routing_number",
+      "*.cardNumber",
+      "*.card_number",
+      "*.cvv",
+      "*.ssn",
+      "*.dateOfBirth",
+      "*.date_of_birth",
+      "res.headers['set-cookie']",
     ],
     censor: "[REDACTED]",
   },
@@ -118,3 +134,39 @@ export function logPerformance(
 }
 
 export default logger;
+
+// ─── Domain-specific child loggers ───────────────────────────────────────────
+export const dbLogger = logger.child({ component: "database" });
+export const authLogger = logger.child({ component: "auth" });
+export const amlLogger = logger.child({ component: "aml" });
+export const tbLogger = logger.child({ component: "tigerbeetle" });
+export const temporalLogger = logger.child({ component: "temporal" });
+export const fluvioLogger = logger.child({ component: "fluvio" });
+export const daprLogger = logger.child({ component: "dapr" });
+export const permifyLogger = logger.child({ component: "permify" });
+export const redisLogger = logger.child({ component: "redis" });
+export const httpLogger = logger.child({ component: "http" });
+
+// ─── Request Context (AsyncLocalStorage) ─────────────────────────────────────
+import { AsyncLocalStorage } from "async_hooks";
+
+interface RequestContext {
+  requestId: string;
+  userId?: number;
+  sessionId?: string;
+}
+
+const _requestContextStorage = new AsyncLocalStorage<RequestContext>();
+
+export function runWithRequestContext<T>(context: RequestContext, fn: () => T): T {
+  return _requestContextStorage.run(context, fn);
+}
+
+export function getRequestContext(): RequestContext | undefined {
+  return _requestContextStorage.getStore();
+}
+
+export function getContextLogger(extra?: Record<string, unknown>) {
+  const ctx = _requestContextStorage.getStore();
+  return logger.child({ ...ctx, ...extra });
+}
