@@ -5414,5 +5414,8 @@ export const p2pTransfers = pgTable("p2p_transfers", {
 // ─── External Integrations ───────────────────────────────────────────────────
 export * from "./schema.integrations";
 
+// ─── Production Schema (circuit breakers, DLQ, WAF, compliance, settlement) ──
+export * from "./schema.production";
+
 // ─── Insert Types ────────────────────────────────────────────────────────────
 export * from "./schema.types";

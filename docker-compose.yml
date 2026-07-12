@@ -602,6 +602,69 @@ services:
       timeout: 5s
       retries: 3
 
+  # ─── Event Sourcing (Rust) ─────────────────────────────────────────────────
+  rust-event-store:
+    build:
+      context: ./services/rust-event-store
+      dockerfile: Dockerfile
+    ports:
+      - "8090:8090"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      PORT: "8090"
+      RUST_LOG: "info"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    profiles: ["full", "innovations"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8090/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── Saga Orchestrator (Go) ────────────────────────────────────────────────
+  go-saga-orchestrator:
+    build:
+      context: ./services/go-saga-orchestrator
+      dockerfile: Dockerfile
+    ports:
+      - "8091:8091"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      PORT: "8091"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    profiles: ["full", "innovations"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8091/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ─── ML Feature Pipeline (Python) ─────────────────────────────────────────
+  python-ml-feature-pipeline:
+    build:
+      context: ./services/python-ml-feature-pipeline
+      dockerfile: Dockerfile
+    ports:
+      - "8092:8092"
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      PORT: "8092"
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    profiles: ["full", "innovations"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8092/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
 volumes:
   pgdata:
   grafanadata:

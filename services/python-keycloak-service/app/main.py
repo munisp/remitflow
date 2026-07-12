@@ -25,6 +25,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 import httpx
 import logging
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
+from starlette.responses import Response
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 KEYCLOAK_URL = os.getenv("KEYCLOAK_URL", "http://keycloak:8080")
@@ -37,6 +39,13 @@ INTERNAL_API_KEY = os.getenv("KEYCLOAK_INTERNAL_API_KEY", "keycloak-bridge-key-0
 
 logging.basicConfig(level=logging.INFO, format="[Keycloak] %(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# ─── Prometheus Metrics ────────────────────────────────────────────────────────
+kc_provision_ops = Counter("remitflow_keycloak_provision_total", "Total user provisioning operations", ["status"])
+kc_token_exchanges = Counter("remitflow_keycloak_token_exchanges_total", "Total token exchanges", ["status"])
+kc_api_duration = Histogram("remitflow_keycloak_api_duration_seconds", "Keycloak API call duration", ["operation"])
+kc_connection_up = Gauge("remitflow_keycloak_up", "Keycloak connection status (1=up, 0=down)")
+kc_active_sessions = Gauge("remitflow_keycloak_active_sessions", "Active Keycloak sessions")
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 class UserProvisionRequest(BaseModel):
@@ -258,14 +267,31 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {
-        "status": "healthy",
-        "service": "keycloak-iam-bridge",
-        "version": "v110.0.0",
-        "keycloak_url": KEYCLOAK_URL,
-        "realm": KEYCLOAK_REALM,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
+    # Probe Keycloak OIDC discovery endpoint
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{KEYCLOAK_URL}/realms/{KEYCLOAK_REALM}/.well-known/openid-configuration")
+            kc_up = r.status_code == 200
+            kc_connection_up.set(1 if kc_up else 0)
+    except Exception:
+        kc_up = False
+        kc_connection_up.set(0)
+    return JSONResponse(
+        status_code=200 if kc_up else 503,
+        content={
+            "status": "healthy" if kc_up else "degraded",
+            "service": "keycloak-iam-bridge",
+            "version": "v110.0.0",
+            "keycloak_url": KEYCLOAK_URL,
+            "keycloak_reachable": kc_up,
+            "realm": KEYCLOAK_REALM,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+@app.get("/metrics")
+async def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.post("/api/v1/users/provision")
 async def provision_user(req: UserProvisionRequest, _=Depends(verify_api_key)):
