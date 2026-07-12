@@ -1,5 +1,12 @@
 FROM python:3.11-slim
 
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
+
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*

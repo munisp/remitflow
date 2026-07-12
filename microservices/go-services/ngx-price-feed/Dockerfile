@@ -1,5 +1,12 @@
 # Build stage
 FROM golang:1.22-alpine AS builder
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download

@@ -1,0 +1,64 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# RemitFlow Redis ACL Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Implements principle of least privilege for all Redis clients.
+# Passwords are injected at runtime via Docker secrets — placeholders below.
+#
+# ACL Syntax: user <name> on|off >password ~key-pattern &channel-pattern +commands
+#
+# CVE-2025-49844 mitigation: All users explicitly deny EVAL, EVALSHA, SCRIPT.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Disable the default user (no anonymous access)
+user default off nopass nocommands nokeys
+
+# ── Application User (API server, rate limiter) ───────────────────────────────
+# Can SET/GET/DEL keys in remitflow: namespace, use pub/sub, use streams.
+# Explicitly denied: EVAL, EVALSHA, SCRIPT, DEBUG, CONFIG, FLUSHALL, FLUSHDB.
+user remitflow_app on >REMITFLOW_APP_PASSWORD_PLACEHOLDER \
+  ~remitflow:* ~session:* ~ratelimit:* ~cache:* \
+  &remitflow.* \
+  +GET +SET +DEL +EXPIRE +TTL +PTTL +PERSIST \
+  +HGET +HSET +HDEL +HGETALL +HMSET +HMGET \
+  +LPUSH +RPUSH +LPOP +RPOP +LRANGE +LLEN \
+  +SADD +SREM +SMEMBERS +SISMEMBER +SCARD \
+  +ZADD +ZREM +ZRANGE +ZRANGEBYSCORE +ZCARD +ZSCORE \
+  +INCR +DECR +INCRBY +DECRBY \
+  +PUBLISH +SUBSCRIBE +UNSUBSCRIBE +PSUBSCRIBE +PUNSUBSCRIBE \
+  +XADD +XREAD +XLEN +XRANGE +XREVRANGE \
+  +PING +ECHO +SELECT +QUIT \
+  -EVAL -EVALSHA -SCRIPT -DEBUG -CONFIG \
+  -FLUSHALL -FLUSHDB -KEYS -MIGRATE -MONITOR
+
+# ── Rate Limiter User (go-rate-limiter service) ───────────────────────────────
+user remitflow_ratelimiter on >REMITFLOW_RATELIMITER_PASSWORD_PLACEHOLDER \
+  ~ratelimit:* \
+  +GET +SET +INCR +INCRBY +EXPIRE +TTL +DEL \
+  +PING +QUIT \
+  -EVAL -EVALSHA -SCRIPT -DEBUG -CONFIG \
+  -FLUSHALL -FLUSHDB -KEYS -MONITOR
+
+# ── Session Store User (Keycloak session cache) ───────────────────────────────
+user remitflow_sessions on >REMITFLOW_SESSIONS_PASSWORD_PLACEHOLDER \
+  ~session:* \
+  +GET +SET +DEL +EXPIRE +TTL \
+  +PING +QUIT \
+  -EVAL -EVALSHA -SCRIPT -DEBUG -CONFIG \
+  -FLUSHALL -FLUSHDB -KEYS -MONITOR
+
+# ── Read-Only Analytics User ──────────────────────────────────────────────────
+user remitflow_readonly on >REMITFLOW_READONLY_PASSWORD_PLACEHOLDER \
+  ~remitflow:* ~cache:* \
+  +GET +HGET +HGETALL +LRANGE +SMEMBERS +ZRANGE \
+  +TTL +PTTL +TYPE +OBJECT \
+  +PING +QUIT \
+  -EVAL -EVALSHA -SCRIPT -DEBUG -CONFIG \
+  -FLUSHALL -FLUSHDB -KEYS -MONITOR -SET -DEL
+
+# ── Admin User (monitoring, ops — restricted access) ─────────────────────────
+user remitflow_admin on >REMITFLOW_ADMIN_PASSWORD_PLACEHOLDER \
+  ~* \
+  +INFO +DBSIZE +SLOWLOG +LATENCY +MEMORY +CLIENT \
+  +PING +QUIT \
+  -EVAL -EVALSHA -SCRIPT -DEBUG \
+  -FLUSHALL -FLUSHDB -MIGRATE -MONITOR

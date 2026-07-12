@@ -9,7 +9,7 @@ name = "audit-service"
 path = "src/main.rs"
 
 [dependencies]
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres"] }
+sqlx = { version = "0.8.1", features = ["runtime-tokio", "postgres"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["json"] }
 serde = { version = "1", features = ["derive"] }

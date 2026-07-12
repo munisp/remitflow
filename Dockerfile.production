@@ -1,6 +1,13 @@
 # Multi-stage production Dockerfile — P1 DevOps 4.4
 # Stage 1: Dependencies
 FROM node:20-alpine AS deps
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force

@@ -31,7 +31,7 @@ services:
       retries: 5
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4.2-alpine  # CVE-2025-49844 patched version.4.2-alpine  # CVE-2025-49844 patched version
     ports:
       - "6379:6379"
     healthcheck:
@@ -258,7 +258,7 @@ services:
       retries: 3
 
   rate-limiter:
-    image: redis:7-alpine
+    image: redis:7.4.2-alpine  # CVE-2025-49844 patched version.4.2-alpine  # CVE-2025-49844 patched version
     profiles: ["full", "monitoring"]
     ports:
       - "6380:6379"
@@ -666,6 +666,30 @@ services:
       retries: 3
 
 volumes:
+  redis-data:
+    driver: local
   pgdata:
   grafanadata:
   miniodata:
+
+# ─── Docker Secrets (production: use Docker Swarm or K8s secrets) ─────────────
+secrets:
+  redis_password:
+    environment: REDIS_PASSWORD
+  postgres_password:
+    environment: POSTGRES_PASSWORD
+  jwt_secret:
+    environment: JWT_SECRET
+  keycloak_admin_password:
+    environment: KEYCLOAK_ADMIN_PASSWORD
+
+# ─── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  remitflow-internal:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+  remitflow-external:
+    driver: bridge

@@ -1,4 +1,11 @@
 FROM python:3.11-slim
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

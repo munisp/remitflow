@@ -1,5 +1,12 @@
 # ── Build stage ───────────────────────────────────────────────────────────────
 FROM rust:1.77-slim-bookworm AS builder
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
 WORKDIR /app
 # Cache dependencies
 COPY Cargo.toml Cargo.lock ./
@@ -20,4 +27,8 @@ ENV PORT=8082 \
 EXPOSE 8082
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
   CMD curl -f http://localhost:8082/health || exit 1
+RUN addgroup --system --gid 1001 appgroup && \
+    adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
+USER appuser
+
 ENTRYPOINT ["audit-service"]

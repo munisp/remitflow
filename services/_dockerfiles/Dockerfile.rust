@@ -15,6 +15,13 @@ ARG SERVICE_NAME=rust-service
 
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
+
 ARG SERVICE_NAME
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -47,5 +54,8 @@ COPY --from=builder /app/service /service
 USER nonroot:nonroot
 
 EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
 
 ENTRYPOINT ["/service"]

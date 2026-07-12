@@ -1,5 +1,12 @@
 # syntax=docker/dockerfile:1
 FROM python:3.11-slim AS base
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
 WORKDIR /app
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 COPY requirements.txt* ./

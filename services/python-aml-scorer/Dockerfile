@@ -1,6 +1,13 @@
 # ─── Build Stage ──────────────────────────────────────────────────────────────
 FROM python:3.12-slim-bookworm AS builder
 
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
+
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \

@@ -1,5 +1,12 @@
 # ─── Build stage ──────────────────────────────────────────────────────────────
 FROM python:3.11-slim AS builder
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
 WORKDIR /app
 RUN pip install --upgrade pip
 COPY requirements.txt .

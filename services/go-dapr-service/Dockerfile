@@ -1,5 +1,12 @@
 # ─── Build Stage ──────────────────────────────────────────────────────────────
 FROM golang:1.22-alpine AS builder
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
 RUN apk add --no-cache git ca-certificates tzdata
 WORKDIR /app
 COPY go.mod ./
@@ -16,4 +23,8 @@ COPY --from=builder /app/dapr-service /dapr-service
 EXPOSE 8097
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["/dapr-service", "-health"]
+RUN addgroup --system --gid 1001 appgroup && \
+    adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
+USER appuser
+
 ENTRYPOINT ["/dapr-service"]

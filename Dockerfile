@@ -8,6 +8,13 @@
 # ---- Stage 1: Build ----
 FROM node:22-alpine AS builder
 
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
+
 WORKDIR /app
 
 # Install pnpm

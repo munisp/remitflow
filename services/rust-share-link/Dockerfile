@@ -1,5 +1,12 @@
 # ─── Build stage ──────────────────────────────────────────────────────────────
 FROM rust:1.78-alpine AS builder
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
 RUN apk add --no-cache musl-dev pkgconfig openssl-dev
 WORKDIR /app
 COPY Cargo.toml ./

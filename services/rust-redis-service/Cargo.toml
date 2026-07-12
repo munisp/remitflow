@@ -12,7 +12,7 @@ rand = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 axum = { version = "0.7", features = ["json", "macros"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres"] }
+sqlx = { version = "0.8.1", features = ["runtime-tokio", "postgres"] }
 actix-web = "4"
 redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
 tokio = { version = "1", features = ["full"] }

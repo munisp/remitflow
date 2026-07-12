@@ -9,7 +9,7 @@ name = "crypto_guard"
 path = "src/main.rs"
 
 [dependencies]
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "json"] }
+sqlx = { version = "0.8.1", features = ["runtime-tokio", "postgres", "json"] }
 # HTTP server
 actix-web = "4"
 # Serialization

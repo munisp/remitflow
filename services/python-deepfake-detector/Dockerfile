@@ -1,5 +1,12 @@
 # ── Build stage ──────────────────────────────────────────────────────────────
 FROM python:3.11-slim AS base
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -31,5 +38,13 @@ ENV PORT=8097 \
 RUN python -c "from transformers import AutoFeatureExtractor, AutoModelForImageClassification; \
     AutoFeatureExtractor.from_pretrained('Wvolf/ViT-L_Deepfake_Detection'); \
     AutoModelForImageClassification.from_pretrained('Wvolf/ViT-L_Deepfake_Detection')" || true
+
+RUN addgroup --system --gid 1001 appgroup && \
+    adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser && \
+    chown -R appuser:appgroup /app
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
 
 CMD ["python", "main.py"]

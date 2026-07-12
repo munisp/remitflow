@@ -7,6 +7,13 @@
 # using a shared router with path-based dispatching.
 
 FROM golang:1.22-alpine AS builder
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true" \
+      security.cve-2025-49844="mitigated" \
+      security.cve-2024-32650="mitigated"
+
 RUN apk add --no-cache git ca-certificates
 WORKDIR /build
 
@@ -34,4 +41,8 @@ RUN apk add --no-cache ca-certificates wget
 COPY --from=builder /go-services /usr/local/bin/go-services
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 CMD wget --spider -q http://localhost:8080/health || exit 1
+RUN addgroup --system --gid 1001 appgroup && \
+    adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
+USER appuser
+
 ENTRYPOINT ["/usr/local/bin/go-services"]
