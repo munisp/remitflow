@@ -43,6 +43,8 @@ import { transferBatchQueue } from "./services/transferBatchQueue";
 import { walletCache } from "./services/walletCache";
 import { logger } from './_core/logger';
 import { safeParseAmount } from "./lib/safeDecimal";
+import { auditCoreOperation } from "./middleware/coreAtomicity";
+import { KAFKA_TOPICS } from "./middleware/kafka";
 
 // ============================================================================
 // FX Rate Cache (backed by fx-rates.service with real API sources)
@@ -202,6 +204,23 @@ async function executeSingleRecurringPayment(payment: any): Promise<void> {
     recipientAccount: payment.recipientAccount,
     metadata: { recurringPaymentId: payment.id, scheduleName: payment.name },
   });
+
+  // Ledger + event backing: record the debit in TigerBeetle (double-entry) and
+  // publish to Kafka so scheduled money movement is reconcilable like any other
+  // transfer instead of only mutating the wallet balance.
+  await auditCoreOperation({
+    userId: payment.userId,
+    action: "recurring_payment.execute",
+    description: `Recurring payment "${payment.name}": ${payment.amount} ${payment.currency}`,
+    amount: safeParseAmount(payment.amount),
+    currency: payment.currency,
+    featureLabel: "recurring_payment",
+    operationRef: reference,
+    kafkaTopic: KAFKA_TOPICS.TRANSACTIONS,
+    metadata: { recurringPaymentId: payment.id, scheduleName: payment.name },
+  }).catch((err) =>
+    logger.warn({ err: err?.message, reference }, "[Scheduler] Recurring payment ledger/event recording failed")
+  );
 
   // Update recurring payment record
   const nextRun = calculateNextRun(payment);

@@ -342,6 +342,7 @@ import { nfcPaymentsRouter } from "./_core/nfcPayments";
 import { markLaneRouter } from "./integrations/marklane/markLaneRouter";
 import { adminRouter as adminDashboardRouter } from "./admin/adminRouter";
 import { insiderThreatRouter } from "./routers/insiderThreatControls";
+import { complianceRouter } from "./routers/complianceRouter";
 
 
 // ─── FX Rate Fetcher ──────────────────────────────────────────────────────────
@@ -7100,5 +7101,7 @@ Case: #${input.caseId}`,
   insiderThreat: insiderThreatRouter,
   // Platform Health (all 12 integrations)
   platformHealth: healthRouter,
+  // Phase 2 Compliance Suite (Travel Rule, SAR/STR, PEP, Data Residency, Audit)
+  complianceV2: complianceRouter,
 });
 export type AppRouter = typeof appRouter;

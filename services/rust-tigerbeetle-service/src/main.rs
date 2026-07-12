@@ -332,6 +332,7 @@ async fn db_record_transfer(pool: &PgPool, id: &str, debit_id: &str, credit_id: 
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn db_update_balances(pool: &PgPool, debit_id: &str, credit_id: &str, amount: u128, is_pending: bool) -> Result<(), sqlx::Error> {
     if is_pending {
         sqlx::query("UPDATE tb_accounts SET debits_pending = debits_pending + $1, updated_at = NOW() WHERE id = $2")
@@ -344,6 +345,37 @@ async fn db_update_balances(pool: &PgPool, debit_id: &str, credit_id: &str, amou
         sqlx::query("UPDATE tb_accounts SET credits_posted = credits_posted + $1, updated_at = NOW() WHERE id = $2")
             .bind(amount.to_string()).bind(credit_id).execute(pool).await?;
     }
+    Ok(())
+}
+
+/// Records a transfer and updates both account balances atomically in a single
+/// DB transaction, so a failure between the insert and the balance updates can
+/// never leave the ledger in an inconsistent state.
+async fn db_record_transfer_atomic(pool: &PgPool, id: &str, debit_id: &str, credit_id: &str, amount: u128, ledger: u32, code: u16, flags: u16, status: &str, idempotency_key: Option<&str>, is_pending: bool) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO tb_transfers (id, debit_account_id, credit_account_id, amount, pending_id, ledger, code, flags, status, idempotency_key)
+         VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9)
+         ON CONFLICT (id) DO UPDATE SET status = $8"
+    )
+    .bind(id).bind(debit_id).bind(credit_id)
+    .bind(amount.to_string())
+    .bind(ledger as i32).bind(code as i16).bind(flags as i16)
+    .bind(status).bind(idempotency_key)
+    .execute(&mut *tx).await?;
+
+    if is_pending {
+        sqlx::query("UPDATE tb_accounts SET debits_pending = debits_pending + $1, updated_at = NOW() WHERE id = $2")
+            .bind(amount.to_string()).bind(debit_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE tb_accounts SET credits_pending = credits_pending + $1, updated_at = NOW() WHERE id = $2")
+            .bind(amount.to_string()).bind(credit_id).execute(&mut *tx).await?;
+    } else {
+        sqlx::query("UPDATE tb_accounts SET debits_posted = debits_posted + $1, updated_at = NOW() WHERE id = $2")
+            .bind(amount.to_string()).bind(debit_id).execute(&mut *tx).await?;
+        sqlx::query("UPDATE tb_accounts SET credits_posted = credits_posted + $1, updated_at = NOW() WHERE id = $2")
+            .bind(amount.to_string()).bind(credit_id).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -478,6 +510,16 @@ async fn initiate_transfer(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TransferRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // Reject non-positive / non-finite amounts. A negative f64 cast to u128 wraps
+    // to a huge value and a negative amount would also bypass the balance pre-check.
+    if !req.amount.is_finite() || req.amount <= 0.0 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+            "error": "INVALID_AMOUNT",
+            "amount": req.amount,
+            "message": "Transfer amount must be greater than zero"
+        })));
+    }
+
     let debit_id = req.debit_account_id.clone();
     let credit_id = req.credit_account_id.clone();
     let amount_minor = amount_to_minor(req.amount);
@@ -531,22 +573,17 @@ async fn initiate_transfer(
     let flags = if is_pending { transfer_flags::PENDING } else { transfer_flags::NONE };
     let status = if is_pending { "pending" } else { "posted" };
 
-    // Record transfer in PostgreSQL
-    if let Err(e) = db_record_transfer(
+    // Record transfer and update balances atomically in PostgreSQL (FAIL-CLOSED)
+    if let Err(e) = db_record_transfer_atomic(
         &state.db_pool, &transfer_id_str, &debit_id, &credit_id,
-        amount_minor, None, 1, transfer_code, flags, status,
-        req.idempotency_key.as_deref(),
+        amount_minor, 1, transfer_code, flags, status,
+        req.idempotency_key.as_deref(), is_pending,
     ).await {
         error!(err = %e, "[TigerBeetle] FAIL-CLOSED: Transfer persistence failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
             "error": "TRANSFER_FAILED",
             "message": "Failed to persist transfer — operation blocked"
         })));
-    }
-
-    // Update account balances
-    if let Err(e) = db_update_balances(&state.db_pool, &debit_id, &credit_id, amount_minor, is_pending).await {
-        error!(err = %e, "[TigerBeetle] Balance update failed");
     }
 
     // Emit Kafka event

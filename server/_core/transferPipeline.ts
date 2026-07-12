@@ -29,6 +29,17 @@ import { broadcastUserEvent } from "../sse.service";
 import { createAuditLog } from "../db";
 import { checkFraud, checkVelocity } from "../fraud.service";
 
+/**
+ * Deterministic TigerBeetle transfer id derived from the transfer UUID.
+ * Both the pipeline (which creates the pending hold) and the saga compensation
+ * (which must void that exact hold) derive the same id, so compensation can
+ * always target the real pending transfer instead of a fabricated random id.
+ */
+function pendingTransferIdFor(transferId: string): bigint {
+  const hex = transferId.replace(/-/g, "").slice(0, 32).padEnd(32, "0");
+  return BigInt(`0x${hex}`);
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface TransferPipelineInput {
@@ -49,6 +60,12 @@ export interface TransferPipelineInput {
   skipKycTier?: boolean;
   /** Skip velocity check */
   skipVelocity?: boolean;
+  /**
+   * Skip the TigerBeetle ledger step. Set by callers (e.g. property escrow) that
+   * already create their own ledger-backed hold on a dedicated account/ledger, so
+   * the pipeline does not double-book a second pending transfer for the same funds.
+   */
+  skipLedger?: boolean;
   /** Additional metadata for audit log */
   metadata?: Record<string, unknown>;
 }
@@ -188,8 +205,9 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
   // 4. TigerBeetle double-entry ledger (FAIL-CLOSED in production)
   // Uses two-phase transfer: create pending hold, then post after settlement.
   // Validates balance before creating the transfer.
-  {
-    const transferBigId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
+  // Skipped when the caller already recorded a ledger-backed hold (e.g. escrow).
+  if (!input.skipLedger) {
+    const transferBigId = pendingTransferIdFor(input.transferId);
     const debitAccountId = BigInt(input.userId);
     const creditAccountId = BigInt(input.userId + 1_000_000);
     const amountCents = BigInt(Math.round(input.amount * 100));
@@ -358,7 +376,7 @@ export async function compensateFailedTransfer(input: {
   try {
     // Void the pending TigerBeetle transfer (two-phase: void releases the hold)
     const voidId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
-    const pendingId = BigInt(Date.now()) * BigInt(999) + BigInt(Math.floor(Math.random() * 999));
+    const pendingId = pendingTransferIdFor(input.transferId);
     await tigerBeetle.voidPendingTransfer({
       id: voidId,
       pendingId,

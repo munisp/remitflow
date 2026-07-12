@@ -36,6 +36,7 @@ import {
   securityIncidents,
 } from "../../drizzle/schema";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+import { auditCoreOperation } from "../middleware/coreAtomicity";
 import { logger } from "../_core/logger";
 
 // ─── Support Tickets ─────────────────────────────────────────────────────────
@@ -434,6 +435,20 @@ export const stablecoinRouter = router({
         txHash,
         timestamp: new Date().toISOString(),
       }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Stablecoin] Kafka event failed"));
+
+      // Ledger backing: record the double-entry in TigerBeetle so the stablecoin
+      // debit is reconcilable, not only a bare wallet balance mutation + event.
+      await auditCoreOperation({
+        userId: ctx.user.id,
+        action: "stablecoin.transfer",
+        description: `Stablecoin transfer ${input.amount} ${wallet.symbol} to ${input.toAddress}`,
+        amount: input.amount,
+        currency: wallet.symbol,
+        featureLabel: "stablecoin_transfer",
+        operationRef: txHash,
+        kafkaTopic: KAFKA_TOPICS.TRANSACTIONS,
+        metadata: { walletId: input.walletId, toAddress: input.toAddress, txHash },
+      }).catch(() => {});
 
       return { success: true, verified: true, txHash, amount: input.amount, toAddress: input.toAddress };
     }),

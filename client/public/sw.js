@@ -6,12 +6,24 @@
 // v204 additions: Form M history, HNW banking, CBN compliance, BDC portal, SME trade routes cached
 // v23 additions: Tier 1 (Expense, Contractor, KYB, Payroll Tax), Tier 2 (Savings, Bonds, LC, Invoice Financing, Payroll Run), Tier 3 (Embedded Payroll, Mortgage, Credit Scoring, ESG)
 
+// CACHE_VERSION is auto-set by the deploy pipeline (ops/deploy/cache-bust.sh).
+// During development it falls back to 'v24'. On every production deploy the
+// script rewrites this line with a content-derived hash so the SW byte-changes,
+// which triggers the browser's update-check and forces re-installation.
 const CACHE_VERSION = 'v24';
 const STATIC_CACHE = `remitflow-static-${CACHE_VERSION}`;
 const API_CACHE = `remitflow-api-${CACHE_VERSION}`;
 const FX_CACHE = `remitflow-fx-${CACHE_VERSION}`;
 const COMMUNITY_CACHE = `remitflow-community-${CACHE_VERSION}`;
 const REVENUE_SHARE_CACHE = `remitflow-revenue-share-${CACHE_VERSION}`;
+
+const KNOWN_CACHE_PREFIXES = [
+  'remitflow-static-',
+  'remitflow-api-',
+  'remitflow-fx-',
+  'remitflow-community-',
+  'remitflow-revenue-share-',
+];
 
 // Cache size limits per cache bucket — prevents unbounded storage growth
 const CACHE_SIZE_LIMITS = {
@@ -125,13 +137,30 @@ self.addEventListener('install', (event) => {
 });
 
 self.addEventListener('activate', (event) => {
+  const currentCaches = new Set([STATIC_CACHE, API_CACHE, FX_CACHE, COMMUNITY_CACHE, REVENUE_SHARE_CACHE]);
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
-        keys.filter((k) => k.startsWith('remitflow-') && ![STATIC_CACHE, API_CACHE, FX_CACHE, REVENUE_SHARE_CACHE].includes(k))
-          .map((k) => caches.delete(k))
+        keys
+          .filter((k) => {
+            if (currentCaches.has(k)) return false;
+            return KNOWN_CACHE_PREFIXES.some((prefix) => k.startsWith(prefix));
+          })
+          .map((k) => {
+            console.log('[SW] Deleting stale cache:', k);
+            return caches.delete(k);
+          })
       )
-    ).then(() => self.clients.claim())
+    )
+    .then(() => self.clients.claim())
+    .then(() => {
+      // Notify all clients that a new version is active
+      self.clients.matchAll({ type: 'window' }).then((clients) => {
+        clients.forEach((client) => {
+          client.postMessage({ type: 'SW_UPDATED', version: CACHE_VERSION });
+        });
+      });
+    })
   );
 });
 

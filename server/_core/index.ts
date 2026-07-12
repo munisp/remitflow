@@ -17,6 +17,7 @@ import { openAppSecHeadersMiddleware, openAppSecWafMiddleware, getSecurityVulner
 import { startScheduler } from "../scheduler";
 import { startMicroservices } from "./microservices";
 import { ensureTopicsExist, disconnectKafka } from "../middleware/kafka";
+import { startKafkaConsumers, stopKafkaConsumers } from "../middleware/kafkaConsumer";
 import { metricsHandler } from "../metrics";
 import { registerMojaloopWebhooks } from "../mojaloop.webhook";
 import { registerPaymentRailWebhooks } from "../payment-rail-webhooks";
@@ -1279,7 +1280,9 @@ async function startServer() {
     // Start automated daily reconciliation scheduler
     import("../lib/reconciliationScheduler").then(({ startReconciliationScheduler }) => startReconciliationScheduler()).catch(err => logger.warn({ errMsg: err?.message }, "[Reconciliation] Scheduler init failed (non-blocking):"));
     // Initialize Kafka topics (non-blocking, graceful fallback if Kafka unavailable)
-    ensureTopicsExist().catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic init failed (non-blocking):"));
+    ensureTopicsExist()
+      .then(() => startKafkaConsumers())
+      .catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic/consumer init failed (non-blocking):"));
     // Start webhook retry scheduler (exponential backoff for failed payment callbacks)
     try {
       const { ensureWebhookQueueTable, startWebhookRetryScheduler } = await import("../lib/webhookRetryQueue.js");
@@ -1331,6 +1334,16 @@ async function gracefulShutdown(signal: string) {
   // Stop WebSocket broadcaster
   stopServicesHealthWS();
 
+  // Drain Kafka consumers FIRST — their handlers depend on DB (getDb/createAuditLog)
+  // and Redis, so they must finish before those resources are torn down. The producer
+  // is disconnected later since it has no DB/Redis dependency.
+  try {
+    await stopKafkaConsumers();
+    logger.info("[Shutdown] Kafka consumers stopped");
+  } catch (err: any) {
+    logger.warn({ errMsg: err.message }, "[Shutdown] Kafka consumer stop warning:");
+  }
+
   // Disconnect Redis
   try {
     const { disconnectRedis } = await import("../middleware/redis");
@@ -1350,7 +1363,7 @@ async function gracefulShutdown(signal: string) {
   }
 
   try {
-    // Disconnect Kafka producer
+    // Disconnect Kafka producer (no DB/Redis dependency; consumers already drained above)
     await disconnectKafka();
     logger.info("[Shutdown] Kafka disconnected");
   } catch (err: any) {
