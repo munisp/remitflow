@@ -1,0 +1,236 @@
+# RemitFlow — Chaos Engineering Experiments (Chaos Mesh / LitmusChaos)
+# ══════════════════════════════════════════════════════════════════════════════
+# Defines structured chaos experiments to validate platform resilience.
+#
+# Experiment categories:
+#   1. Network chaos   — latency injection, packet loss, partition
+#   2. Pod chaos       — pod kill, pod failure, container kill
+#   3. Resource chaos  — CPU stress, memory stress, disk fill
+#   4. Application chaos — Kafka consumer lag, Redis eviction, DB connection pool exhaustion
+#
+# Usage:
+#   kubectl apply -f infra/chaos/chaos-experiments.yaml
+#   # Or with LitmusChaos:
+#   litmusctl run experiment --file infra/chaos/chaos-experiments.yaml
+#
+# IMPORTANT: Only run in staging/canary environments. Never in production.
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: remitflow-kafka-latency
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    chaos-type: network
+    target: kafka
+spec:
+  action: delay
+  mode: one
+  selector:
+    namespaces:
+      - remitflow-staging
+    labelSelectors:
+      "app": "kafka"
+  delay:
+    latency: "200ms"
+    correlation: "25"
+    jitter: "50ms"
+  duration: "5m"
+  scheduler:
+    cron: "@every 1h"
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: remitflow-redis-partition
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    chaos-type: network
+    target: redis
+spec:
+  action: partition
+  mode: one
+  selector:
+    namespaces:
+      - remitflow-staging
+    labelSelectors:
+      "app": "redis"
+  direction: both
+  target:
+    mode: one
+    selector:
+      namespaces:
+        - remitflow-staging
+      labelSelectors:
+        "app": "remitflow-server"
+  duration: "2m"
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: remitflow-server-pod-kill
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    chaos-type: pod
+    target: server
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces:
+      - remitflow-staging
+    labelSelectors:
+      "app": "remitflow-server"
+  gracePeriod: 0
+  duration: "1m"
+  scheduler:
+    cron: "@every 6h"
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: remitflow-fraud-ml-failure
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    chaos-type: pod
+    target: fraud-ml
+spec:
+  action: pod-failure
+  mode: all
+  selector:
+    namespaces:
+      - remitflow-staging
+    labelSelectors:
+      "app": "fraud-ml"
+  duration: "3m"
+  # Tests that the fraud orchestrator gracefully degrades when ML services are down
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: remitflow-server-cpu-stress
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    chaos-type: resource
+    target: server
+spec:
+  mode: one
+  selector:
+    namespaces:
+      - remitflow-staging
+    labelSelectors:
+      "app": "remitflow-server"
+  stressors:
+    cpu:
+      workers: 4
+      load: 80
+  duration: "5m"
+  scheduler:
+    cron: "@every 12h"
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: StressChaos
+metadata:
+  name: remitflow-server-memory-stress
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    chaos-type: resource
+    target: server
+spec:
+  mode: one
+  selector:
+    namespaces:
+      - remitflow-staging
+    labelSelectors:
+      "app": "remitflow-server"
+  stressors:
+    memory:
+      workers: 4
+      size: "512MB"
+  duration: "3m"
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: remitflow-postgres-latency
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    chaos-type: network
+    target: postgres
+spec:
+  action: delay
+  mode: one
+  selector:
+    namespaces:
+      - remitflow-staging
+    labelSelectors:
+      "app": "postgres"
+  delay:
+    latency: "500ms"
+    correlation: "50"
+    jitter: "100ms"
+  duration: "5m"
+  # Tests that the server handles slow DB queries gracefully (timeouts, retries)
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: remitflow-tigerbeetle-packet-loss
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    chaos-type: network
+    target: tigerbeetle
+spec:
+  action: loss
+  mode: one
+  selector:
+    namespaces:
+      - remitflow-staging
+    labelSelectors:
+      "app": "tigerbeetle"
+  loss:
+    loss: "10"
+    correlation: "25"
+  duration: "2m"
+  # Tests that TigerBeetle client retries correctly on packet loss
+---
+# Chaos Experiment Schedule (LitmusChaos ChaosSchedule)
+apiVersion: litmuschaos.io/v1alpha1
+kind: ChaosSchedule
+metadata:
+  name: remitflow-weekly-resilience-drill
+  namespace: remitflow-staging
+spec:
+  schedule:
+    now: false
+    repeat:
+      properties:
+        minChaosInterval: "168h" # weekly
+      workHours:
+        includedHours: "2-4" # 2am-4am UTC
+  engineTemplateSpec:
+    engineState: active
+    appinfo:
+      appns: remitflow-staging
+      applabel: "app=remitflow-server"
+      appkind: deployment
+    chaosServiceAccount: litmus-admin
+    experiments:
+      - name: pod-delete
+        spec:
+          components:
+            env:
+              - name: TOTAL_CHAOS_DURATION
+                value: "60"
+              - name: CHAOS_INTERVAL
+                value: "10"
+              - name: FORCE
+                value: "false"

@@ -245,6 +245,12 @@ import { rateAlertsRouter } from "./routers/productionV86.js";
 import { fraudRulesCrudRouter, multiCurrencyLedgerRouter, notificationCenterV2Router, partnerPayoutAutomationRouter, smartRoutingV2Router, tenantWhiteLabelRouter } from "./routers/productionV89.js";
 import { beneficiaryDedupRouter, bulkPaymentRouter, disputeManagementRouter, embeddingIndexRouter, fxStreamRouter, grafanaRouter, kycWorkflowRouter, openBankingRouter, paymentRailsRouter, regulatoryReportingRouter, revenueAnalyticsRouter, sanctionsScreeningRouter } from "./routers/productionV90.js";
 import { auditTrailV2Router, beneficiaryGroupsV2Router, complianceScoringRouter, feeNegotiationRouter, feeRulesEngineRouter, multiHopRoutingRouter, partnerWebhooksV2Router, reconciliationV2Router, systemHealthRouter, transferLimitsV2Router } from "./routers/v99Features.js";
+
+import { fraudOrchestratorRouter } from "./routers/fraudOrchestratorRouter.js";
+import { cbdcSettlementRouter } from "./routers/cbdcSettlementRouter.js";
+import { webauthnRouter } from "./routers/webauthnRouter.js";
+import { multiTenancyRouter } from "./routers/multiTenancyRouter.js";
+import { analyticsDashboardRouter } from "./routers/analyticsDashboardRouter.js";
 import { cbnComplianceRouter } from "./routers/cbnCompliance.js";
 import { outboundRouter } from "./routers/outbound.js";
 import { westAfricaRouter } from "./routers/westAfrica.js";
@@ -6978,6 +6984,12 @@ Case: #${input.caseId}`,
   reconciliationV2: reconciliationV2Router,
   systemHealth: systemHealthRouter,
   transferLimitsV2: transferLimitsV2Router,
+  
+  fraudOrchestrator: fraudOrchestratorRouter,
+  cbdcSettlement: cbdcSettlementRouter,
+  webauthn: webauthnRouter,
+  multiTenancy: multiTenancyRouter,
+  analyticsDashboard: analyticsDashboardRouter,
   cbnCompliance: cbnComplianceRouter,
   outbound: outboundRouter,
   westAfrica: westAfricaRouter,
