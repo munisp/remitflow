@@ -1,6 +1,6 @@
 # Multi-stage production Dockerfile — P1 DevOps 4.4
 # Stage 1: Dependencies
-FROM node:20-alpine AS deps
+FROM node:26-alpine AS deps
 
 LABEL org.opencontainers.image.vendor="RemitFlow" \
       org.opencontainers.image.licenses="Proprietary" \
@@ -13,7 +13,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 # Stage 2: Build
-FROM node:20-alpine AS builder
+FROM node:26-alpine AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -21,7 +21,7 @@ COPY . .
 RUN npm run build
 
 # Stage 3: Production
-FROM node:20-alpine AS runner
+FROM node:26-alpine AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
