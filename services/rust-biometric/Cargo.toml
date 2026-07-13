@@ -1,0 +1,28 @@
+[package]
+name    = "rust-biometric"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "rust-biometric"
+path = "src/main.rs"
+
+[dependencies]
+axum             = { version = "0.7", features = ["json"] }
+tokio            = { version = "1",   features = ["full"] }
+serde            = { version = "1",   features = ["derive"] }
+serde_json       = "1"
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+prometheus       = { version = "0.13", features = ["process"] }
+uuid             = { version = "1",   features = ["v4"] }
+base64           = "0.22"
+sha2             = "0.10"
+hmac             = "0.12"
+hex              = "0.4"
+lazy_static      = "1"
+
+[profile.release]
+opt-level = 3
+lto       = true
+codegen-units = 1

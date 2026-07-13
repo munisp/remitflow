@@ -755,6 +755,86 @@ services:
       - stablecoin
       - full
 
+  python-kyc-pipeline:
+    build:
+      context: ./services/python-kyc-pipeline
+      dockerfile: Dockerfile
+    container_name: remitflow-python-kyc-pipeline
+    ports:
+      - "8148:8148"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 4g
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8148/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    profiles: [full, kyc]
+
+  rust-biometric:
+    build:
+      context: ./services/rust-biometric
+      dockerfile: Dockerfile
+    container_name: remitflow-rust-biometric
+    ports:
+      - "8149:8149"
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8149/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    profiles: [full, kyc]
+
+  go-kyc-orchestrator:
+    build:
+      context: ./services/go-kyc-orchestrator
+      dockerfile: Dockerfile
+    container_name: remitflow-go-kyc-orchestrator
+    ports:
+      - "8150:8150"
+    environment:
+      - PORT=8150
+      - KYC_PIPELINE_URL=http://python-kyc-pipeline:8148
+      - BIOMETRIC_URL=http://rust-biometric:8149
+      - AML_SCORER_URL=http://python-aml-scorer:8130
+      - TRAVEL_RULE_URL=http://python-travel-rule:8122
+    depends_on:
+      - python-kyc-pipeline
+      - rust-biometric
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8150/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    profiles: [full, kyc]
+
 volumes:
   redis-data:
     driver: local

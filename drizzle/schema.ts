@@ -5552,3 +5552,5 @@ export type StablecoinYieldPosition  = typeof stablecoinYieldPositions.$inferSel
 export type InsertStablecoinYieldPosition = typeof stablecoinYieldPositions.$inferInsert;
 
 export * from "./schema.stablecoin-innovations";
+
+export * from "./schema.kyc-pipeline";
