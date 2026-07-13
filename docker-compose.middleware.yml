@@ -1,0 +1,330 @@
+##############################################################################
+# docker-compose.middleware.yml
+#
+# Overlay for all new middleware integration services.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.middleware.yml up
+#
+# Services added:
+#   go-middleware-bus          (port 8200) — Kafka/Dapr/Temporal/Mojaloop bus
+#   rust-middleware-connector  (port 8210) — Fluvio/TigerBeetle/Redis/OpenSearch
+#   python-analytics-middleware(port 8220) — OpenSearch/Lakehouse/Keycloak/Permify
+#   go-kyc-trigger-engine      (port 8160) — 15 KYC/KYB trigger types
+#   rust-kyc-event-processor   (port 8190) — Real-time KYC event processing
+#   python-kyc-trigger-scorer  (port 8195) — ML-driven KYC risk scoring
+#   go-corridor-engine         (port 8170) — FX spread & corridor pricing
+#   go-notification-hub        (port 8180) — Multi-channel notifications
+##############################################################################
+
+version: "3.9"
+
+x-middleware-defaults: &middleware-defaults
+  restart: unless-stopped
+  networks:
+    - remitflow-internal
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+x-go-resources: &go-resources
+  limits:
+    cpus: "0.5"
+    memory: 256M
+  reservations:
+    cpus: "0.1"
+    memory: 64M
+
+x-rust-resources: &rust-resources
+  limits:
+    cpus: "1.0"
+    memory: 512M
+  reservations:
+    cpus: "0.1"
+    memory: 128M
+
+x-python-resources: &python-resources
+  limits:
+    cpus: "0.5"
+    memory: 512M
+  reservations:
+    cpus: "0.1"
+    memory: 128M
+
+services:
+
+  # ── Go Unified Middleware Bus ───────────────────────────────────────────────
+  go-middleware-bus:
+    <<: *middleware-defaults
+    build:
+      context: ./services/go-middleware-bus
+      dockerfile: Dockerfile
+    image: remitflow/go-middleware-bus:latest
+    container_name: remitflow-go-middleware-bus
+    ports:
+      - "8200:8200"
+    environment:
+      PORT: "8200"
+      KAFKA_BROKERS: "${KAFKA_BROKERS:-kafka:9092}"
+      DAPR_HTTP_PORT: "3500"
+      TEMPORAL_HOST: "${TEMPORAL_HOST:-temporal:7233}"
+      TEMPORAL_NAMESPACE: "${TEMPORAL_NAMESPACE:-remitflow}"
+      MOJALOOP_URL: "${MOJALOOP_URL:-http://mojaloop-central-ledger:3001}"
+      REDIS_URL: "${REDIS_URL:-redis:6379}"
+      RUST_CONNECTOR_URL: "http://rust-middleware-connector:8210"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    depends_on:
+      - kafka
+      - redis
+    deploy:
+      resources: *go-resources
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8200/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── Rust High-Performance Middleware Connector ──────────────────────────────
+  rust-middleware-connector:
+    <<: *middleware-defaults
+    build:
+      context: ./services/rust-middleware-connector
+      dockerfile: Dockerfile
+    image: remitflow/rust-middleware-connector:latest
+    container_name: remitflow-rust-middleware-connector
+    ports:
+      - "8210:8210"
+    environment:
+      PORT: "8210"
+      TIGERBEETLE_ADDRESSES: "${TIGERBEETLE_ADDRESSES:-tigerbeetle:3000}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
+      FLUVIO_ENDPOINT: "${FLUVIO_ENDPOINT:-fluvio-sc:9003}"
+      OPENSEARCH_URL: "${OPENSEARCH_URL:-http://opensearch:9200}"
+      OPENSEARCH_USER: "${OPENSEARCH_USER:-admin}"
+      OPENSEARCH_PASSWORD: "${OPENSEARCH_PASSWORD:-admin}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    depends_on:
+      - redis
+    deploy:
+      resources: *rust-resources
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8210/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Python Analytics Middleware ─────────────────────────────────────────────
+  python-analytics-middleware:
+    <<: *middleware-defaults
+    build:
+      context: ./services/python-analytics-middleware
+      dockerfile: Dockerfile
+    image: remitflow/python-analytics-middleware:latest
+    container_name: remitflow-python-analytics-middleware
+    ports:
+      - "8220:8220"
+    environment:
+      PORT: "8220"
+      OPENSEARCH_URL: "${OPENSEARCH_URL:-http://opensearch:9200}"
+      OPENSEARCH_USER: "${OPENSEARCH_USER:-admin}"
+      OPENSEARCH_PASSWORD: "${OPENSEARCH_PASSWORD:-admin}"
+      LAKEHOUSE_URL: "${LAKEHOUSE_URL:-http://python-lakehouse:8130}"
+      KEYCLOAK_URL: "${KEYCLOAK_URL:-http://keycloak:8080}"
+      KEYCLOAK_REALM: "${KEYCLOAK_REALM:-remitflow}"
+      KEYCLOAK_ADMIN_USER: "${KEYCLOAK_ADMIN_USER:-admin}"
+      KEYCLOAK_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:-admin}"
+      PERMIFY_URL: "${PERMIFY_URL:-http://permify:3476}"
+      DATABASE_URL: "${DATABASE_URL}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    depends_on:
+      - keycloak
+    deploy:
+      resources: *python-resources
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8220/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Go KYC/KYB Trigger Engine ───────────────────────────────────────────────
+  go-kyc-trigger-engine:
+    <<: *middleware-defaults
+    build:
+      context: ./services/go-kyc-trigger-engine
+      dockerfile: Dockerfile
+    image: remitflow/go-kyc-trigger-engine:latest
+    container_name: remitflow-go-kyc-trigger-engine
+    ports:
+      - "8160:8160"
+    environment:
+      PORT: "8160"
+      KAFKA_BROKERS: "${KAFKA_BROKERS:-kafka:9092}"
+      TEMPORAL_HOST: "${TEMPORAL_HOST:-temporal:7233}"
+      TEMPORAL_NAMESPACE: "${TEMPORAL_NAMESPACE:-remitflow}"
+      DAPR_HTTP_PORT: "3500"
+      MIDDLEWARE_BUS_URL: "http://go-middleware-bus:8200"
+      KYC_PIPELINE_URL: "http://go-kyc-orchestrator:8150"
+      RUST_SCORER_URL: "http://rust-kyc-event-processor:8190"
+      PYTHON_SCORER_URL: "http://python-kyc-trigger-scorer:8195"
+      DATABASE_URL: "${DATABASE_URL}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    depends_on:
+      - go-middleware-bus
+      - kafka
+    deploy:
+      resources: *go-resources
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8160/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── Rust KYC Real-Time Event Processor ─────────────────────────────────────
+  rust-kyc-event-processor:
+    <<: *middleware-defaults
+    build:
+      context: ./services/rust-kyc-event-processor
+      dockerfile: Dockerfile
+    image: remitflow/rust-kyc-event-processor:latest
+    container_name: remitflow-rust-kyc-event-processor
+    ports:
+      - "8190:8190"
+    environment:
+      PORT: "8190"
+      FLUVIO_ENDPOINT: "${FLUVIO_ENDPOINT:-fluvio-sc:9003}"
+      KAFKA_BROKERS: "${KAFKA_BROKERS:-kafka:9092}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
+      TIGERBEETLE_ADDRESSES: "${TIGERBEETLE_ADDRESSES:-tigerbeetle:3000}"
+      KYC_TRIGGER_ENGINE_URL: "http://go-kyc-trigger-engine:8160"
+      DATABASE_URL: "${DATABASE_URL}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    depends_on:
+      - redis
+      - go-kyc-trigger-engine
+    deploy:
+      resources: *rust-resources
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8190/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Python KYC ML Trigger Scorer ────────────────────────────────────────────
+  python-kyc-trigger-scorer:
+    <<: *middleware-defaults
+    build:
+      context: ./services/python-kyc-trigger-scorer
+      dockerfile: Dockerfile
+    image: remitflow/python-kyc-trigger-scorer:latest
+    container_name: remitflow-python-kyc-trigger-scorer
+    ports:
+      - "8195:8195"
+    environment:
+      PORT: "8195"
+      DATABASE_URL: "${DATABASE_URL}"
+      OPENSEARCH_URL: "${OPENSEARCH_URL:-http://opensearch:9200}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
+      AML_SCORER_URL: "http://python-aml-scorer:8100"
+      KYC_TRIGGER_ENGINE_URL: "http://go-kyc-trigger-engine:8160"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    depends_on:
+      - go-kyc-trigger-engine
+    deploy:
+      resources: *python-resources
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8195/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ── Go Corridor & FX Spread Engine ─────────────────────────────────────────
+  go-corridor-engine:
+    <<: *middleware-defaults
+    build:
+      context: ./services/go-corridor-engine
+      dockerfile: Dockerfile
+    image: remitflow/go-corridor-engine:latest
+    container_name: remitflow-go-corridor-engine
+    ports:
+      - "8170:8170"
+    environment:
+      PORT: "8170"
+      DATABASE_URL: "${DATABASE_URL}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
+      MIDDLEWARE_BUS_URL: "http://go-middleware-bus:8200"
+      PRICE_ORACLE_URL: "http://rust-price-oracle:8120"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    depends_on:
+      - go-middleware-bus
+      - redis
+    deploy:
+      resources: *go-resources
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8170/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ── Go Unified Notification Hub ─────────────────────────────────────────────
+  go-notification-hub:
+    <<: *middleware-defaults
+    build:
+      context: ./services/go-notification-hub
+      dockerfile: Dockerfile
+    image: remitflow/go-notification-hub:latest
+    container_name: remitflow-go-notification-hub
+    ports:
+      - "8180:8180"
+    environment:
+      PORT: "8180"
+      DATABASE_URL: "${DATABASE_URL}"
+      KAFKA_BROKERS: "${KAFKA_BROKERS:-kafka:9092}"
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
+      TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID:-}"
+      TWILIO_AUTH_TOKEN: "${TWILIO_AUTH_TOKEN:-}"
+      TWILIO_FROM_NUMBER: "${TWILIO_FROM_NUMBER:-}"
+      SENDGRID_API_KEY: "${SENDGRID_API_KEY:-}"
+      WHATSAPP_API_URL: "${WHATSAPP_API_URL:-}"
+      WHATSAPP_API_KEY: "${WHATSAPP_API_KEY:-}"
+      FCM_SERVER_KEY: "${FCM_SERVER_KEY:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+    depends_on:
+      - kafka
+      - redis
+    deploy:
+      resources: *go-resources
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8180/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  remitflow-internal:
+    external: true
+    name: remitflow_remitflow-internal

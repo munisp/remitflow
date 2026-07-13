@@ -1,5 +1,6 @@
 import { TRPCError } from "@trpc/server";
 import { kycOrchestrationRouter } from "./routers/kycOrchestration";
+import { developerExperienceRouter } from "./routers/developerExperience";
 import { and, asc, desc, eq, inArray, sql, gte, lte, count, lt, isNotNull, sum } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { z } from "zod";
@@ -7105,5 +7106,6 @@ Case: #${input.caseId}`,
   // Phase 2 Compliance Suite (Travel Rule, SAR/STR, PEP, Data Residency, Audit)
   complianceV2: complianceRouter,
   kycOrchestration: kycOrchestrationRouter,
+  developerExperience: developerExperienceRouter,
 });
 export type AppRouter = typeof appRouter;

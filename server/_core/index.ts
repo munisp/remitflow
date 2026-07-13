@@ -23,6 +23,8 @@ import { registerMojaloopWebhooks } from "../mojaloop.webhook";
 import { registerPaymentRailWebhooks } from "../payment-rail-webhooks";
 import { registerSseClient, registerUserSseClient } from "../sse.service";
 import { requestIdMiddleware } from "../middleware/requestId";
+import { kycGateMiddleware } from "../middleware/kycGate";
+import { publishPlatformEvent, checkMiddlewareHealth } from "../lib/middleware-orchestrator";
 import { attachServicesHealthWS, stopServicesHealthWS } from "../ws-services-health.js";
 import { requireValidEnv } from "./startup-validation";
 import { logger } from "./logger";
@@ -92,6 +94,10 @@ async function startServer() {
   // Body parser — 1MB for API payloads (KYC uploads go through S3 presigned URLs)
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ limit: "1mb", extended: true }));
+
+  // KYC/KYB gate middleware — enforces tier-based access control on all payment routes
+  // Triggers KYC verification workflows for users who haven't completed the required tier
+  app.use(kycGateMiddleware);
 
   // Production hardening: health checks, metrics, CORS, OpenAPI
   registerProductionHardeningRoutes(app);
@@ -214,6 +220,22 @@ async function startServer() {
       timestamp: new Date().toISOString(),
       checks,
     });
+  });
+
+  // Middleware health endpoint — checks all 13 middleware systems (Kafka, Dapr, Fluvio, Temporal, etc.)
+  app.get("/api/middleware/health", async (_req, res) => {
+    try {
+      const health = await checkMiddlewareHealth();
+      const allHealthy = Object.values(health).every((s: any) => s.status === "ok" || s.status === "healthy");
+      res.status(allHealthy ? 200 : 207).json({
+        status: allHealthy ? "healthy" : "degraded",
+        timestamp: new Date().toISOString(),
+        version: "69.0.0",
+        systems: health,
+      });
+    } catch (err: any) {
+      res.status(500).json({ status: "error", error: err.message, timestamp: new Date().toISOString() });
+    }
   });
 
   // DB connection pool metrics — for Prometheus/Grafana dashboards
@@ -1283,6 +1305,14 @@ async function startServer() {
     ensureTopicsExist()
       .then(() => startKafkaConsumers())
       .catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic/consumer init failed (non-blocking):"));
+    // Publish platform startup event to all 13 middleware systems (non-blocking)
+    publishPlatformEvent({
+      type: "platform.startup",
+      service: "remitflow-api",
+      version: "69.0.0",
+      port,
+      timestamp: new Date().toISOString(),
+    }).catch(err => logger.warn({ errMsg: err?.message }, "[Middleware] Startup event publish failed (non-blocking):"));
     // Start webhook retry scheduler (exponential backoff for failed payment callbacks)
     try {
       const { ensureWebhookQueueTable, startWebhookRetryScheduler } = await import("../lib/webhookRetryQueue.js");

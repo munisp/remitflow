@@ -5554,3 +5554,6 @@ export type InsertStablecoinYieldPosition = typeof stablecoinYieldPositions.$inf
 export * from "./schema.stablecoin-innovations";
 
 export * from "./schema.kyc-pipeline";
+
+// ─── KYC/KYB Trigger & Pipeline Schema ───────────────────────────────────────
+export * from "./drizzle/schema.kyc-triggers";

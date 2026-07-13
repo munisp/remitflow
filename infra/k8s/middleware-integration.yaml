@@ -1,0 +1,656 @@
+##############################################################################
+# middleware-integration.yaml
+# Kubernetes manifests for all 8 new RemitFlow middleware integration services
+##############################################################################
+
+---
+# ── Namespace ─────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: remitflow
+  labels:
+    app.kubernetes.io/part-of: remitflow
+
+---
+# ── Shared ConfigMap ──────────────────────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: middleware-config
+  namespace: remitflow
+data:
+  KAFKA_BROKERS: "kafka:9092"
+  TEMPORAL_HOST: "temporal:7233"
+  TEMPORAL_NAMESPACE: "remitflow"
+  REDIS_URL: "redis://redis:6379"
+  FLUVIO_ENDPOINT: "fluvio-sc:9003"
+  OPENSEARCH_URL: "http://opensearch:9200"
+  KEYCLOAK_URL: "http://keycloak:8080"
+  KEYCLOAK_REALM: "remitflow"
+  PERMIFY_URL: "http://permify:3476"
+  MOJALOOP_URL: "http://mojaloop-central-ledger:3001"
+  TIGERBEETLE_ADDRESSES: "tigerbeetle:3000"
+  MIDDLEWARE_BUS_URL: "http://go-middleware-bus:8200"
+  RUST_CONNECTOR_URL: "http://rust-middleware-connector:8210"
+  ANALYTICS_MIDDLEWARE_URL: "http://python-analytics-middleware:8220"
+  KYC_TRIGGER_ENGINE_URL: "http://go-kyc-trigger-engine:8160"
+  LOG_LEVEL: "info"
+
+---
+# ── go-middleware-bus ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-middleware-bus
+  namespace: remitflow
+  labels:
+    app: go-middleware-bus
+    component: middleware
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: go-middleware-bus
+  template:
+    metadata:
+      labels:
+        app: go-middleware-bus
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8200"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: go-middleware-bus
+          image: remitflow/go-middleware-bus:latest
+          ports:
+            - containerPort: 8200
+          envFrom:
+            - configMapRef:
+                name: middleware-config
+            - secretRef:
+                name: middleware-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8200
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8200
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-middleware-bus
+  namespace: remitflow
+spec:
+  selector:
+    app: go-middleware-bus
+  ports:
+    - port: 8200
+      targetPort: 8200
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: go-middleware-bus-hpa
+  namespace: remitflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: go-middleware-bus
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+# ── rust-middleware-connector ─────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rust-middleware-connector
+  namespace: remitflow
+  labels:
+    app: rust-middleware-connector
+    component: middleware
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rust-middleware-connector
+  template:
+    metadata:
+      labels:
+        app: rust-middleware-connector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8210"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: rust-middleware-connector
+          image: remitflow/rust-middleware-connector:latest
+          ports:
+            - containerPort: 8210
+          envFrom:
+            - configMapRef:
+                name: middleware-config
+            - secretRef:
+                name: middleware-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8210
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8210
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rust-middleware-connector
+  namespace: remitflow
+spec:
+  selector:
+    app: rust-middleware-connector
+  ports:
+    - port: 8210
+      targetPort: 8210
+
+---
+# ── python-analytics-middleware ───────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-analytics-middleware
+  namespace: remitflow
+  labels:
+    app: python-analytics-middleware
+    component: middleware
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: python-analytics-middleware
+  template:
+    metadata:
+      labels:
+        app: python-analytics-middleware
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8220"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: python-analytics-middleware
+          image: remitflow/python-analytics-middleware:latest
+          ports:
+            - containerPort: 8220
+          envFrom:
+            - configMapRef:
+                name: middleware-config
+            - secretRef:
+                name: middleware-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8220
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-analytics-middleware
+  namespace: remitflow
+spec:
+  selector:
+    app: python-analytics-middleware
+  ports:
+    - port: 8220
+      targetPort: 8220
+
+---
+# ── go-kyc-trigger-engine ─────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-kyc-trigger-engine
+  namespace: remitflow
+  labels:
+    app: go-kyc-trigger-engine
+    component: kyc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: go-kyc-trigger-engine
+  template:
+    metadata:
+      labels:
+        app: go-kyc-trigger-engine
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8160"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: go-kyc-trigger-engine
+          image: remitflow/go-kyc-trigger-engine:latest
+          ports:
+            - containerPort: 8160
+          envFrom:
+            - configMapRef:
+                name: middleware-config
+            - secretRef:
+                name: middleware-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8160
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-kyc-trigger-engine
+  namespace: remitflow
+spec:
+  selector:
+    app: go-kyc-trigger-engine
+  ports:
+    - port: 8160
+      targetPort: 8160
+
+---
+# ── rust-kyc-event-processor ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rust-kyc-event-processor
+  namespace: remitflow
+  labels:
+    app: rust-kyc-event-processor
+    component: kyc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: rust-kyc-event-processor
+  template:
+    metadata:
+      labels:
+        app: rust-kyc-event-processor
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: rust-kyc-event-processor
+          image: remitflow/rust-kyc-event-processor:latest
+          ports:
+            - containerPort: 8190
+          envFrom:
+            - configMapRef:
+                name: middleware-config
+            - secretRef:
+                name: middleware-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8190
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rust-kyc-event-processor
+  namespace: remitflow
+spec:
+  selector:
+    app: rust-kyc-event-processor
+  ports:
+    - port: 8190
+      targetPort: 8190
+
+---
+# ── python-kyc-trigger-scorer ─────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-kyc-trigger-scorer
+  namespace: remitflow
+  labels:
+    app: python-kyc-trigger-scorer
+    component: kyc
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: python-kyc-trigger-scorer
+  template:
+    metadata:
+      labels:
+        app: python-kyc-trigger-scorer
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: python-kyc-trigger-scorer
+          image: remitflow/python-kyc-trigger-scorer:latest
+          ports:
+            - containerPort: 8195
+          envFrom:
+            - configMapRef:
+                name: middleware-config
+            - secretRef:
+                name: middleware-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8195
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-kyc-trigger-scorer
+  namespace: remitflow
+spec:
+  selector:
+    app: python-kyc-trigger-scorer
+  ports:
+    - port: 8195
+      targetPort: 8195
+
+---
+# ── go-corridor-engine ────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-corridor-engine
+  namespace: remitflow
+  labels:
+    app: go-corridor-engine
+    component: payments
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: go-corridor-engine
+  template:
+    metadata:
+      labels:
+        app: go-corridor-engine
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8170"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: go-corridor-engine
+          image: remitflow/go-corridor-engine:latest
+          ports:
+            - containerPort: 8170
+          envFrom:
+            - configMapRef:
+                name: middleware-config
+            - secretRef:
+                name: middleware-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8170
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-corridor-engine
+  namespace: remitflow
+spec:
+  selector:
+    app: go-corridor-engine
+  ports:
+    - port: 8170
+      targetPort: 8170
+
+---
+# ── go-notification-hub ───────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-notification-hub
+  namespace: remitflow
+  labels:
+    app: go-notification-hub
+    component: notifications
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: go-notification-hub
+  template:
+    metadata:
+      labels:
+        app: go-notification-hub
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8180"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: go-notification-hub
+          image: remitflow/go-notification-hub:latest
+          ports:
+            - containerPort: 8180
+          envFrom:
+            - configMapRef:
+                name: middleware-config
+            - secretRef:
+                name: middleware-secrets
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8180
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-notification-hub
+  namespace: remitflow
+spec:
+  selector:
+    app: go-notification-hub
+  ports:
+    - port: 8180
+      targetPort: 8180
+
+---
+# ── Shared Secrets Template (values to be provided via Vault/Sealed Secrets) ──
+apiVersion: v1
+kind: Secret
+metadata:
+  name: middleware-secrets
+  namespace: remitflow
+  annotations:
+    # Replace with Sealed Secrets or External Secrets Operator in production
+    kubernetes.io/description: "Middleware integration secrets — inject via Vault or ESO"
+type: Opaque
+stringData:
+  DATABASE_URL: "REPLACE_WITH_VAULT_SECRET"
+  OPENSEARCH_USER: "REPLACE_WITH_VAULT_SECRET"
+  OPENSEARCH_PASSWORD: "REPLACE_WITH_VAULT_SECRET"
+  KEYCLOAK_ADMIN_USER: "REPLACE_WITH_VAULT_SECRET"
+  KEYCLOAK_ADMIN_PASSWORD: "REPLACE_WITH_VAULT_SECRET"
+  TWILIO_ACCOUNT_SID: "REPLACE_WITH_VAULT_SECRET"
+  TWILIO_AUTH_TOKEN: "REPLACE_WITH_VAULT_SECRET"
+  SENDGRID_API_KEY: "REPLACE_WITH_VAULT_SECRET"
+  WHATSAPP_API_KEY: "REPLACE_WITH_VAULT_SECRET"
+  FCM_SERVER_KEY: "REPLACE_WITH_VAULT_SECRET"
+
+---
+# ── PodDisruptionBudgets ──────────────────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: go-middleware-bus-pdb
+  namespace: remitflow
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: go-middleware-bus
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rust-middleware-connector-pdb
+  namespace: remitflow
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: rust-middleware-connector
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: go-kyc-trigger-engine-pdb
+  namespace: remitflow
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: go-kyc-trigger-engine
