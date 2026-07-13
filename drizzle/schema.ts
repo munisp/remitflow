@@ -5419,3 +5419,134 @@ export * from "./schema.production";
 
 // ─── Insert Types ────────────────────────────────────────────────────────────
 export * from "./schema.types";
+
+// ─── Stablecoin On-Ramp Transactions ─────────────────────────────────────────
+export const onrampTransactions = pgTable("onramp_transactions", {
+  id:               serial("id").primaryKey(),
+  userId:           integer("user_id").notNull().references(() => users.id),
+  txRef:            varchar("tx_ref", { length: 100 }).notNull().unique(),
+  fiatCurrency:     varchar("fiat_currency", { length: 10 }).notNull(),
+  fiatAmount:       numeric("fiat_amount", { precision: 18, scale: 2 }).notNull(),
+  stablecoin:       varchar("stablecoin", { length: 20 }).notNull(),
+  stablecoinAmount: numeric("stablecoin_amount", { precision: 18, scale: 8 }).notNull(),
+  chain:            varchar("chain", { length: 50 }).notNull().default("ethereum"),
+  provider:         varchar("provider", { length: 50 }).notNull().default("internal"),
+  walletAddress:    varchar("wallet_address", { length: 200 }),
+  fee:              numeric("fee", { precision: 18, scale: 8 }).default("0"),
+  fxRate:           numeric("fx_rate", { precision: 18, scale: 8 }),
+  status:           varchar("status", { length: 30 }).notNull().default("pending"),
+  providerRef:      varchar("provider_ref", { length: 200 }),
+  chainTxHash:      varchar("chain_tx_hash", { length: 200 }),
+  kycTier:          varchar("kyc_tier", { length: 20 }),
+  travelRuleApplied: boolean("travel_rule_applied").default(false),
+  depegWarning:     boolean("depeg_warning").default(false),
+  completedAt:      timestamp("completed_at"),
+  createdAt:        timestamp("created_at").defaultNow(),
+  updatedAt:        timestamp("updated_at").defaultNow(),
+});
+
+// ─── Stablecoin Off-Ramp Transactions ────────────────────────────────────────
+export const offrampTransactions = pgTable("offramp_transactions", {
+  id:               serial("id").primaryKey(),
+  userId:           integer("user_id").notNull().references(() => users.id),
+  txRef:            varchar("tx_ref", { length: 100 }).notNull().unique(),
+  stablecoin:       varchar("stablecoin", { length: 20 }).notNull(),
+  stablecoinAmount: numeric("stablecoin_amount", { precision: 18, scale: 8 }).notNull(),
+  fiatCurrency:     varchar("fiat_currency", { length: 10 }).notNull(),
+  fiatAmount:       numeric("fiat_amount", { precision: 18, scale: 2 }).notNull(),
+  netPayout:        numeric("net_payout", { precision: 18, scale: 2 }).notNull(),
+  fee:              numeric("fee", { precision: 18, scale: 8 }).default("0"),
+  fxRate:           numeric("fx_rate", { precision: 18, scale: 8 }),
+  payoutRail:       varchar("payout_rail", { length: 50 }).notNull().default("bank_transfer"),
+  bankAccountId:    integer("bank_account_id"),
+  mobileMoneyNumber: varchar("mobile_money_number", { length: 30 }),
+  status:           varchar("status", { length: 30 }).notNull().default("processing"),
+  providerRef:      varchar("provider_ref", { length: 200 }),
+  kycTier:          varchar("kyc_tier", { length: 20 }),
+  travelRuleApplied: boolean("travel_rule_applied").default(false),
+  depegWarning:     boolean("depeg_warning").default(false),
+  completedAt:      timestamp("completed_at"),
+  createdAt:        timestamp("created_at").defaultNow(),
+  updatedAt:        timestamp("updated_at").defaultNow(),
+});
+
+// ─── Stablecoin Reserves (Proof-of-Reserve) ───────────────────────────────────
+export const stablecoinReserves = pgTable("stablecoin_reserves", {
+  id:               serial("id").primaryKey(),
+  symbol:           varchar("symbol", { length: 20 }).notNull(),
+  onChainBalance:   numeric("on_chain_balance", { precision: 28, scale: 8 }).notNull().default("0"),
+  platformBalance:  numeric("platform_balance", { precision: 28, scale: 8 }).notNull().default("0"),
+  reserveRatio:     numeric("reserve_ratio", { precision: 10, scale: 6 }).notNull().default("1.000000"),
+  custodian:        varchar("custodian", { length: 100 }),
+  attestationUrl:   text("attestation_url"),
+  lastVerifiedAt:   timestamp("last_verified_at"),
+  status:           varchar("status", { length: 30 }).notNull().default("unverified"),
+  createdAt:        timestamp("created_at").defaultNow(),
+  updatedAt:        timestamp("updated_at").defaultNow(),
+});
+
+// ─── Bridge Transactions ──────────────────────────────────────────────────────
+export const bridgeTransactions = pgTable("bridge_transactions", {
+  id:               serial("id").primaryKey(),
+  userId:           integer("user_id").notNull().references(() => users.id),
+  bridgeId:         varchar("bridge_id", { length: 100 }).notNull().unique(),
+  stablecoin:       varchar("stablecoin", { length: 20 }).notNull(),
+  amount:           numeric("amount", { precision: 18, scale: 8 }).notNull(),
+  netAmount:        numeric("net_amount", { precision: 18, scale: 8 }).notNull(),
+  fromChain:        varchar("from_chain", { length: 50 }).notNull(),
+  toChain:          varchar("to_chain", { length: 50 }).notNull(),
+  bridgeFee:        numeric("bridge_fee", { precision: 18, scale: 8 }).default("0"),
+  gasFee:           numeric("gas_fee", { precision: 18, scale: 8 }).default("0"),
+  sourceTxHash:     varchar("source_tx_hash", { length: 200 }),
+  destTxHash:       varchar("dest_tx_hash", { length: 200 }),
+  status:           varchar("status", { length: 30 }).notNull().default("initiated"),
+  estimatedMinutes: integer("estimated_minutes"),
+  completedAt:      timestamp("completed_at"),
+  createdAt:        timestamp("created_at").defaultNow(),
+  updatedAt:        timestamp("updated_at").defaultNow(),
+});
+
+// ─── Stablecoin De-Peg Events ─────────────────────────────────────────────────
+export const stablecoinDepegEvents = pgTable("stablecoin_depeg_events", {
+  id:               serial("id").primaryKey(),
+  symbol:           varchar("symbol", { length: 20 }).notNull(),
+  price:            numeric("price", { precision: 10, scale: 6 }).notNull(),
+  targetPrice:      numeric("target_price", { precision: 10, scale: 6 }).notNull().default("1.000000"),
+  deviationPercent: numeric("deviation_percent", { precision: 8, scale: 4 }).notNull(),
+  severity:         varchar("severity", { length: 20 }).notNull().default("warning"),
+  source:           varchar("source", { length: 50 }).default("oracle"),
+  onrampSuspended:  boolean("onramp_suspended").default(false),
+  resolvedAt:       timestamp("resolved_at"),
+  createdAt:        timestamp("created_at").defaultNow(),
+});
+
+// ─── Stablecoin Yield Positions ───────────────────────────────────────────────
+export const stablecoinYieldPositions = pgTable("stablecoin_yield_positions", {
+  id:               serial("id").primaryKey(),
+  userId:           integer("user_id").notNull().references(() => users.id),
+  stablecoin:       varchar("stablecoin", { length: 20 }).notNull(),
+  protocol:         varchar("protocol", { length: 100 }).notNull(),
+  chain:            varchar("chain", { length: 50 }).notNull(),
+  principal:        numeric("principal", { precision: 18, scale: 8 }).notNull(),
+  currentValue:     numeric("current_value", { precision: 18, scale: 8 }).notNull(),
+  accruedYield:     numeric("accrued_yield", { precision: 18, scale: 8 }).default("0"),
+  apyPercent:       numeric("apy_percent", { precision: 8, scale: 4 }),
+  status:           varchar("status", { length: 30 }).notNull().default("active"),
+  enteredAt:        timestamp("entered_at").defaultNow(),
+  exitedAt:         timestamp("exited_at"),
+  createdAt:        timestamp("created_at").defaultNow(),
+  updatedAt:        timestamp("updated_at").defaultNow(),
+});
+
+export type OnrampTransaction       = typeof onrampTransactions.$inferSelect;
+export type InsertOnrampTransaction  = typeof onrampTransactions.$inferInsert;
+export type OfframpTransaction       = typeof offrampTransactions.$inferSelect;
+export type InsertOfframpTransaction = typeof offrampTransactions.$inferInsert;
+export type StablecoinReserve        = typeof stablecoinReserves.$inferSelect;
+export type InsertStablecoinReserve  = typeof stablecoinReserves.$inferInsert;
+export type BridgeTransaction        = typeof bridgeTransactions.$inferSelect;
+export type InsertBridgeTransaction  = typeof bridgeTransactions.$inferInsert;
+export type StablecoinDepegEvent     = typeof stablecoinDepegEvents.$inferSelect;
+export type InsertStablecoinDepegEvent = typeof stablecoinDepegEvents.$inferInsert;
+export type StablecoinYieldPosition  = typeof stablecoinYieldPositions.$inferSelect;
+export type InsertStablecoinYieldPosition = typeof stablecoinYieldPositions.$inferInsert;
