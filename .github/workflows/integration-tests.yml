@@ -24,9 +24,9 @@ jobs:
     if: inputs.suite == 'all' || inputs.suite == 'sandbox' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "npm"
@@ -41,7 +41,7 @@ jobs:
           SMILE_PARTNER_ID_SANDBOX: ${{ secrets.SMILE_PARTNER_ID_SANDBOX }}
         run: npx vitest run tests/integration/sandbox-providers.test.ts --reporter=verbose
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: failure()
         with:
           name: sandbox-test-results
@@ -66,9 +66,9 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "npm"
@@ -100,9 +100,9 @@ jobs:
     if: inputs.suite == 'all' || inputs.suite == 'e2e'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: "npm"
@@ -125,7 +125,7 @@ jobs:
         env:
           BASE_URL: http://localhost:3000
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: e2e-test-results
@@ -144,7 +144,7 @@ jobs:
           - { name: worker, file: Dockerfile.worker }
           - { name: production, file: Dockerfile.production }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build Docker image
         run: |
