@@ -532,3 +532,412 @@ paths:
                   delivered: { type: boolean }
                   statusCode: { type: integer }
                   latencyMs:  { type: number }
+
+  # ── On-Demand Liquidity (ODL) ────────────────────────────────────────────────
+  /odl/quote:
+    get:
+      tags: [transfers]
+      summary: Get a real-time ODL quote for bridge-asset settlement
+      description: |
+        Returns a 30-second locked quote for settling a corridor via a bridge
+        asset (USDC, USDT, XLM, XRP) without requiring pre-funded Nostro accounts.
+      security: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, example: "USD" }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, example: "NGN" }
+        - name: amount
+          in: query
+          required: true
+          schema: { type: number, example: 1000 }
+      responses:
+        "200":
+          description: ODL quote
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  quoteId:        { type: string }
+                  fromCurrency:   { type: string }
+                  toCurrency:     { type: string }
+                  sendAmount:     { type: number }
+                  receiveAmount:  { type: number }
+                  bridgeAsset:    { type: string, enum: [USDC, USDT, XLM, XRP] }
+                  provider:       { type: string, enum: [CIRCLE, RIPPLE, STELLAR, POLYGON] }
+                  totalFeePct:    { type: number, description: "Total fee as percentage" }
+                  totalFeeAmount: { type: number }
+                  slippagePct:    { type: number }
+                  expiresAt:      { type: string, format: date-time }
+                  lockedRate:     { type: boolean }
+        "404":
+          description: No ODL route available for this corridor
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /odl/settlements:
+    post:
+      tags: [transfers]
+      summary: Initiate an ODL settlement from a locked quote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [quoteId, transferId]
+              properties:
+                quoteId:    { type: string }
+                transferId: { type: string, format: uuid }
+      responses:
+        "202":
+          description: ODL settlement initiated asynchronously
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settlementId: { type: string }
+                  status:       { type: string, enum: [PENDING, ON_RAMPING, BRIDGING, OFF_RAMPING] }
+                  message:      { type: string }
+        "410":
+          description: Quote has expired
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /odl/settlements/{id}:
+    get:
+      tags: [transfers]
+      summary: Get ODL settlement status and audit trail
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Settlement details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  settlementId:   { type: string }
+                  status:         { type: string, enum: [PENDING, ON_RAMPING, BRIDGING, OFF_RAMPING, COMPLETED, FAILED, FAILED_SLIPPAGE] }
+                  bridgeAsset:    { type: string }
+                  onRampTxId:     { type: string }
+                  bridgeTxHash:   { type: string }
+                  offRampTxId:    { type: string }
+                  actualSlippage: { type: number }
+                  completedAt:    { type: string, format: date-time }
+                  auditTrail:     { type: array, items: { type: object } }
+
+  /odl/routes:
+    get:
+      tags: [transfers]
+      summary: List all available ODL corridor routes
+      security: []
+      responses:
+        "200":
+          description: Available ODL routes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  routes: { type: array, items: { type: object } }
+                  count:  { type: integer }
+
+  # ── KYC & Compliance ─────────────────────────────────────────────────────────
+  /kyc/submit:
+    post:
+      tags: [compliance]
+      summary: Submit KYC documents for verification
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [tier, documentType, documentFront]
+              properties:
+                tier:          { type: integer, enum: [1, 2, 3], description: "KYC tier to apply for" }
+                documentType:  { type: string, enum: [passport, national_id, drivers_license] }
+                documentFront: { type: string, format: binary }
+                documentBack:  { type: string, format: binary }
+                selfie:        { type: string, format: binary }
+      responses:
+        "202":
+          description: KYC submission accepted for processing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  submissionId: { type: string, format: uuid }
+                  status:       { type: string, enum: [pending, processing, approved, rejected, manual_review] }
+                  estimatedTime: { type: integer, description: "Estimated processing time in seconds" }
+
+  /kyc/status:
+    get:
+      tags: [compliance]
+      summary: Get current KYC status and tier
+      responses:
+        "200":
+          description: KYC status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tier:         { type: integer }
+                  status:       { type: string }
+                  limits:       { type: object }
+                  nextTier:     { type: object }
+
+  /compliance/aml/score:
+    post:
+      tags: [compliance]
+      summary: Get AML risk score for a transaction
+      description: Returns a composite AML risk score from all ML models.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId, amount, currency, destinationCountry]
+              properties:
+                userId:             { type: string, format: uuid }
+                amount:             { type: number }
+                currency:           { type: string }
+                destinationCountry: { type: string }
+                transferId:         { type: string, format: uuid }
+      responses:
+        "200":
+          description: AML risk score
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  score:       { type: number, minimum: 0, maximum: 1 }
+                  level:       { type: string, enum: [LOW, MEDIUM, HIGH, CRITICAL] }
+                  flags:       { type: array, items: { type: string } }
+                  action:      { type: string, enum: [ALLOW, REVIEW, BLOCK] }
+                  traceId:     { type: string }
+
+  /compliance/travel-rule/check:
+    post:
+      tags: [compliance]
+      summary: Check FATF Travel Rule compliance for a transfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transferId, amount, currency]
+              properties:
+                transferId:  { type: string, format: uuid }
+                amount:      { type: number }
+                currency:    { type: string }
+                vaspDid:     { type: string, description: "Counterparty VASP DID for Notabene lookup" }
+      responses:
+        "200":
+          description: Travel Rule compliance result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  required:    { type: boolean }
+                  status:      { type: string, enum: [compliant, pending, blocked] }
+                  vaspName:    { type: string }
+                  message:     { type: string }
+
+  # ── Analytics & Reporting ────────────────────────────────────────────────────
+  /analytics/dashboard:
+    get:
+      tags: [analytics]
+      summary: Get aggregated analytics dashboard data
+      parameters:
+        - name: period
+          in: query
+          schema: { type: string, enum: [1h, 24h, 7d, 30d, 90d], default: 24h }
+      responses:
+        "200":
+          description: Dashboard analytics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  volumeUSD:       { type: number }
+                  transactionCount: { type: integer }
+                  successRate:     { type: number }
+                  avgProcessingMs: { type: number }
+                  topCorridors:    { type: array, items: { type: object } }
+                  fraudRate:       { type: number }
+                  sloCompliance:   { type: object }
+
+  /analytics/corridors:
+    get:
+      tags: [analytics]
+      summary: Get per-corridor performance metrics
+      parameters:
+        - name: period
+          in: query
+          schema: { type: string, enum: [24h, 7d, 30d], default: 7d }
+      responses:
+        "200":
+          description: Corridor performance data
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  corridors: { type: array, items: { type: object } }
+
+  # ── Multi-Rail Selector ───────────────────────────────────────────────────────
+  /rails/available:
+    get:
+      tags: [transfers]
+      summary: Get available payment rails for a corridor
+      security: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, example: "USD" }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, example: "NGN" }
+        - name: amount
+          in: query
+          schema: { type: number }
+      responses:
+        "200":
+          description: Available rails with cost and speed comparison
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rails:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        rail:          { type: string }
+                        name:          { type: string }
+                        estimatedTime: { type: string }
+                        totalFeePct:   { type: number }
+                        available:     { type: boolean }
+                        recommended:   { type: boolean }
+
+  # ── Developer Portal ─────────────────────────────────────────────────────────
+  /developer/api-keys:
+    get:
+      tags: [developer]
+      summary: List API keys for the authenticated tenant
+      responses:
+        "200":
+          description: API keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keys: { type: array, items: { type: object } }
+
+    post:
+      tags: [developer]
+      summary: Create a new API key
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name:        { type: string }
+                scopes:      { type: array, items: { type: string } }
+                expiresInDays: { type: integer }
+      responses:
+        "201":
+          description: API key created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  keyId:    { type: string }
+                  secret:   { type: string, description: "Only shown once" }
+                  scopes:   { type: array, items: { type: string } }
+
+  /developer/sdks:
+    get:
+      tags: [developer]
+      summary: Get SDK download links for all supported languages
+      security: []
+      responses:
+        "200":
+          description: SDK links
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sdks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        language: { type: string }
+                        version:  { type: string }
+                        url:      { type: string, format: uri }
+                        checksum: { type: string }
+
+  /developer/webhooks/simulate:
+    post:
+      tags: [developer]
+      summary: Simulate a webhook event delivery
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [webhookId, eventType]
+              properties:
+                webhookId:  { type: string, format: uuid }
+                eventType:  { type: string, example: "transfer.completed" }
+                payload:    { type: object }
+      responses:
+        "200":
+          description: Simulation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivered:  { type: boolean }
+                  statusCode: { type: integer }
+                  latencyMs:  { type: number }
+                  response:   { type: string }
+
+tags:
+  - name: analytics
+    description: Business intelligence and performance analytics
+  - name: developer
+    description: Developer portal — API keys, SDKs, and webhook management
