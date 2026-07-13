@@ -6,7 +6,7 @@
 # ============================================================
 
 # ---- Stage 1: Build ----
-FROM node:22-alpine AS builder
+FROM node:26-alpine AS builder
 
 LABEL org.opencontainers.image.vendor="RemitFlow" \
       org.opencontainers.image.licenses="Proprietary" \
@@ -33,7 +33,7 @@ COPY . .
 RUN pnpm build
 
 # ---- Stage 2: Production Runner ----
-FROM node:22-alpine AS runner
+FROM node:26-alpine AS runner
 
 # Metadata labels
 LABEL maintainer="remitflow@example.com"
