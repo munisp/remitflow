@@ -1,0 +1,43 @@
+# RemitFlow — CODEOWNERS
+# Defines required reviewers for changes to critical platform areas.
+# Format: <pattern> <owner1> [owner2] ...
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# ── Default: all changes require platform team review ─────────────────────────
+*                                   @munisp
+
+# ── Core API server ───────────────────────────────────────────────────────────
+/server/_core/                      @munisp
+/server/routers/                    @munisp
+/server/middleware/                 @munisp
+
+# ── Security-sensitive modules ────────────────────────────────────────────────
+/server/security/                   @munisp
+/server/lib/travelRule.ts           @munisp
+/server/lib/regulatoryReporting.ts  @munisp
+/server/lib/enhancedScreening.ts    @munisp
+/server/lib/complianceAuditTrail.ts @munisp
+/server/integrations/keycloak/      @munisp
+/services/rust-pq-crypto/           @munisp
+
+# ── Financial ledger ──────────────────────────────────────────────────────────
+/server/integrations/tigerbeetle/   @munisp
+/services/rust-tigerbeetle-bridge/  @munisp
+/services/rust-tigerbeetle-service/ @munisp
+
+# ── Database schema and migrations ────────────────────────────────────────────
+/drizzle/                           @munisp
+
+# ── Infrastructure ────────────────────────────────────────────────────────────
+/docker-compose*.yml                @munisp
+/infra/                             @munisp
+/.github/workflows/                 @munisp
+
+# ── CI/CD pipelines ───────────────────────────────────────────────────────────
+/.github/                           @munisp
+
+# ── Compliance and KYC ────────────────────────────────────────────────────────
+/server/routers/complianceRouter.ts @munisp
+/server/routers/kycOrchestration.ts @munisp
+/services/travel-rule-service/      @munisp
+/services/python-compliance-reporter/ @munisp

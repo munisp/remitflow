@@ -1,0 +1,223 @@
+###############################################################################
+# RemitFlow — Dependabot Configuration
+# Automatically creates PRs for dependency updates across all ecosystems.
+# Configured for security-first: patches applied immediately, minor/major
+# updates batched weekly to reduce noise.
+###############################################################################
+
+version: 2
+
+updates:
+  # ── Node.js / npm (root package) ────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "munisp"
+    labels:
+      - "dependencies"
+      - "npm"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    groups:
+      # Group all non-security patch updates
+      patch-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+      # Group minor updates for review
+      minor-updates:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+    ignore:
+      # Pin major versions that require manual migration
+      - dependency-name: "drizzle-orm"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@trpc/*"
+        update-types: ["version-update:semver-major"]
+
+  # ── Node.js / npm (PWA) ──────────────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/uis/pwa"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "npm"
+      - "pwa"
+    commit-message:
+      prefix: "chore(deps/pwa)"
+
+  # ── Node.js / npm (React Native) ─────────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/uis/react-native"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "npm"
+      - "react-native"
+    commit-message:
+      prefix: "chore(deps/rn)"
+
+  # ── Go modules (all Go services) ─────────────────────────────────────────────
+  - package-ecosystem: "gomod"
+    directory: "/services/go-fx-aggregator"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "go"
+    commit-message:
+      prefix: "chore(deps/go)"
+
+  - package-ecosystem: "gomod"
+    directory: "/services/go-middleware-bus"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    labels:
+      - "dependencies"
+      - "go"
+
+  - package-ecosystem: "gomod"
+    directory: "/services/go-kyc-trigger-engine"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    labels:
+      - "dependencies"
+      - "go"
+
+  - package-ecosystem: "gomod"
+    directory: "/services/go-agent-intelligence"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+    labels:
+      - "dependencies"
+      - "go"
+
+  # ── Rust / Cargo ──────────────────────────────────────────────────────────────
+  - package-ecosystem: "cargo"
+    directory: "/services/rust-fee-engine"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(deps/rust)"
+
+  - package-ecosystem: "cargo"
+    directory: "/services/rust-tigerbeetle-bridge"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  - package-ecosystem: "cargo"
+    directory: "/services/rust-pq-crypto"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  - package-ecosystem: "cargo"
+    directory: "/services/rust-fluvio-consumer"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  # ── Python / pip ──────────────────────────────────────────────────────────────
+  - package-ecosystem: "pip"
+    directory: "/services/python-aml-scorer"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "chore(deps/python)"
+
+  - package-ecosystem: "pip"
+    directory: "/services/python-lakehouse"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+    labels:
+      - "dependencies"
+      - "python"
+
+  - package-ecosystem: "pip"
+    directory: "/services/python-compliance-reporter"
+    schedule:
+      interval: "weekly"
+      day: "thursday"
+    labels:
+      - "dependencies"
+      - "python"
+
+  # ── Docker / GitHub Actions ───────────────────────────────────────────────────
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore(deps/docker)"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "friday"
+      time: "06:00"
+      timezone: "UTC"
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(deps/actions)"
+    groups:
+      actions-updates:
+        patterns:
+          - "*"
