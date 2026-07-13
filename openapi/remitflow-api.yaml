@@ -1,0 +1,534 @@
+openapi: 3.1.0
+info:
+  title: RemitFlow Platform API
+  version: "1.0.0"
+  description: |
+    RemitFlow is an institutional-grade cross-border payments and stablecoin platform.
+    This specification covers all public and partner-facing REST endpoints.
+  contact:
+    name: RemitFlow Developer Support
+    email: api@remitflow.io
+    url: https://developers.remitflow.io
+  license:
+    name: Proprietary
+    url: https://remitflow.io/terms
+
+servers:
+  - url: https://api.remitflow.io/v1
+    description: Production
+  - url: https://sandbox.remitflow.io/v1
+    description: Sandbox
+
+tags:
+  - name: auth
+    description: Authentication and session management
+  - name: transfers
+    description: Cross-border payment transfers
+  - name: fx
+    description: Foreign exchange rates and hedging
+  - name: stablecoin
+    description: Stablecoin operations
+  - name: cbdc
+    description: Central Bank Digital Currency gateway
+  - name: compliance
+    description: KYC, AML, and regulatory compliance
+  - name: webhooks
+    description: Webhook subscription management
+  - name: health
+    description: Platform health and status
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:    { type: string, example: "TRANSFER_LIMIT_EXCEEDED" }
+        message: { type: string, example: "Transfer amount exceeds daily limit" }
+        details: { type: object }
+        traceId: { type: string, format: uuid }
+
+    Money:
+      type: object
+      required: [amount, currency]
+      properties:
+        amount:   { type: string, pattern: "^[0-9]+\\.[0-9]{2}$", example: "1000.00" }
+        currency: { type: string, minLength: 3, maxLength: 3, example: "USD" }
+
+    Transfer:
+      type: object
+      required: [id, status, amount, sourceCurrency, destinationCurrency, createdAt]
+      properties:
+        id:                  { type: string, format: uuid }
+        status:              { type: string, enum: [pending, processing, completed, failed, cancelled] }
+        amount:              { $ref: "#/components/schemas/Money" }
+        sourceCurrency:      { type: string, example: "USD" }
+        destinationCurrency: { type: string, example: "NGN" }
+        exchangeRate:        { type: number, format: double }
+        fee:                 { $ref: "#/components/schemas/Money" }
+        recipientId:         { type: string, format: uuid }
+        reference:           { type: string }
+        rail:                { type: string, enum: [swift, sepa, ach, rtgs, papss, fednow, stablecoin] }
+        createdAt:           { type: string, format: date-time }
+        completedAt:         { type: string, format: date-time }
+        metadata:            { type: object }
+
+    FxQuote:
+      type: object
+      required: [id, fromCurrency, toCurrency, rate, validUntil]
+      properties:
+        id:           { type: string, format: uuid }
+        fromCurrency: { type: string, example: "USD" }
+        toCurrency:   { type: string, example: "NGN" }
+        rate:         { type: number, format: double, example: 1605.50 }
+        inverseRate:  { type: number, format: double }
+        spread:       { type: number, format: double }
+        validUntil:   { type: string, format: date-time }
+        provider:     { type: string }
+
+    StablecoinBalance:
+      type: object
+      properties:
+        symbol:    { type: string, example: "USDC" }
+        balance:   { type: string, example: "1000.000000" }
+        usdValue:  { type: number, format: double }
+        chain:     { type: string, example: "ethereum" }
+
+    WebhookSubscription:
+      type: object
+      required: [id, url, events]
+      properties:
+        id:        { type: string, format: uuid }
+        url:       { type: string, format: uri }
+        events:    { type: array, items: { type: string } }
+        secret:    { type: string }
+        active:    { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    HealthStatus:
+      type: object
+      properties:
+        status:    { type: string, enum: [healthy, degraded, unhealthy] }
+        version:   { type: string }
+        uptime:    { type: number }
+        services:  { type: object, additionalProperties: { type: string } }
+
+security:
+  - BearerAuth: []
+
+paths:
+  # ── Health ──────────────────────────────────────────────────────────────────
+  /health:
+    get:
+      tags: [health]
+      summary: Platform health check
+      security: []
+      responses:
+        "200":
+          description: Platform is healthy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthStatus" }
+
+  # ── Auth ────────────────────────────────────────────────────────────────────
+  /auth/token:
+    post:
+      tags: [auth]
+      summary: Obtain access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clientId, clientSecret]
+              properties:
+                clientId:     { type: string }
+                clientSecret: { type: string }
+                grantType:    { type: string, enum: [client_credentials, authorization_code], default: client_credentials }
+      responses:
+        "200":
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:  { type: string }
+                  tokenType:    { type: string, example: Bearer }
+                  expiresIn:    { type: integer, example: 3600 }
+                  scope:        { type: string }
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Refresh access token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        "200":
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  expiresIn:   { type: integer }
+
+  # ── Transfers ───────────────────────────────────────────────────────────────
+  /transfers:
+    get:
+      tags: [transfers]
+      summary: List transfers
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [pending, processing, completed, failed, cancelled] }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: List of transfers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:       { type: array, items: { $ref: "#/components/schemas/Transfer" } }
+                  nextCursor: { type: string }
+                  total:      { type: integer }
+
+    post:
+      tags: [transfers]
+      summary: Initiate a transfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, sourceCurrency, destinationCurrency, recipientId]
+              properties:
+                amount:              { type: string, example: "500.00" }
+                sourceCurrency:      { type: string, example: "USD" }
+                destinationCurrency: { type: string, example: "NGN" }
+                recipientId:         { type: string, format: uuid }
+                fxQuoteId:           { type: string, format: uuid, description: "Lock in a specific FX rate" }
+                rail:                { type: string, enum: [auto, swift, sepa, ach, papss, fednow, stablecoin] }
+                reference:           { type: string }
+                idempotencyKey:      { type: string, description: "Prevents duplicate transfers" }
+                metadata:            { type: object }
+      responses:
+        "201":
+          description: Transfer initiated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Transfer" }
+        "422":
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /transfers/{id}:
+    get:
+      tags: [transfers]
+      summary: Get transfer by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Transfer details
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Transfer" }
+        "404":
+          description: Transfer not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /transfers/{id}/cancel:
+    post:
+      tags: [transfers]
+      summary: Cancel a pending transfer
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Transfer cancelled
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Transfer" }
+
+  # ── FX ──────────────────────────────────────────────────────────────────────
+  /fx/quote:
+    post:
+      tags: [fx]
+      summary: Get a live FX quote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fromCurrency, toCurrency, amount]
+              properties:
+                fromCurrency: { type: string, example: "USD" }
+                toCurrency:   { type: string, example: "NGN" }
+                amount:       { type: string, example: "1000.00" }
+                lockDuration: { type: integer, description: "Lock duration in seconds", default: 30 }
+      responses:
+        "200":
+          description: FX quote
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FxQuote" }
+
+  /fx/rates:
+    get:
+      tags: [fx]
+      summary: Get current FX rates
+      security: []
+      parameters:
+        - name: base
+          in: query
+          schema: { type: string, default: USD }
+        - name: symbols
+          in: query
+          schema: { type: string, example: "NGN,GHS,KES,ZAR" }
+      responses:
+        "200":
+          description: Current FX rates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  base:      { type: string }
+                  rates:     { type: object, additionalProperties: { type: number } }
+                  timestamp: { type: string, format: date-time }
+
+  # ── Stablecoin ───────────────────────────────────────────────────────────────
+  /stablecoin/balances:
+    get:
+      tags: [stablecoin]
+      summary: Get stablecoin balances
+      responses:
+        "200":
+          description: Stablecoin balances
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  balances: { type: array, items: { $ref: "#/components/schemas/StablecoinBalance" } }
+
+  /stablecoin/onramp:
+    post:
+      tags: [stablecoin]
+      summary: On-ramp fiat to stablecoin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fiatAmount, fiatCurrency, targetSymbol]
+              properties:
+                fiatAmount:   { type: string, example: "1000.00" }
+                fiatCurrency: { type: string, example: "USD" }
+                targetSymbol: { type: string, example: "USDC" }
+                chain:        { type: string, example: "ethereum" }
+      responses:
+        "201":
+          description: On-ramp initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txId:       { type: string, format: uuid }
+                  status:     { type: string }
+                  stablecoinAmount: { type: string }
+
+  /stablecoin/offramp:
+    post:
+      tags: [stablecoin]
+      summary: Off-ramp stablecoin to fiat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stablecoinAmount, symbol, fiatCurrency]
+              properties:
+                stablecoinAmount: { type: string, example: "1000.000000" }
+                symbol:           { type: string, example: "USDC" }
+                fiatCurrency:     { type: string, example: "NGN" }
+                bankAccountId:    { type: string, format: uuid }
+      responses:
+        "201":
+          description: Off-ramp initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txId:       { type: string, format: uuid }
+                  status:     { type: string }
+                  fiatAmount: { type: string }
+
+  # ── CBDC ─────────────────────────────────────────────────────────────────────
+  /cbdc/registry:
+    get:
+      tags: [cbdc]
+      summary: List supported CBDCs
+      security: []
+      responses:
+        "200":
+          description: CBDC registry
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cbdcs: { type: array, items: { type: object } }
+
+  /cbdc/transfer:
+    post:
+      tags: [cbdc]
+      summary: Initiate a CBDC transfer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [cbdcCode, amount, recipient]
+              properties:
+                cbdcCode:  { type: string, example: "eNGN" }
+                amount:    { type: number, example: 50000 }
+                recipient: { type: string }
+                memo:      { type: string }
+      responses:
+        "201":
+          description: CBDC transfer initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txId:    { type: string, format: uuid }
+                  status:  { type: string }
+
+  # ── Webhooks ─────────────────────────────────────────────────────────────────
+  /webhooks:
+    get:
+      tags: [webhooks]
+      summary: List webhook subscriptions
+      responses:
+        "200":
+          description: Webhook subscriptions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhooks: { type: array, items: { $ref: "#/components/schemas/WebhookSubscription" } }
+
+    post:
+      tags: [webhooks]
+      summary: Create a webhook subscription
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, events]
+              properties:
+                url:    { type: string, format: uri }
+                events: { type: array, items: { type: string }, example: ["transfer.completed", "transfer.failed"] }
+                secret: { type: string, description: "HMAC secret for signature verification" }
+      responses:
+        "201":
+          description: Webhook created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookSubscription" }
+
+  /webhooks/{id}:
+    delete:
+      tags: [webhooks]
+      summary: Delete a webhook subscription
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Webhook deleted
+
+  /webhooks/{id}/test:
+    post:
+      tags: [webhooks]
+      summary: Send a test webhook event
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Test event sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivered: { type: boolean }
+                  statusCode: { type: integer }
+                  latencyMs:  { type: number }

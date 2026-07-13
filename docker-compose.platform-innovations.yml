@@ -1,0 +1,171 @@
+# RemitFlow — Platform Innovation Services Docker Compose Override
+# Usage: docker compose -f docker-compose.yml -f docker-compose.platform-innovations.yml up
+
+version: "3.9"
+
+services:
+
+  # ── Real-Time Hub (Go) ───────────────────────────────────────────────────────
+  go-realtime-hub:
+    build:
+      context: ./services/go-realtime-hub
+      dockerfile: Dockerfile
+    image: remitflow/go-realtime-hub:latest
+    container_name: remitflow-go-realtime-hub
+    restart: unless-stopped
+    ports:
+      - "8141:8141"
+    environment:
+      PORT: "8141"
+    networks: [remitflow-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8141/livez"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:   { cpus: "0.5",  memory: "256m" }
+        reservations: { cpus: "0.1", memory: "64m" }
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.realtime-hub.rule=Host(`api.remitflow.io`) && PathPrefix(`/stream`)"
+
+  # ── Payment Retry Engine (Rust) ──────────────────────────────────────────────
+  rust-payment-retry:
+    build:
+      context: ./services/rust-payment-retry
+      dockerfile: Dockerfile
+    image: remitflow/rust-payment-retry:latest
+    container_name: remitflow-rust-payment-retry
+    restart: unless-stopped
+    ports:
+      - "8142:8142"
+    environment:
+      PORT: "8142"
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+    networks: [remitflow-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8142/livez"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:   { cpus: "1.0",  memory: "512m" }
+        reservations: { cpus: "0.2", memory: "128m" }
+    security_opt: [no-new-privileges:true]
+
+  # ── Real-Time Compliance (Python) ────────────────────────────────────────────
+  python-realtime-compliance:
+    build:
+      context: ./services/python-realtime-compliance
+      dockerfile: Dockerfile
+    image: remitflow/python-realtime-compliance:latest
+    container_name: remitflow-python-realtime-compliance
+    restart: unless-stopped
+    ports:
+      - "8143:8143"
+    environment:
+      PORT: "8143"
+      DATABASE_URL: ${DATABASE_URL}
+    networks: [remitflow-net]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8143/livez')"]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:   { cpus: "1.0",  memory: "1g" }
+        reservations: { cpus: "0.2", memory: "256m" }
+    security_opt: [no-new-privileges:true]
+
+  # ── SLO Tracker (Go) ─────────────────────────────────────────────────────────
+  go-slo-tracker:
+    build:
+      context: ./services/go-slo-tracker
+      dockerfile: Dockerfile
+    image: remitflow/go-slo-tracker:latest
+    container_name: remitflow-go-slo-tracker
+    restart: unless-stopped
+    ports:
+      - "8144:8144"
+    environment:
+      PORT: "8144"
+    networks: [remitflow-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8144/livez"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:   { cpus: "0.2",  memory: "256m" }
+        reservations: { cpus: "0.05", memory: "64m" }
+    security_opt: [no-new-privileges:true]
+    read_only: true
+
+  # ── Chaos Engine (Go) — staging/dev only ─────────────────────────────────────
+  go-chaos-engine:
+    build:
+      context: ./services/go-chaos-engine
+      dockerfile: Dockerfile
+    image: remitflow/go-chaos-engine:latest
+    container_name: remitflow-go-chaos-engine
+    restart: unless-stopped
+    ports:
+      - "8145:8145"
+    environment:
+      PORT: "8145"
+    networks: [remitflow-net]
+    profiles: [staging, development]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8145/livez"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:   { cpus: "0.2",  memory: "128m" }
+        reservations: { cpus: "0.05", memory: "32m" }
+    security_opt: [no-new-privileges:true]
+    read_only: true
+
+  # ── FX Hedging Engine (Go) ───────────────────────────────────────────────────
+  go-fx-hedging:
+    build:
+      context: ./services/go-fx-hedging
+      dockerfile: Dockerfile
+    image: remitflow/go-fx-hedging:latest
+    container_name: remitflow-go-fx-hedging
+    restart: unless-stopped
+    ports:
+      - "8130:8130"
+    environment:
+      PORT: "8130"
+      DATABASE_URL: ${DATABASE_URL}
+    networks: [remitflow-net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8130/livez"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:   { cpus: "0.5",  memory: "256m" }
+        reservations: { cpus: "0.1", memory: "64m" }
+    security_opt: [no-new-privileges:true]
+
+networks:
+  remitflow-net:
+    external: true

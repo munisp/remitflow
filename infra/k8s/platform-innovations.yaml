@@ -1,0 +1,337 @@
+# RemitFlow — Platform Innovation Services Kubernetes Manifests
+# Covers: go-realtime-hub, rust-payment-retry, python-realtime-compliance,
+#         go-slo-tracker, go-chaos-engine, go-fx-hedging, go-defi-yield
+
+---
+# ── go-realtime-hub ────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-realtime-hub
+  namespace: remitflow
+  labels: { app: go-realtime-hub, tier: realtime, version: v1 }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: go-realtime-hub }
+  template:
+    metadata:
+      labels: { app: go-realtime-hub }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8141"
+        prometheus.io/path:   "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+      - name: go-realtime-hub
+        image: remitflow/go-realtime-hub:latest
+        ports: [{ containerPort: 8141 }]
+        env:
+        - { name: PORT, value: "8141" }
+        resources:
+          requests: { cpu: "100m", memory: "64Mi" }
+          limits:   { cpu: "500m", memory: "256Mi" }
+        livenessProbe:
+          httpGet: { path: /livez, port: 8141 }
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet: { path: /readyz, port: 8141 }
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities: { drop: [ALL] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-realtime-hub
+  namespace: remitflow
+spec:
+  selector: { app: go-realtime-hub }
+  ports:
+  - { port: 8141, targetPort: 8141, name: http }
+
+---
+# ── rust-payment-retry ─────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rust-payment-retry
+  namespace: remitflow
+  labels: { app: rust-payment-retry, tier: payments }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: rust-payment-retry }
+  template:
+    metadata:
+      labels: { app: rust-payment-retry }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8142"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+      - name: rust-payment-retry
+        image: remitflow/rust-payment-retry:latest
+        ports: [{ containerPort: 8142 }]
+        env:
+        - { name: PORT, value: "8142" }
+        resources:
+          requests: { cpu: "200m", memory: "128Mi" }
+          limits:   { cpu: "1000m", memory: "512Mi" }
+        livenessProbe:
+          httpGet: { path: /livez, port: 8142 }
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet: { path: /readyz, port: 8142 }
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities: { drop: [ALL] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rust-payment-retry
+  namespace: remitflow
+spec:
+  selector: { app: rust-payment-retry }
+  ports:
+  - { port: 8142, targetPort: 8142, name: http }
+
+---
+# ── python-realtime-compliance ─────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-realtime-compliance
+  namespace: remitflow
+  labels: { app: python-realtime-compliance, tier: compliance }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: python-realtime-compliance }
+  template:
+    metadata:
+      labels: { app: python-realtime-compliance }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8143"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: python-realtime-compliance
+        image: remitflow/python-realtime-compliance:latest
+        ports: [{ containerPort: 8143 }]
+        env:
+        - { name: PORT, value: "8143" }
+        resources:
+          requests: { cpu: "200m", memory: "256Mi" }
+          limits:   { cpu: "1000m", memory: "1Gi" }
+        livenessProbe:
+          httpGet: { path: /livez, port: 8143 }
+          initialDelaySeconds: 10
+          periodSeconds: 15
+        readinessProbe:
+          httpGet: { path: /health, port: 8143 }
+          initialDelaySeconds: 8
+          periodSeconds: 10
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: [ALL] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-realtime-compliance
+  namespace: remitflow
+spec:
+  selector: { app: python-realtime-compliance }
+  ports:
+  - { port: 8143, targetPort: 8143, name: http }
+
+---
+# ── go-slo-tracker ─────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-slo-tracker
+  namespace: remitflow
+  labels: { app: go-slo-tracker, tier: observability }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: go-slo-tracker }
+  template:
+    metadata:
+      labels: { app: go-slo-tracker }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8144"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+      - name: go-slo-tracker
+        image: remitflow/go-slo-tracker:latest
+        ports: [{ containerPort: 8144 }]
+        env:
+        - { name: PORT, value: "8144" }
+        resources:
+          requests: { cpu: "50m", memory: "64Mi" }
+          limits:   { cpu: "200m", memory: "256Mi" }
+        livenessProbe:
+          httpGet: { path: /livez, port: 8144 }
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet: { path: /readyz, port: 8144 }
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities: { drop: [ALL] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-slo-tracker
+  namespace: remitflow
+spec:
+  selector: { app: go-slo-tracker }
+  ports:
+  - { port: 8144, targetPort: 8144, name: http }
+
+---
+# ── go-chaos-engine ────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: go-chaos-engine
+  namespace: remitflow
+  labels: { app: go-chaos-engine, tier: testing }
+  annotations:
+    # Only deploy in non-production environments
+    remitflow.io/environment: "staging,development"
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: go-chaos-engine }
+  template:
+    metadata:
+      labels: { app: go-chaos-engine }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8145"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+      - name: go-chaos-engine
+        image: remitflow/go-chaos-engine:latest
+        ports: [{ containerPort: 8145 }]
+        env:
+        - { name: PORT, value: "8145" }
+        resources:
+          requests: { cpu: "50m", memory: "32Mi" }
+          limits:   { cpu: "200m", memory: "128Mi" }
+        livenessProbe:
+          httpGet: { path: /livez, port: 8145 }
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities: { drop: [ALL] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: go-chaos-engine
+  namespace: remitflow
+spec:
+  selector: { app: go-chaos-engine }
+  ports:
+  - { port: 8145, targetPort: 8145, name: http }
+
+---
+# ── HorizontalPodAutoscaler for high-traffic services ─────────────────────────
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: go-realtime-hub-hpa
+  namespace: remitflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: go-realtime-hub
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target: { type: Utilization, averageUtilization: 60 }
+  - type: Resource
+    resource:
+      name: memory
+      target: { type: Utilization, averageUtilization: 70 }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: python-realtime-compliance-hpa
+  namespace: remitflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: python-realtime-compliance
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target: { type: Utilization, averageUtilization: 70 }
+
+---
+# ── PodDisruptionBudgets ────────────────────────────────────────────────────────
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: go-realtime-hub-pdb
+  namespace: remitflow
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: { app: go-realtime-hub }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: rust-payment-retry-pdb
+  namespace: remitflow
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: rust-payment-retry }
