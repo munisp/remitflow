@@ -1,0 +1,22 @@
+[package]
+name = "rust-chain-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "RemitFlow Multi-Chain Bridge Abstraction Layer (LayerZero/Wormhole/CCTP/Axelar)"
+
+[[bin]]
+name = "rust-chain-bridge"
+path = "src/main.rs"
+
+[dependencies]
+actix-web  = "4"
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio      = { version = "1", features = ["full"] }
+uuid       = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+strip         = "symbols"

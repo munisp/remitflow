@@ -5550,3 +5550,5 @@ export type StablecoinDepegEvent     = typeof stablecoinDepegEvents.$inferSelect
 export type InsertStablecoinDepegEvent = typeof stablecoinDepegEvents.$inferInsert;
 export type StablecoinYieldPosition  = typeof stablecoinYieldPositions.$inferSelect;
 export type InsertStablecoinYieldPosition = typeof stablecoinYieldPositions.$inferInsert;
+
+export * from "./schema.stablecoin-innovations";
