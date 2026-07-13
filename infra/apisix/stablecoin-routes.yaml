@@ -1,0 +1,200 @@
+# APISIX Stablecoin Routes — RemitFlow
+# Configures rate limiting, circuit breakers, and OpenAppSec WAF for all stablecoin endpoints.
+
+routes:
+  # ─── ON-RAMP ───────────────────────────────────────────────────────────────
+  - id: stablecoin-onramp
+    uri: /api/trpc/stablecoinEnhanced.buyWithFiat
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      limit-count:
+        count: 10
+        time_window: 60
+        key: consumer_name
+        rejected_code: 429
+      limit-req:
+        rate: 2
+        burst: 3
+        key: consumer_name
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 5
+        healthy:
+          http_statuses: [200]
+          successes: 2
+      openappsec:
+        mode: prevent
+        threat_prevention: true
+
+  # ─── OFF-RAMP ──────────────────────────────────────────────────────────────
+  - id: stablecoin-offramp
+    uri: /api/trpc/stablecoinEnhanced.sellToFiat
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      limit-count:
+        count: 10
+        time_window: 60
+        key: consumer_name
+        rejected_code: 429
+      limit-req:
+        rate: 2
+        burst: 3
+        key: consumer_name
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 5
+        healthy:
+          http_statuses: [200]
+          successes: 2
+      openappsec:
+        mode: prevent
+        threat_prevention: true
+
+  # ─── SWAP ──────────────────────────────────────────────────────────────────
+  - id: stablecoin-swap
+    uri: /api/trpc/stablecoinEnhanced.swap
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      limit-count:
+        count: 20
+        time_window: 60
+        key: consumer_name
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 30
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 3
+        healthy:
+          http_statuses: [200]
+          successes: 2
+      openappsec:
+        mode: prevent
+
+  # ─── SEND ──────────────────────────────────────────────────────────────────
+  - id: stablecoin-send
+    uri: /api/trpc/stablecoinEnhanced.send
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      limit-count:
+        count: 5
+        time_window: 60
+        key: consumer_name
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 3
+        healthy:
+          http_statuses: [200]
+          successes: 2
+      openappsec:
+        mode: prevent
+        threat_prevention: true
+
+  # ─── YIELD / STAKING ───────────────────────────────────────────────────────
+  - id: stablecoin-yield
+    uri: /api/trpc/stablecoinEnhanced.stakeForYield
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      limit-count:
+        count: 5
+        time_window: 300
+        key: consumer_name
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 120
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 3
+        healthy:
+          http_statuses: [200]
+          successes: 2
+
+  # ─── BRIDGE ────────────────────────────────────────────────────────────────
+  - id: stablecoin-bridge
+    uri: /api/trpc/stablecoinEnhanced.bridgeChain
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      limit-count:
+        count: 3
+        time_window: 300
+        key: consumer_name
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 180
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 2
+        healthy:
+          http_statuses: [200]
+          successes: 3
+
+  # ─── WEBHOOK RECEIVER ──────────────────────────────────────────────────────
+  - id: stablecoin-webhook-circle
+    uri: /api/webhooks/stablecoin/circle
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      openappsec:
+        mode: prevent
+        threat_prevention: true
+      limit-req:
+        rate: 100
+        burst: 200
+        key: remote_addr
+        rejected_code: 429
+      hmac-auth:
+        signed_headers: [x-circle-signature, date]
+
+  - id: stablecoin-webhook-yellowcard
+    uri: /api/webhooks/stablecoin/yellowcard
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      openappsec:
+        mode: prevent
+        threat_prevention: true
+      limit-req:
+        rate: 100
+        burst: 200
+        key: remote_addr
+        rejected_code: 429
+
+upstreams:
+  - id: remitflow-backend
+    type: roundrobin
+    nodes:
+      - host: remitflow-server
+        port: 3000
+        weight: 1
+    health_check:
+      active:
+        http_path: /api/health
+        interval: 5
+        timeout: 3
+        healthy:
+          http_statuses: [200]
+          successes: 2
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 3

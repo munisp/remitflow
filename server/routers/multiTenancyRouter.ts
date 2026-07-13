@@ -30,7 +30,9 @@ import { z } from "zod";
 import { router, protectedProcedure, adminProcedure, publicProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
-import { redis } from "../middleware/redis";
+import { getRedisClient } from "../middleware/redis";
+const redis = getRedisClient();
+import { sanitizeHtml } from "../_core/featurePersistence";
 import crypto from "node:crypto";
 
 // ── Service URL ───────────────────────────────────────────────────────────────
@@ -88,6 +90,7 @@ interface TenantConfig {
 
 async function getCachedTenant(tenantId: string): Promise<TenantConfig | null> {
   try {
+    if (!redis) return null;
     const cached = await redis.get(`tenant:config:${tenantId}`);
     return cached ? JSON.parse(cached) : null;
   } catch {
@@ -97,6 +100,7 @@ async function getCachedTenant(tenantId: string): Promise<TenantConfig | null> {
 
 async function cacheTenant(tenantId: string, config: TenantConfig): Promise<void> {
   try {
+    if (!redis) return;
     await redis.set(`tenant:config:${tenantId}`, JSON.stringify(config), "EX", TENANT_CACHE_TTL);
   } catch {
     // Non-fatal
@@ -294,21 +298,30 @@ export const multiTenancyRouter = router({
       supportEmail: z.string().email().optional(),
     }))
     .mutation(async ({ input }) => {
-      const { tenantId, ...branding } = input;
-
+      const { tenantId, ...rawBranding } = input;
+      // Sanitize text fields to prevent XSS
+      const branding = {
+        ...rawBranding,
+        emailFromName: rawBranding.emailFromName ? sanitizeHtml(rawBranding.emailFromName) : rawBranding.emailFromName,
+        fontFamily: rawBranding.fontFamily ? sanitizeHtml(rawBranding.fontFamily) : rawBranding.fontFamily,
+        customDomain: rawBranding.customDomain ? sanitizeHtml(rawBranding.customDomain) : rawBranding.customDomain,
+      };
       await tenantServiceCall(
         `/api/tenants/${tenantId}/branding`,
         "PUT",
         branding
       );
-
-      // Invalidate cache
-      await redis.del(`tenant:config:${tenantId}`);
-
+      // Invalidate cache (redis may be null in dev/test)
+      if (redis) {
+        try {
+          await redis.del(`tenant:config:${tenantId}`);
+        } catch {
+          // Redis unavailable in test/dev — non-fatal
+        }
+      }
       logger.info({ tenantId }, "[MultiTenancy] Branding updated");
-      return { updated: true, tenantId };
+      return { updated: true, tenantId, sanitized: branding };
     }),
-
   /**
    * Update tenant feature flags.
    */
@@ -335,8 +348,8 @@ export const multiTenancyRouter = router({
         input.flags
       );
 
-      // Invalidate cache
-      await redis.del(`tenant:config:${input.tenantId}`);
+      // Invalidate cache (redis may be null in dev/test)
+      if (redis) await redis.del(`tenant:config:${input.tenantId}`);
 
       logger.info({ tenantId: input.tenantId, flags: input.flags }, "[MultiTenancy] Feature flags updated");
       return { updated: true, tenantId: input.tenantId, flags: input.flags };
@@ -356,13 +369,15 @@ export const multiTenancyRouter = router({
       const apiKey = `rmf_${input.tenantId}_${crypto.randomBytes(24).toString("base64url")}`;
       const expiresAt = new Date(Date.now() + input.expiresInDays * 86400_000);
 
-      // Store in Redis with TTL
-      await redis.set(
-        `tenant:apikey:${apiKey}`,
-        JSON.stringify({ tenantId: input.tenantId, scopes: input.scopes, keyName: input.keyName }),
-        "EX",
-        input.expiresInDays * 86400
-      );
+      // Store in Redis with TTL (if available)
+      if (redis) {
+        await redis.set(
+          `tenant:apikey:${apiKey}`,
+          JSON.stringify({ tenantId: input.tenantId, scopes: input.scopes, keyName: input.keyName }),
+          "EX",
+          input.expiresInDays * 86400
+        );
+      }
 
       logger.info({ tenantId: input.tenantId, keyName: input.keyName }, "[MultiTenancy] API key generated");
 
@@ -426,7 +441,7 @@ export const multiTenancyRouter = router({
         { reason: input.reason }
       );
 
-      await redis.del(`tenant:config:${input.tenantId}`);
+      if (redis) await redis.del(`tenant:config:${input.tenantId}`);
 
       logger.warn({ tenantId: input.tenantId, reason: input.reason }, "[MultiTenancy] Tenant suspended");
       return { suspended: true, tenantId: input.tenantId };

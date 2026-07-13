@@ -1,0 +1,150 @@
+# Lakehouse Stablecoin Tables — RemitFlow Delta Lake Architecture
+# Three-layer medallion architecture: Bronze (raw) → Silver (cleaned) → Gold (aggregated)
+
+lakehouse:
+  engine: delta
+  storage: s3
+  catalog: glue
+  database: remitflow_stablecoin
+
+layers:
+  # ─── BRONZE LAYER (Raw Ingestion) ──────────────────────────────────────────
+  bronze:
+    description: "Raw, unprocessed stablecoin events ingested directly from Kafka/Fluvio"
+    tables:
+      - name: bronze_stablecoin_transactions
+        path: s3://remitflow-lakehouse/bronze/stablecoin/transactions/
+        format: delta
+        partitions: [event_date, stablecoin]
+        schema:
+          - { name: id, type: string, nullable: false }
+          - { name: user_id, type: string, nullable: false }
+          - { name: type, type: string, nullable: false }
+          - { name: stablecoin, type: string, nullable: false }
+          - { name: amount, type: decimal(28,8), nullable: false }
+          - { name: fiat_currency, type: string, nullable: true }
+          - { name: fiat_amount, type: decimal(18,4), nullable: true }
+          - { name: status, type: string, nullable: false }
+          - { name: raw_payload, type: string, nullable: true }
+          - { name: ingested_at, type: timestamp, nullable: false }
+          - { name: event_date, type: date, nullable: false }
+        retention_days: 365
+        auto_optimize: true
+
+      - name: bronze_depeg_events
+        path: s3://remitflow-lakehouse/bronze/stablecoin/depeg/
+        format: delta
+        partitions: [event_date, stablecoin]
+        schema:
+          - { name: id, type: string, nullable: false }
+          - { name: stablecoin, type: string, nullable: false }
+          - { name: price, type: decimal(18,8), nullable: false }
+          - { name: deviation_pct, type: double, nullable: false }
+          - { name: source, type: string, nullable: false }
+          - { name: raw_payload, type: string, nullable: true }
+          - { name: event_date, type: date, nullable: false }
+          - { name: ingested_at, type: timestamp, nullable: false }
+        retention_days: 365
+
+  # ─── SILVER LAYER (Cleaned & Enriched) ─────────────────────────────────────
+  silver:
+    description: "Cleaned, deduplicated, and enriched stablecoin data with PII masked"
+    tables:
+      - name: silver_stablecoin_transactions
+        path: s3://remitflow-lakehouse/silver/stablecoin/transactions/
+        format: delta
+        partitions: [event_date, stablecoin, type]
+        source: bronze_stablecoin_transactions
+        transformations:
+          - deduplicate_on: [id]
+          - mask_pii: [user_id]
+          - enrich_with_fx_rates: true
+          - calculate_usd_equivalent: true
+          - add_risk_score: true
+        schema:
+          - { name: id, type: string, nullable: false }
+          - { name: user_id_hashed, type: string, nullable: false }
+          - { name: type, type: string, nullable: false }
+          - { name: stablecoin, type: string, nullable: false }
+          - { name: amount, type: decimal(28,8), nullable: false }
+          - { name: usd_equivalent, type: decimal(18,4), nullable: true }
+          - { name: fiat_currency, type: string, nullable: true }
+          - { name: fiat_amount, type: decimal(18,4), nullable: true }
+          - { name: status, type: string, nullable: false }
+          - { name: risk_score, type: double, nullable: true }
+          - { name: chain, type: string, nullable: true }
+          - { name: provider, type: string, nullable: true }
+          - { name: fee_usd, type: decimal(18,4), nullable: true }
+          - { name: event_date, type: date, nullable: false }
+          - { name: created_at, type: timestamp, nullable: false }
+          - { name: completed_at, type: timestamp, nullable: true }
+        retention_days: 730
+        z_order_by: [stablecoin, type, event_date]
+
+      - name: silver_compliance_events
+        path: s3://remitflow-lakehouse/silver/stablecoin/compliance/
+        format: delta
+        partitions: [event_date, action]
+        retention_days: 730
+
+  # ─── GOLD LAYER (Business Aggregates) ──────────────────────────────────────
+  gold:
+    description: "Pre-aggregated business metrics for dashboards and regulatory reporting"
+    tables:
+      - name: gold_stablecoin_daily_volume
+        path: s3://remitflow-lakehouse/gold/stablecoin/daily_volume/
+        format: delta
+        partitions: [event_date]
+        source: silver_stablecoin_transactions
+        aggregations:
+          - group_by: [event_date, stablecoin, type]
+          - metrics:
+              - { name: transaction_count, expr: "count(*)" }
+              - { name: total_amount, expr: "sum(amount)" }
+              - { name: total_usd_volume, expr: "sum(usd_equivalent)" }
+              - { name: avg_amount, expr: "avg(amount)" }
+              - { name: p95_amount, expr: "percentile(amount, 0.95)" }
+              - { name: unique_users, expr: "count(distinct user_id_hashed)" }
+        refresh_schedule: "0 * * * *"  # hourly
+        retention_days: 1825  # 5 years
+
+      - name: gold_stablecoin_corridor_metrics
+        path: s3://remitflow-lakehouse/gold/stablecoin/corridor_metrics/
+        format: delta
+        partitions: [event_date]
+        source: silver_stablecoin_transactions
+        aggregations:
+          - group_by: [event_date, stablecoin, fiat_currency, provider]
+          - metrics:
+              - { name: volume_usd, expr: "sum(usd_equivalent)" }
+              - { name: avg_fee_usd, expr: "avg(fee_usd)" }
+              - { name: success_rate, expr: "sum(case when status='completed' then 1 else 0 end) / count(*)" }
+        refresh_schedule: "0 * * * *"
+        retention_days: 1825
+
+      - name: gold_regulatory_reporting
+        path: s3://remitflow-lakehouse/gold/stablecoin/regulatory/
+        format: delta
+        partitions: [report_month, jurisdiction]
+        description: "Pre-aggregated data for FATF, FinCEN, and local regulatory reports"
+        retention_days: 3650  # 10 years (regulatory requirement)
+        pii_masked: true
+
+pipelines:
+  - name: bronze-to-silver-stablecoin
+    schedule: "*/15 * * * *"  # every 15 minutes
+    source: bronze_stablecoin_transactions
+    target: silver_stablecoin_transactions
+    engine: spark
+    spark_config:
+      executor_memory: 4g
+      executor_cores: 2
+      num_executors: 4
+
+  - name: silver-to-gold-aggregation
+    schedule: "0 * * * *"  # hourly
+    source: silver_stablecoin_transactions
+    targets:
+      - gold_stablecoin_daily_volume
+      - gold_stablecoin_corridor_metrics
+    engine: spark

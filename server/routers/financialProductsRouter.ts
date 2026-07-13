@@ -28,8 +28,9 @@ import { z } from "zod";
 import { router, protectedProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
-import { redis } from "../middleware/redis";
-import { db } from "../db";
+import { getRedisClient } from "../middleware/redis";
+const redis = getRedisClient();
+import { db } from "../db-shim";
 import {
   transactions, wallets, users, savingsGoals, bnplPlans,
 } from "../../drizzle/schema";

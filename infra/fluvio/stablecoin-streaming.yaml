@@ -1,0 +1,142 @@
+# Fluvio Stablecoin Streaming Configuration — RemitFlow
+# Defines 11 topics for real-time stablecoin event streaming with SmartModules.
+
+cluster:
+  name: remitflow-stablecoin
+  replicas: 3
+
+topics:
+  - name: stablecoin_onramp_initiated
+    partitions: 6
+    replication: 3
+    retention: 7d
+    compression: lz4
+
+  - name: stablecoin_onramp_completed
+    partitions: 6
+    replication: 3
+    retention: 7d
+    compression: lz4
+
+  - name: stablecoin_offramp_initiated
+    partitions: 6
+    replication: 3
+    retention: 7d
+    compression: lz4
+
+  - name: stablecoin_offramp_completed
+    partitions: 6
+    replication: 3
+    retention: 7d
+    compression: lz4
+
+  - name: stablecoin_swap_executed
+    partitions: 6
+    replication: 3
+    retention: 7d
+    compression: lz4
+
+  - name: stablecoin_send_completed
+    partitions: 6
+    replication: 3
+    retention: 7d
+    compression: lz4
+
+  - name: stablecoin_yield_staked
+    partitions: 3
+    replication: 3
+    retention: 30d
+    compression: lz4
+
+  - name: stablecoin_bridge_initiated
+    partitions: 6
+    replication: 3
+    retention: 7d
+    compression: lz4
+
+  - name: stablecoin_bridge_completed
+    partitions: 6
+    replication: 3
+    retention: 7d
+    compression: lz4
+
+  - name: stablecoin_depeg_alert
+    partitions: 3
+    replication: 3
+    retention: 90d
+    compression: lz4
+
+  - name: stablecoin_compliance_flag
+    partitions: 3
+    replication: 3
+    retention: 90d
+    compression: lz4
+
+smartmodules:
+  - name: depeg-detector
+    description: "Real-time de-peg detection SmartModule — filters events where price deviation > 0.5%"
+    wasm: smartmodules/depeg_detector.wasm
+    type: filter-map
+    params:
+      depeg_threshold: 0.005
+      stablecoins:
+        - USDT
+        - USDC
+        - BUSD
+        - DAI
+        - NGNT
+        - cUSD
+        - PYUSD
+    topics:
+      input: stablecoin_depeg_alert
+      output: stablecoin_depeg_confirmed
+
+  - name: compliance-enricher
+    description: "Enriches stablecoin transactions with risk scores from the compliance pipeline"
+    wasm: smartmodules/compliance_enricher.wasm
+    type: map
+    params:
+      risk_threshold: 75
+      auto_flag_above: 90
+    topics:
+      input: stablecoin_onramp_initiated
+      output: stablecoin_compliance_flag
+
+  - name: fx-rate-aggregator
+    description: "Aggregates FX rates from multiple oracle sources for stablecoin pricing"
+    wasm: smartmodules/fx_rate_aggregator.wasm
+    type: aggregate
+    params:
+      window_seconds: 10
+      sources: [chainlink, pyth, band, coingecko]
+    topics:
+      input: stablecoin_onramp_initiated
+      output: stablecoin_onramp_completed
+
+connectors:
+  - name: opensearch-stablecoin-sink
+    type: sink
+    connector: opensearch
+    topics:
+      - stablecoin_onramp_completed
+      - stablecoin_offramp_completed
+      - stablecoin_swap_executed
+      - stablecoin_send_completed
+      - stablecoin_bridge_completed
+      - stablecoin_compliance_flag
+    config:
+      url: http://opensearch:9200
+      index: stablecoin-transactions
+      batch_size: 100
+      flush_interval_ms: 1000
+
+  - name: postgres-audit-sink
+    type: sink
+    connector: jdbc
+    topics:
+      - stablecoin_compliance_flag
+      - stablecoin_depeg_alert
+    config:
+      url: jdbc:postgresql://postgres:5432/remitflow
+      table: stablecoin_audit_log
+      batch_size: 50

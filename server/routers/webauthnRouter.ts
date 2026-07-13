@@ -31,8 +31,9 @@ import { z } from "zod";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
-import { db } from "../db";
-import { redis } from "../middleware/redis";
+import { db } from "../db-shim";
+import { getRedisClient } from "../middleware/redis";
+const redis = getRedisClient();
 import crypto from "node:crypto";
 
 // ── Configuration ─────────────────────────────────────────────────────────────

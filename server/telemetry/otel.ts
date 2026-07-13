@@ -19,7 +19,7 @@
  */
 
 import { NodeSDK } from "@opentelemetry/sdk-node";
-import { Resource } from "@opentelemetry/resources";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import { SEMRESATTRS_SERVICE_NAME, SEMRESATTRS_SERVICE_VERSION, SEMRESATTRS_DEPLOYMENT_ENVIRONMENT } from "@opentelemetry/semantic-conventions";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
@@ -39,7 +39,7 @@ const SAMPLE_RATE = IS_PRODUCTION ? 0.1 : 1.0;
 
 // ── Resource ─────────────────────────────────────────────────────────────────
 
-const resource = new Resource({
+const resource = resourceFromAttributes({
   [SEMRESATTRS_SERVICE_NAME]: SERVICE_NAME,
   [SEMRESATTRS_SERVICE_VERSION]: SERVICE_VERSION,
   [SEMRESATTRS_DEPLOYMENT_ENVIRONMENT]: process.env.NODE_ENV ?? "development",

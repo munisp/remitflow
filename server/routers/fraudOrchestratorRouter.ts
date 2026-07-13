@@ -25,8 +25,8 @@ import { z } from "zod";
 import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
 import { withSpan } from "../telemetry/otel";
-import { db } from "../db";
-import { amlAlerts } from "../db/schema";
+import { db } from "../db-shim";
+import { complianceCases as amlAlerts } from "../../drizzle/schema";
 import { notifyFraudAlert } from "../sse.enhanced";
 
 // ── Service URLs ──────────────────────────────────────────────────────────────

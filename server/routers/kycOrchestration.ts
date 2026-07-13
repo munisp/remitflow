@@ -12,7 +12,7 @@
 import { z } from "zod";
 import { createTRPCRouter, protectedProcedure, publicProcedure } from "../trpc";
 import { TRPCError } from "@trpc/server";
-import { db } from "../db";
+import { db } from "../db-shim";
 import { eq, desc } from "drizzle-orm";
 
 const KYC_ORCHESTRATOR_URL = process.env.KYC_ORCHESTRATOR_URL ?? "http://go-kyc-orchestrator:8150";

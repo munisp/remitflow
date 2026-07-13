@@ -1,0 +1,160 @@
+{
+  "ilm_policy": {
+    "name": "stablecoin-90day-retention",
+    "policy": {
+      "phases": {
+        "hot": {
+          "min_age": "0ms",
+          "actions": {
+            "rollover": { "max_size": "50gb", "max_age": "7d" },
+            "set_priority": { "priority": 100 }
+          }
+        },
+        "warm": {
+          "min_age": "7d",
+          "actions": {
+            "shrink": { "number_of_shards": 1 },
+            "forcemerge": { "max_num_segments": 1 },
+            "set_priority": { "priority": 50 }
+          }
+        },
+        "cold": {
+          "min_age": "30d",
+          "actions": {
+            "set_priority": { "priority": 0 },
+            "freeze": {}
+          }
+        },
+        "delete": {
+          "min_age": "90d",
+          "actions": { "delete": {} }
+        }
+      }
+    }
+  },
+  "index_templates": [
+    {
+      "name": "stablecoin-transactions",
+      "index_patterns": ["stablecoin-transactions-*"],
+      "template": {
+        "settings": {
+          "number_of_shards": 3,
+          "number_of_replicas": 1,
+          "index.lifecycle.name": "stablecoin-90day-retention",
+          "index.lifecycle.rollover_alias": "stablecoin-transactions"
+        },
+        "mappings": {
+          "properties": {
+            "id": { "type": "keyword" },
+            "userId": { "type": "keyword" },
+            "type": { "type": "keyword" },
+            "stablecoin": { "type": "keyword" },
+            "amount": { "type": "double" },
+            "fiatCurrency": { "type": "keyword" },
+            "fiatAmount": { "type": "double" },
+            "status": { "type": "keyword" },
+            "chain": { "type": "keyword" },
+            "txHash": { "type": "keyword" },
+            "provider": { "type": "keyword" },
+            "fee": { "type": "double" },
+            "exchangeRate": { "type": "double" },
+            "createdAt": { "type": "date" },
+            "completedAt": { "type": "date" },
+            "metadata": { "type": "object", "dynamic": true }
+          }
+        }
+      }
+    },
+    {
+      "name": "stablecoin-depeg-events",
+      "index_patterns": ["stablecoin-depeg-*"],
+      "template": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 1,
+          "index.lifecycle.name": "stablecoin-90day-retention"
+        },
+        "mappings": {
+          "properties": {
+            "stablecoin": { "type": "keyword" },
+            "peg": { "type": "keyword" },
+            "currentPrice": { "type": "double" },
+            "deviation": { "type": "double" },
+            "severity": { "type": "keyword" },
+            "sources": { "type": "keyword" },
+            "detectedAt": { "type": "date" },
+            "resolvedAt": { "type": "date" }
+          }
+        }
+      }
+    },
+    {
+      "name": "stablecoin-compliance-events",
+      "index_patterns": ["stablecoin-compliance-*"],
+      "template": {
+        "settings": {
+          "number_of_shards": 2,
+          "number_of_replicas": 1,
+          "index.lifecycle.name": "stablecoin-90day-retention"
+        },
+        "mappings": {
+          "properties": {
+            "transactionId": { "type": "keyword" },
+            "userId": { "type": "keyword" },
+            "riskScore": { "type": "double" },
+            "flags": { "type": "keyword" },
+            "action": { "type": "keyword" },
+            "reviewedBy": { "type": "keyword" },
+            "createdAt": { "type": "date" }
+          }
+        }
+      }
+    },
+    {
+      "name": "stablecoin-yield-events",
+      "index_patterns": ["stablecoin-yield-*"],
+      "template": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 1,
+          "index.lifecycle.name": "stablecoin-90day-retention"
+        },
+        "mappings": {
+          "properties": {
+            "userId": { "type": "keyword" },
+            "stablecoin": { "type": "keyword" },
+            "protocol": { "type": "keyword" },
+            "amount": { "type": "double" },
+            "apy": { "type": "double" },
+            "action": { "type": "keyword" },
+            "createdAt": { "type": "date" }
+          }
+        }
+      }
+    },
+    {
+      "name": "stablecoin-bridge-events",
+      "index_patterns": ["stablecoin-bridge-*"],
+      "template": {
+        "settings": {
+          "number_of_shards": 1,
+          "number_of_replicas": 1,
+          "index.lifecycle.name": "stablecoin-90day-retention"
+        },
+        "mappings": {
+          "properties": {
+            "userId": { "type": "keyword" },
+            "stablecoin": { "type": "keyword" },
+            "fromChain": { "type": "keyword" },
+            "toChain": { "type": "keyword" },
+            "amount": { "type": "double" },
+            "bridgeFee": { "type": "double" },
+            "status": { "type": "keyword" },
+            "txHash": { "type": "keyword" },
+            "createdAt": { "type": "date" }
+          }
+        }
+      }
+    }
+  ]
+}

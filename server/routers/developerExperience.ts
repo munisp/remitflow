@@ -12,7 +12,7 @@
 
 import { z } from "zod";
 import { createTRPCRouter, protectedProcedure, publicProcedure } from "../trpc";
-import { db } from "../db";
+import { db } from "../db-shim";
 import { eq, desc, and, gte, sql } from "drizzle-orm";
 import crypto from "crypto";
 

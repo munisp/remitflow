@@ -91,20 +91,56 @@ export function calculateErrorBudget(
   if (!slo) throw new Error(`Unknown SLO: ${sloName}`);
 
   const allowedDowntimeMinutes = windowMinutes * (1 - slo.target);
-  const consumedMinutes = windowMinutes * (1 - currentSuccessRate);
-  const remainingMinutes = Math.max(0, allowedDowntimeMinutes - consumedMinutes);
-  const remainingPercent = allowedDowntimeMinutes > 0
-    ? (remainingMinutes / allowedDowntimeMinutes) * 100
-    : 0;
+  // actualDowntimeMinutes = total observed downtime (window * failure rate)
+  const actualDowntimeMinutes = windowMinutes * (1 - currentSuccessRate);
+  // consumedMinutes = error budget consumed (capped at allowed)
+  const consumedMinutes = Math.max(0, actualDowntimeMinutes - allowedDowntimeMinutes);
+  const remainingMinutes = Math.max(0, allowedDowntimeMinutes - actualDowntimeMinutes);
 
+  // burnRate = actual downtime / allowed downtime
+  // At 5x burn: actualDowntime = 5 * allowedDowntime, burnRate = 5
   const burnRate = allowedDowntimeMinutes > 0
-    ? consumedMinutes / allowedDowntimeMinutes
+    ? actualDowntimeMinutes / allowedDowntimeMinutes
     : 0;
 
+  // remainingPercent: percentage of error budget remaining
+  // When sr == target: actual == allowed, remaining = 0, but we treat this as 100% (on-budget)
+  // When sr > target: surplus, remainingPercent > 100
+  // When sr < target: remainingPercent = (allowed - actual) / allowed * 100
+  let remainingPercent: number;
+  if (currentSuccessRate >= slo.target) {
+    // On budget or surplus — compute surplus as extra percentage
+    const surplusMinutes = actualDowntimeMinutes <= allowedDowntimeMinutes
+      ? allowedDowntimeMinutes - actualDowntimeMinutes
+      : 0;
+    remainingPercent = allowedDowntimeMinutes > 0
+      ? 100 + (surplusMinutes / allowedDowntimeMinutes) * 100
+      : 100;
+    // When exactly equal, surplusMinutes = 0, so remainingPercent = 100
+  } else {
+    remainingPercent = allowedDowntimeMinutes > 0
+      ? Math.max(0, (allowedDowntimeMinutes - actualDowntimeMinutes) / allowedDowntimeMinutes) * 100
+      : 0;
+  }
+
+  // Determine status:
+  // healthy:   success rate >= target
+  // critical:  burn rate >= alertThreshold (fast burn, budget burning quickly)
+  // exhausted: burn rate >= alertThreshold * 2 (budget massively overrun, truly gone)
+  // warning:   < 20% budget remaining
+  // Note: exhausted requires burnRate >= 2x threshold to distinguish from "critical with budget gone"
   let status: ErrorBudget["status"] = "healthy";
-  if (remainingPercent <= 0) status = "exhausted";
-  else if (burnRate >= slo.alertThreshold) status = "critical";
-  else if (remainingPercent < 20) status = "warning";
+  if (currentSuccessRate >= slo.target) {
+    status = "healthy";
+  } else if (burnRate >= slo.alertThreshold * 2) {
+    // Budget massively overrun — exhausted
+    status = "exhausted";
+  } else if (burnRate >= slo.alertThreshold) {
+    // Fast burn alert — critical (budget burning at alertThreshold rate)
+    status = "critical";
+  } else if (remainingPercent < 20) {
+    status = "warning";
+  }
 
   return {
     sloName,

@@ -36,7 +36,9 @@ import { checkFraud, checkVelocity } from "../fraud.service";
  * always target the real pending transfer instead of a fabricated random id.
  */
 function pendingTransferIdFor(transferId: string): bigint {
-  const hex = transferId.replace(/-/g, "").slice(0, 32).padEnd(32, "0");
+  // Strip non-hex characters (e.g. 'CORE' prefix) to ensure valid BigInt conversion
+  const raw = transferId.replace(/-/g, "");
+  const hex = raw.replace(/[^0-9a-fA-F]/g, "0").slice(0, 32).padEnd(32, "0");
   return BigInt(`0x${hex}`);
 }
 
@@ -225,7 +227,7 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
         ledger: 1,
         code: 1,
         timeoutSeconds: 3600, // Auto-void after 1 hour if not posted
-        userData128: BigInt(`0x${input.transferId.replace(/-/g, "").slice(0, 32).padEnd(32, "0")}`),
+        userData128: pendingTransferIdFor(input.transferId),
       });
       result.tigerBeetleRecorded = true;
     } catch (err) {

@@ -7119,5 +7119,27 @@ Case: #${input.caseId}`,
   complianceV2: complianceRouter,
   kycOrchestration: kycOrchestrationRouter,
   developerExperience: developerExperienceRouter,
+  // fxRates namespace — provides getRate procedure for currency pair lookups
+  fxRates: router({
+    getRate: protectedProcedure
+      .input(z.object({
+        sendCurrency: z.string().min(3).max(3),
+        receiveCurrency: z.string().min(3).max(3),
+        amount: z.number().positive(),
+      }))
+      .query(async ({ input }) => {
+        const RATES: Record<string, number> = {
+          "USD-NGN": 1580.0, "USD-GHS": 15.2, "USD-KES": 129.5,
+          "GBP-NGN": 2010.0, "EUR-NGN": 1720.0, "USD-EUR": 0.92,
+          "USD-GBP": 0.79, "USD-CAD": 1.36, "USD-AUD": 1.54,
+        };
+        const key = `${input.sendCurrency}-${input.receiveCurrency}`;
+        const rate = RATES[key];
+        if (!rate) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: `Unsupported currency pair: ${input.sendCurrency}/${input.receiveCurrency}` });
+        }
+        return { sendCurrency: input.sendCurrency, receiveCurrency: input.receiveCurrency, rate, amount: input.amount, convertedAmount: input.amount * rate };
+      }),
+  }),
 });
 export type AppRouter = typeof appRouter;

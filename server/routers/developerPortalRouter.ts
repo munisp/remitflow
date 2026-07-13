@@ -32,8 +32,9 @@ import { z } from "zod";
 import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
-import { redis } from "../middleware/redis";
-import { db } from "../db";
+import { getRedisClient } from "../middleware/redis";
+const redis = getRedisClient();
+import { db } from "../db-shim";
 import { webhooks, apiKeys } from "../../drizzle/schema";
 import { eq, and, desc } from "drizzle-orm";
 import * as crypto from "crypto";
@@ -407,7 +408,7 @@ export const developerPortalRouter = router({
     .input(z.object({
       name: z.string().min(2).max(100),
       scopes: z.array(z.enum(["transfers:read", "transfers:write", "kyc:read", "fx:read", "admin:read"])).min(1),
-      ipAllowlist: z.array(z.string().ip()).optional(),
+      ipAllowlist: z.array(z.string().regex(/^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?).){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/, "Invalid IP address")).optional(),
       expiresAt: z.string().datetime().optional(),
       testMode: z.boolean().default(false),
     }))

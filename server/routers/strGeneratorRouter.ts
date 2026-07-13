@@ -13,8 +13,9 @@ import { z } from "zod";
 import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
-import { db } from "../db";
-import { redis } from "../middleware/redis";
+import { db } from "../db-shim";
+import { getRedisClient } from "../middleware/redis";
+const redis = getRedisClient();
 import { publishEvent } from "../lib/middleware-orchestrator";
 
 const STR_SVC_URL = process.env.STR_GENERATOR_URL ?? "http://python-str-generator:8210";

@@ -20,9 +20,10 @@
 import { z } from "zod";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
-import { redis } from "../middleware/redis";
+import { getRedisClient } from "../middleware/redis";
+const redis = getRedisClient();
 import { ollamaChat, generateStructuredOutput } from "../ollama.service";
-import { db } from "../db";
+import { db } from "../db-shim";
 import { fxRates } from "../../drizzle/schema";
 import { eq, desc, gte, and } from "drizzle-orm";
 

@@ -21,9 +21,10 @@ import { z } from "zod";
 import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
-import { redis } from "../middleware/redis";
+import { getRedisClient } from "../middleware/redis";
+const redis = getRedisClient();
 import { ollamaChat, generateStructuredOutput, type OllamaMessage } from "../ollama.service";
-import { db } from "../db";
+import { db } from "../db-shim";
 import { publishEvent } from "../lib/middleware-orchestrator";
 
 // ── Constants ─────────────────────────────────────────────────────────────────

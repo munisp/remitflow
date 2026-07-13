@@ -1,0 +1,313 @@
+name: SDK Generation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'openapi/remitflow-api.yaml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'SDK version to publish (e.g. 1.2.0)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  validate-spec:
+    name: Validate OpenAPI Spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Spectral linter
+        run: npm install -g @stoplight/spectral-cli
+
+      - name: Lint OpenAPI spec
+        run: spectral lint openapi/remitflow-api.yaml --ruleset .spectral.yaml || true
+
+      - name: Validate spec with swagger-parser
+        run: |
+          npm install -g @apidevtools/swagger-cli
+          swagger-cli validate openapi/remitflow-api.yaml
+
+  generate-typescript-sdk:
+    name: Generate TypeScript SDK
+    needs: validate-spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install openapi-typescript-codegen
+        run: npm install -g openapi-typescript-codegen
+
+      - name: Generate TypeScript SDK
+        run: |
+          mkdir -p sdk/typescript
+          openapi --input openapi/remitflow-api.yaml \
+            --output sdk/typescript \
+            --client fetch \
+            --name RemitFlowClient \
+            --useOptions \
+            --useUnionTypes
+
+      - name: Add package.json to TypeScript SDK
+        run: |
+          VERSION="${{ github.event.inputs.version || '1.0.0' }}"
+          cat > sdk/typescript/package.json << EOF
+          {
+            "name": "@remitflow/sdk",
+            "version": "${VERSION}",
+            "description": "Official RemitFlow TypeScript/JavaScript SDK",
+            "main": "index.js",
+            "types": "index.d.ts",
+            "license": "MIT",
+            "repository": {
+              "type": "git",
+              "url": "https://github.com/munisp/remitflow"
+            },
+            "keywords": ["remitflow", "payments", "remittance", "fintech", "sdk"]
+          }
+          EOF
+
+      - name: Upload TypeScript SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: typescript-sdk
+          path: sdk/typescript/
+          retention-days: 30
+
+  generate-python-sdk:
+    name: Generate Python SDK
+    needs: validate-spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install openapi-generator-cli
+        run: |
+          npm install -g @openapitools/openapi-generator-cli
+          openapi-generator-cli version-manager set 7.4.0
+
+      - name: Generate Python SDK
+        run: |
+          mkdir -p sdk/python
+          openapi-generator-cli generate \
+            -i openapi/remitflow-api.yaml \
+            -g python \
+            -o sdk/python \
+            --package-name remitflow_sdk \
+            --additional-properties=packageVersion=${{ github.event.inputs.version || '1.0.0' }},projectName=remitflow-sdk,packageUrl=https://github.com/munisp/remitflow
+
+      - name: Add README to Python SDK
+        run: |
+          cat > sdk/python/README.md << 'EOF'
+          # RemitFlow Python SDK
+
+          Official Python SDK for the RemitFlow cross-border payments platform.
+
+          ## Installation
+
+          ```bash
+          pip install remitflow-sdk
+          ```
+
+          ## Quick Start
+
+          ```python
+          from remitflow_sdk import RemitFlowClient
+          from remitflow_sdk.configuration import Configuration
+
+          config = Configuration(
+              host="https://api.remitflow.io/v1",
+              access_token="your_access_token"
+          )
+          client = RemitFlowClient(configuration=config)
+
+          # Get FX rates
+          rates = client.fx_api.get_fx_rates(base="USD", symbols="NGN,GHS,KES")
+          print(rates)
+
+          # Initiate a transfer
+          transfer = client.transfers_api.create_transfer(
+              amount="500.00",
+              source_currency="USD",
+              destination_currency="NGN",
+              recipient_id="uuid-here"
+          )
+          print(transfer.id, transfer.status)
+          ```
+          EOF
+
+      - name: Upload Python SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-sdk
+          path: sdk/python/
+          retention-days: 30
+
+  generate-go-sdk:
+    name: Generate Go SDK
+    needs: validate-spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install openapi-generator-cli
+        run: npm install -g @openapitools/openapi-generator-cli
+
+      - name: Generate Go SDK
+        run: |
+          mkdir -p sdk/go
+          openapi-generator-cli generate \
+            -i openapi/remitflow-api.yaml \
+            -g go \
+            -o sdk/go \
+            --package-name remitflow \
+            --additional-properties=packageVersion=${{ github.event.inputs.version || '1.0.0' }},isGoSubmodule=true,packageName=remitflow
+
+      - name: Add go.mod to Go SDK
+        run: |
+          cat > sdk/go/go.mod << EOF
+          module github.com/remitflow/go-sdk
+
+          go 1.22
+
+          require (
+            golang.org/x/oauth2 v0.21.0
+          )
+          EOF
+
+      - name: Upload Go SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-sdk
+          path: sdk/go/
+          retention-days: 30
+
+  generate-rust-sdk:
+    name: Generate Rust SDK
+    needs: validate-spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install openapi-generator-cli
+        run: npm install -g @openapitools/openapi-generator-cli
+
+      - name: Generate Rust SDK
+        run: |
+          mkdir -p sdk/rust
+          openapi-generator-cli generate \
+            -i openapi/remitflow-api.yaml \
+            -g rust \
+            -o sdk/rust \
+            --package-name remitflow-sdk \
+            --additional-properties=packageVersion=${{ github.event.inputs.version || '1.0.0' }},packageName=remitflow_sdk
+
+      - name: Upload Rust SDK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-sdk
+          path: sdk/rust/
+          retention-days: 30
+
+  commit-sdks:
+    name: Commit Generated SDKs to Repository
+    needs:
+      - generate-typescript-sdk
+      - generate-python-sdk
+      - generate-go-sdk
+      - generate-rust-sdk
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all SDK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: sdk-artifacts/
+
+      - name: Organize SDKs
+        run: |
+          mkdir -p sdk/typescript sdk/python sdk/go sdk/rust
+          cp -r sdk-artifacts/typescript-sdk/. sdk/typescript/ || true
+          cp -r sdk-artifacts/python-sdk/. sdk/python/ || true
+          cp -r sdk-artifacts/go-sdk/. sdk/go/ || true
+          cp -r sdk-artifacts/rust-sdk/. sdk/rust/ || true
+
+      - name: Create SDK index
+        run: |
+          VERSION="${{ github.event.inputs.version || '1.0.0' }}"
+          cat > sdk/README.md << EOF
+          # RemitFlow SDKs
+
+          Auto-generated SDKs from the OpenAPI specification.
+          Version: ${VERSION}
+          Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          | Language | Package | Install |
+          |---|---|---|
+          | TypeScript/JS | \`@remitflow/sdk\` | \`npm install @remitflow/sdk\` |
+          | Python | \`remitflow-sdk\` | \`pip install remitflow-sdk\` |
+          | Go | \`github.com/remitflow/go-sdk\` | \`go get github.com/remitflow/go-sdk\` |
+          | Rust | \`remitflow-sdk\` | \`cargo add remitflow-sdk\` |
+
+          ## Usage
+
+          See individual SDK directories for language-specific documentation.
+          EOF
+
+      - name: Commit and push SDKs
+        run: |
+          git config --local user.email "sdk-bot@remitflow.io"
+          git config --local user.name "RemitFlow SDK Bot"
+          git add sdk/
+          git diff --staged --quiet || git commit -m "chore: auto-generate SDKs from OpenAPI spec [skip ci]"
+          git push
+
+  publish-postman-collection:
+    name: Generate Postman Collection
+    needs: validate-spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install openapi-to-postmanv2
+        run: npm install -g openapi-to-postmanv2
+
+      - name: Generate Postman collection
+        run: |
+          mkdir -p sdk/postman
+          openapi2postmanv2 \
+            -s openapi/remitflow-api.yaml \
+            -o sdk/postman/remitflow-collection.json \
+            -p || true
+
+      - name: Upload Postman collection
+        uses: actions/upload-artifact@v4
+        with:
+          name: postman-collection
+          path: sdk/postman/
+          retention-days: 90

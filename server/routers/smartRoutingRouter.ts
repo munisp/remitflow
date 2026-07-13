@@ -359,4 +359,24 @@ export const smartRoutingRouter = router({
         status: "locked",
       };
     }),
+
+  /**
+   * Get the single best route for a corridor (alias for getRoutes returning top result).
+   */
+  getBestRoute: protectedProcedure
+    .input(z.object({
+      amount: z.number().positive(),
+      sendCurrency: z.string().length(3),
+      receiveCurrency: z.string().length(3),
+    }))
+    .query(async ({ input, ctx }) => {
+      const fxRates: Record<string, number> = {
+        "USD-NGN": 1580.0, "USD-GHS": 15.2, "USD-KES": 129.5,
+        "GBP-NGN": 2010.0, "EUR-NGN": 1720.0,
+      };
+      const routes = buildRouteOptions(input.amount, input.sendCurrency, input.receiveCurrency, fxRates);
+      const best = routes.sort((a, b) => b.overallScore - a.overallScore)[0];
+      logger.info({ userId: ctx.user.id, corridor: `${input.sendCurrency}-${input.receiveCurrency}` }, "[SmartRouting] getBestRoute called");
+      return { corridor: `${input.sendCurrency}-${input.receiveCurrency}`, amount: input.amount, bestRoute: best ?? null };
+    }),
 });

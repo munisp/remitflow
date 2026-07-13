@@ -25,8 +25,9 @@ import { z } from "zod";
 import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
-import { redis } from "../middleware/redis";
-import { db } from "../db";
+import { getRedisClient } from "../middleware/redis";
+const redis = getRedisClient();
+import { db } from "../db-shim";
 import { pushTokens, notificationPreferences } from "../../drizzle/schema";
 import { eq, and, inArray, desc } from "drizzle-orm";
 

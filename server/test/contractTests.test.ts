@@ -13,7 +13,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { createCallerFactory } from "@trpc/server";
+import { createCallerFactory } from "../_core/trpc";
 import { appRouter } from "../routers";
 
 // ── Test Context Factory ──────────────────────────────────────────────────────

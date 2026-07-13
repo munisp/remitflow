@@ -109,6 +109,8 @@ export interface UserSseEvent {
     | "kyc_approved" | "kyc_rejected" | "kyc_pending"
     | "login_new_device" | "password_changed" | "2fa_enabled" | "2fa_disabled"
     | "rate_alert_hit" | "low_balance" | "referral_bonus" | "card_transaction"
+    | "cash_pickup_assigned" | "cash_pickup_ready" | "cash_pickup_completed" | "cash_pickup_expired"
+    | "pickup_code_regenerated" | "float_topup_approved" | "float_topup_requested" | "float_balance_low"
     | "ping" | "notification";
   payload: Record<string, unknown>;
   timestamp: string;
