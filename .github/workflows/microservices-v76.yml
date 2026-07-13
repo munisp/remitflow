@@ -25,8 +25,8 @@ jobs:
       matrix:
         service: [ngx-price-feed, api-gateway, corridor-pricing]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: "1.22"
           cache-dependency-path: microservices/go-services/${{ matrix.service }}/go.sum
@@ -37,7 +37,7 @@ jobs:
           go vet ./...
           go test -v -race -coverprofile=coverage.out ./...
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           file: microservices/go-services/${{ matrix.service }}/coverage.out
           flags: go-${{ matrix.service }}
@@ -54,13 +54,13 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v7
         with:
           context: microservices/go-services/${{ matrix.service }}
           push: true
@@ -77,7 +77,7 @@ jobs:
       matrix:
         service: [fx-engine, tx-processor, compliance-engine]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -103,13 +103,13 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v7
         with:
           context: microservices/rust-services/${{ matrix.service }}
           push: true
@@ -126,8 +126,8 @@ jobs:
       matrix:
         service: [fraud-detection, aml-compliance, analytics-engine]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -158,13 +158,13 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v7
         with:
           context: microservices/python-services/${{ matrix.service }}
           push: true
@@ -181,12 +181,12 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: production
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Update image tags
         run: |
           sed -i "s|:v76|:${{ github.sha }}|g" k8s/microservices-v76.yaml
       - name: Deploy to cluster
-        uses: azure/k8s-deploy@v4
+        uses: azure/k8s-deploy@v6
         with:
           namespace: remitflow
           manifests: k8s/microservices-v76.yaml
@@ -206,7 +206,7 @@ jobs:
     name: Validate Observability Config
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Validate Prometheus config
         run: |
           docker run --rm \

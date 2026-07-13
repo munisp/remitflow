@@ -15,8 +15,8 @@ jobs:
     name: Dead Code Analysis (knip)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -31,7 +31,7 @@ jobs:
           # Upload report as artifact regardless
       - name: Upload knip report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: knip-report
           path: knip-report.txt
@@ -41,8 +41,8 @@ jobs:
     name: Circular Dependency Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -51,7 +51,7 @@ jobs:
         run: npx madge --circular --extensions ts,tsx server/ client/src/ 2>/dev/null | tee circular-deps.txt || true
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: circular-deps-report
           path: circular-deps.txt
@@ -61,8 +61,8 @@ jobs:
     name: Orphan Feature Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -71,7 +71,7 @@ jobs:
         run: node scripts/audit-orphans.mjs | tee orphan-audit.txt
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: orphan-audit-report
           path: orphan-audit.txt
@@ -81,7 +81,7 @@ jobs:
     name: Anti-Pattern Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Scan for anti-patterns
         run: |
           echo "=== Unbounded Maps (should use BoundedCache) ==="
@@ -101,7 +101,7 @@ jobs:
 
       - name: Upload report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pattern-scan-report
           path: pattern-scan.txt
@@ -111,8 +111,8 @@ jobs:
     name: Lighthouse Performance Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -120,7 +120,7 @@ jobs:
       - name: Build frontend
         run: npm run build
       - name: Run Lighthouse CI
-        uses: treosh/lighthouse-ci-action@v11
+        uses: treosh/lighthouse-ci-action@v12
         with:
           configPath: ./lighthouserc.json
           uploadArtifacts: true

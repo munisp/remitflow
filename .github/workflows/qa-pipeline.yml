@@ -64,9 +64,9 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -90,7 +90,7 @@ jobs:
           REDIS_URL: redis://localhost:6379
 
       - name: Upload test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: test-results
@@ -106,9 +106,9 @@ jobs:
       github.event.inputs.suite == 'all' ||
       github.event.inputs.suite == 'security'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -143,7 +143,7 @@ jobs:
           ./qa/security/dependency-audit.sh
 
       - name: Upload security reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: security-reports
@@ -159,7 +159,7 @@ jobs:
       github.event.inputs.suite == 'all' ||
       github.event.inputs.suite == 'security'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
@@ -190,7 +190,7 @@ jobs:
           ./qa/security/smart-contract-audit.sh || true
 
       - name: Upload audit reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: contract-audit-reports
@@ -219,9 +219,9 @@ jobs:
         ports:
           - 6379:6379
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -256,7 +256,7 @@ jobs:
             --out json=qa/load-testing/results/reconciliation.json
 
       - name: Upload load test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: load-test-results
@@ -285,9 +285,9 @@ jobs:
         ports:
           - 6379:6379
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -307,7 +307,7 @@ jobs:
           ./qa/chaos-engineering/chaos-runner.sh all http://localhost:3001
 
       - name: Upload chaos results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: chaos-results
@@ -336,7 +336,7 @@ jobs:
         ports:
           - 6379:6379
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Run DR tests
         run: |
@@ -347,7 +347,7 @@ jobs:
           REDIS_URL: redis://localhost:6379
 
       - name: Upload DR results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: dr-results
@@ -372,9 +372,9 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: "npm"
@@ -393,7 +393,7 @@ jobs:
           ./qa/regulatory-sandbox/compliance-test-suite.sh all http://localhost:3001
 
       - name: Upload compliance reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: compliance-reports
