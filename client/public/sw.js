@@ -436,13 +436,13 @@ self.addEventListener('push', (event) => {
   event.waitUntil(
     self.registration.showNotification(data.title ?? 'RemitFlow', {
       body: data.body ?? 'You have a new notification',
-      icon: '/manus-storage/icon-192_d0405887.png',
-      badge: '/manus-storage/icon-192_d0405887.png',
+      icon: '/icons/icon-192.png',
+      badge: '/icons/icon-192.png',
       tag: data.tag || 'remitflow-notification',
       data: { url: data.url || (isPayoutAlert ? '/partner/revenue-share?tab=payouts' : '/dashboard') },
       actions: isPayoutAlert
         ? [
-            { action: 'view-payout', title: 'View Payout', icon: '/manus-storage/icon-192_d0405887.png' },
+            { action: 'view-payout', title: 'View Payout', icon: '/icons/icon-192.png' },
             { action: 'dismiss', title: 'Dismiss' },
           ]
         : (data.actions || []),

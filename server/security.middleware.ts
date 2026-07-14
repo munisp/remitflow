@@ -74,9 +74,6 @@ export const ALLOWED_ORIGINS: (string | RegExp)[] = [
   "http://localhost:5173",
   "http://127.0.0.1:3000",
   "http://127.0.0.1:5173",
-  /^https:\/\/[a-z0-9-]+(\.us[0-9]+)?\.manus\.computer$/,
-  /^https:\/\/[a-z0-9.-]+-[a-z0-9]+\.us[0-9]+\.manus\.computer$/,
-  /^https:\/\/[a-z0-9-]+\.manus\.space$/,
   // Custom production domain (configured via REMITFLOW_PRODUCTION_DOMAIN)
   `https://${PRODUCTION_DOMAIN}`,
   `https://www.${PRODUCTION_DOMAIN}`,
@@ -148,7 +145,6 @@ export const helmetMiddleware = helmet({
         "https://open.er-api.com",
         "https://api.exchangerate-api.com",
         "https://api.frankfurter.app",
-        "https://api.manus.im",
         "wss:",
         "ws:",
       ],

@@ -10,7 +10,7 @@ import type { AppRouter } from '../../../../server/routers';
 
 export const trpc = createTRPCReact<AppRouter>();
 
-const API_BASE_URL = process.env.REMITFLOW_API_URL ?? 'https://remitflow.manus.space';
+const API_BASE_URL = process.env.REMITFLOW_API_URL ?? 'https://remitflow.app';
 
 export const trpcClient = trpc.createClient({
   links: [

@@ -9,7 +9,7 @@ export const APP = {
   NAME: "RemitFlow",
   TAGLINE: "Cross-Border Remittance Platform",
   VERSION: "5.0.0",
-  BASE_URL: process.env.APP_BASE_URL || `https://${process.env.REMITFLOW_PRODUCTION_DOMAIN || "remitflow.manus.space"}`,
+  BASE_URL: process.env.APP_BASE_URL || `https://${process.env.REMITFLOW_PRODUCTION_DOMAIN || "remitflow.app"}`,
   SUPPORT_EMAIL: "support@remitflow.com",
   COMPLIANCE_EMAIL: "compliance@remitflow.com",
   LEGAL_EMAIL: "legal@remitflow.com",

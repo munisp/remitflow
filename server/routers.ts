@@ -529,31 +529,32 @@ export const appRouter = router({
       const db = await getDb();
       return { status: "ok", db: !!db, timestamp: new Date().toISOString(), version: "2.0.0", uptime: process.uptime() };
     }),
-    // ─── Heartbeat job management (admin only) ──────────────────────────────
+    // ─── Scheduled job management (admin only) ─────────────────────────────
+    // Uses the scheduler API (OPENAI_API_BASE_URL + OPENAI_API_KEY).
     heartbeatList: adminProcedure.query(async () => {
       const { execSync } = await import('child_process');
       try {
-        const raw = execSync('manus-heartbeat list 2>&1', { timeout: 10000 }).toString();
-        const parsed = JSON.parse(raw);
-        return { jobs: (parsed.jobs ?? []) as Array<{ task_uid: string; name: string; cron: string; path: string; description?: string; enabled: boolean; next_execution_at?: string; last_execution_at?: string; last_status?: string }>, total: (parsed.total ?? 0) as number };
+        const output = execSync('manus-config schedule list --json', { encoding: 'utf8' });
+        const result = JSON.parse(output) as { jobs: Array<{ task_uid: string; name: string; cron: string; path: string; description?: string; enabled: boolean; next_execution_at?: string; last_execution_at?: string; last_status?: string }>; total: number };
+        return { jobs: result.jobs, total: result.total };
       } catch (err: any) {
-        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to list heartbeat jobs: ${err.message}` });
+        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to list scheduled jobs: ${err.message}` });
       }
     }),
     heartbeatLogs: adminProcedure.input(z.object({ taskUid: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/, "Invalid task UID format") })).query(async ({ input }) => {
       const { execFileSync } = await import('child_process');
       try {
-        const raw = execFileSync('manus-heartbeat', ['logs', '--task-uid', input.taskUid], { timeout: 10000 }).toString();
-        const parsed = JSON.parse(raw);
-        return { logs: (parsed.logs ?? []) as Array<{ execution_id: string; started_at: string; finished_at?: string; status: string; http_status?: number; duration_ms?: number }>, total: (parsed.total ?? 0) as number };
+        const output = execFileSync('manus-config', ['schedule', 'logs', input.taskUid, '--json'], { encoding: 'utf8' });
+        const result = JSON.parse(output) as { logs: Array<{ execution_id: string; started_at: string; finished_at?: string; status: string; http_status?: number; duration_ms?: number }>; total: number };
+        return { logs: result.logs, total: result.total };
       } catch (err: any) {
-        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to fetch logs: ${err.message}` });
+        throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to get logs: ${err.message}` });
       }
     }),
     heartbeatPause: adminProcedure.input(z.object({ taskUid: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/, "Invalid task UID format") })).mutation(async ({ input }) => {
       const { execFileSync } = await import('child_process');
       try {
-        execFileSync('manus-heartbeat', ['pause', '--task-uid', input.taskUid], { timeout: 10000 });
+        execFileSync('manus-config', ['schedule', 'pause', input.taskUid], { encoding: 'utf8' });
         return { success: true };
       } catch (err: any) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to pause job: ${err.message}` });
@@ -562,7 +563,7 @@ export const appRouter = router({
     heartbeatResume: adminProcedure.input(z.object({ taskUid: z.string().min(1).regex(/^[a-zA-Z0-9_-]+$/, "Invalid task UID format") })).mutation(async ({ input }) => {
       const { execFileSync } = await import('child_process');
       try {
-        execFileSync('manus-heartbeat', ['resume', '--task-uid', input.taskUid], { timeout: 10000 });
+        execFileSync('manus-config', ['schedule', 'resume', input.taskUid], { encoding: 'utf8' });
         return { success: true };
       } catch (err: any) {
         throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: `Failed to resume job: ${err.message}` });

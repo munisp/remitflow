@@ -109,13 +109,13 @@ export async function ollamaChat(
     }
   }
 
-  // Fallback to Manus built-in LLM
+  // Fallback to OpenAI-compatible LLM
   try {
     const { invokeLLM } = await import("./_core/llm.js");
     const response = await invokeLLM({ messages });
     return {
       content: (response.choices?.[0]?.message?.content as string) || "",
-      model: "manus-builtin",
+      model: "openai-fallback",
       durationMs: Date.now() - start,
       available: false,
       usedFallback: true,

@@ -31,6 +31,8 @@
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
+import { join } from "path";
+const ROOT_DIR = join(__dirname, "../..");
 import { createCallerFactory } from "../_core/trpc";
 
 // ── Mock Infrastructure ───────────────────────────────────────────────────────
@@ -412,7 +414,7 @@ describe("Stakeholder 1: End User — Retail Remittance Flows", () => {
   describe("1.12 Social Ledger — Ajo/Esusu Groups", () => {
     it("should have rust-social-ledger service implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/rust-social-ledger/src/main.rs");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/rust-social-ledger/src/main.rs"));
       expect(exists).toBe(true);
     });
   });
@@ -456,7 +458,7 @@ describe("Stakeholder 2: Business User — Bulk Payments & Payroll", () => {
   describe("2.3 FX Hedging for Business Transfers", () => {
     it("should have go-fx-hedging service implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/go-fx-hedging/main.go");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/go-fx-hedging/main.go"));
       expect(exists).toBe(true);
     });
   });
@@ -496,7 +498,7 @@ describe("Stakeholder 3: Compliance Officer — AML, KYC, STR", () => {
 
     it("should have GNN fraud detection service implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/python-gnn-fraud/main.py");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/python-gnn-fraud/main.py"));
       expect(exists).toBe(true);
     });
   });
@@ -504,7 +506,7 @@ describe("Stakeholder 3: Compliance Officer — AML, KYC, STR", () => {
   describe("3.2 FATF Travel Rule Enforcement", () => {
     it("should have travel rule service implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/travel-rule-service/main.go");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/travel-rule-service/main.go"));
       expect(exists).toBe(true);
     });
 
@@ -522,7 +524,7 @@ describe("Stakeholder 3: Compliance Officer — AML, KYC, STR", () => {
 
     it("should have python-str-generator service implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/python-str-generator/main.py");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/python-str-generator/main.py"));
       expect(exists).toBe(true);
     });
   });
@@ -530,7 +532,7 @@ describe("Stakeholder 3: Compliance Officer — AML, KYC, STR", () => {
   describe("3.4 Sanctions Screening", () => {
     it("should have ComplyAdvantage integration implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/python-sanctions-updater/main.py");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/python-sanctions-updater/main.py"));
       expect(exists).toBe(true);
     });
   });
@@ -597,7 +599,7 @@ describe("Stakeholder 4: Platform Admin — Analytics & System Management", () =
   describe("4.4 Prometheus Alerting Rules", () => {
     it("should have Prometheus alerting rules defined", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/infra/prometheus/alerts.yml");
+      const exists = fs.existsSync(join(ROOT_DIR, "infra/prometheus/alerts.yml"));
       expect(exists).toBe(true);
     });
   });
@@ -605,7 +607,7 @@ describe("Stakeholder 4: Platform Admin — Analytics & System Management", () =
   describe("4.5 Chaos Engineering Configuration", () => {
     it("should have chaos experiments configured", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/infra/chaos/chaos-experiments.yaml");
+      const exists = fs.existsSync(join(ROOT_DIR, "infra/chaos/chaos-experiments.yaml"));
       expect(exists).toBe(true);
     });
   });
@@ -613,13 +615,13 @@ describe("Stakeholder 4: Platform Admin — Analytics & System Management", () =
   describe("4.6 Kubernetes & Helm Infrastructure", () => {
     it("should have Helm charts defined", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/infrastructure/charts");
+      const exists = fs.existsSync(join(ROOT_DIR, "infrastructure/charts"));
       expect(exists).toBe(true);
     });
 
     it("should have Terraform IaC defined", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/terraform/environments/production/main.tf");
+      const exists = fs.existsSync(join(ROOT_DIR, "terraform/environments/production/main.tf"));
       expect(exists).toBe(true);
     });
   });
@@ -646,7 +648,7 @@ describe("Stakeholder 5: B2B Partner / Tenant — White-Label & Developer Portal
   describe("5.3 SDK Auto-Generation Pipeline", () => {
     it("should have SDK generation workflow defined", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/.github/workflows/sdk-generation.yml");
+      const exists = fs.existsSync(join(ROOT_DIR, ".github/workflows/sdk-generation.yml"));
       expect(exists).toBe(true);
     });
   });
@@ -654,13 +656,13 @@ describe("Stakeholder 5: B2B Partner / Tenant — White-Label & Developer Portal
   describe("5.4 OpenAPI Specification", () => {
     it("should have enriched OpenAPI spec", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/openapi/remitflow-api.yaml");
+      const exists = fs.existsSync(join(ROOT_DIR, "openapi/remitflow-api.yaml"));
       expect(exists).toBe(true);
     });
 
     it("should include ODL settlement path in OpenAPI spec", async () => {
       const fs = await import("fs");
-      const content = fs.readFileSync("/home/ubuntu/remitflow/openapi/remitflow-api.yaml", "utf-8");
+      const content = fs.readFileSync(join(ROOT_DIR, "openapi/remitflow-api.yaml"), "utf-8");
       expect(content).toContain("odl");
     });
   });
@@ -689,7 +691,7 @@ describe("Stakeholder 6: Agent — Cash-In / Cash-Out", () => {
   describe("6.2 QR/NFC Payment Gateway", () => {
     it("should have go-qr-nfc-gateway service implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/go-qr-nfc-gateway/main.go");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/go-qr-nfc-gateway/main.go"));
       expect(exists).toBe(true);
     });
   });
@@ -697,7 +699,7 @@ describe("Stakeholder 6: Agent — Cash-In / Cash-Out", () => {
   describe("6.3 M-Pesa Integration", () => {
     it("should have M-Pesa payment gateway implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/payment-gateways/m-pesa/service.py");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/payment-gateways/m-pesa/service.py"));
       expect(exists).toBe(true);
     });
   });
@@ -729,7 +731,7 @@ describe("Cross-Cutting: AI, Notifications, Security", () => {
   describe("7.3 Security Hardening", () => {
     it("should have security hardening module defined", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/server/security/hardening.ts");
+      const exists = fs.existsSync(join(ROOT_DIR, "server/security/hardening.ts"));
       expect(exists).toBe(true);
     });
 
@@ -742,7 +744,7 @@ describe("Cross-Cutting: AI, Notifications, Security", () => {
   describe("7.4 Post-Quantum Cryptography", () => {
     it("should have rust-pq-crypto service implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/rust-pq-crypto/src/main.rs");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/rust-pq-crypto/src/main.rs"));
       expect(exists).toBe(true);
     });
   });
@@ -763,13 +765,13 @@ describe("Cross-Cutting: AI, Notifications, Security", () => {
   describe("7.7 TigerBeetle Double-Entry Ledger", () => {
     it("should have TigerBeetle bridge service implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/rust-tigerbeetle-bridge/src/main.rs");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/rust-tigerbeetle-bridge/src/main.rs"));
       expect(exists).toBe(true);
     });
 
     it("should have reconciliation engine implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/server/integrations/tigerbeetle/reconciliation.ts");
+      const exists = fs.existsSync(join(ROOT_DIR, "server/integrations/tigerbeetle/reconciliation.ts"));
       expect(exists).toBe(true);
     });
   });
@@ -777,7 +779,7 @@ describe("Cross-Cutting: AI, Notifications, Security", () => {
   describe("7.8 ISO 20022 Mojaloop Integration", () => {
     it("should have ISO 20022 message builder implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/server/integrations/mojaloop/iso20022.ts");
+      const exists = fs.existsSync(join(ROOT_DIR, "server/integrations/mojaloop/iso20022.ts"));
       expect(exists).toBe(true);
     });
   });
@@ -785,7 +787,7 @@ describe("Cross-Cutting: AI, Notifications, Security", () => {
   describe("7.9 Lakehouse Analytics Pipeline", () => {
     it("should have Python lakehouse pipeline implemented", async () => {
       const fs = await import("fs");
-      const exists = fs.existsSync("/home/ubuntu/remitflow/services/python-lakehouse/src/pipeline.py");
+      const exists = fs.existsSync(join(ROOT_DIR, "services/python-lakehouse/src/pipeline.py"));
       expect(exists).toBe(true);
     });
   });
@@ -793,42 +795,42 @@ describe("Cross-Cutting: AI, Notifications, Security", () => {
   describe("7.10 Repository Documentation & DevOps", () => {
     it("should have .env.example defined", async () => {
       const fs = await import("fs");
-      expect(fs.existsSync("/home/ubuntu/remitflow/.env.example")).toBe(true);
+      expect(fs.existsSync(join(ROOT_DIR, ".env.example"))).toBe(true);
     });
 
     it("should have SECURITY.md defined", async () => {
       const fs = await import("fs");
-      expect(fs.existsSync("/home/ubuntu/remitflow/SECURITY.md")).toBe(true);
+      expect(fs.existsSync(join(ROOT_DIR, "SECURITY.md"))).toBe(true);
     });
 
     it("should have CHANGELOG.md defined", async () => {
       const fs = await import("fs");
-      expect(fs.existsSync("/home/ubuntu/remitflow/CHANGELOG.md")).toBe(true);
+      expect(fs.existsSync(join(ROOT_DIR, "CHANGELOG.md"))).toBe(true);
     });
 
     it("should have Dependabot configured", async () => {
       const fs = await import("fs");
-      expect(fs.existsSync("/home/ubuntu/remitflow/.github/dependabot.yml")).toBe(true);
+      expect(fs.existsSync(join(ROOT_DIR, ".github/dependabot.yml"))).toBe(true);
     });
 
     it("should have CODEOWNERS defined", async () => {
       const fs = await import("fs");
-      expect(fs.existsSync("/home/ubuntu/remitflow/.github/CODEOWNERS")).toBe(true);
+      expect(fs.existsSync(join(ROOT_DIR, ".github/CODEOWNERS"))).toBe(true);
     });
 
     it("should have PR template defined", async () => {
       const fs = await import("fs");
-      expect(fs.existsSync("/home/ubuntu/remitflow/.github/pull_request_template.md")).toBe(true);
+      expect(fs.existsSync(join(ROOT_DIR, ".github/pull_request_template.md"))).toBe(true);
     });
 
     it("should have k6 load tests defined", async () => {
       const fs = await import("fs");
-      expect(fs.existsSync("/home/ubuntu/remitflow/k6/transfer-load-test.js")).toBe(true);
+      expect(fs.existsSync(join(ROOT_DIR, "k6/transfer-load-test.js"))).toBe(true);
     });
 
     it("should have vitest configuration defined", async () => {
       const fs = await import("fs");
-      expect(fs.existsSync("/home/ubuntu/remitflow/vitest.config.ts")).toBe(true);
+      expect(fs.existsSync(join(ROOT_DIR, "vitest.config.ts"))).toBe(true);
     });
   });
 });

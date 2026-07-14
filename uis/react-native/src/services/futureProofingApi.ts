@@ -4,7 +4,7 @@
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API_BASE_URL = process.env.REMITFLOW_API_URL ?? 'https://remitflow.manus.space';
+const API_BASE_URL = process.env.REMITFLOW_API_URL ?? 'https://remitflow.app';
 
 async function getHeaders(): Promise<Record<string, string>> {
   const sessionId = await AsyncStorage.getItem('session_id');

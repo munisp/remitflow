@@ -64,7 +64,7 @@ class UserUpdateRequest(BaseModel):
     attributes: Optional[dict] = None
 
 class TokenExchangeRequest(BaseModel):
-    manus_token: str
+    oauth_token: str
     user_id: int
     email: str
 
@@ -178,11 +178,11 @@ class KeycloakClient:
         logger.info(f"Assigning roles {mapped_roles} to {keycloak_user_id}")
         return {"assigned": True, "roles": mapped_roles, "user_id": keycloak_user_id}
 
-    async def exchange_token(self, manus_token: str, user_id: int, email: str) -> dict:
-        """Exchange Manus OAuth token for Keycloak token (token exchange flow)"""
-        # In production: validate Manus token, then issue Keycloak token
+    async def exchange_token(self, oauth_token: str, user_id: int, email: str) -> dict:
+        """Exchange an external OAuth token for a Keycloak token (token exchange flow)"""
+        # In production: validate the incoming OAuth token, then issue a Keycloak token
         # For now: generate a mock Keycloak-compatible JWT
-        token_hash = hashlib.sha256(f"{manus_token}{user_id}".encode()).hexdigest()[:32]
+        token_hash = hashlib.sha256(f"{oauth_token}{user_id}".encode()).hexdigest()[:32]
         return {
             "access_token": f"kc_{token_hash}",
             "token_type": "Bearer",
@@ -320,8 +320,8 @@ async def lookup_user(email: str, _=Depends(verify_api_key)):
 
 @app.post("/api/v1/token/exchange")
 async def exchange_token(req: TokenExchangeRequest, _=Depends(verify_api_key)):
-    """Exchange Manus OAuth token for Keycloak token"""
-    result = await kc_client.exchange_token(req.manus_token, req.user_id, req.email)
+    """Exchange an external OAuth token for a Keycloak token"""
+    result = await kc_client.exchange_token(req.oauth_token, req.user_id, req.email)
     return result
 
 @app.post("/api/v1/roles/assign")
@@ -362,7 +362,7 @@ async def realm_stats(_=Depends(verify_api_key)):
         "total_users": 0,  # In production: query Keycloak admin API
         "active_sessions": 0,
         "roles": ["remitflow-user", "remitflow-admin", "remitflow-partner", "remitflow-compliance"],
-        "identity_providers": ["manus-oauth", "google", "microsoft"],
+        "identity_providers": ["oidc", "google", "microsoft"],
         "mfa_enabled": True,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

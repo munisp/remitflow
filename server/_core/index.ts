@@ -315,7 +315,7 @@ async function startServer() {
   // Prometheus metrics endpoint (scrape target for Prometheus/Grafana)
   app.get("/metrics", metricsHandler);
 
-  // Storage proxy for /manus-storage/* assets
+  // Storage proxy for /icons/* and other static assets from S3-compatible storage
   registerStorageProxy(app);
 
   // OAuth callback under /api/oauth/callback
@@ -1236,7 +1236,7 @@ async function startServer() {
 
   // POST /api/scheduled/purge-expired-keys — every 6h idempotency key cleanup
   // Project-level Heartbeat cron (§4a). No end-user involvement.
-  // Register via: manus-heartbeat create --name purge-idempotency-keys --cron "0 0 */6 * * *" --path /api/scheduled/purge-expired-keys
+  // Register via: POST /api/scheduler/jobs { name: "purge-idempotency-keys", cron: "0 0 */6 * * *", path: "/api/scheduled/purge-expired-keys" }
   app.post("/api/scheduled/purge-expired-keys", async (req, res) => {
     try {
       const isScheduledTask = req.headers["x-scheduled-task"] === "true";

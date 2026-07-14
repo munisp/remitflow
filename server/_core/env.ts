@@ -1,5 +1,22 @@
 // ── Environment Configuration ────────────────────────────────────────────────
 // Production-critical vars MUST be set via environment. No secrets in source.
+//
+// Required in production:
+//   DATABASE_URL           — PostgreSQL connection string
+//   JWT_SECRET             — Cookie/session signing secret (min 32 chars)
+//   OPENAI_API_BASE_URL    — OpenAI-compatible LLM endpoint (e.g. https://api.openai.com/v1)
+//   OPENAI_API_KEY         — API key for the LLM provider
+//   RESEND_API_KEY         — Transactional email via Resend
+//   KEYCLOAK_URL           — Keycloak server URL
+//   KEYCLOAK_CLIENT_SECRET — Keycloak client secret
+//   PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET
+//   FLUTTERWAVE_SECRET_KEY / FLUTTERWAVE_PUBLIC_KEY
+//
+// Optional:
+//   STORAGE_ENDPOINT       — S3-compatible endpoint for static assets
+//   STORAGE_BUCKET         — S3 bucket name
+//   APP_URL                — Public URL of the app (default: https://remitflow.app)
+//   REMITFLOW_PRODUCTION_DOMAIN — Production domain for CORS (default: remitflow.app)
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -19,8 +36,9 @@ export const ENV = {
   oAuthServerUrl: requireInProduction("OAUTH_SERVER_URL", ""),
   ownerOpenId: process.env.OWNER_OPEN_ID ?? "",
   isProduction,
-  forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
-  forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
+  // LLM (OpenAI-compatible). Set OPENAI_API_BASE_URL to point to any compatible provider.
+  forgeApiUrl: process.env.OPENAI_API_BASE_URL ?? "",
+  forgeApiKey: process.env.OPENAI_API_KEY ?? "",
   // Email (Resend)
   resendApiKey: process.env.RESEND_API_KEY ?? "",
   resendFromEmail: process.env.RESEND_FROM_EMAIL ?? "noreply@remitflow.app",

@@ -142,9 +142,9 @@ describe("v94 — Referral Bonus System", () => {
 
   it("generates correct referral link format", () => {
     const referralCode = "RF123456";
-    const origin = "https://remitflow.manus.space";
+    const origin = "https://remitflow.app";
     const link = `${origin}/?ref=${referralCode}`;
-    expect(link).toBe("https://remitflow.manus.space/?ref=RF123456");
+    expect(link).toBe("https://remitflow.app/?ref=RF123456");
     expect(link).toContain("?ref=");
   });
 

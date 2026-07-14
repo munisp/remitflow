@@ -124,7 +124,7 @@ export default function LoginScreen() {
           )}
 
           <Text style={styles.hint}>
-            Visit remitflow.manus.space on your browser to get your session token from Settings → API Access.
+            Visit remitflow.app on your browser to get your session token from Settings → API Access.
           </Text>
         </View>
 

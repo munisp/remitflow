@@ -43,7 +43,7 @@ export default function HNWPrivateBankingScreen() {
 
   const handleCheckout = (serviceType: string) => {
     setCheckoutLoading(serviceType);
-    createCheckout?.mutate?.({ serviceType, origin: 'https://remitflow.manus.space' });
+    createCheckout?.mutate?.({ serviceType, origin: 'https://remitflow.app' });
   };
 
   const tierColors: Record<string, string> = {

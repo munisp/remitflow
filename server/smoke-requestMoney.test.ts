@@ -62,10 +62,10 @@ describe("requestMoney router — smoke tests", () => {
   });
 
   it("should build correct pay link from base URL and token", () => {
-    const baseUrl = "https://remitflow.manus.space";
+    const baseUrl = "https://remitflow.app";
     const token = "abc123def456";
     const payLink = `${baseUrl}/pay/${token}`;
-    expect(payLink).toBe("https://remitflow.manus.space/pay/abc123def456");
+    expect(payLink).toBe("https://remitflow.app/pay/abc123def456");
     expect(payLink).toMatch(/^https:\/\//);
     expect(payLink).toContain(token);
   });

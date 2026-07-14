@@ -220,7 +220,7 @@ describe("/api/scheduled/purge-expired-keys — handler logic", () => {
 // ─── Cron registration spec ───────────────────────────────────────────────────
 describe("/api/scheduled/purge-expired-keys — cron registration spec", () => {
   it("cron expression is 6-field UTC every-6-hours pattern", () => {
-    // CLI: manus-heartbeat create --name purge-idempotency-keys --cron "0 0 */6 * * *" --path /api/scheduled/purge-expired-keys
+    // Scheduler: POST /api/scheduler/jobs { name: "purge-idempotency-keys", cron: "0 0 */6 * * *", path: "/api/scheduled/purge-expired-keys" }
     const cronExpression = "0 0 */6 * * *";
     const parts = cronExpression.split(" ");
     expect(parts).toHaveLength(6);   // 6-field cron (with seconds)

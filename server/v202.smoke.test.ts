@@ -223,12 +223,12 @@ describe("HNW Stripe checkout — service configuration", () => {
   });
 
   it("should build correct success/cancel URLs from origin", () => {
-    const origin = "https://example.manus.space";
+    const origin = "https://example.remitflow.app";
     const serviceType = "priority_swift";
     const successUrl = `${origin}/private-banking?payment=success&service=${serviceType}`;
     const cancelUrl = `${origin}/private-banking?payment=cancelled`;
-    expect(successUrl).toBe("https://example.manus.space/private-banking?payment=success&service=priority_swift");
-    expect(cancelUrl).toBe("https://example.manus.space/private-banking?payment=cancelled");
+    expect(successUrl).toBe("https://example.remitflow.app/private-banking?payment=success&service=priority_swift");
+    expect(cancelUrl).toBe("https://example.remitflow.app/private-banking?payment=cancelled");
   });
 
   it("should include required Stripe metadata fields", () => {
