@@ -4,4 +4,4 @@ asyncpg==0.30.0
 reportlab==5.0.0
 pydantic==2.13.4
 prometheus-client==0.25.0
-python-dotenv==1.0.1
+python-dotenv==1.2.2
