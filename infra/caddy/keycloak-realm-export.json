@@ -1,0 +1,139 @@
+{
+  "realm": "remitflow",
+  "enabled": true,
+  "displayName": "RemitFlow",
+  "displayNameHtml": "<strong>RemitFlow</strong> Identity",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "waitIncrementSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "failureFactor": 5,
+  "accessTokenLifespan": 300,
+  "accessTokenLifespanForImplicitFlow": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "offlineSessionIdleTimeout": 2592000,
+  "accessCodeLifespan": 60,
+  "accessCodeLifespanUserAction": 300,
+  "accessCodeLifespanLogin": 1800,
+  "actionTokenGeneratedByAdminLifespan": 43200,
+  "actionTokenGeneratedByUserLifespan": 300,
+  "roles": {
+    "realm": [
+      { "name": "user",             "description": "Standard RemitFlow user" },
+      { "name": "agent",            "description": "RemitFlow cash agent" },
+      { "name": "compliance",       "description": "Compliance officer" },
+      { "name": "admin",            "description": "Platform administrator" },
+      { "name": "super-admin",      "description": "Super administrator" },
+      { "name": "grafana-viewer",   "description": "Read-only Grafana access" },
+      { "name": "grafana-admin",    "description": "Grafana administrator" },
+      { "name": "temporal-admin",   "description": "Temporal workflow admin" },
+      { "name": "b2b-partner",      "description": "B2B API partner" },
+      { "name": "kyc-reviewer",     "description": "KYC document reviewer" },
+      { "name": "risk-analyst",     "description": "Risk and fraud analyst" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "remitflow-backend",
+      "name": "RemitFlow Backend API",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KEYCLOAK_CLIENT_SECRET:-remitflow-client-secret-change-in-production}",
+      "bearerOnly": false,
+      "publicClient": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "https://api.remitflow.local/*",
+        "https://admin.remitflow.local/*",
+        "http://localhost:3000/*"
+      ],
+      "webOrigins": [
+        "https://api.remitflow.local",
+        "https://admin.remitflow.local",
+        "http://localhost:3000"
+      ],
+      "defaultClientScopes": ["web-origins", "profile", "roles", "email"],
+      "optionalClientScopes": ["address", "phone", "offline_access"],
+      "attributes": {
+        "access.token.lifespan": "300",
+        "client.session.idle.timeout": "1800"
+      }
+    },
+    {
+      "clientId": "remitflow-pwa",
+      "name": "RemitFlow PWA",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "https://app.remitflow.local/*",
+        "http://localhost:5173/*"
+      ],
+      "webOrigins": [
+        "https://app.remitflow.local",
+        "http://localhost:5173"
+      ]
+    },
+    {
+      "clientId": "caddy-keycloak-bridge",
+      "name": "Caddy Forward Auth Bridge",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${CADDY_BRIDGE_CLIENT_SECRET:-caddy-bridge-secret-change-in-production}",
+      "bearerOnly": false,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect",
+      "description": "Used by caddy-keycloak-bridge for token introspection"
+    },
+    {
+      "clientId": "grafana",
+      "name": "Grafana",
+      "enabled": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${GRAFANA_KEYCLOAK_SECRET:-grafana-secret-change-in-production}",
+      "standardFlowEnabled": true,
+      "protocol": "openid-connect",
+      "redirectUris": ["https://grafana.remitflow.local/*"],
+      "webOrigins": ["https://grafana.remitflow.local"]
+    }
+  ],
+  "identityProviders": [],
+  "userFederationProviders": [],
+  "eventsEnabled": true,
+  "eventsExpiration": 604800,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "enabledEventTypes": [
+    "LOGIN", "LOGIN_ERROR", "LOGOUT", "REGISTER", "REGISTER_ERROR",
+    "UPDATE_PASSWORD", "UPDATE_PASSWORD_ERROR", "UPDATE_PROFILE",
+    "SEND_RESET_PASSWORD", "RESET_PASSWORD", "RESET_PASSWORD_ERROR",
+    "VERIFY_EMAIL", "VERIFY_EMAIL_ERROR",
+    "CLIENT_LOGIN", "CLIENT_LOGIN_ERROR",
+    "TOKEN_EXCHANGE", "TOKEN_EXCHANGE_ERROR"
+  ],
+  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and specialChars(1) and notUsername and passwordHistory(5)",
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA256",
+  "otpPolicyDigits": 6,
+  "otpPolicyPeriod": 30
+}

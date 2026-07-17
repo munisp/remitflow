@@ -1,0 +1,86 @@
+# ── Caddy Edge Proxy — Helm Values ────────────────────────────────────────────
+replicaCount: 2
+
+image:
+  repository: remitflow/caddy
+  pullPolicy: IfNotPresent
+  tag: "2.9"
+
+# Domain configuration
+domains:
+  api:       "api.remitflow.io"
+  b2b:       "b2b.remitflow.io"
+  admin:     "admin.remitflow.io"
+  grafana:   "grafana.remitflow.io"
+  keycloak:  "auth.remitflow.io"
+  temporal:  "temporal.remitflow.io"
+  prometheus: "metrics.remitflow.io"
+
+# TLS configuration
+tls:
+  acmeEmail: "ops@remitflow.io"
+  # Use Redis for cert storage (required for multi-replica deployments)
+  storageBackend: redis
+
+# Keycloak integration
+keycloak:
+  url: "http://keycloak:8080"
+  realm: "remitflow"
+
+# APISix upstream
+apisix:
+  host: "apisix"
+  port: 9080
+
+# Redis (for TLS cert storage)
+redis:
+  host: "redis"
+  port: 6379
+  db: 1
+
+# Resource limits
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# Autoscaling
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# Service configuration
+service:
+  type: LoadBalancer
+  ports:
+    http: 80
+    https: 443
+    admin: 2019
+    metrics: 2020
+
+# Prometheus monitoring
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: "15s"
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Security context
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+    add: ["NET_BIND_SERVICE"]

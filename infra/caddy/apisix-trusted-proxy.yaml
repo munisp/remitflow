@@ -1,0 +1,55 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# RemitFlow — APISix Trusted Proxy Configuration for Caddy
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# When Caddy sits in front of APISix, APISix must trust Caddy's X-Real-IP and
+# X-Forwarded-* headers to correctly identify client IPs for:
+#   - Rate limiting (limit-count, limit-req plugins)
+#   - IP restriction (ip-restriction plugin)
+#   - Access logs
+#   - Fraud detection (real client IP needed)
+#
+# APISix's real-ip plugin reads the X-Real-IP header set by Caddy and replaces
+# the connection IP with the actual client IP.
+#
+# This file documents the required APISix plugin configuration.
+# Apply via: kubectl apply -f (for K8s) or via setup-routes.sh (for Docker)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Global Plugin Config (add to apisix.yaml plugin_attr section) ─────────────
+plugin_attr:
+  real-ip:
+    # Trust only Caddy's internal IP range as the proxy
+    # In Docker Compose: Caddy is on the remitflow-internal network (172.20.0.0/16)
+    # In Kubernetes: Caddy pod CIDR
+    trusted_addresses:
+      - 172.20.0.0/16   # Docker internal network
+      - 10.0.0.0/8      # Kubernetes pod CIDR
+      - 127.0.0.1/32    # Loopback (for local testing)
+    # Read real IP from this header (set by Caddy)
+    source: http_x_real_ip
+    # Recursive lookup to handle multiple proxy hops
+    recursive: true
+
+# ── Route-level Plugin Config (example for the main API route) ────────────────
+# Add this to each route in setup-routes.sh or the APISix admin API
+route_plugin_example:
+  real-ip:
+    source: http_x_real_ip
+    trusted_addresses:
+      - 172.20.0.0/16
+  # Forward auth headers from Caddy (set by caddy-keycloak-bridge)
+  # These are available to upstream services via request headers
+  proxy-rewrite:
+    headers:
+      set:
+        # Caddy sets these after Keycloak validation; APISix passes them through
+        X-Auth-User:   "$http_x_auth_user"
+        X-Auth-Email:  "$http_x_auth_email"
+        X-Auth-Roles:  "$http_x_auth_roles"
+        X-Auth-Tenant: "$http_x_auth_tenant"
+        X-Keycloak-ID: "$http_x_keycloak_id"
+        # mTLS headers from Caddy (for B2B routes)
+        X-Client-Cert-Subject: "$http_x_client_cert_subject"
+        X-Client-Cert-Serial:  "$http_x_client_cert_serial"
+        X-mTLS-Verified:       "$http_x_mtls_verified"

@@ -1,0 +1,15 @@
+apiVersion: v2
+name: caddy
+description: RemitFlow Caddy Edge Proxy — TLS termination, rate limiting, OIDC forward auth
+type: application
+version: 1.0.0
+appVersion: "2.9"
+keywords:
+  - caddy
+  - proxy
+  - tls
+  - edge
+  - gateway
+maintainers:
+  - name: RemitFlow Platform Team
+    email: platform@remitflow.io

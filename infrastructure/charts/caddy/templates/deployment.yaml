@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "caddy.fullname" . }}
+  labels:
+    {{- include "caddy.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "caddy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "caddy.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: caddy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+            - name: https
+              containerPort: 443
+              protocol: TCP
+            - name: https-udp
+              containerPort: 443
+              protocol: UDP
+            - name: admin
+              containerPort: 2019
+              protocol: TCP
+            - name: metrics
+              containerPort: 2020
+              protocol: TCP
+          env:
+            - name: CADDY_API_DOMAIN
+              value: {{ .Values.domains.api | quote }}
+            - name: CADDY_B2B_DOMAIN
+              value: {{ .Values.domains.b2b | quote }}
+            - name: CADDY_ADMIN_DOMAIN
+              value: {{ .Values.domains.admin | quote }}
+            - name: CADDY_GRAFANA_DOMAIN
+              value: {{ .Values.domains.grafana | quote }}
+            - name: CADDY_KEYCLOAK_DOMAIN
+              value: {{ .Values.domains.keycloak | quote }}
+            - name: CADDY_TEMPORAL_DOMAIN
+              value: {{ .Values.domains.temporal | quote }}
+            - name: CADDY_PROMETHEUS_DOMAIN
+              value: {{ .Values.domains.prometheus | quote }}
+            - name: ACME_EMAIL
+              value: {{ .Values.tls.acmeEmail | quote }}
+            - name: REDIS_HOST
+              value: {{ .Values.redis.host | quote }}
+            - name: REDIS_PORT
+              value: {{ .Values.redis.port | quote }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: remitflow-secrets
+                  key: redis-password
+                  optional: true
+          volumeMounts:
+            - name: caddy-data
+              mountPath: /data/caddy
+            - name: caddy-config
+              mountPath: /config/caddy
+            - name: caddy-logs
+              mountPath: /var/log/caddy
+            - name: caddyfile
+              mountPath: /etc/caddy/Caddyfile
+              subPath: Caddyfile
+              readOnly: true
+            - name: pki-certs
+              mountPath: /etc/caddy/pki
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /config/
+              port: 2019
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /config/
+              port: 2019
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      volumes:
+        - name: caddy-data
+          persistentVolumeClaim:
+            claimName: {{ include "caddy.fullname" . }}-data
+        - name: caddy-config
+          emptyDir: {}
+        - name: caddy-logs
+          emptyDir: {}
+        - name: caddyfile
+          configMap:
+            name: {{ include "caddy.fullname" . }}-config
+        - name: pki-certs
+          secret:
+            secretName: {{ include "caddy.fullname" . }}-pki
+            optional: true

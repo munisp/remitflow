@@ -1,0 +1,332 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# RemitFlow — Caddy Edge Proxy Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Architecture:
+#   Internet → Caddy (TLS, rate-limit, OIDC) → APISix (routing, WAF) → Services
+#
+# Caddy handles:
+#   1. Automatic TLS (Let's Encrypt / ZeroSSL) — zero-touch certificate lifecycle
+#   2. HTTP/2 + HTTP/3 (QUIC) — modern transport for mobile remittance clients
+#   3. Edge rate limiting — protects against DDoS before traffic hits APISix
+#   4. OIDC Forward Auth via Keycloak — secures admin/dashboard routes
+#   5. mTLS — enforces mutual TLS for B2B partner API endpoints
+#   6. Observability — structured JSON access logs, Prometheus /metrics
+#   7. Security headers — HSTS, CSP, X-Frame-Options, etc.
+#
+# ── Global Options ─────────────────────────────────────────────────────────────
+{
+	# Admin API (for dynamic config reload without restart)
+	admin 0.0.0.0:2019
+
+	# TLS certificate storage backend (Redis for cluster coordination)
+	storage redis {
+		host     {$REDIS_HOST:redis}
+		port     {$REDIS_PORT:6379}
+		password {$REDIS_PASSWORD:}
+		db       1
+		key_prefix "caddy_tls:"
+	}
+
+	# Default TLS policy — TLS 1.2 minimum, TLS 1.3 preferred
+	default_sni {$CADDY_DEFAULT_SNI:remitflow.local}
+
+	# Structured JSON access logging (feeds into OpenSearch)
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 100mb
+			roll_keep 10
+		}
+		format json {
+			time_format iso8601
+		}
+		level INFO
+	}
+
+	# Email for ACME certificate registration
+	email {$ACME_EMAIL:ops@remitflow.io}
+
+	# Use ZeroSSL as primary ACME CA (Let's Encrypt as fallback)
+	acme_ca https://acme.zerossl.com/v2/DV90
+
+	# On-Demand TLS — dynamically issue certs for tenant subdomains
+	on_demand_tls {
+		ask http://caddy-ondemand-validator:8070/tls/ask
+		interval 2m
+		burst 5
+	}
+}
+
+# ── Redirect HTTP → HTTPS ──────────────────────────────────────────────────────
+http:// {
+	redir https://{host}{uri} permanent
+}
+
+# ── Main API Gateway (routes to APISix) ───────────────────────────────────────
+{$CADDY_API_DOMAIN:api.remitflow.local} {
+	# TLS configuration
+	tls {
+		protocols tls1.2 tls1.3
+		curves x25519 p256 p384
+		ciphers TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+	}
+
+	# Security headers (applied to all responses)
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		X-XSS-Protection          "1; mode=block"
+		Referrer-Policy           "strict-origin-when-cross-origin"
+		Permissions-Policy        "geolocation=(), microphone=(), camera=()"
+		# Remove server fingerprinting headers
+		-Server
+		-X-Powered-By
+	}
+
+	# Edge rate limiting — applied before APISix
+	# Limits: 100 req/s per IP for general API, 10 req/s for auth endpoints
+	@auth_paths path /api/trpc/auth.* /api/trpc/user.login /api/trpc/user.register
+	rate_limit @auth_paths {
+		zone auth_zone {
+			key    {remote_host}
+			events 10
+			window 1s
+		}
+	}
+
+	rate_limit {
+		zone global_zone {
+			key    {remote_host}
+			events 100
+			window 1s
+		}
+	}
+
+	# Structured request logging with correlation ID
+	log {
+		output file /var/log/caddy/api-access.log {
+			roll_size 200mb
+			roll_keep 20
+		}
+		format json {
+			time_format iso8601
+		}
+	}
+
+	# Reverse proxy to APISix API Gateway
+	reverse_proxy apisix:9080 {
+		# Pass real client IP to APISix (APISix uses real-ip plugin)
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-Host {host}
+		# Correlation ID for distributed tracing
+		header_up X-Correlation-ID {http.request.uuid}
+
+		# Health checking of APISix
+		health_uri    /apisix/status
+		health_interval 10s
+		health_timeout  5s
+		health_status  200
+
+		# Connection pooling
+		keepalive          32
+		keepalive_timeout  60s
+
+		# Timeouts for financial transactions (generous to avoid false timeouts)
+		dial_timeout       5s
+		response_header_timeout 30s
+		read_buffer_size   16kb
+		write_buffer_size  16kb
+
+		# Load balancing (multiple APISix instances in production)
+		lb_policy round_robin
+	}
+}
+
+# ── B2B Partner API (mTLS enforced) ───────────────────────────────────────────
+{$CADDY_B2B_DOMAIN:b2b.remitflow.local} {
+	tls {
+		protocols tls1.2 tls1.3
+		# Require client certificates for B2B partners
+		client_auth {
+			mode                 require_and_verify
+			trusted_ca_certs_pem_files /etc/caddy/pki/b2b-partner-ca.pem
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		-Server
+	}
+
+	# Extract mTLS client certificate info and forward to APISix
+	header_up X-Client-Cert-Subject {tls_client_subject}
+	header_up X-Client-Cert-Serial  {tls_client_serial}
+	header_up X-Client-Cert-Issuer  {tls_client_issuer}
+	header_up X-mTLS-Verified       "true"
+
+	# Strict rate limit for B2B (per certificate subject)
+	rate_limit {
+		zone b2b_zone {
+			key    {tls_client_subject}
+			events 1000
+			window 60s
+		}
+	}
+
+	reverse_proxy apisix:9080 {
+		header_up X-Real-IP         {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		health_uri    /apisix/status
+		health_interval 10s
+		keepalive 16
+	}
+}
+
+# ── Admin Dashboard (Keycloak OIDC Forward Auth) ───────────────────────────────
+{$CADDY_ADMIN_DOMAIN:admin.remitflow.local} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "SAMEORIGIN"
+		Content-Security-Policy   "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+		-Server
+	}
+
+	# Forward auth to Keycloak bridge service for OIDC validation
+	# Any non-2xx response from keycloak-bridge redirects to login
+	forward_auth keycloak-bridge:8090 {
+		uri /auth/verify
+		copy_headers X-Auth-User X-Auth-Email X-Auth-Roles X-Auth-Tenant X-Keycloak-ID
+		header_up X-Forwarded-Method {method}
+		header_up X-Forwarded-Uri    {uri}
+		header_up X-Forwarded-Host   {host}
+	}
+
+	# After auth, proxy to the admin UI
+	reverse_proxy api:3000 {
+		header_up X-Real-IP         {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		keepalive 8
+	}
+}
+
+# ── Grafana Observability (Keycloak OIDC Forward Auth) ────────────────────────
+{$CADDY_GRAFANA_DOMAIN:grafana.remitflow.local} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "SAMEORIGIN"
+		-Server
+	}
+
+	# Only allow users with grafana-admin or grafana-viewer Keycloak role
+	forward_auth keycloak-bridge:8090 {
+		uri /auth/verify?required_role=grafana-viewer
+		copy_headers X-Auth-User X-Auth-Email X-Auth-Roles
+	}
+
+	reverse_proxy grafana:3000 {
+		header_up X-Real-IP         {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up Host              {upstream_hostport}
+	}
+}
+
+# ── Keycloak Identity Provider (public — handles its own auth) ────────────────
+{$CADDY_KEYCLOAK_DOMAIN:auth.remitflow.local} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		-Server
+	}
+
+	# Keycloak handles its own OIDC/SAML flows
+	reverse_proxy keycloak:8080 {
+		header_up X-Real-IP           {remote_host}
+		header_up X-Forwarded-For     {remote_host}
+		header_up X-Forwarded-Proto   {scheme}
+		header_up X-Forwarded-Host    {host}
+		header_up X-Forwarded-Port    {server_port}
+		# Keycloak needs the original host for redirect URIs
+		header_up Host                {host}
+		keepalive 16
+		flush_interval -1
+	}
+}
+
+# ── Temporal Workflow UI (internal, Keycloak auth) ────────────────────────────
+{$CADDY_TEMPORAL_DOMAIN:temporal.remitflow.local} {
+	tls {
+		protocols tls1.2 tls1.3
+	}
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "SAMEORIGIN"
+		-Server
+	}
+
+	forward_auth keycloak-bridge:8090 {
+		uri /auth/verify?required_role=temporal-admin
+		copy_headers X-Auth-User X-Auth-Email X-Auth-Roles
+	}
+
+	reverse_proxy temporal-ui:8080 {
+		header_up X-Real-IP         {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
+
+# ── Prometheus Metrics (internal only — no public access) ─────────────────────
+{$CADDY_PROMETHEUS_DOMAIN:metrics.remitflow.local} {
+	tls {
+		protocols tls1.2 tls1.3
+		# Only allow internal monitoring systems (IP restriction)
+		client_auth {
+			mode require_and_verify
+			trusted_ca_certs_pem_files /etc/caddy/pki/internal-ca.pem
+		}
+	}
+
+	# Only allow scraping from Prometheus server
+	@allowed_ips remote_ip 172.20.0.0/16 127.0.0.1
+	handle @allowed_ips {
+		reverse_proxy prometheus:9090 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+	handle {
+		respond "Forbidden" 403
+	}
+}
+
+# ── Caddy's own metrics endpoint (for Prometheus scraping) ────────────────────
+:2020 {
+	metrics /metrics
+}
+
+# ── On-Demand TLS Validator (internal service) ────────────────────────────────
+# Validates tenant subdomain requests before issuing certificates
+:8070 {
+	route /tls/ask {
+		reverse_proxy api:3000/api/trpc/system.validateTenantDomain
+	}
+}

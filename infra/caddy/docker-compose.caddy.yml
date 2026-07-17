@@ -1,0 +1,200 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# RemitFlow — Caddy Edge Proxy Docker Compose Extension
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f infra/caddy/docker-compose.caddy.yml up
+#
+# This file adds:
+#   1. caddy              — Edge proxy (TLS, rate-limit, HTTP/3)
+#   2. caddy-keycloak-bridge — Forward auth validator for Caddy ↔ Keycloak
+#   3. caddy-ondemand-validator — On-Demand TLS domain validator
+#   4. keycloak           — Identity Provider (OIDC/SAML)
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "3.9"
+
+services:
+
+  # ── Caddy Edge Proxy ─────────────────────────────────────────────────────────
+  caddy:
+    build:
+      context: ./services/caddy
+      dockerfile: Dockerfile
+    container_name: remitflow-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"       # HTTP (redirects to HTTPS)
+      - "443:443"     # HTTPS (TLS 1.2/1.3)
+      - "443:443/udp" # HTTP/3 (QUIC)
+      - "2019:2019"   # Caddy Admin API (internal only)
+      - "2020:2020"   # Caddy Prometheus metrics
+    environment:
+      # Domain configuration
+      CADDY_API_DOMAIN:       "${CADDY_API_DOMAIN:-api.remitflow.local}"
+      CADDY_B2B_DOMAIN:       "${CADDY_B2B_DOMAIN:-b2b.remitflow.local}"
+      CADDY_ADMIN_DOMAIN:     "${CADDY_ADMIN_DOMAIN:-admin.remitflow.local}"
+      CADDY_GRAFANA_DOMAIN:   "${CADDY_GRAFANA_DOMAIN:-grafana.remitflow.local}"
+      CADDY_KEYCLOAK_DOMAIN:  "${CADDY_KEYCLOAK_DOMAIN:-auth.remitflow.local}"
+      CADDY_TEMPORAL_DOMAIN:  "${CADDY_TEMPORAL_DOMAIN:-temporal.remitflow.local}"
+      CADDY_PROMETHEUS_DOMAIN: "${CADDY_PROMETHEUS_DOMAIN:-metrics.remitflow.local}"
+      CADDY_DEFAULT_SNI:      "${CADDY_DEFAULT_SNI:-api.remitflow.local}"
+      # TLS / ACME
+      ACME_EMAIL:             "${ACME_EMAIL:-ops@remitflow.io}"
+      # Redis for TLS certificate storage (cluster-safe)
+      REDIS_HOST:             "${REDIS_HOST:-redis}"
+      REDIS_PORT:             "${REDIS_PORT:-6379}"
+      REDIS_PASSWORD:         "${REDIS_PASSWORD:-}"
+    volumes:
+      - caddy-data:/data/caddy
+      - caddy-config:/config/caddy
+      - caddy-logs:/var/log/caddy
+      - ./services/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./services/caddy/pki:/etc/caddy/pki:ro
+    depends_on:
+      apisix:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      caddy-keycloak-bridge:
+        condition: service_healthy
+      caddy-ondemand-validator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - remitflow-internal
+      - remitflow-external
+    profiles: [full, gateway, caddy]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE  # Required to bind ports 80 and 443
+
+  # ── Caddy ↔ Keycloak Forward Auth Bridge ─────────────────────────────────────
+  caddy-keycloak-bridge:
+    build:
+      context: ./services/caddy-keycloak-bridge
+      dockerfile: Dockerfile
+    container_name: remitflow-caddy-keycloak-bridge
+    restart: unless-stopped
+    environment:
+      KEYCLOAK_URL:      "${KEYCLOAK_URL:-http://keycloak:8080}"
+      KEYCLOAK_REALM:    "${KEYCLOAK_REALM:-remitflow}"
+      LISTEN_ADDR:       ":8090"
+      LOG_LEVEL:         "${LOG_LEVEL:-info}"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8090/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - remitflow-internal
+    profiles: [full, gateway, caddy]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  # ── Caddy On-Demand TLS Validator ─────────────────────────────────────────────
+  caddy-ondemand-validator:
+    build:
+      context: ./services/caddy-ondemand-validator
+      dockerfile: Dockerfile
+    container_name: remitflow-caddy-ondemand-validator
+    restart: unless-stopped
+    environment:
+      API_BASE_URL:          "${API_BASE_URL:-http://api:3000}"
+      INTERNAL_API_KEY:      "${CADDY_ONDEMAND_API_KEY:-caddy-ondemand-key-change-in-production}"
+      ALLOWED_BASE_DOMAINS:  "${CADDY_ALLOWED_DOMAINS:-remitflow.io,remitflow.local}"
+      LISTEN_ADDR:           ":8070"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8070/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - remitflow-internal
+    profiles: [full, gateway, caddy]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  # ── Keycloak Identity Provider ────────────────────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: remitflow-keycloak
+    restart: unless-stopped
+    command:
+      - start-dev
+      - --import-realm
+    ports:
+      - "8080:8080"   # HTTP (internal only; Caddy terminates TLS externally)
+    environment:
+      # Admin credentials
+      KEYCLOAK_ADMIN:          "${KEYCLOAK_ADMIN_USER:-admin}"
+      KEYCLOAK_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:-changeme-in-production}"
+      # Database backend (production: use dedicated Postgres DB)
+      KC_DB:                   postgres
+      KC_DB_URL:               "jdbc:postgresql://postgres:5432/remitflow_keycloak"
+      KC_DB_USERNAME:          "${DB_USER:-remitflow}"
+      KC_DB_PASSWORD:          "${DB_PASSWORD:-remitflow_dev}"
+      # Proxy settings (Caddy handles TLS, Keycloak is behind proxy)
+      KC_PROXY:                edge
+      KC_HOSTNAME:             "${CADDY_KEYCLOAK_DOMAIN:-auth.remitflow.local}"
+      KC_HOSTNAME_STRICT:      "false"
+      KC_HTTP_ENABLED:         "true"
+      # Logging
+      KC_LOG_LEVEL:            "${KEYCLOAK_LOG_LEVEL:-INFO}"
+      # Features
+      KC_FEATURES:             "token-exchange,admin-fine-grained-authz"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./infra/caddy/keycloak-realm-export.json:/opt/keycloak/data/import/remitflow-realm.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && cat <&3 | grep -q '200 OK'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - remitflow-internal
+    profiles: [full, gateway, caddy, security]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: "1.0"
+
+volumes:
+  caddy-data:
+    driver: local
+  caddy-config:
+    driver: local
+  caddy-logs:
+    driver: local
+  keycloak-data:
+    driver: local

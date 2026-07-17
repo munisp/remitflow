@@ -1,0 +1,6 @@
+# Never commit PKI private keys or actual certificates
+*.key
+*.p12
+*.pfx
+*.pem
+!README.md

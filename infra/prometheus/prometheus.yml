@@ -82,6 +82,39 @@ scrape_configs:
       - targets: ["compliance-reporter:8104"]
     metrics_path: "/metrics"
 
+  # ─── Caddy Edge Proxy & Auth Services ────────────────────────────────────────
+  - job_name: "caddy"
+    static_configs:
+      - targets: ["caddy:2020"]
+    metrics_path: /metrics
+    labels:
+      layer: edge
+      component: proxy
+
+  - job_name: "caddy-keycloak-bridge"
+    static_configs:
+      - targets: ["caddy-keycloak-bridge:8090"]
+    metrics_path: /metrics
+    labels:
+      layer: edge
+      component: auth
+
+  - job_name: "caddy-ondemand-validator"
+    static_configs:
+      - targets: ["caddy-ondemand-validator:8070"]
+    metrics_path: /metrics
+    labels:
+      layer: edge
+      component: tls
+
+  - job_name: "keycloak"
+    static_configs:
+      - targets: ["keycloak:8080"]
+    metrics_path: /realms/master/metrics
+    labels:
+      layer: identity
+      component: oidc
+
 alerting:
   alertmanagers:
     - static_configs:
