@@ -26,7 +26,7 @@ jobs:
         service: [ngx-price-feed, api-gateway, corridor-pricing]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.22"
           cache-dependency-path: microservices/go-services/${{ matrix.service }}/go.sum
@@ -186,7 +186,7 @@ jobs:
         run: |
           sed -i "s|:v76|:${{ github.sha }}|g" k8s/microservices-v76.yaml
       - name: Deploy to cluster
-        uses: azure/k8s-deploy@v6
+        uses: azure/k8s-deploy@v7
         with:
           namespace: remitflow
           manifests: k8s/microservices-v76.yaml
