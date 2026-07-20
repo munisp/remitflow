@@ -159,7 +159,7 @@
     "@tailwindcss/typography": "^0.5.15",
     "@tailwindcss/vite": "^4.2.2",
     "@types/cors": "^2.8.19",
-    "@types/express": "4.17.21",
+    "@types/express": "5.0.6",
     "@types/google.maps": "^3.58.1",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.1",
