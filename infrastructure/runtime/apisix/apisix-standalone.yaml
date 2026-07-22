@@ -1,0 +1,47 @@
+routes:
+  - id: remitflow-api
+    uri: /api/*
+    methods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+    plugins:
+      cors:
+        allow_origins: "*"
+        allow_methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+        allow_headers: "Authorization,Content-Type,X-Request-ID,X-Tenant-ID"
+        expose_headers: "X-Request-ID"
+        max_age: 3600
+      request-id:
+        header_name: X-Request-ID
+        include_in_response: true
+      limit-req:
+        rate: 100
+        burst: 50
+        rejected_code: 429
+        key_type: var
+        key: remote_addr
+      openid-connect:
+        client_id: remitflow-backend
+        discovery: http://keycloak:8080/realms/remitflow/.well-known/openid-configuration
+        bearer_only: true
+        realm: remitflow
+        ssl_verify: false
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:3000": 1
+
+  - id: remitflow-health
+    uri: /health
+    methods: [GET]
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:3000": 1
+
+  - id: remitflow-public-auth-discovery
+    uri: /.well-known/*
+    methods: [GET]
+    upstream:
+      type: roundrobin
+      nodes:
+        "keycloak:8080": 1
+#END

@@ -25,8 +25,6 @@ import { z } from "zod";
 import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
-import { getRedisClient } from "../middleware/redis";
-const redis = getRedisClient();
 import { db } from "../db-shim";
 import { pushTokens, notificationPreferences } from "../../drizzle/schema";
 import { eq, and, inArray, desc } from "drizzle-orm";
@@ -59,13 +57,14 @@ interface PushMessage {
 
 // ── Expo Push API ─────────────────────────────────────────────────────────────
 
-const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
+const EXPO_PUSH_URL = process.env.EXPO_PUSH_URL?.trim();
 
 async function sendExpoPushNotifications(messages: PushMessage[]): Promise<{
   sent: number;
   failed: number;
   errors: string[];
 }> {
+  if (!EXPO_PUSH_URL) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "EXPO_PUSH_URL must be configured." });
   const chunks: PushMessage[][] = [];
   for (let i = 0; i < messages.length; i += 100) {
     chunks.push(messages.slice(i, i + 100));
@@ -228,15 +227,19 @@ export const pushNotificationRouter = router({
         platform: input.platform,
         deviceId: input.deviceId,
         appVersion: input.appVersion,
-        status: "active",
-      } as any).onConflictDoUpdate({
-        target: [pushTokens.deviceId as any],
+        isActive: true,
+        lastUsedAt: new Date(),
+      }).onConflictDoUpdate({
+        target: pushTokens.token,
         set: {
-          token: input.token,
+          userId,
+          platform: input.platform,
+          deviceId: input.deviceId,
           appVersion: input.appVersion,
           updatedAt: new Date(),
-          status: "active",
-        } as any,
+          lastUsedAt: new Date(),
+          isActive: true,
+        },
       });
 
       logger.info({ userId, platform: input.platform }, "[PushNotification] Token registered");
@@ -248,47 +251,43 @@ export const pushNotificationRouter = router({
    */
   updatePreferences: protectedProcedure
     .input(z.object({
-      transfer: z.boolean().default(true),
-      fx_alert: z.boolean().default(true),
-      kyc: z.boolean().default(true),
-      bnpl: z.boolean().default(true),
-      savings: z.boolean().default(true),
-      security: z.boolean().default(true),
-      promo: z.boolean().default(false),
+      transfer: z.boolean(),
+      fx_alert: z.boolean(),
+      kyc: z.boolean(),
+      bnpl: z.boolean(),
+      savings: z.boolean(),
+      security: z.boolean(),
+      promo: z.boolean(),
     }))
     .mutation(async ({ input, ctx }) => {
-      const userId = ctx.user.id;
-
-      await db.insert(notificationPreferences).values({
-        userId,
-        ...input,
-      } as any).onConflictDoUpdate({
-        target: [notificationPreferences.userId as any],
-        set: { ...input, updatedAt: new Date() } as any,
-      });
-
+      const entries = Object.entries(input) as Array<[NotificationCategory, boolean]>;
+      await Promise.all(entries.map(([category, pushEnabled]) => db.insert(notificationPreferences).values({
+        userId: ctx.user.id,
+        category,
+        emailEnabled: true,
+        inAppEnabled: true,
+        pushEnabled,
+        updatedAt: new Date(),
+      }).onConflictDoUpdate({
+        target: [notificationPreferences.userId, notificationPreferences.category],
+        set: { pushEnabled, updatedAt: new Date() },
+      })));
       return { updated: true, preferences: input };
     }),
 
   /**
-   * Get notification preferences for the current user.
+   * Get normalized category preferences for the current user.
    */
   getPreferences: protectedProcedure
     .query(async ({ ctx }) => {
-      const [prefs] = await db.select()
+      const rows = await db.select({ category: notificationPreferences.category, pushEnabled: notificationPreferences.pushEnabled })
         .from(notificationPreferences)
-        .where(eq(notificationPreferences.userId, ctx.user.id))
-        .limit(1);
-
-      return prefs ?? {
-        transfer: true,
-        fx_alert: true,
-        kyc: true,
-        bnpl: true,
-        savings: true,
-        security: true,
-        promo: false,
-      };
+        .where(eq(notificationPreferences.userId, ctx.user.id));
+      const preferences: Record<NotificationCategory, boolean> = { transfer: true, fx_alert: true, kyc: true, bnpl: true, savings: true, security: true, promo: false };
+      for (const row of rows as Array<{ category: string; pushEnabled: boolean | null }>) {
+        if (row.category in preferences) preferences[row.category as NotificationCategory] = row.pushEnabled ?? false;
+      }
+      return preferences;
     }),
 
   /**
@@ -300,7 +299,7 @@ export const pushNotificationRouter = router({
       userId: z.number().int().positive(),
       category: z.enum(["transfer", "fx_alert", "kyc", "bnpl", "savings", "security", "promo"]),
       event: z.string(),
-      data: z.record(z.unknown()).default({}),
+      data: z.record(z.string(), z.unknown()).default({}),
     }))
     .mutation(async ({ input }) => {
       // Get user's active tokens
@@ -309,7 +308,7 @@ export const pushNotificationRouter = router({
         .where(
           and(
             eq(pushTokens.userId, input.userId),
-            eq(pushTokens.status, "active" as any),
+            eq(pushTokens.isActive, true),
           )
         );
 
@@ -355,7 +354,7 @@ export const pushNotificationRouter = router({
           notification = { title: "RemitFlow Update", body: "You have a new notification.", deepLink: "remitflow://" };
       }
 
-      const messages: PushMessage[] = tokens.map((t) => ({
+      const messages: PushMessage[] = (tokens as Array<{ token: string }>).map((t) => ({
         to: t.token,
         title: notification.title,
         body: notification.body,
@@ -392,7 +391,7 @@ export const pushNotificationRouter = router({
     .mutation(async ({ input }) => {
       const query = db.select({ token: pushTokens.token })
         .from(pushTokens)
-        .where(eq(pushTokens.status, "active" as any));
+        .where(eq(pushTokens.isActive, true));
 
       const tokens = await query;
 
@@ -400,7 +399,7 @@ export const pushNotificationRouter = router({
         return { sent: 0, reason: "No active push tokens" };
       }
 
-      const messages: PushMessage[] = tokens.map((t) => ({
+      const messages: PushMessage[] = (tokens as Array<{ token: string }>).map((t) => ({
         to: t.token,
         title: input.title,
         body: input.body,

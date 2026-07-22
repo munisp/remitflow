@@ -25,12 +25,12 @@ import { z } from "zod";
 import { router, adminProcedure, protectedProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
 import { db } from "../db-shim";
-import { getRedisClient } from "../middleware/redis";
-const redis = getRedisClient();
+import { requireRedisClient } from "../middleware/redis";
+const redis = requireRedisClient();
 import { withSpan } from "../telemetry/otel";
 import { openSearch } from "../lib/middleware-orchestrator";
 const indexDocument = (index: string, doc: Record<string, unknown>, id?: string) => openSearch.index(index, doc, id);
-const searchDocuments = (index: string, query: unknown, size?: number) => openSearch.search(index, query, size);
+const searchDocuments = (index: string, query: Record<string, unknown>, size?: number) => openSearch.search(index, query as Parameters<typeof openSearch.search>[1], size);
 
 // ── Service URLs ──────────────────────────────────────────────────────────────
 

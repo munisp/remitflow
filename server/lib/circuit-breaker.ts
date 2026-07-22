@@ -199,6 +199,20 @@ class CircuitBreakerRegistry {
 
 export const circuitBreakerRegistry = new CircuitBreakerRegistry();
 
+export function getAllCircuitStatus(): Array<{
+  name: string;
+  state: "closed" | "open" | "half_open";
+  failureCount: number;
+  requestCount: number;
+}> {
+  return Array.from(circuitBreakerRegistry.getAll().entries()).map(([name, breaker]) => ({
+    name,
+    state: breaker.currentState.toLowerCase() as "closed" | "open" | "half_open",
+    failureCount: breaker.stats.failureCount,
+    requestCount: breaker.stats.requestCount,
+  }));
+}
+
 // ─── Pre-registered Breakers for All Downstream Services ─────────────────────
 
 export const breakers = {

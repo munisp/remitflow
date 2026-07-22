@@ -47,27 +47,24 @@ const Airtime: React.FC = () => {
     { id: '9mobile', name: '9mobile', color: 'from-green-700 to-green-800', text: 'text-white' },
   ];
   const quickAmounts = [100, 200, 500, 1000, 2000, 5000];
-  const [dataBundles, setDataBundles] = useState([
-    { id: '1', name: '1GB', validity: '1 Day', price: 350 },
-    { id: '2', name: '2GB', validity: '2 Days', price: 600 },
-    { id: '3', name: '3GB', validity: '7 Days', price: 1000 },
-    { id: '4', name: '5GB', validity: '30 Days', price: 1500 },
-    { id: '5', name: '10GB', validity: '30 Days', price: 2500 },
-    { id: '6', name: '20GB', validity: '30 Days', price: 5000 },
-  ]);
+  const [dataBundles, setDataBundles] = useState<Array<{ id: string; name: string; validity: string; price: number }>>([]);
 
   const fetchDataBundles = useCallback(async (networkId: string) => {
     if (!networkId) return;
     setIsLoadingBundles(true);
     try {
       const res = await airtimeService.getDataPlans(networkId);
-      const data = res.data as { id: string; name: string; validity: string; price: number }[];
-      if (Array.isArray(data) && data.length > 0) {
-        setDataBundles(data);
-        setSelectedBundle('');
-      }
+      const data = res.data.map((plan) => ({
+        id: plan.id,
+        name: plan.name || plan.data,
+        validity: plan.validity,
+        price: Number(plan.amount),
+      }));
+      setDataBundles(data);
+      setSelectedBundle('');
     } catch {
-      // Keep default bundles on error
+      setDataBundles([]);
+      setError('Data plans are unavailable for this network.');
     } finally {
       setIsLoadingBundles(false);
     }

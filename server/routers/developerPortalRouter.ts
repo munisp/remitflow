@@ -35,7 +35,7 @@ import { logger } from "../_core/logger";
 import { getRedisClient } from "../middleware/redis";
 const redis = getRedisClient();
 import { db } from "../db-shim";
-import { webhooks, apiKeys } from "../../drizzle/schema";
+import { webhookEndpoints as webhooks, apiKeys } from "../../drizzle/schema";
 import { eq, and, desc } from "drizzle-orm";
 import * as crypto from "crypto";
 
@@ -305,14 +305,14 @@ export const developerPortalRouter = router({
         url: input.url,
         events: input.events,
         secret,
-        status: "active",
+        isActive: true,
         description: input.description,
-      } as any).returning();
+      }).returning();
 
       logger.info({ userId, url: input.url, events: input.events }, "[DevPortal] Webhook registered");
 
       return {
-        webhookId: (webhook as any)?.id ?? `wh_${Date.now()}`,
+        webhookId: webhook.id,
         url: input.url,
         events: input.events,
         secret, // Only shown once
@@ -327,7 +327,7 @@ export const developerPortalRouter = router({
         id: webhooks.id,
         url: webhooks.url,
         events: webhooks.events,
-        status: webhooks.status,
+        isActive: webhooks.isActive,
         description: webhooks.description,
         createdAt: webhooks.createdAt,
       })
@@ -335,15 +335,15 @@ export const developerPortalRouter = router({
         .where(eq(webhooks.userId, ctx.user.id))
         .orderBy(desc(webhooks.createdAt));
 
-      return rows;
+      return (rows as Array<{ id: number; url: string; events: string[] | null; isActive: boolean; description: string | null; createdAt: Date }>).map((row) => ({ ...row, status: row.isActive ? "active" : "disabled" }));
     }),
 
   deleteWebhook: protectedProcedure
-    .input(z.object({ webhookId: z.string() }))
+    .input(z.object({ webhookId: z.number().int().positive() }))
     .mutation(async ({ input, ctx }) => {
       await db.delete(webhooks).where(
         and(
-          eq(webhooks.id, input.webhookId as any),
+            eq(webhooks.id, input.webhookId),
           eq(webhooks.userId, ctx.user.id),
         )
       );
@@ -356,16 +356,16 @@ export const developerPortalRouter = router({
    */
   simulateWebhookEvent: protectedProcedure
     .input(z.object({
-      webhookId: z.string(),
+      webhookId: z.number().int().positive(),
       event: z.enum(WEBHOOK_EVENTS),
-      customPayload: z.record(z.unknown()).optional(),
+      customPayload: z.record(z.string(), z.unknown()),
     }))
     .mutation(async ({ input, ctx }) => {
       const [webhook] = await db.select()
         .from(webhooks)
         .where(
           and(
-            eq(webhooks.id, input.webhookId as any),
+            eq(webhooks.id, input.webhookId),
             eq(webhooks.userId, ctx.user.id),
           )
         )
@@ -375,10 +375,10 @@ export const developerPortalRouter = router({
         throw new TRPCError({ code: "NOT_FOUND", message: "Webhook not found." });
       }
 
-      const payload = input.customPayload ?? SAMPLE_PAYLOADS[input.event];
+      const payload = input.customPayload;
       const result = await deliverWebhook(
-        (webhook as any).url,
-        (webhook as any).secret,
+        webhook.url,
+        webhook.secret,
         input.event,
         payload,
       );
@@ -393,7 +393,7 @@ export const developerPortalRouter = router({
 
       return {
         event: input.event,
-        url: (webhook as any).url,
+        url: webhook.url,
         success: result.success,
         statusCode: result.statusCode,
         durationMs: result.durationMs,
@@ -422,6 +422,7 @@ export const developerPortalRouter = router({
         userId,
         keyId,
         keyHash,
+        keyPrefix: keyId.slice(0, 12),
         name: input.name,
         scopes: input.scopes,
         ipAllowlist: input.ipAllowlist ?? [],
@@ -522,52 +523,27 @@ export const developerPortalRouter = router({
   // ── Sandbox Simulation ─────────────────────────────────────────────────────
 
   /**
-   * Simulate a transfer in test mode (no real money moved).
+   * Submit a sandbox transfer to an explicitly configured provider. The platform
+   * does not generate fictional rates, references, or outcomes locally.
    */
   simulateTransfer: protectedProcedure
     .input(z.object({
       amount: z.number().positive(),
       fromCurrency: z.string().length(3),
       toCurrency: z.string().length(3),
-      outcome: z.enum(["success", "failure", "pending"]).default("success"),
-      delaySeconds: z.number().int().min(0).max(30).default(0),
+      recipientId: z.string().min(1),
     }))
     .mutation(async ({ input, ctx }) => {
-      // Simulate processing delay
-      if (input.delaySeconds > 0) {
-        await new Promise((r) => setTimeout(r, input.delaySeconds * 1000));
-      }
-
-      const mockRef = `RF-TEST-${Date.now()}`;
-      const mockRate = { USD_NGN: 1580, GBP_NGN: 2000, USD_GHS: 15.2, USD_KES: 129 };
-      const rateKey = `${input.fromCurrency}_${input.toCurrency}` as keyof typeof mockRate;
-      const rate = mockRate[rateKey] ?? 1.0;
-
-      if (input.outcome === "failure") {
-        return {
-          success: false,
-          reference: mockRef,
-          status: "failed",
-          failureReason: "Simulated failure — recipient bank declined",
-          failureCode: "BANK_DECLINED",
-          testMode: true,
-        };
-      }
-
-      return {
-        success: true,
-        reference: mockRef,
-        status: input.outcome === "pending" ? "pending" : "completed",
-        amount: input.amount,
-        fromCurrency: input.fromCurrency,
-        toCurrency: input.toCurrency,
-        exchangeRate: rate,
-        amountReceived: parseFloat((input.amount * rate).toFixed(2)),
-        fee: parseFloat((input.amount * 0.015).toFixed(2)),
-        completedAt: input.outcome === "completed" ? new Date().toISOString() : null,
-        testMode: true,
-        message: "This is a test transfer. No real money was moved.",
-      };
+      const upstream = process.env.SANDBOX_CORE_BANKING_UPSTREAM?.replace(/\/$/, "");
+      if (!upstream) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "SANDBOX_CORE_BANKING_UPSTREAM must be configured." });
+      const response = await fetch(`${upstream}/sandbox/transfers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-RemitFlow-User": String(ctx.user.id) },
+        body: JSON.stringify(input),
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!response.ok) throw new TRPCError({ code: "BAD_GATEWAY", message: `Sandbox provider rejected transfer (${response.status}).` });
+      return response.json() as Promise<Record<string, unknown>>;
     }),
 
   /**

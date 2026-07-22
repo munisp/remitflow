@@ -488,7 +488,7 @@ const BatchPayments: React.FC = () => {
                   type="text"
                   value={newBatch.name}
                   onChange={(e) => setNewBatch(prev => ({ ...prev, name: e.target.value }))}
-                  value="e.g., January Payroll"
+                  placeholder="e.g., January Payroll"
                   className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-4 focus:ring-indigo-100 focus:border-indigo-500 focus:outline-none transition-all"
                 />
               </div>

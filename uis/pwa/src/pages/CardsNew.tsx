@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { accountService } from "../services/api";
+import { accountService } from "../services/accountService";
 import { cardService, type Card } from "../services/cardService";
 
 interface CardDisplay {

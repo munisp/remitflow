@@ -6,8 +6,9 @@ let stripeClient: Stripe | null = null;
 
 export function getStripe(): Stripe {
   if (!stripeClient) {
-    const key = (ENV as any).STRIPE_SECRET_KEY ?? process.env.STRIPE_SECRET_KEY ?? "sk_test_placeholder";
-    stripeClient = new Stripe(key, { apiVersion: "2026-04-22.dahlia" });
+    const key = (ENV as { STRIPE_SECRET_KEY?: string }).STRIPE_SECRET_KEY ?? process.env.STRIPE_SECRET_KEY;
+    if (!key) throw new Error("STRIPE_SECRET_KEY must be configured");
+    stripeClient = new Stripe(key, { apiVersion: "2026-06-24.dahlia" });
   }
   return stripeClient;
 }

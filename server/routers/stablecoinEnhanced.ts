@@ -16,9 +16,13 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { eq, and, desc, gte, lte, sql } from "drizzle-orm";
 import { router, protectedProcedure, adminProcedure } from "../trpc.js";
-import { getDb } from "../db.js";
+import { getDb, createAuditLog } from "../db.js";
 import { wallets, transactions, auditLogs, users } from "../../drizzle/schema.js";
 import { createId } from "@paralleldrive/cuid2";
+import { runComplianceCheck } from "../_core/complianceEngine.js";
+import { KAFKA_TOPICS, publishEvent } from "../middleware/kafka.js";
+import { requestStablecoinEngine, requestStablecoinOracle, submitTravelRuleReport, requireFiniteNumber, requireText } from "../services/stablecoinOperations.js";
+import { createStablecoinP2PClaim, reserveStablecoinP2PClaim, completeStablecoinP2PClaim, releaseStablecoinP2PClaim } from "../services/stablecoinP2PClaims.js";
 
 // ── KYC Tier Limits (USD equivalent) ─────────────────────────────────────────
 const KYC_TIER_LIMITS: Record<string, { onrampDaily: number; offrampDaily: number; singleTx: number }> = {
@@ -40,41 +44,23 @@ const TRAVEL_RULE_THRESHOLD_USD = 1_000;
 // ── De-Peg Circuit Breaker ────────────────────────────────────────────────────
 const DEPEG_THRESHOLD = 0.005; // 0.5% deviation from $1.00
 
-// ── FX Rate Cache (fallback) ──────────────────────────────────────────────────
-const FX_RATES: Record<string, number> = {
-  USD: 1.0, NGN: 1650.0, GBP: 0.79, EUR: 0.92,
-  GHS: 15.8, KES: 129.5, ZAR: 18.6, XOF: 600.0,
-  CAD: 1.36, AUD: 1.52,
-};
-
+// ── Configured, fail-closed service operations ───────────────────────────────
 async function getFXRate(from: string, to: string): Promise<number> {
-  const fromRate = FX_RATES[from] ?? 1.0;
-  const toRate = FX_RATES[to] ?? 1.0;
-  return fromRate / toRate;
+  const response = await requestStablecoinEngine("/stablecoin/fx-rate", { from_currency: from, to_currency: to });
+  return requireFiniteNumber(response.rate, "rate");
 }
 
 async function checkDepeg(stablecoin: string): Promise<{ depegged: boolean; price: number; deviation: number }> {
-  // In production: call python-stablecoin-oracle at http://stablecoin-oracle:8110/depeg
-  // Fallback: assume pegged
-  return { depegged: false, price: 1.0, deviation: 0.0 };
+  const response = await requestStablecoinOracle(`/depeg?asset=${encodeURIComponent(stablecoin)}`);
+  return {
+    depegged: Boolean(response.depegged),
+    price: requireFiniteNumber(response.price, "price"),
+    deviation: requireFiniteNumber(response.deviation, "deviation"),
+  };
 }
 
-async function callStablecoinEngine(endpoint: string, body: object): Promise<Record<string, unknown>> {
-  const engineUrl = process.env.STABLECOIN_ENGINE_URL ?? "http://go-stablecoin-engine:8108";
-  try {
-    const res = await fetch(`${engineUrl}${endpoint}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) throw new Error(`Stablecoin engine error: ${res.status}`);
-    return res.json() as Promise<Record<string, unknown>>;
-  } catch (err) {
-    // Circuit breaker: log and return synthetic pending result
-    console.error("[StablecoinEngine] Unreachable:", err);
-    return { status: "pending", orderId: `LOCAL-${createId()}`, error: "engine_unavailable" };
-  }
+async function callStablecoinEngine(endpoint: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return requestStablecoinEngine(endpoint, body);
 }
 
 async function publishTravelRuleReport(payload: {
@@ -85,8 +71,14 @@ async function publishTravelRuleReport(payload: {
   stablecoin: string;
   chain: string;
 }): Promise<void> {
-  // In production: POST to go-travel-rule-service or Notabene/Sygna API
-  console.info("[TravelRule] Report submitted", payload);
+  await submitTravelRuleReport({
+    transaction_reference: payload.txRef,
+    originator_id: String(payload.originatorId),
+    beneficiary_address: payload.beneficiaryAddress,
+    amount_usd: payload.amountUsd,
+    stablecoin: payload.stablecoin,
+    chain: payload.chain,
+  });
 }
 
 async function recordLedgerEntry(entry: {
@@ -96,20 +88,54 @@ async function recordLedgerEntry(entry: {
   creditAccount: string;
   amount: number;
   currency: string;
-  metadata: object;
+  metadata: Record<string, unknown>;
 }): Promise<void> {
-  // In production: call rust-tigerbeetle-bridge at http://tigerbeetle-bridge:8112
-  const bridgeUrl = process.env.TIGERBEETLE_BRIDGE_URL ?? "http://rust-tigerbeetle-bridge:8112";
+  const bridgeUrl = process.env.TIGERBEETLE_BRIDGE_URL?.trim();
+  if (!bridgeUrl) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "TIGERBEETLE_BRIDGE_URL must be configured." });
+  let response: Response;
   try {
-    await fetch(`${bridgeUrl}/ledger/transfer`, {
+    response = await fetch(`${bridgeUrl.replace(/\/+$/, "")}/ledger/transfer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(entry),
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(10_000),
     });
-  } catch {
-    console.error("[TigerBeetle] Ledger write failed for ref:", entry.ref);
+  } catch (error) {
+    throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: `TigerBeetle bridge is unavailable: ${error instanceof Error ? error.message : "connection failed"}` });
   }
+  if (!response.ok) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `TigerBeetle bridge rejected ledger entry (${response.status}).` });
+}
+
+async function runStablecoinCompliance(input: { userId: number; amount: number; currency: string; stablecoin: string; chain?: string; recipientName?: string; walletAddress?: string; direction: "buy" | "sell" }): Promise<void> {
+  const decision = await runComplianceCheck({
+    userId: input.userId,
+    userName: `user:${input.userId}`,
+    recipientName: input.recipientName ?? "stablecoin-counterparty",
+    amount: input.amount,
+    currency: input.currency,
+    stablecoin: input.stablecoin,
+    chain: input.chain ?? "offchain",
+    walletAddress: input.walletAddress,
+    direction: input.direction,
+  });
+  if (decision.action !== "approve") {
+    throw new TRPCError({ code: decision.action === "block" ? "FORBIDDEN" : "PRECONDITION_FAILED", message: `Stablecoin operation requires compliance review: ${decision.reasons.join("; ")}` });
+  }
+}
+
+async function publishStablecoinEvent(action: string, userId: number, payload: Record<string, unknown>): Promise<void> {
+  const published = await publishEvent(KAFKA_TOPICS.TRANSACTIONS, `${action}:${userId}:${createId()}`, {
+    eventType: "created",
+    transactionId: String(payload.transactionId ?? createId()),
+    userId,
+    amount: typeof payload.amount === "number" ? payload.amount : 0,
+    currency: typeof payload.currency === "string" ? payload.currency : "USD",
+    status: typeof payload.status === "string" ? payload.status : "pending",
+    timestamp: new Date().toISOString(),
+    action,
+    ...payload,
+  });
+  if (!published) throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "Kafka event publication failed; stablecoin operation was not accepted." });
 }
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -182,8 +208,8 @@ export const stablecoinEnhancedRouter = router({
         tx_ref: txRef,
       });
 
-      const stablecoinAmount = (engineResult.stablecoin_amount as number) ?? (amountUsd * 0.995);
-      const fee = (engineResult.fee as number) ?? (input.fiatAmount * 0.005);
+      const stablecoinAmount = requireFiniteNumber(engineResult.stablecoin_amount, "stablecoin_amount");
+      const fee = requireFiniteNumber(engineResult.fee, "fee");
 
       // 5. Credit stablecoin wallet (optimistic — confirmed on webhook)
       const [existingWallet] = await db
@@ -408,14 +434,14 @@ export const stablecoinEnhancedRouter = router({
       return {
         success: true,
         txRef,
-        status: (engineResult.status as string) ?? "processing",
+        status: requireText(engineResult.status, "status"),
         stablecoin: input.stablecoin,
         stablecoinAmount: input.stablecoinAmount,
         fiatCurrency: input.fiatCurrency,
         netPayout: parseFloat(netPayout.toFixed(2)),
         fee: parseFloat(fee.toFixed(2)),
         payoutRail: input.payoutRail,
-        estimatedTime: (engineResult.estimated_time as string) ?? "1-3 business days",
+        estimatedTime: requireText(engineResult.estimated_time, "estimated_time"),
         depegWarning: depeg.depegged ? `${input.stablecoin} price deviation: ${(depeg.deviation * 100).toFixed(2)}%` : null,
         travelRuleApplied: amountUsd >= TRAVEL_RULE_THRESHOLD_USD,
       };
@@ -434,7 +460,7 @@ export const stablecoinEnhancedRouter = router({
         sql`${wallets.currency} = ANY(ARRAY['USDC','USDT','DAI','PYUSD','EURC','NGNT','cUSD','BUSD'])`,
       ));
 
-    return stablecoinWallets.map(w => ({
+    return (stablecoinWallets as Array<{ currency: string; balance: string | number; status: string }>).map((w) => ({
       symbol: w.currency,
       balance: Number(w.balance),
       status: w.status,
@@ -451,25 +477,13 @@ export const stablecoinEnhancedRouter = router({
       provider:     z.enum(["moonpay", "transak", "yellowcard", "circle", "internal"]).default("internal"),
     }))
     .query(async ({ input }) => {
-      const usdRate = await getFXRate(input.fiatCurrency, "USD");
-      const usdAmount = input.fiatAmount * usdRate;
-      const fee = input.fiatAmount * 0.005;
-      const netUsd = usdAmount - (fee * usdRate);
-      const stablecoinAmount = netUsd; // 1:1 for USD-pegged
-
-      const depeg = await checkDepeg(input.stablecoin);
-
-      return {
-        fiatCurrency: input.fiatCurrency,
-        fiatAmount: input.fiatAmount,
+      const quote = await callStablecoinEngine("/stablecoin/quotes/onramp", {
+        fiat_currency: input.fiatCurrency,
+        fiat_amount: input.fiatAmount,
         stablecoin: input.stablecoin,
-        stablecoinAmount: parseFloat(stablecoinAmount.toFixed(6)),
-        fee: parseFloat(fee.toFixed(2)),
-        fxRate: usdRate,
         provider: input.provider,
-        depegWarning: depeg.depegged,
-        expiresAt: new Date(Date.now() + 30_000).toISOString(),
-      };
+      });
+      return quote;
     }),
 
   // ── Off-Ramp Quote ─────────────────────────────────────────────────────────
@@ -481,74 +495,23 @@ export const stablecoinEnhancedRouter = router({
       payoutRail:       z.enum(["ach", "sepa", "swift", "mobile_money", "mojaloop", "bank_transfer"]).default("bank_transfer"),
     }))
     .query(async ({ input }) => {
-      const fxRate = await getFXRate("USD", input.fiatCurrency);
-      const fiatAmount = input.stablecoinAmount * fxRate;
-      const fee = fiatAmount * 0.0075;
-      const netPayout = fiatAmount - fee;
-
-      const estimatedTimes: Record<string, string> = {
-        ach: "1-3 business days", sepa: "1 business day",
-        swift: "2-5 business days", mobile_money: "instant",
-        mojaloop: "< 30 seconds", bank_transfer: "1-2 business days",
-      };
-
-      return {
+      const quote = await callStablecoinEngine("/stablecoin/quotes/offramp", {
         stablecoin: input.stablecoin,
-        stablecoinAmount: input.stablecoinAmount,
-        fiatCurrency: input.fiatCurrency,
-        fiatAmount: parseFloat(fiatAmount.toFixed(2)),
-        fee: parseFloat(fee.toFixed(2)),
-        netPayout: parseFloat(netPayout.toFixed(2)),
-        fxRate,
-        payoutRail: input.payoutRail,
-        estimatedTime: estimatedTimes[input.payoutRail] ?? "1-3 business days",
-        expiresAt: new Date(Date.now() + 30_000).toISOString(),
-      };
+        stablecoin_amount: input.stablecoinAmount,
+        fiat_currency: input.fiatCurrency,
+        payout_rail: input.payoutRail,
+      });
+      return quote;
     }),
 
   // ── Supported Assets ───────────────────────────────────────────────────────
-  supported: protectedProcedure.query(async () => ({
-    stablecoins: [...SUPPORTED_STABLECOINS],
-    chains: [...SUPPORTED_CHAINS],
-    fiatCurrencies: [...SUPPORTED_FIAT],
-    onrampProviders: ["moonpay", "transak", "yellowcard", "circle", "internal"],
-    offrampRails: ["ach", "sepa", "swift", "mobile_money", "mojaloop", "bank_transfer"],
-  })),
+  supported: protectedProcedure.query(async () => callStablecoinEngine("/stablecoin/supported", {})),
 
   // ── De-Peg Status ──────────────────────────────────────────────────────────
-  depegStatus: protectedProcedure.query(async () => {
-    const checks = await Promise.all(
-      SUPPORTED_STABLECOINS.map(async (symbol) => {
-        const status = await checkDepeg(symbol);
-        return { symbol, ...status };
-      }),
-    );
-    return { checks, threshold: DEPEG_THRESHOLD, checkedAt: new Date().toISOString() };
-  }),
+  depegStatus: protectedProcedure.query(async () => requestStablecoinOracle("/depeg/status")),
 
   // ── Reserve Proof (Admin) ──────────────────────────────────────────────────
-  reserveProof: adminProcedure.query(async () => {
-    const proofUrl = process.env.STABLECOIN_ORACLE_URL ?? "http://python-stablecoin-oracle:8110";
-    try {
-      const res = await fetch(`${proofUrl}/reserve/proof`, { signal: AbortSignal.timeout(5_000) });
-      if (res.ok) return res.json();
-    } catch { /* fallback below */ }
-
-    // Fallback synthetic proof
-    return {
-      timestamp: new Date().toISOString(),
-      reserves: SUPPORTED_STABLECOINS.map(symbol => ({
-        symbol,
-        onChainBalance: 0,
-        platformBalance: 0,
-        ratio: 1.0,
-        lastVerified: new Date().toISOString(),
-        status: "unverified",
-      })),
-      attestation: null,
-      warning: "Oracle unreachable — reserve proof unavailable",
-    };
-  }),
+  reserveProof: adminProcedure.query(async () => requestStablecoinOracle("/reserve/proof")),
 
   // ── Transaction History ────────────────────────────────────────────────────
   history: protectedProcedure
@@ -563,7 +526,7 @@ export const stablecoinEnhancedRouter = router({
 
       const conditions = [eq(transactions.userId, ctx.user.id)];
       if (input.type !== "all") {
-        conditions.push(eq(transactions.type, input.type));
+        conditions.push(sql`${transactions.type} = ${input.type}` as never);
       }
 
       const rows = await db
@@ -597,226 +560,146 @@ export const stablecoinEnhancedRouter = router({
 import { executeAtomicStablecoinFlow } from "../services/stablecoinAtomicity";
 
 export const stablecoinExtendedRouter = router({
-  stakeForYield: protectedProcedure
-    .input(z.object({
-      stablecoin: z.string(),
-      amount: z.number().positive(),
-      protocol: z.string().default("aave"),
-      idempotencyKey: z.string().optional(),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      return executeAtomicStablecoinFlow(
-        {
-          userId: ctx.user.id,
-          amount: input.amount,
-          stablecoin: input.stablecoin,
-          flowType: "stake_for_yield",
-          idempotencyKey: input.idempotencyKey ?? `stake-${ctx.user.id}-${Date.now()}`,
-          metadata: { protocol: input.protocol },
-        },
-        async () => ({ staked: true, protocol: input.protocol, amount: input.amount }),
-      );
-    }),
-  unstake: protectedProcedure
-    .input(z.object({
-      stablecoin: z.string(),
-      amount: z.number().positive(),
-      protocol: z.string().default("aave"),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      return executeAtomicStablecoinFlow(
-        {
-          userId: ctx.user.id,
-          amount: input.amount,
-          stablecoin: input.stablecoin,
-          flowType: "unstake",
-          idempotencyKey: `unstake-${ctx.user.id}-${Date.now()}`,
-          metadata: { protocol: input.protocol },
-        },
-        async () => ({ unstaked: true, protocol: input.protocol, amount: input.amount }),
-      );
-    }),
-
-  bridgeChain: protectedProcedure
-    .input(z.object({
-      stablecoin: z.string(),
-      amount: z.number().positive(),
-      fromChain: z.string(),
-      toChain: z.string(),
-      idempotencyKey: z.string().optional(),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      return executeAtomicStablecoinFlow(
-        {
-          userId: ctx.user.id,
-          amount: input.amount,
-          stablecoin: input.stablecoin,
-          flowType: "bridge_chain",
-          idempotencyKey: input.idempotencyKey ?? `bridge-${ctx.user.id}-${Date.now()}`,
-          metadata: { fromChain: input.fromChain, toChain: input.toChain },
-        },
-        async () => ({ bridged: true, fromChain: input.fromChain, toChain: input.toChain }),
-      );
-    }),
-
-  createDcaPlan: protectedProcedure
-    .input(z.object({
-      stablecoin: z.string(),
-      targetAsset: z.string(),
-      fiatAmountPerPurchase: z.number().positive(),
-      frequency: z.enum(["daily", "weekly", "biweekly", "monthly"]),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      const planId = `dca-${ctx.user.id}-${Date.now()}`;
-      return { planId, ...input, active: true, status: "DCA_PLAN_CREATED" };
-    }),
-
-  pauseDcaPlan: protectedProcedure
-    .input(z.object({ planId: z.string() }))
-    .mutation(async ({ input }) => ({ planId: input.planId, paused: true, status: "DCA_PLAN_PAUSED" })),
-
-  resumeDcaPlan: protectedProcedure
-    .input(z.object({ planId: z.string() }))
-    .mutation(async ({ input }) => ({ planId: input.planId, paused: false, status: "DCA_PLAN_RESUMED" })),
-
-  setAutoConvert: protectedProcedure
-    .input(z.object({
-      enabled: z.boolean(),
-      fromCurrency: z.string(),
-      targetStablecoin: z.string().default("USDC"),
-      convertPercent: z.number().min(0).max(100).default(100),
-      threshold: z.number().optional(),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      return executeAtomicStablecoinFlow(
-        {
-          userId: ctx.user.id,
-          amount: 0,
-          stablecoin: input.targetStablecoin,
-          flowType: "auto_convert_config",
-          idempotencyKey: `autoconvert-${ctx.user.id}-${Date.now()}`,
-          metadata: { enabled: input.enabled, fromCurrency: input.fromCurrency, convertPercent: input.convertPercent },
-        },
-        async () => ({ configured: true, ...input }),
-      );
-    }),
-
-  sendToContact: protectedProcedure
-    .input(z.object({
-      stablecoin: z.string(),
-      amount: z.number().positive(),
-      recipientPhone: z.string().optional(),
-      recipientEmail: z.string().optional(),
-      message: z.string().optional(),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      const claimId = `claim_${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
-      const claimUrl = `https://remitflow.app/claim/${claimId}`;
-      // Store pending_claim record
-      return { claimId, claimUrl, expiresIn: "72h", status: "pending_claim", ...input };
-    }),
-
-  redeemP2pClaim: protectedProcedure
-    .input(z.object({ claimCode: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      const result = await executeP2pClaim(input.claimCode, ctx.user.id);
-      return { redeemed: true, claimCode: input.claimCode, userId: ctx.user.id, result };
-    }),
-
-  // ── Alias procedures for router completeness ────────────────────────────────
-  buyWithFiat: protectedProcedure
-    .input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fiatCurrency: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      await runCompliancePipeline({ userId: ctx.user.id, amount: input.amount, currency: input.fiatCurrency });
-      publishEvent("stablecoin.buy", { userId: ctx.user.id, ...input });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_BUY", description: `Bought ${input.stablecoin}` });
-      return { success: true, ...input };
-    }),
-
-  sellToFiat: protectedProcedure
-    .input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fiatCurrency: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      await runCompliancePipeline({ userId: ctx.user.id, amount: input.amount, currency: input.fiatCurrency });
-      publishEvent("stablecoin.sell", { userId: ctx.user.id, ...input });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_SELL", description: `Sold ${input.stablecoin}` });
-      return { success: true, ...input };
-    }),
-
-  withdrawToBank: protectedProcedure
-    .input(z.object({ stablecoin: z.string(), amount: z.number().positive(), bankAccountId: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      await runCompliancePipeline({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin });
-      publishEvent("stablecoin.withdraw", { userId: ctx.user.id, ...input });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_WITHDRAW", description: `Withdrew ${input.stablecoin}` });
-      return { success: true, ...input };
-    }),
-
-  swap: protectedProcedure
-    .input(z.object({ fromStablecoin: z.string(), toStablecoin: z.string(), amount: z.number().positive() }))
-    .mutation(async ({ ctx, input }) => {
-      await runCompliancePipeline({ userId: ctx.user.id, amount: input.amount, currency: input.fromStablecoin });
-      publishEvent("stablecoin.swap", { userId: ctx.user.id, ...input });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_SWAP", description: `Swapped ${input.fromStablecoin} to ${input.toStablecoin}` });
-      return { success: true, ...input };
-    }),
-
-  send: protectedProcedure
-    .input(z.object({ stablecoin: z.string(), amount: z.number().positive(), toAddress: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      await runCompliancePipeline({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin });
-      publishEvent("stablecoin.send", { userId: ctx.user.id, ...input });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_SEND", description: `Sent ${input.stablecoin}` });
-      return { success: true, ...input };
-    }),
-
-  payBill: protectedProcedure
-    .input(z.object({ stablecoin: z.string(), amount: z.number().positive(), billRef: z.string(), provider: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      await runCompliancePipeline({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin });
-      publishEvent("stablecoin.bill_pay", { userId: ctx.user.id, ...input });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_BILL_PAY", description: `Paid bill ${input.billRef}` });
-      return { success: true, ...input };
-    }),
-
-  createVirtualCard: protectedProcedure
-    .input(z.object({ stablecoin: z.string(), spendLimit: z.number().positive() }))
-    .mutation(async ({ ctx, input }) => {
-      publishEvent("stablecoin.card_created", { userId: ctx.user.id, ...input });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_CARD_CREATED", description: `Created virtual card` });
-      return { success: true, cardId: `card_${Date.now()}`, ...input };
-    }),
-
-  // Additional procedures with full compliance + audit trail
-  redeemP2pClaimV2: protectedProcedure
-    .input(z.object({ claimCode: z.string(), stablecoin: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      publishEvent("stablecoin.p2p_claim", { userId: ctx.user.id, claimCode: input.claimCode });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM", description: `Redeemed P2P claim ${input.claimCode}` });
-      return { success: true, claimCode: input.claimCode };
-    }),
-
-  sendToContactV2: protectedProcedure
-    .input(z.object({ stablecoin: z.string(), amount: z.number().positive(), recipientPhone: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      await runCompliancePipeline({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin });
-      publishEvent("stablecoin.send_to_contact", { userId: ctx.user.id, ...input });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_SEND_CONTACT", description: `Sent ${input.stablecoin} to contact` });
-      return { success: true, ...input };
-    }),
-
-  bridgeChainV2: protectedProcedure
-    .input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fromChain: z.string(), toChain: z.string() }))
-    .mutation(async ({ ctx, input }) => {
-      publishEvent("stablecoin.bridge", { userId: ctx.user.id, ...input });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_BRIDGE", description: `Bridged ${input.stablecoin} from ${input.fromChain} to ${input.toChain}` });
-      return { success: true, ...input };
-    }),
-
-  stakeForYieldV2: protectedProcedure
-    .input(z.object({ stablecoin: z.string(), amount: z.number().positive(), protocol: z.string().default("aave") }))
-    .mutation(async ({ ctx, input }) => {
-      publishEvent("stablecoin.stake", { userId: ctx.user.id, ...input });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_STAKE", description: `Staked ${input.stablecoin} on ${input.protocol}` });
-      return { success: true, ...input };
-    }),
+  stakeForYield: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), protocol: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, direction: "buy" });
+    const result = await callStablecoinEngine("/stablecoin/stake", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.stake", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_STAKE", description: `Stake submitted for ${input.amount} ${input.stablecoin}`, metadata: result });
+    return result;
+  }),
+  unstake: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), protocol: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, direction: "sell" });
+    const result = await callStablecoinEngine("/stablecoin/unstake", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.unstake", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_UNSTAKE", description: `Unstake submitted for ${input.amount} ${input.stablecoin}`, metadata: result });
+    return result;
+  }),
+  bridgeChain: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fromChain: z.string(), toChain: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, chain: input.toChain, direction: "sell" });
+    const result = await callStablecoinEngine("/stablecoin/bridge", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.bridge", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_BRIDGE", description: `Bridge submitted from ${input.fromChain} to ${input.toChain}`, metadata: result });
+    return result;
+  }),
+  createDcaPlan: protectedProcedure.input(z.object({ stablecoin: z.string(), targetAsset: z.string(), fiatAmountPerPurchase: z.number().positive(), frequency: z.enum(["daily", "weekly", "biweekly", "monthly"]), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    const result = await callStablecoinEngine("/stablecoin/dca/plans", { user_id: ctx.user.id, ...input });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_DCA_CREATED", description: `DCA plan submitted for ${input.stablecoin}`, metadata: result });
+    return result;
+  }),
+  pauseDcaPlan: protectedProcedure.input(z.object({ planId: z.string() })).mutation(async ({ ctx, input }) => callStablecoinEngine(`/stablecoin/dca/plans/${encodeURIComponent(input.planId)}/pause`, { user_id: ctx.user.id })),
+  resumeDcaPlan: protectedProcedure.input(z.object({ planId: z.string() })).mutation(async ({ ctx, input }) => callStablecoinEngine(`/stablecoin/dca/plans/${encodeURIComponent(input.planId)}/resume`, { user_id: ctx.user.id })),
+  setAutoConvert: protectedProcedure.input(z.object({ enabled: z.boolean(), fromCurrency: z.string(), targetStablecoin: z.string(), convertPercent: z.number().min(0).max(100), threshold: z.number().optional(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => callStablecoinEngine("/stablecoin/auto-convert/preferences", { user_id: ctx.user.id, ...input })),
+  sendToContact: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), recipientPhone: z.string().optional(), recipientEmail: z.string().email().optional(), message: z.string().max(500).optional() }).refine((value) => Boolean(value.recipientPhone || value.recipientEmail), { message: "A recipient phone or email is required." })).mutation(async ({ ctx, input }) => {
+    const recipientIdentifier = input.recipientEmail ?? input.recipientPhone!;
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, recipientName: recipientIdentifier, direction: "sell" });
+    const claim = await createStablecoinP2PClaim({ senderId: ctx.user.id, recipientIdentifier, stablecoin: input.stablecoin, amount: input.amount, message: input.message });
+    try {
+      await recordLedgerEntry({ ref: claim.ledgerReference, userId: ctx.user.id, debitAccount: `user:${ctx.user.id}:${input.stablecoin}`, creditAccount: `p2p-escrow:${claim.id}`, amount: input.amount, currency: input.stablecoin, metadata: { claimId: claim.id, recipientIdentifier } });
+      await publishStablecoinEvent("stablecoin.p2p_claim_created", ctx.user.id, { transactionId: claim.id, amount: input.amount, currency: input.stablecoin, status: "pending" });
+      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_CREATED", description: `P2P claim created for ${input.amount} ${input.stablecoin}`, metadata: { claimId: claim.id } });
+      return { claimId: claim.id, claimCode: claim.claimCode, expiresAt: claim.expiresAt, status: "pending" };
+    } catch (error) {
+      throw error;
+    }
+  }),
+  redeemP2pClaim: protectedProcedure.input(z.object({ claimCode: z.string().min(16) })).mutation(async ({ ctx, input }) => {
+    const claim = await reserveStablecoinP2PClaim(input.claimCode, ctx.user.id);
+    try {
+      await recordLedgerEntry({ ref: `${claim.ledgerReference}:redeem`, userId: ctx.user.id, debitAccount: `p2p-escrow:${claim.id}`, creditAccount: `user:${ctx.user.id}:${claim.stablecoin}`, amount: claim.amount, currency: claim.stablecoin, metadata: { claimId: claim.id } });
+      await completeStablecoinP2PClaim(claim.id, ctx.user.id);
+      await publishStablecoinEvent("stablecoin.p2p_claim_redeemed", ctx.user.id, { transactionId: claim.id, amount: claim.amount, currency: claim.stablecoin, status: "completed" });
+      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_REDEEMED", description: `P2P claim redeemed`, metadata: { claimId: claim.id } });
+      return { claimId: claim.id, status: "claimed" };
+    } catch (error) {
+      await releaseStablecoinP2PClaim(claim.id, ctx.user.id);
+      throw error;
+    }
+  }),
+  buyWithFiat: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fiatCurrency: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.fiatCurrency, stablecoin: input.stablecoin, direction: "buy" });
+    const result = await callStablecoinEngine("/stablecoin/buy", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.buy", ctx.user.id, { amount: input.amount, currency: input.fiatCurrency, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_BUY", description: `Stablecoin buy submitted`, metadata: result });
+    return result;
+  }),
+  sellToFiat: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fiatCurrency: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.fiatCurrency, stablecoin: input.stablecoin, direction: "sell" });
+    const result = await callStablecoinEngine("/stablecoin/sell", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.sell", ctx.user.id, { amount: input.amount, currency: input.fiatCurrency, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_SELL", description: `Stablecoin sell submitted`, metadata: result });
+    return result;
+  }),
+  withdrawToBank: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), bankAccountId: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, direction: "sell" });
+    const result = await callStablecoinEngine("/stablecoin/withdraw", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.withdraw", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_WITHDRAW", description: `Stablecoin withdrawal submitted`, metadata: result });
+    return result;
+  }),
+  swap: protectedProcedure.input(z.object({ fromStablecoin: z.string(), toStablecoin: z.string(), amount: z.number().positive(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.fromStablecoin, stablecoin: input.fromStablecoin, direction: "sell" });
+    const result = await callStablecoinEngine("/stablecoin/swap", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.swap", ctx.user.id, { amount: input.amount, currency: input.fromStablecoin, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_SWAP", description: `Stablecoin swap submitted`, metadata: result });
+    return result;
+  }),
+  send: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), toAddress: z.string().min(10), chain: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, walletAddress: input.toAddress, chain: input.chain, direction: "sell" });
+    const result = await callStablecoinEngine("/stablecoin/send", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.send", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_SEND", description: `Stablecoin transfer submitted`, metadata: result });
+    return result;
+  }),
+  payBill: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), billRef: z.string(), provider: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, recipientName: input.provider, direction: "sell" });
+    const result = await callStablecoinEngine("/stablecoin/bills", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.bill_pay", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_BILL_PAY", description: `Stablecoin bill payment submitted`, metadata: result });
+    return result;
+  }),
+  createVirtualCard: protectedProcedure.input(z.object({ stablecoin: z.string(), spendLimit: z.number().positive(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    const result = await callStablecoinEngine("/stablecoin/cards", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.card_created", ctx.user.id, { amount: input.spendLimit, currency: input.stablecoin, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_CARD_CREATED", description: `Stablecoin virtual card issuance submitted`, metadata: result });
+    return result;
+  }),
+  redeemP2pClaimV2: protectedProcedure.input(z.object({ claimCode: z.string().min(16), stablecoin: z.string() })).mutation(async ({ ctx, input }) => {
+    const claim = await reserveStablecoinP2PClaim(input.claimCode, ctx.user.id);
+    if (claim.stablecoin !== input.stablecoin) {
+      await releaseStablecoinP2PClaim(claim.id, ctx.user.id);
+      throw new TRPCError({ code: "BAD_REQUEST", message: "Claim asset does not match the requested stablecoin." });
+    }
+    try {
+      await recordLedgerEntry({ ref: `${claim.ledgerReference}:redeem`, userId: ctx.user.id, debitAccount: `p2p-escrow:${claim.id}`, creditAccount: `user:${ctx.user.id}:${claim.stablecoin}`, amount: claim.amount, currency: claim.stablecoin, metadata: { claimId: claim.id } });
+      await completeStablecoinP2PClaim(claim.id, ctx.user.id);
+      await publishStablecoinEvent("stablecoin.p2p_claim_redeemed", ctx.user.id, { transactionId: claim.id, amount: claim.amount, currency: claim.stablecoin, status: "completed" });
+      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_REDEEMED", description: "P2P claim redeemed", metadata: { claimId: claim.id } });
+      return { claimId: claim.id, status: "claimed" };
+    } catch (error) {
+      await releaseStablecoinP2PClaim(claim.id, ctx.user.id);
+      throw error;
+    }
+  }),
+  sendToContactV2: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), recipientPhone: z.string(), message: z.string().max(500).optional() })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, recipientName: input.recipientPhone, direction: "sell" });
+    const claim = await createStablecoinP2PClaim({ senderId: ctx.user.id, recipientIdentifier: input.recipientPhone, stablecoin: input.stablecoin, amount: input.amount, message: input.message });
+    await recordLedgerEntry({ ref: claim.ledgerReference, userId: ctx.user.id, debitAccount: `user:${ctx.user.id}:${input.stablecoin}`, creditAccount: `p2p-escrow:${claim.id}`, amount: input.amount, currency: input.stablecoin, metadata: { claimId: claim.id } });
+    await publishStablecoinEvent("stablecoin.p2p_claim_created", ctx.user.id, { transactionId: claim.id, amount: input.amount, currency: input.stablecoin, status: "pending" });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_CREATED", description: "P2P claim created", metadata: { claimId: claim.id } });
+    return { claimId: claim.id, claimCode: claim.claimCode, expiresAt: claim.expiresAt, status: "pending" };
+  }),
+  bridgeChainV2: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fromChain: z.string(), toChain: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, chain: input.toChain, direction: "sell" });
+    const result = await callStablecoinEngine("/stablecoin/bridge", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.bridge", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_BRIDGE", description: "Stablecoin bridge submitted", metadata: result });
+    return result;
+  }),
+  stakeForYieldV2: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), protocol: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, direction: "buy" });
+    const result = await callStablecoinEngine("/stablecoin/stake", { user_id: ctx.user.id, ...input });
+    await publishStablecoinEvent("stablecoin.stake", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_STAKE", description: "Stablecoin stake submitted", metadata: result });
+    return result;
+  }),
 });

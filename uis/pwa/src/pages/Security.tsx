@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { useTranslation } from 'node_modules/react-i18next';
+import { useTranslation } from 'react-i18next';
 import { securityService } from '../services/api';
 
 interface LoginSession {
@@ -77,89 +77,56 @@ export default function Security() {
 
   const loadSecurityData = async () => {
     setIsLoading(true);
-    try {
-      const [historyData, settingsData] = await Promise.all([
-        securityService.getLoginHistory().catch(() => null),
-        securityService.getSettings().catch(() => null),
-      ]);
-      const sessionsData = historyData;
-      const eventsData = historyData;
+    setErrorMessage('');
+    const [historyResult, settingsResult] = await Promise.allSettled([
+      securityService.getLoginHistory(),
+      securityService.getSettings(),
+    ]);
 
-      if (sessionsData) setSessions(sessionsData as unknown as LoginSession[]);
-      else {
-        setSessions([
-          {
-            id: '1',
-            device: 'Windows PC',
-            browser: 'Chrome 120',
-            location: 'Lagos, Nigeria',
-            ipAddress: '102.89.xxx.xxx',
-            lastActive: new Date().toISOString(),
-            isCurrent: true,
-          },
-          {
-            id: '2',
-            device: 'iPhone 15',
-            browser: 'Safari Mobile',
-            location: 'Lagos, Nigeria',
-            ipAddress: '102.89.xxx.xxx',
-            lastActive: new Date(Date.now() - 3600000).toISOString(),
-            isCurrent: false,
-          },
-          {
-            id: '3',
-            device: 'MacBook Pro',
-            browser: 'Firefox 121',
-            location: 'Abuja, Nigeria',
-            ipAddress: '41.58.xxx.xxx',
-            lastActive: new Date(Date.now() - 86400000).toISOString(),
-            isCurrent: false,
-          },
-        ]);
-      }
-
-      if (eventsData) setEvents(eventsData as unknown as SecurityEvent[]);
-      else {
-        setEvents([
-          {
-            id: '1',
-            type: 'login',
-            description: 'Successful login from Chrome on Windows',
-            timestamp: new Date().toISOString(),
-            ipAddress: '102.89.xxx.xxx',
-            location: 'Lagos, Nigeria',
-          },
-          {
-            id: '2',
-            type: 'password_change',
-            description: 'Password was changed',
-            timestamp: new Date(Date.now() - 604800000).toISOString(),
-            ipAddress: '102.89.xxx.xxx',
-            location: 'Lagos, Nigeria',
-          },
-          {
-            id: '3',
-            type: '2fa_enabled',
-            description: 'Two-factor authentication was enabled',
-            timestamp: new Date(Date.now() - 1209600000).toISOString(),
-            ipAddress: '102.89.xxx.xxx',
-            location: 'Lagos, Nigeria',
-          },
-        ]);
-      }
-
-      if (settingsData) setSettings(settingsData as unknown as SecuritySettings);
-    } catch {
-      // Use mock data
-    } finally {
-      setIsLoading(false);
+    if (historyResult.status === 'fulfilled') {
+      const history = historyResult.value.data;
+      setSessions(history.map((entry) => ({
+        id: entry.id,
+        device: entry.device,
+        browser: 'Not reported by the identity provider',
+        location: entry.location,
+        ipAddress: entry.ipAddress,
+        lastActive: entry.timestamp,
+        isCurrent: false,
+      })));
+      setEvents(history.map((entry) => ({
+        id: entry.id,
+        type: 'login' as const,
+        description: entry.success ? 'Successful sign-in' : 'Failed sign-in',
+        timestamp: entry.timestamp,
+        ipAddress: entry.ipAddress,
+        location: entry.location,
+      })));
+    } else {
+      setSessions([]);
+      setEvents([]);
+      setErrorMessage('Unable to load security activity from the backend.');
     }
+
+    if (settingsResult.status === 'fulfilled') {
+      const backendSettings = settingsResult.value.data;
+      setSettings({
+        twoFactorEnabled: backendSettings.twoFactorEnabled,
+        biometricEnabled: backendSettings.biometricEnabled,
+        pinEnabled: backendSettings.transactionPin,
+        loginNotifications: backendSettings.loginNotifications,
+        transactionPin: backendSettings.transactionPin,
+      });
+    } else {
+      setErrorMessage((current) => current || 'Unable to load security settings from the backend.');
+    }
+    setIsLoading(false);
   };
 
   const revokeSession = async (sessionId: string) => {
-    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
     try {
       await securityService.revokeDevice(sessionId);
+      setSessions((prev) => prev.filter((session) => session.id !== sessionId));
       setSuccessMessage('Session revoked successfully');
     } catch {
       setErrorMessage('Failed to revoke session');
@@ -167,9 +134,9 @@ export default function Security() {
   };
 
   const revokeAllSessions = async () => {
-    setSessions((prev) => prev.filter((s) => s.isCurrent));
     try {
       await securityService.revokeDevice('all');
+      setSessions((prev) => prev.filter((session) => session.isCurrent));
       setSuccessMessage('All other sessions revoked');
     } catch {
       setErrorMessage('Failed to revoke sessions');
@@ -188,21 +155,12 @@ export default function Security() {
     }
 
     try {
-      const response = await securityService.changePin(passwordForm.currentPassword, passwordForm.newPassword).catch(() => null);
-
-      if (response) {
-        setSuccessMessage('Password changed successfully');
-        setShowChangePassword(false);
-        setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
-      } else {
-        setSuccessMessage('Password changed successfully');
-        setShowChangePassword(false);
-        setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
-      }
-    } catch {
+      await securityService.changePassword(passwordForm.currentPassword, passwordForm.newPassword);
       setSuccessMessage('Password changed successfully');
       setShowChangePassword(false);
       setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+    } catch {
+      setErrorMessage('Password change was not accepted by the backend.');
     }
   };
 
@@ -224,10 +182,7 @@ export default function Security() {
       setPinForm({ pin: '', confirmPin: '' });
       setSettings((prev) => ({ ...prev, pinEnabled: true }));
     } catch {
-      setSuccessMessage('PIN set up successfully');
-      setShowSetupPin(false);
-      setPinForm({ pin: '', confirmPin: '' });
-      setSettings((prev) => ({ ...prev, pinEnabled: true }));
+      setErrorMessage('PIN setup was not accepted by the backend.');
     }
   };
 

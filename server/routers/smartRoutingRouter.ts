@@ -194,9 +194,10 @@ async function queryAgentIntelligence(
   sendCurrency: string,
   receiveCurrency: string,
   userId: number
-): Promise<{ routes: RouteOption[]; modelVersion: string } | null> {
+): Promise<{ routes: RouteOption[]; modelVersion: string }> {
+  const agentUrl = process.env.AGENT_INTELLIGENCE_URL?.replace(/\/$/, "");
+  if (!agentUrl) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "AGENT_INTELLIGENCE_URL must be configured." });
   try {
-    const agentUrl = process.env.AGENT_INTELLIGENCE_URL ?? "http://go-agent-intelligence:9001";
     const response = await fetch(`${agentUrl}/api/routing/score`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -210,11 +211,15 @@ async function queryAgentIntelligence(
       signal: AbortSignal.timeout(3000), // 3s timeout — fall back if slow
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: `Routing intelligence service failed (${response.status}).` });
     const data = await response.json() as { routes: RouteOption[]; modelVersion: string };
+    if (!Array.isArray(data.routes) || data.routes.length === 0 || !data.modelVersion) {
+      throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "Routing intelligence service returned an invalid decision." });
+    }
     return data;
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof TRPCError) throw error;
+    throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "Routing intelligence service is unavailable." });
   }
 }
 
@@ -243,34 +248,15 @@ export const smartRoutingRouter = router({
 
         const userId = ctx.user.id;
 
-        // Try AI agent first
         const agentResult = await queryAgentIntelligence(
           input.sendAmount,
           input.sendCurrency,
           input.receiveCurrency,
           userId
         );
-
-        let routes: RouteOption[];
-        let modelVersion: string;
-
-        if (agentResult) {
-          routes = agentResult.routes;
-          modelVersion = agentResult.modelVersion;
-          logger.info({ userId, corridor: `${input.sendCurrency}-${input.receiveCurrency}` }, "[SmartRouting] Used AI agent scoring");
-        } else {
-          // Fall back to rule-based scoring
-          const fxRates: Record<string, number> = {
-            "USD-NGN": 1580.0,
-            "USD-GHS": 15.2,
-            "USD-KES": 129.5,
-            "GBP-NGN": 2010.0,
-            "EUR-NGN": 1720.0,
-          };
-          routes = buildRouteOptions(input.sendAmount, input.sendCurrency, input.receiveCurrency, fxRates);
-          modelVersion = "rule-based-v1";
-          logger.info({ userId }, "[SmartRouting] Used rule-based fallback scoring");
-        }
+        const routes = agentResult.routes;
+        const modelVersion = agentResult.modelVersion;
+        logger.info({ userId, corridor: `${input.sendCurrency}-${input.receiveCurrency}`, modelVersion }, "[SmartRouting] Used AI agent scoring");
 
         // Re-sort by priority preference
         if (input.priority === "cost") {
@@ -290,8 +276,15 @@ export const smartRoutingRouter = router({
           sendAmount: input.sendAmount,
           sendCurrency: input.sendCurrency,
           receiveCurrency: input.receiveCurrency,
+          corridorCode: `${input.sendCurrency}-${input.receiveCurrency}`,
           routes,
           recommendedRouteId: recommendedRoute?.routeId ?? "",
+          decisionFactors: {
+            recommendedOverallScore: recommendedRoute?.overallScore ?? 0,
+            recommendedReliabilityScore: recommendedRoute?.reliabilityScore ?? 0,
+            recommendedLiquidityScore: recommendedRoute?.liquidityScore ?? 0,
+            recommendedComplianceScore: recommendedRoute?.complianceScore ?? 0,
+          },
           modelVersion,
           computedAt: new Date(),
         } satisfies RoutingDecision;

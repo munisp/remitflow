@@ -19,7 +19,7 @@
  * Language: TypeScript (co-located with tRPC routers for type-safe queries)
  */
 
-import { db } from "../db";
+import { getDb } from "../db";
 import { sql, eq } from "drizzle-orm";
 import { pgTable, bigserial, bigint, varchar, numeric, integer, boolean, timestamp, jsonb, index } from "drizzle-orm/pg-core";
 
@@ -135,6 +135,12 @@ export const projectionCheckpoints = pgTable(
   }
 );
 
+async function requireProjectionDb() {
+  const db = await getDb();
+  if (!db) throw new Error("Database unavailable for CQRS projection");
+  return db;
+}
+
 // ─── Projection Handlers ──────────────────────────────────────────────────────
 
 export interface DomainEvent {
@@ -158,6 +164,7 @@ export class UserDashboardProjection {
   static readonly aggregateType = "user";
 
   static async handle(event: DomainEvent): Promise<void> {
+    const db = await requireProjectionDb();
     const userId = parseInt(event.aggregate_id, 10);
 
     switch (event.event_type) {
@@ -215,6 +222,7 @@ export class WalletBalanceProjection {
   static readonly aggregateType = "wallet";
 
   static async handle(event: DomainEvent): Promise<void> {
+    const db = await requireProjectionDb();
     const walletId = parseInt(event.aggregate_id, 10);
     const p = event.payload as any;
 
@@ -286,6 +294,7 @@ export class ComplianceSummaryProjection {
   static readonly aggregateType = "compliance";
 
   static async handle(event: DomainEvent): Promise<void> {
+    const db = await requireProjectionDb();
     const userId = parseInt(event.aggregate_id, 10);
     const p = event.payload as any;
 
@@ -356,7 +365,7 @@ export const PROJECTION_REGISTRY = [
  */
 export async function dispatchToProjections(event: DomainEvent): Promise<void> {
   const handlers = PROJECTION_REGISTRY.filter(
-    (p) => p.aggregateType === event.aggregate_type || p.aggregateType === "*"
+    (p) => p.aggregateType === event.aggregate_type
   );
 
   await Promise.allSettled(
@@ -368,6 +377,7 @@ export async function dispatchToProjections(event: DomainEvent): Promise<void> {
   );
 
   // Update checkpoint
+  const db = await requireProjectionDb();
   for (const handler of handlers) {
     await db.execute(sql`
       INSERT INTO projection_checkpoints (projection_name, aggregate_type, last_processed_version, updated_at)

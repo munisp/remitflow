@@ -18,29 +18,22 @@ import { canAccessDispute, grantTransactionAccess } from "../middleware/permify"
 import { logger } from '../_core/logger';
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 
-// ─── SMS helper (Africa's Talking real SDK or console fallback) ─────────────────────────────────
+// ─── SMS helper (Africa's Talking provider) ───────────────────────────────────
 async function sendDisputeSms(phone: string | null | undefined, message: string): Promise<void> {
   if (!phone) return;
-  try {
-    const provider = process.env.SMS_PROVIDER ?? "console";
-    if (provider === "africas_talking") {
-      const AfricasTalking = (await import("africastalking")).default;
-      const at = AfricasTalking({
-        apiKey: process.env.AFRICASTALKING_API_KEY ?? "",
-        username: process.env.AFRICASTALKING_USERNAME ?? "sandbox",
-      });
-      await at.SMS.send({
-        to: [phone],
-        message,
-        from: process.env.AFRICASTALKING_SENDER_ID,
-      });
-    } else {
-      // Console fallback for dev — disputes are still traceable via logs
-      logger.info(`[DisputeSMS][${provider}] To: ${phone} | ${message}`);
-    }
-  } catch (err: any) {
-    logger.error({ err: err.message }, '[DisputeSMS] Failed:');
+  if (process.env.SMS_PROVIDER !== "africas_talking") {
+    throw new Error("SMS_PROVIDER must be configured as africas_talking for dispute notifications");
   }
+  const apiKey = process.env.AFRICASTALKING_API_KEY;
+  const username = process.env.AFRICASTALKING_USERNAME;
+  if (!apiKey || !username) throw new Error("Africa's Talking credentials must be configured");
+  const AfricasTalking = (await import("africastalking")).default;
+  const at = AfricasTalking({ apiKey, username });
+  await at.SMS.send({
+    to: [phone],
+    message,
+    from: process.env.AFRICASTALKING_SENDER_ID,
+  });
 }
 
 // ─── Raise a new transfer dispute ────────────────────────────────────────────

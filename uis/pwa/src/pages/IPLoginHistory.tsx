@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useTranslation } from 'node_modules/react-i18next';
+import { useTranslation } from 'react-i18next';
 import { securityService, type LoginHistoryEntry } from '../services/api';
 
 const FAILED_ATTEMPT_THRESHOLD = 3;

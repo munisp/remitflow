@@ -368,7 +368,7 @@ export function useSearch<T = unknown>(
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [aggregations, setAggregations] = useState<Record<string, SearchAggregation[]>>({});
 
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const search = useCallback(async () => {
     if (query.length < minQueryLength) {

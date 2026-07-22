@@ -7,8 +7,10 @@
 import { getTenantHeadersFromStorage } from "./tenant/getTenantHeaders";
 import { tenantService } from "./tenant/tenantService";
 
-const CORE_BANKING_BASE =
-  import.meta.env.VITE_CORE_BANKING_URL || "https://54remit.upi.dev";
+const CORE_BANKING_BASE = (
+  import.meta.env.VITE_CORE_BANKING_URL ||
+  (typeof window !== "undefined" ? `${window.location.origin}/api` : "/api")
+).replace(/\/$/, "");
 
 export interface LoginCredentials {
   email: string;

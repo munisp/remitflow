@@ -59,6 +59,12 @@ export function getRedisClient(): Redis | null {
   }
 }
 
+export function requireRedisClient(): Redis {
+  const client = getRedisClient();
+  if (!client) throw new Error("Redis is unavailable for this operation");
+  return client;
+}
+
 // ── Cache Operations ──────────────────────────────────────────────────────────
 export async function cacheGet<T>(key: string): Promise<T | null> {
   const r = getRedisClient();

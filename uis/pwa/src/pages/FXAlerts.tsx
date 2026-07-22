@@ -619,7 +619,7 @@ const FXAlerts: React.FC = () => {
                   type="number"
                   value={newAlert.threshold_value}
                   onChange={(e) => setNewAlert(prev => ({ ...prev, threshold_value: e.target.value }))}
-                  value="e.g., 2000"
+                  placeholder="e.g., 2000"
                   className="w-full px-4 py-3 border border-slate-200 rounded-xl"
                 />
               </div>
@@ -658,7 +658,7 @@ const FXAlerts: React.FC = () => {
                   value={redeemPoints}
                   onChange={(e) => setRedeemPoints(e.target.value)}
                   max={loyalty.available_points}
-                  value="100"
+                  placeholder="100"
                   className="w-full px-4 py-3 border border-slate-200 rounded-xl"
                 />
               </div>

@@ -1265,7 +1265,7 @@ export const appRouter = router({
       // ─── FX rate lock validation: reject if rate moved > 0.5% since quote ──────
       if (input.rateLockToken) {
         const { validateRateLock } = await import("./lib/fxRateLock");
-        const lockResult = validateRateLock(input.rateLockToken, ctx.user!.id, input.fromCurrency, input.toCurrency, fxRate);
+        const lockResult = validateRateLock(input.rateLockToken, String(ctx.user!.id), input.fromCurrency, input.toCurrency, fxRate);
         if (!lockResult.valid) {
           throw new TRPCError({
             code: "PRECONDITION_FAILED",
@@ -1489,7 +1489,7 @@ export const appRouter = router({
       const toAmount = (input.amount - fee) * fxRate;
       // Generate FX rate lock token (valid for 60 seconds)
       const { createRateLock } = await import("./lib/fxRateLock");
-      const rateLockToken = createRateLock(ctx.user!.id, input.fromCurrency, input.toCurrency, fxRate);
+      const rateLockToken = createRateLock(String(ctx.user!.id), input.fromCurrency, input.toCurrency, fxRate);
       return { fxRate, fee: Math.round(fee * 100) / 100, toAmount: Math.round(toAmount * 100) / 100, fromAmount: input.amount, estimatedTime: "1-3 minutes", rateLockToken, rateLockExpiresInSeconds: 60 };
     }),
   }),
@@ -4070,7 +4070,7 @@ export const appRouter = router({
             }
             // SSE in-app notification
             broadcastUserEvent(alert.user_id, {
-              type: "fx_alert",
+              type: "rate_alert_hit",
               payload: {
                 pair: pairLabel,
                 currentRate: currentRate.toFixed(4),

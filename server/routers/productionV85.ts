@@ -296,7 +296,7 @@ export const complianceAlertsRouter = router({
       else if (input.action === "resolve") { updates.status = "resolved"; updates.resolvedAt = new Date(); }
       else if (input.action === "dismiss") { updates.status = "dismissed"; }
       await db.update(complianceAlerts).set(updates as any).where(inArray(complianceAlerts.id, input.ids));
-      broadcastAdminEvent({ type: "bulk_action", payload: { ids: input.ids, action: input.action, by: ctx.user.id } });
+      broadcastAdminEvent({ type: "case_updated", payload: { ids: input.ids, action: input.action, by: ctx.user.id, bulk: true } });
       return { updated: input.ids.length, action: input.action };
     }),
 

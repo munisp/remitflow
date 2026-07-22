@@ -251,7 +251,7 @@ export const developerExperienceRouter = createTRPCRouter({
   generateSdkSnippet: protectedProcedure
     .input(z.object({
       procedure: z.string(),
-      input:     z.record(z.unknown()).default({}),
+      input:     z.record(z.string(), z.unknown()).default({}),
       language:  z.enum(["typescript", "python", "go"]),
     }))
     .query(async ({ input }) => {

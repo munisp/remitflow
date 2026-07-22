@@ -1,11 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import CreateAccountModal from "../components/CreateAccountModal";
-import {
-  accountService,
-  exchangeRateService,
-  type Account,
-} from "../services/api";
+import { exchangeRateService } from "../services/api";
+import { accountService, type Account } from "../services/accountService";
 
 interface WalletData {
   currency: string;
@@ -88,6 +85,7 @@ const Wallet: React.FC = () => {
             currency: primaryAccount.account_currency,
             balance: parseFloat(primaryAccount.balance) || 0,
             flag: currencyInfo?.flag || "",
+            currencyName: currencyInfo?.name || primaryAccount.account_currency,
             name: currencyInfo?.name || primaryAccount.account_currency,
             accountNumber: primaryAccount.account_number,
             accountId: primaryAccount.id,
@@ -113,11 +111,6 @@ const Wallet: React.FC = () => {
     const rate = exchangeRates[w.currency] || 1;
     return acc + w.balance * rate;
   }, 0);
-
-  const handleAddMoney = async () => {
-    // TODO: Implement funding flow
-    console.log("Add money for currency:", selectedCurrency);
-  };
 
   const handleAccountCreated = () => {
     // Refresh wallet data after creating new account
@@ -160,12 +153,12 @@ const Wallet: React.FC = () => {
             >
               Receive
             </Link>
-            <button
-              onClick={handleAddMoney}
+            <Link
+              to="/receive"
               className="text-sm bg-white/15 backdrop-blur-sm px-5 py-2.5 rounded-xl hover:bg-white/25 transition-colors font-medium"
             >
               Add Money
-            </button>
+            </Link>
           </div>
         </div>
       </div>

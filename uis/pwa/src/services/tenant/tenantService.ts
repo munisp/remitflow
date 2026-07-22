@@ -4,8 +4,10 @@
  * Based on 54remit core banking tenant management pattern
  */
 
-const CORE_BANKING_BASE =
-  import.meta.env.VITE_CORE_BANKING_URL || "https://54remit.upi.dev";
+const CORE_BANKING_BASE = (
+  import.meta.env.VITE_CORE_BANKING_URL ||
+  (typeof window !== "undefined" ? `${window.location.origin}/api` : "/api")
+).replace(/\/$/, "");
 
 export interface TenantContact {
   id: string;

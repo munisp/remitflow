@@ -31,21 +31,9 @@ export interface PaymentResult {
   errorMessage?: string;
 }
 
-// All supported African and global corridors
-const AFRICAN_CURRENCIES = ["NGN", "KES", "GHS", "TZS", "UGX", "ZAR", "XOF", "XAF", "EGP", "MAD", "ETB", "TND"];
-const GLOBAL_CURRENCIES = ["USD", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF", "CNY", "INR", "BRL", "MXN", "PHP", "SGD"];
-
-const DEV_SANDBOX_PROVIDER: PaymentProvider = {
-  name: "dev_sandbox",
-  supportedCurrencies: [...AFRICAN_CURRENCIES, ...GLOBAL_CURRENCIES],
-  supportedRails: ["bank_transfer", "mobile_money", "card", "crypto", "wallet", "cash_pickup"],
-  priority: 100,
-};
-
-const PROVIDERS: PaymentProvider[] = [
-  DEV_SANDBOX_PROVIDER,
-  // Production providers would be added here conditionally
-];
+// Provider adapters are intentionally registered only by concrete production
+// integrations. This module must never simulate a financial result.
+const PROVIDERS: PaymentProvider[] = [];
 
 /**
  * Select the best payment provider for a given currency and rail.
@@ -74,44 +62,12 @@ export async function initiatePayment(
   const provider = selectProvider(request.currency, rail);
 
   if (!provider) {
-    return {
-      success: false,
-      providerName: "none",
-      status: "failed",
-      errorMessage: `No provider available for ${request.currency} via ${rail}`,
-    };
+    throw new Error(`No verified payment provider is configured for ${request.currency} via ${rail}`);
   }
 
-  // Dev sandbox simulation
-  if (provider.name === "dev_sandbox") {
-    // Simulate failure for very large amounts (test scenario)
-    if (request.amount >= 999999) {
-      return {
-        success: false,
-        providerName: "dev_sandbox",
-        status: "failed",
-        errorMessage: "Amount exceeds sandbox limit",
-      };
-    }
-
-    // Simulate async processing delay
-    await new Promise((resolve) => setTimeout(resolve, 10));
-
-    return {
-      success: true,
-      providerRef: `DEV-${request.transactionId}-${Date.now()}`,
-      providerName: "dev_sandbox",
-      status: "completed",
-    };
-  }
-
-  // Production provider logic would go here
-  return {
-    success: false,
-    providerName: provider.name,
-    status: "failed",
-    errorMessage: "Production provider not configured",
-  };
+  // A provider record without its concrete adapter is a deployment error, not a
+  // condition in which a payment may be claimed as completed.
+  throw new Error(`Payment provider adapter is unavailable for ${provider.name}`);
 }
 
 /**

@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { SearchBar } from "../components/SearchBar";
-import { accountService, transactionServiceCore } from "../services/api";
-import type { Transaction as CoreTransaction } from "../services/transactionService";
+import type { TransactionSearchResult } from "../services/searchService";
+import { accountService } from "../services/accountService";
+import { transactionServiceCore, type Transaction as CoreTransaction } from "../services/transactionService";
 
 interface Transaction {
   id: string;
@@ -13,79 +14,6 @@ interface Transaction {
   date: string;
   reference: string;
 }
-
-const mockTransactions: Transaction[] = [
-  {
-    id: "1",
-    type: "sent",
-    amount: 50000,
-    currency: "NGN",
-    status: "completed",
-    description: "Transfer to John Doe",
-    date: "2024-01-15 14:30",
-    reference: "TXN001234",
-  },
-  {
-    id: "2",
-    type: "received",
-    amount: 25000,
-    currency: "NGN",
-    status: "completed",
-    description: "From Jane Smith",
-    date: "2024-01-14 10:15",
-    reference: "TXN001233",
-  },
-  {
-    id: "3",
-    type: "airtime",
-    amount: 2000,
-    currency: "NGN",
-    status: "completed",
-    description: "MTN Airtime",
-    date: "2024-01-13 09:00",
-    reference: "TXN001232",
-  },
-  {
-    id: "4",
-    type: "bill",
-    amount: 15000,
-    currency: "NGN",
-    status: "completed",
-    description: "IKEDC Electricity",
-    date: "2024-01-12 16:45",
-    reference: "TXN001231",
-  },
-  {
-    id: "5",
-    type: "exchange",
-    amount: 100,
-    currency: "USD",
-    status: "completed",
-    description: "USD to NGN",
-    date: "2024-01-11 11:20",
-    reference: "TXN001230",
-  },
-  {
-    id: "6",
-    type: "sent",
-    amount: 75000,
-    currency: "NGN",
-    status: "pending",
-    description: "Transfer to Mike Johnson",
-    date: "2024-01-10 08:30",
-    reference: "TXN001229",
-  },
-  {
-    id: "7",
-    type: "received",
-    amount: 100000,
-    currency: "NGN",
-    status: "completed",
-    description: "From Sarah Williams",
-    date: "2024-01-09 15:00",
-    reference: "TXN001228",
-  },
-];
 
 const Transactions: React.FC = () => {
   const [filter, setFilter] = useState("all");
@@ -342,7 +270,7 @@ const Transactions: React.FC = () => {
           </div>
           <div className="flex gap-2">
             <SearchBar
-              value="Search transactions..."
+              placeholder="Search transactions..."
               index="transactions"
               onSearch={handleSearch}
               className="w-full md:w-64"

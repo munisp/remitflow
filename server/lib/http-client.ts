@@ -83,10 +83,13 @@ export function createSecureHttpClient(options?: {
 
   // ─── Response Interceptor: Size Guard ───────────────────────────────────
   instance.interceptors.response.use((response: AxiosResponse) => {
-    const contentLength = parseInt(
-      response.headers["content-length"] ?? "0",
-      10
-    );
+    const rawContentLength = response.headers["content-length"];
+    const contentLengthValue = Array.isArray(rawContentLength)
+      ? rawContentLength[0]
+      : typeof rawContentLength === "string" || typeof rawContentLength === "number"
+        ? String(rawContentLength)
+        : "0";
+    const contentLength = parseInt(contentLengthValue, 10);
     if (contentLength > MAX_RESPONSE_SIZE_BYTES) {
       throw new Error(
         `Response size ${contentLength} exceeds maximum allowed ${MAX_RESPONSE_SIZE_BYTES} bytes`

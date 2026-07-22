@@ -1,8 +1,9 @@
 {
   "include": [
-    "client/src/**/*",
+    "uis/pwa/src/**/*",
     "shared/**/*",
-    "server/**/*"
+    "server/**/*",
+    "drizzle/**/*"
   ],
   "exclude": [
     "node_modules",
@@ -14,6 +15,7 @@
     "incremental": true,
     "tsBuildInfoFile": "./node_modules/typescript/tsbuildinfo",
     "noEmit": true,
+    "target": "ES2022",
     "module": "ESNext",
     "strict": true,
     "strictNullChecks": true,
@@ -40,7 +42,7 @@
     ],
     "paths": {
       "@/*": [
-        "./client/src/*"
+        "./uis/pwa/src/*"
       ],
       "@shared/*": [
         "./shared/*"

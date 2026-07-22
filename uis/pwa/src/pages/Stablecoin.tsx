@@ -606,7 +606,7 @@ export default function Stablecoin() {
                     type="number"
                     value={sendAmount}
                     onChange={(e) => setSendAmount(e.target.value)}
-                    value="0.00"
+                    placeholder="0.00"
                     className="w-full pl-8 pr-4 py-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                   />
                 </div>
@@ -618,7 +618,7 @@ export default function Stablecoin() {
                   type="text"
                   value={sendAddress}
                   onChange={(e) => setSendAddress(e.target.value)}
-                  value="Enter wallet address"
+                  placeholder="Enter wallet address"
                   className="w-full px-4 py-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                 />
               </div>
@@ -747,7 +747,7 @@ export default function Stablecoin() {
                       setConvertAmount(e.target.value);
                       setQuote(null);
                     }}
-                    value="0.00"
+                    placeholder="0.00"
                     className="w-full pl-8 pr-4 py-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                   />
                 </div>
@@ -889,7 +889,7 @@ export default function Stablecoin() {
                     type="number"
                     value={rampAmount}
                     onChange={(e) => setRampAmount(e.target.value)}
-                    value="0.00"
+                    placeholder="0.00"
                     className="w-full pl-8 pr-4 py-3 border rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
                   />
                 </div>

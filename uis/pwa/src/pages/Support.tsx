@@ -62,8 +62,8 @@ const Support: React.FC = () => {
             <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)} className={inputClass} required>
               <option value="">Select a category</option><option value="transaction">Transaction Issue</option><option value="account">Account Problem</option><option value="kyc">KYC Verification</option><option value="card">Card Issue</option><option value="other">Other</option>
             </select></div>
-          <div><label className="block text-sm font-medium text-slate-700 mb-2">Subject</label><input type="text" value={subject} onChange={(e) => setSubject(e.target.value)} className={inputClass} value="Brief description of your issue" required /></div>
-          <div><label className="block text-sm font-medium text-slate-700 mb-2">Message</label><textarea value={message} onChange={(e) => setMessage(e.target.value)} className={inputClass} rows={4} value="Describe your issue in detail..." required /></div>
+          <div><label className="block text-sm font-medium text-slate-700 mb-2">Subject</label><input type="text" value={subject} onChange={(e) => setSubject(e.target.value)} className={inputClass} placeholder="Brief description of your issue" required /></div>
+          <div><label className="block text-sm font-medium text-slate-700 mb-2">Message</label><textarea value={message} onChange={(e) => setMessage(e.target.value)} className={inputClass} rows={4} placeholder="Describe your issue in detail..." required /></div>
           <button type="submit" disabled={submitting} className="w-full py-3.5 bg-gradient-to-r from-indigo-600 to-violet-600 text-white font-semibold rounded-xl shadow-lg shadow-indigo-200 hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200 disabled:opacity-50">
             {submitting ? 'Submitting...' : 'Submit Request'}
           </button>

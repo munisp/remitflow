@@ -24,14 +24,15 @@ import { eq, sql } from "drizzle-orm";
 import { logger } from "../_core/logger";
 
 const MICROSERVICE_URLS = {
-  bricspay: process.env.BRICSPAY_SERVICE_URL || "http://localhost:8102",
-  mbridge:  process.env.MBRIDGE_SERVICE_URL  || "http://localhost:8103",
-  ghipss:   process.env.GHIPSS_SERVICE_URL   || "http://localhost:8104",
-  africbdc: process.env.AFRICBDC_SERVICE_URL || "http://localhost:8105",
-  papss:    process.env.PAPSS_SERVICE_URL    || "http://localhost:8106",
+  bricspay: process.env.BRICSPAY_SERVICE_URL?.trim() ?? "",
+  mbridge:  process.env.MBRIDGE_SERVICE_URL?.trim() ?? "",
+  ghipss:   process.env.GHIPSS_SERVICE_URL?.trim() ?? "",
+  africbdc: process.env.AFRICBDC_SERVICE_URL?.trim() ?? "",
+  papss:    process.env.PAPSS_SERVICE_URL?.trim() ?? "",
 };
 
 async function callRailService(url: string, path: string, body: unknown) {
+  if (!url) throw new Error("Rail service URL is not configured for this payment route");
   try {
     const res = await fetch(`${url}${path}`, {
       method: "POST",
@@ -58,8 +59,8 @@ async function callRailService(url: string, path: string, body: unknown) {
           );
         }
       } catch { /* DB unavailable — propagate original error */ }
-      logger.warn({ url, path }, "Rail service unavailable — queued for retry");
-      return { status: "mock_submitted", mock: true, queued: true, message: "Payment queued for retry — microservice temporarily unavailable" };
+      logger.warn({ url, path }, "Rail service unavailable; retry event persisted");
+      throw new Error("Rail service is unavailable; retry event was persisted and no payment result was issued");
     }
     throw err;
   }

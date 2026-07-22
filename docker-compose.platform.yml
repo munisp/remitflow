@@ -1,0 +1,405 @@
+# Canonical self-hosted RemitFlow platform topology.
+# Required values belong in an uncommitted .env file; see .env.platform.example.
+# Start: docker compose --env-file .env -f docker-compose.platform.yml up --build
+name: remitflow
+
+x-database-url: &database-url postgresql://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+x-redis-url: &redis-url redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0
+
+services:
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [platform]
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [platform]
+
+  migrate:
+    build:
+      context: .
+      target: builder
+    command: ["pnpm", "db:migrate"]
+    environment:
+      DATABASE_URL: *database-url
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks: [platform]
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0.7
+    command: ["start", "--import-realm", "--http-enabled=true", "--hostname-strict=false"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      KC_DB_USERNAME: ${POSTGRES_USER:?POSTGRES_USER is required}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:?KEYCLOAK_ADMIN_USERNAME is required}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is required}
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    volumes:
+      - ./infra/caddy/keycloak-realm-export.json:/opt/keycloak/data/import/remitflow-realm.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/keycloak/bin/kc.sh show-config >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 40s
+    networks: [platform]
+
+  permify:
+    image: ghcr.io/permify/permify:v0.9.6
+    command: ["serve"]
+    environment:
+      PERMIFY_DATABASE_ENGINE: postgres
+      PERMIFY_DATABASE_URI: *database-url
+      PERMIFY_DATABASE_AUTO_MIGRATE: "true"
+      PERMIFY_HTTP_PORT: "3476"
+      PERMIFY_GRPC_PORT: "3478"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3476/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    networks: [platform]
+
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.16.63
+    entrypoint: ["/bin/sh", "-ec"]
+    command: >-
+      if [ ! -f /data/0_0.tigerbeetle ]; then
+        tigerbeetle format --cluster=${TIGERBEETLE_CLUSTER_ID:?TIGERBEETLE_CLUSTER_ID is required} --replica=0 --replica-count=1 /data/0_0.tigerbeetle;
+      fi;
+      exec tigerbeetle start --addresses=0.0.0.0:3000 --cluster=${TIGERBEETLE_CLUSTER_ID:?TIGERBEETLE_CLUSTER_ID is required} --replica=0 /data/0_0.tigerbeetle
+    environment:
+      TIGERBEETLE_CLUSTER_ID: ${TIGERBEETLE_CLUSTER_ID:?TIGERBEETLE_CLUSTER_ID is required}
+    volumes:
+      - tigerbeetle-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /data/0_0.tigerbeetle"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [platform]
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    environment:
+      DB: postgresql
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [platform]
+
+  temporal-ui:
+    image: temporalio/ui:2.26.2
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      - temporal
+    networks: [platform]
+
+  dapr-placement:
+    image: daprio/dapr:1.14.4
+    command: ["./placement", "-port", "50006"]
+    networks: [platform]
+
+  dapr-scheduler:
+    image: daprio/dapr:1.14.4
+    command: ["./scheduler", "--port", "50007"]
+    networks: [platform]
+
+  # The controller and SPU form the real Fluvio data plane. The platform's
+  # production bootstrap job must register the SPU and create approved topics
+  # before publishers are admitted; this avoids silent topic auto-creation.
+  fluvio-sc:
+    image: infinyon/fluvio:stable
+    command: ["./fluvio-run", "sc", "--local", "/fluvio/metadata"]
+    volumes:
+      - fluvio-metadata:/fluvio/metadata
+    networks: [platform]
+
+  fluvio-spu:
+    image: infinyon/fluvio:stable
+    command: ["./fluvio-run", "spu", "-i", "5001", "-p", "fluvio-spu:9010", "-v", "fluvio-spu:9011", "--sc-addr", "fluvio-sc:9004", "--log-base-dir", "/fluvio/data"]
+    volumes:
+      - fluvio-data:/fluvio/data
+    depends_on:
+      - fluvio-sc
+    networks: [platform]
+
+  # Existing platform producers and DLQ consumers use Kafka protocol. Redpanda
+  # supplies that protocol inside the same self-hosted profile; Fluvio remains
+  # the requested event-stream processing plane for its dedicated services.
+  redpanda:
+    image: redpandadata/redpanda:v24.2.12
+    command:
+      ["redpanda", "start", "--overprovisioned", "--smp", "1", "--memory", "1G", "--reserve-memory", "0M", "--node-id", "0", "--check=false"]
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health --brokers=localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks: [platform]
+
+  minio:
+    image: minio/minio:RELEASE.2024-10-02T17-50-41Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?S3_ACCESS_KEY is required}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?S3_SECRET_KEY is required}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+    networks: [platform]
+
+  lakehouse:
+    build: ./services/python-lakehouse
+    environment:
+      DATABASE_URL: *database-url
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?S3_ACCESS_KEY is required}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY is required}
+      LAKEHOUSE_BUCKET: ${LAKEHOUSE_BUCKET:?LAKEHOUSE_BUCKET is required}
+      LAKEHOUSE_PORT: "8102"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks: [platform]
+
+  aml-scorer:
+    build: ./services/python-aml-scorer
+    environment:
+      DATABASE_URL: *database-url
+      AML_SCORER_PORT: "8103"
+      AML_MODEL_ARTIFACT_PATH: /models/aml-model.joblib
+      AML_MODEL_MIN_TRAINING_ROWS: ${AML_MODEL_MIN_TRAINING_ROWS:?AML_MODEL_MIN_TRAINING_ROWS is required}
+      AML_MODEL_TRAINING_TOKEN: ${AML_MODEL_TRAINING_TOKEN:?AML_MODEL_TRAINING_TOKEN is required}
+      AML_THRESHOLD_MEDIUM: ${AML_THRESHOLD_MEDIUM:?AML_THRESHOLD_MEDIUM is required}
+      AML_THRESHOLD_HIGH: ${AML_THRESHOLD_HIGH:?AML_THRESHOLD_HIGH is required}
+      AML_THRESHOLD_CRITICAL: ${AML_THRESHOLD_CRITICAL:?AML_THRESHOLD_CRITICAL is required}
+    volumes:
+      - aml-models:/models
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [platform]
+
+  tigerbeetle-bridge:
+    build: ./services/rust-tigerbeetle-bridge
+    environment:
+      TIGERBEETLE_ADDRESSES: tigerbeetle:3000
+      TIGERBEETLE_CLUSTER_ID: ${TIGERBEETLE_CLUSTER_ID:?TIGERBEETLE_CLUSTER_ID is required}
+      DATABASE_URL: *database-url
+      PORT: "8112"
+    depends_on:
+      tigerbeetle:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks: [platform]
+
+  fluvio-consumer:
+    build: ./services/rust-fluvio-consumer
+    environment:
+      FLUVIO_ENDPOINT: fluvio-sc:9003
+      DATABASE_URL: *database-url
+      PORT: "8113"
+    depends_on:
+      - fluvio-sc
+      - fluvio-spu
+      - postgres
+    networks: [platform]
+
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 15
+    networks: [platform]
+
+  api:
+    build: .
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: *database-url
+      REDIS_URL: *redis-url
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:?KEYCLOAK_REALM is required}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:?KEYCLOAK_CLIENT_ID is required}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:?KEYCLOAK_CLIENT_SECRET is required}
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USERNAME:?KEYCLOAK_ADMIN_USERNAME is required}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is required}
+      PERMIFY_ENDPOINT: permify:3478
+      PERMIFY_TENANT_ID: ${PERMIFY_TENANT_ID:?PERMIFY_TENANT_ID is required}
+      TIGERBEETLE_ADDRESSES: tigerbeetle:3000
+      TIGERBEETLE_BRIDGE_URL: http://tigerbeetle-bridge:8112
+      TIGERBEETLE_CLUSTER_ID: ${TIGERBEETLE_CLUSTER_ID:?TIGERBEETLE_CLUSTER_ID is required}
+      FLUVIO_ENDPOINT: fluvio-sc:9003
+      FLUVIO_PROFILE: ${FLUVIO_PROFILE:?FLUVIO_PROFILE is required}
+      LAKEHOUSE_URL: http://lakehouse:8102
+      LAKEHOUSE_CATALOG: ${LAKEHOUSE_CATALOG:?LAKEHOUSE_CATALOG is required}
+      LAKEHOUSE_WAREHOUSE: ${LAKEHOUSE_WAREHOUSE:?LAKEHOUSE_WAREHOUSE is required}
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_USER: ${OPENSEARCH_USER:?OPENSEARCH_USER is required}
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:?OPENSEARCH_PASSWORD is required}
+      DAPR_HOST: 127.0.0.1
+      DAPR_HTTP_PORT: "3500"
+      DAPR_GRPC_PORT: "50001"
+      DAPR_APP_ID: remitflow-api
+      DAPR_STATE_STORE: ${DAPR_STATE_STORE:?DAPR_STATE_STORE is required}
+      DAPR_PUBSUB: ${DAPR_PUBSUB:?DAPR_PUBSUB is required}
+      DAPR_SECRET_STORE: ${DAPR_SECRET_STORE:?DAPR_SECRET_STORE is required}
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:?TEMPORAL_NAMESPACE is required}
+      APISIX_ADMIN_URL: http://apisix:9180
+      APISIX_GATEWAY_URL: ${APISIX_GATEWAY_URL:?APISIX_GATEWAY_URL is required}
+      APISIX_UPSTREAM_API: ${APISIX_UPSTREAM_API:?APISIX_UPSTREAM_API is required}
+      APISIX_UPSTREAM_LAKEHOUSE: ${APISIX_UPSTREAM_LAKEHOUSE:?APISIX_UPSTREAM_LAKEHOUSE is required}
+      APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:?APISIX_ADMIN_KEY is required}
+      OPENAPPSEC_MGMT_URL: ${OPENAPPSEC_MGMT_URL:?OPENAPPSEC_MGMT_URL is required}
+      OPENAPPSEC_TOKEN: ${OPENAPPSEC_TOKEN:-}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:?KAFKA_BROKERS is required}
+      KAFKA_CLIENT_ID: ${KAFKA_CLIENT_ID:?KAFKA_CLIENT_ID is required}
+      FX_HEALTH_URL: ${FX_HEALTH_URL:?FX_HEALTH_URL is required}
+      CORE_BANKING_UPSTREAM_URL: ${CORE_BANKING_UPSTREAM_URL:?CORE_BANKING_UPSTREAM_URL is required}
+      SMS_PROVIDER: ${SMS_PROVIDER:?SMS_PROVIDER is required}
+      AFRICAS_TALKING_API_KEY: ${AFRICAS_TALKING_API_KEY:-}
+      AFRICAS_TALKING_USERNAME: ${AFRICAS_TALKING_USERNAME:-}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      BRICSPAY_SERVICE_URL: ${BRICSPAY_SERVICE_URL:-}
+      MBRIDGE_SERVICE_URL: ${MBRIDGE_SERVICE_URL:-}
+      GHIPSS_SERVICE_URL: ${GHIPSS_SERVICE_URL:-}
+      AFRICBDC_SERVICE_URL: ${AFRICBDC_SERVICE_URL:-}
+      PAPSS_SERVICE_URL: ${PAPSS_SERVICE_URL:-}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      permify:
+        condition: service_started
+      tigerbeetle:
+        condition: service_healthy
+      tigerbeetle-bridge:
+        condition: service_started
+      lakehouse:
+        condition: service_started
+      redpanda:
+        condition: service_healthy
+    networks: [platform]
+
+  dapr-api:
+    image: daprio/daprd:1.14.4
+    network_mode: service:api
+    command:
+      ["./daprd", "--app-id", "remitflow-api", "--app-port", "3000", "--dapr-http-port", "3500", "--dapr-grpc-port", "50001", "--placement-host-address", "dapr-placement:50006", "--resources-path", "/components"]
+    volumes:
+      - ./infrastructure/runtime/dapr/components:/components:ro
+    depends_on:
+      - api
+      - dapr-placement
+      - dapr-scheduler
+      - redis
+
+  appsec-agent:
+    image: ghcr.io/openappsec/agent:latest
+    ipc: shareable
+    command: ["/cp-nano-agent"]
+    environment:
+      registered_server: RemitFlow-APISIX
+    volumes:
+      - appsec-config:/etc/cp/conf
+      - appsec-data:/etc/cp/data
+      - appsec-logs:/var/log/nano_agent
+      - ./infrastructure/runtime/openappsec:/ext/appsec:ro
+    networks: [platform]
+
+  apisix:
+    image: ghcr.io/openappsec/apisix-attachment:latest
+    ipc: service:appsec-agent
+    environment:
+      APISIX_STAND_ALONE: "true"
+    volumes:
+      - ./infrastructure/runtime/apisix/apisix-standalone.yaml:/usr/local/apisix/conf/apisix.yaml:ro
+    ports:
+      - "${APISIX_HTTP_PORT:-9080}:9080"
+      - "${APISIX_HTTPS_PORT:-9443}:9443"
+    depends_on:
+      - appsec-agent
+      - api
+      - keycloak
+    networks: [platform]
+
+volumes:
+  postgres-data:
+  redis-data:
+  tigerbeetle-data:
+  fluvio-metadata:
+  fluvio-data:
+  minio-data:
+  aml-models:
+  opensearch-data:
+  appsec-config:
+  appsec-data:
+  appsec-logs:
+
+networks:
+  platform:
+    driver: bridge

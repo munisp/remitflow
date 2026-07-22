@@ -24,7 +24,12 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -r -s /bin/false -u 1001 appuser
+RUN useradd -r -s /bin/false -u 1001 appuser \
+    && mkdir -p /data/aml \
+    && chown -R appuser:appuser /data/aml
+
+ENV AML_MODEL_PATH=/data/aml/aml-model.joblib
+VOLUME ["/data/aml"]
 
 WORKDIR /app
 COPY --from=builder /install /usr/local

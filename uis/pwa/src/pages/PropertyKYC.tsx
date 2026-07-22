@@ -255,7 +255,7 @@ const PropertyKYC: React.FC = () => {
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-slate-700 mb-1">Full Name (as on ID)</label>
             <input type="text" value={data.fullName} onChange={(e) => handlePartyChange(party, 'fullName', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="Enter full legal name" required />
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="Enter full legal name" required />
           </div>
 
           <div>
@@ -267,7 +267,7 @@ const PropertyKYC: React.FC = () => {
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Nationality</label>
             <input type="text" value={data.nationality} onChange={(e) => handlePartyChange(party, 'nationality', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="Nigerian" />
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="Enter nationality" />
           </div>
 
           <div>
@@ -281,7 +281,7 @@ const PropertyKYC: React.FC = () => {
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">ID Number</label>
             <input type="text" value={data.idNumber} onChange={(e) => handlePartyChange(party, 'idNumber', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="Enter ID number" required />
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="Enter ID number" required />
           </div>
 
           <div>
@@ -293,25 +293,25 @@ const PropertyKYC: React.FC = () => {
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">BVN (11 digits)</label>
             <input type="text" value={data.bvn} onChange={(e) => handlePartyChange(party, 'bvn', e.target.value)} maxLength={11}
-              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="22XXXXXXXXX" />
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="Enter 11-digit BVN" inputMode="numeric" />
           </div>
 
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">NIN (11 digits)</label>
             <input type="text" value={data.nin} onChange={(e) => handlePartyChange(party, 'nin', e.target.value)} maxLength={11}
-              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="Enter NIN" />
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="Enter 11-digit NIN" inputMode="numeric" />
           </div>
 
           <div className="md:col-span-2">
             <label className="block text-sm font-medium text-slate-700 mb-1">Residential Address</label>
             <input type="text" value={data.address} onChange={(e) => handlePartyChange(party, 'address', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="Enter full address" required />
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="Enter full address" required />
           </div>
 
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">City</label>
             <input type="text" value={data.city} onChange={(e) => handlePartyChange(party, 'city', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="Lagos" />
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="Enter city" />
           </div>
 
           <div>
@@ -326,13 +326,13 @@ const PropertyKYC: React.FC = () => {
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Phone Number</label>
             <input type="tel" value={data.phone} onChange={(e) => handlePartyChange(party, 'phone', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="+234 XXX XXX XXXX" required />
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="Enter phone number" inputMode="tel" required />
           </div>
 
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Email Address</label>
             <input type="email" value={data.email} onChange={(e) => handlePartyChange(party, 'email', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="email@example.com" required={party === 'buyer'} />
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="name@example.com" required={party === 'buyer'} />
           </div>
         </div>
       </div>
@@ -360,7 +360,7 @@ const PropertyKYC: React.FC = () => {
             </label>
             <input type="text" value={sourceOfFunds.primarySource === 'EMPLOYMENT' ? sourceOfFunds.employerName : sourceOfFunds.businessName}
               onChange={(e) => handleSourceOfFundsChange(sourceOfFunds.primarySource === 'EMPLOYMENT' ? 'employerName' : 'businessName', e.target.value)}
-              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="Enter name" />
+              className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="Enter name" />
           </div>
         )}
 
@@ -381,7 +381,7 @@ const PropertyKYC: React.FC = () => {
           <label className="block text-sm font-medium text-slate-700 mb-1">Additional Details</label>
           <textarea value={sourceOfFunds.description} onChange={(e) => handleSourceOfFundsChange('description', e.target.value)}
             className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" rows={4}
-            value="Please provide additional details about your source of funds..." required />
+              placeholder="Please provide additional details about your source of funds..." required />
         </div>
       </div>
     </div>
@@ -495,7 +495,7 @@ const PropertyKYC: React.FC = () => {
               <label className="block text-sm font-medium text-slate-700 mb-1">Year</label>
               <input type="text" value={doc.year}
                 onChange={(e) => setIncomeDocuments(prev => { const u = [...prev]; u[index] = { ...u[index], year: e.target.value }; return u; })}
-                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" value="2024" />
+                className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500" placeholder="YYYY" inputMode="numeric" />
             </div>
           </div>
 
@@ -560,7 +560,7 @@ const PropertyKYC: React.FC = () => {
           <input type="text" value={purchaseAgreement.propertyAddress}
             onChange={(e) => setPurchaseAgreement(prev => ({ ...prev, propertyAddress: e.target.value }))}
             className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500"
-            value="Enter full property address" required />
+            placeholder="Enter full property address" required />
         </div>
 
         <div>
@@ -568,7 +568,7 @@ const PropertyKYC: React.FC = () => {
           <input type="text" value={purchaseAgreement.propertyValue}
             onChange={(e) => setPurchaseAgreement(prev => ({ ...prev, propertyValue: e.target.value }))}
             className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500"
-            value="50,000,000" required />
+            placeholder="Enter property value" inputMode="decimal" required />
         </div>
 
         <div>
@@ -583,7 +583,7 @@ const PropertyKYC: React.FC = () => {
           <input type="text" value={purchaseAgreement.buyerName}
             onChange={(e) => setPurchaseAgreement(prev => ({ ...prev, buyerName: e.target.value }))}
             className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500"
-            value="Must match buyer KYC" required />
+            placeholder="Must match buyer KYC" required />
         </div>
 
         <div>
@@ -591,7 +591,7 @@ const PropertyKYC: React.FC = () => {
           <input type="text" value={purchaseAgreement.sellerName}
             onChange={(e) => setPurchaseAgreement(prev => ({ ...prev, sellerName: e.target.value }))}
             className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500"
-            value="Must match seller KYC" required />
+            placeholder="Must match seller KYC" required />
         </div>
       </div>
 

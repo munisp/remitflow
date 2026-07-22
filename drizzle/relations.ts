@@ -8,7 +8,7 @@ import { relations } from "drizzle-orm";
 import {
   users, wallets, transactions, beneficiaries, cards, savingsGoals,
   fxAlerts, kycDocuments, notifications, auditLogs, virtualAccounts,
-  recurringPayments, scheduledTransferRuns, batchPayments, referrals,
+  recurringPayments, scheduledTransferRuns, scheduledTransfers, batchPayments, referrals,
   disputes, supportTickets, rateLocks, directDebitMandates, consentRecords,
   bnplPlans, cbdcWallets, stablecoinWallets, mojaloopTransfers,
   posTerminals, agentAccounts, kybRecords, idempotencyKeys, outboxEvents,
@@ -106,14 +106,19 @@ export const virtualAccountsRelations = relations(virtualAccounts, ({ one }) => 
 }));
 
 // ─── Recurring Payment Relations ─────────────────────────
-export const recurringPaymentsRelations = relations(recurringPayments, ({ one, many }) => ({
+export const recurringPaymentsRelations = relations(recurringPayments, ({ one }) => ({
   user: one(users, { fields: [recurringPayments.userId], references: [users.id] }),
+}));
+
+// ─── Scheduled Transfer Relations ─────────────────────────
+export const scheduledTransfersRelations = relations(scheduledTransfers, ({ one, many }) => ({
+  user: one(users, { fields: [scheduledTransfers.userId], references: [users.id] }),
   runs: many(scheduledTransferRuns),
 }));
 
 // ─── Scheduled Transfer Run Relations ────────────────────
 export const scheduledTransferRunsRelations = relations(scheduledTransferRuns, ({ one }) => ({
-  recurringPayment: one(recurringPayments, { fields: [scheduledTransferRuns.recurringPaymentId], references: [recurringPayments.id] }),
+  schedule: one(scheduledTransfers, { fields: [scheduledTransferRuns.scheduleId], references: [scheduledTransfers.id] }),
 }));
 
 // ─── Batch Payment Relations ─────────────────────────────

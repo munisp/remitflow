@@ -57,33 +57,11 @@ const POINTS_EXPIRY_MONTHS = 12;
 const POINTS_PER_UNIT = 10; // 1 point per $10 transferred
 const REDEMPTION_VALUE = 0.01; // 1 point = $0.01 discount
 
-async function ensureLoyaltyTables(db: NonNullable<Awaited<ReturnType<typeof getDb>>>) {
-  await db.execute(sql`
-    CREATE TABLE IF NOT EXISTS loyalty_accounts (
-      id SERIAL PRIMARY KEY,
-      user_id INTEGER NOT NULL UNIQUE,
-      balance INTEGER NOT NULL DEFAULT 0,
-      lifetime_earned INTEGER NOT NULL DEFAULT 0,
-      lifetime_redeemed INTEGER NOT NULL DEFAULT 0,
-      tier VARCHAR(20) NOT NULL DEFAULT 'bronze',
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-  await db.execute(sql`
-    CREATE TABLE IF NOT EXISTS loyalty_transactions (
-      id SERIAL PRIMARY KEY,
-      user_id INTEGER NOT NULL,
-      type VARCHAR(20) NOT NULL,
-      amount INTEGER NOT NULL,
-      description VARCHAR(500),
-      expires_at TIMESTAMPTZ,
-      expired BOOLEAN NOT NULL DEFAULT FALSE,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-  await db.execute(sql`CREATE INDEX IF NOT EXISTS idx_loyalty_tx_user ON loyalty_transactions(user_id)`);
-  await db.execute(sql`CREATE INDEX IF NOT EXISTS idx_loyalty_tx_expires ON loyalty_transactions(expires_at) WHERE expired = FALSE AND type = 'earn'`);
+// The loyalty tables are provisioned by drizzle/0067_loyalty_schema.sql before
+// the API starts. Keeping request handlers free of DDL makes schema ownership
+// deterministic and allows database permissions to remain least-privilege.
+async function ensureLoyaltyTables(_db: NonNullable<Awaited<ReturnType<typeof getDb>>>) {
+  return;
 }
 
 async function getOrCreateAccount(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, userId: number) {

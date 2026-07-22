@@ -32,6 +32,7 @@ import { safeParseAmount } from "../lib/safeDecimal";
 import { podLifecycleMiddleware, recordStartupComplete, recordShutdownStart, recordShutdownComplete, recordPanicRecovery } from "../middleware/podLifecycleObservability";
 import { registerProductionHardeningRoutes } from "./productionHardening";
 import { ensureFeatureTables } from "./featurePersistence";
+import { registerRestCompatibilityProxy } from "./restCompatibilityProxy";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -102,8 +103,9 @@ async function startServer() {
   // Production hardening: health checks, metrics, CORS, OpenAPI
   registerProductionHardeningRoutes(app);
 
-  // Ensure feature persistence tables exist
-  ensureFeatureTables().catch(() => {});
+  // Schema provisioning is part of the migration lifecycle; startup must fail
+  // rather than silently running with an incomplete persistence surface.
+  await ensureFeatureTables();
 
   // Health check endpoint (public, no auth) — returns 503 during shutdown
   app.get("/health", (_req, res) => {
@@ -137,21 +139,22 @@ async function startServer() {
     try {
       const t0 = Date.now();
       const Redis = (await import("ioredis")).default;
-      const url = process.env.REDIS_URL ?? "redis://localhost:6379";
+      const url = process.env.REDIS_URL;
+      if (!url) throw new Error("REDIS_URL is not configured");
       const client = new Redis(url, { lazyConnect: true, connectTimeout: 2000 });
       await client.connect();
       const pong = await client.ping();
-      subsystems.redis = { status: pong === "PONG" ? "ok" : "degraded", latencyMs: Date.now() - t0 };
+      subsystems.redis = { status: pong === "PONG" ? "ok" : "error", latencyMs: Date.now() - t0 };
       await client.quit();
-    } catch {
-      subsystems.redis = { status: "degraded", error: "Redis unavailable — using in-memory fallback" };
+    } catch (err: any) {
+      subsystems.redis = { status: "error", error: err.message ?? "Redis unavailable" };
     }
 
     // Payment provider check (which provider is active)
     try {
       const { selectProvider } = await import("../lib/paymentProviders.js");
-      const usdProvider = selectProvider("USD");
-      const ngnProvider = selectProvider("NGN");
+      const usdProvider = selectProvider("USD", "bank_transfer");
+      const ngnProvider = selectProvider("NGN", "bank_transfer");
       subsystems.payments = {
         status: usdProvider ? "ok" : "degraded",
         error: !usdProvider ? "No USD payment provider configured" : undefined,
@@ -169,7 +172,7 @@ async function startServer() {
       const { getDb } = await import("../db.js");
       const db = await getDb();
       if (db) {
-        const result = await db.execute("SELECT COUNT(*) as cnt FROM webhook_retry_queue WHERE status = 'dead_letter'" as any);
+        const result = await db.execute("SELECT COUNT(*) as cnt FROM webhook_deliveries WHERE status = 'failed'" as any);
         const rows = result as unknown as Array<{ cnt: string }>;
         const deadLetterCount = parseInt(rows?.[0]?.cnt ?? "0", 10);
         subsystems.webhook_queue = { status: deadLetterCount > 10 ? "degraded" : "ok" };
@@ -207,10 +210,12 @@ async function startServer() {
       if (db) { await db.execute("SELECT 1" as any); checks.db = { status: "ok", latencyMs: Date.now() - t0 }; }
       else checks.db = { status: "error", error: "DB unavailable" };
     } catch (e: any) { checks.db = { status: "error", error: e.message }; }
-    // FX service check
+    // FX service check: the endpoint must be supplied by the deployed FX provider.
     try {
+      const fxHealthUrl = process.env.FX_HEALTH_URL;
+      if (!fxHealthUrl) throw new Error("FX_HEALTH_URL is not configured");
       const t0 = Date.now();
-      const r = await fetch("https://open.er-api.com/v6/latest/USD", { signal: AbortSignal.timeout(3000) });
+      const r = await fetch(fxHealthUrl, { signal: AbortSignal.timeout(3000) });
       checks.fx = { status: r.ok ? "ok" : "degraded", latencyMs: Date.now() - t0 };
     } catch (e: any) { checks.fx = { status: "error", error: e.message }; }
     const allOk = Object.values(checks).every(c => c.status === "ok");
@@ -908,7 +913,7 @@ async function startServer() {
             // SSE in-app notification
             const { broadcastUserEvent } = await import("../sse.service.js");
             broadcastUserEvent(alert.userId, {
-              type: "fx_alert",
+              type: "rate_alert_hit",
               payload: { pair: pairLabel, currentRate: rateStr, targetRate: targetStr, direction: alert.direction },
             });
           } catch (notifyErr) {
@@ -1262,6 +1267,9 @@ async function startServer() {
       return res.status(500).json({ error: err?.message, timestamp: new Date().toISOString() });
     }
   });
+
+  // Legacy PWA REST paths are forwarded only after native Express and tRPC routes.
+  registerRestCompatibilityProxy(app);
 
   // Global Express error handler — strip stack traces in production
   app.use((err: any, _req: any, res: any, _next: any) => {

@@ -20,8 +20,8 @@
 import { z } from "zod";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
-import { getRedisClient } from "../middleware/redis";
-const redis = getRedisClient();
+import { requireRedisClient } from "../middleware/redis";
+const redis = requireRedisClient();
 import { ollamaChat, generateStructuredOutput } from "../ollama.service";
 import { db } from "../db-shim";
 import { fxRates } from "../../drizzle/schema";
@@ -74,7 +74,7 @@ async function fetchRateHistory(
       .orderBy(desc(fxRates.createdAt))
       .limit(days * 24); // hourly snapshots
 
-    return rows.map((r) => ({
+    return (rows as Array<{ createdAt: Date | null; rate: string | null }>).map((r) => ({
       date: r.createdAt?.toISOString().slice(0, 10) ?? "",
       rate: parseFloat(r.rate ?? "0"),
     }));

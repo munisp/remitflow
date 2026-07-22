@@ -5,7 +5,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { useTranslation } from 'node_modules/react-i18next';
+import { useTranslation } from 'react-i18next';
 import { useOfflineStore, useIsOnline, usePendingCount, useSyncInProgress } from '../stores/offlineStore';
 import { useNetworkStatus } from '../hooks/useNetworkStatus';
 
@@ -141,14 +141,14 @@ export const offlineFetch = async (
           data: offlineData,
         });
         
-        // Return a mock successful response
-        return new Response(JSON.stringify({ 
-          success: true, 
+        // Acknowledge only local durable queueing; this is not a backend success.
+        return new Response(JSON.stringify({
           queued: true,
-          message: 'Transaction queued for sync when online'
+          delivery_status: 'pending',
+          message: 'Transaction is queued locally and awaits backend delivery.',
         }), {
           status: 202,
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'X-RemitFlow-Queued': 'true' },
         });
       }
       throw error;
@@ -162,13 +162,13 @@ export const offlineFetch = async (
       data: offlineData,
     });
     
-    return new Response(JSON.stringify({ 
-      success: true, 
+    return new Response(JSON.stringify({
       queued: true,
-      message: 'Transaction queued for sync when online'
+      delivery_status: 'pending',
+      message: 'Transaction is queued locally and awaits backend delivery.',
     }), {
       status: 202,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-RemitFlow-Queued': 'true' },
     });
   }
   

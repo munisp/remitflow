@@ -101,41 +101,17 @@ const KYCStatusTracker: React.FC = () => {
   const [data, setData] = useState<KYCDashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"overview" | "triggers" | "limits">("overview");
+  const [error, setError] = useState<string | null>(null);
 
   const fetchData = async () => {
     try {
+      setError(null);
       const res = await fetch(`${KYC_PIPELINE_URL}/dashboard`);
-      if (res.ok) setData(await res.json());
-    } catch {
-      // Use mock data for development
-      setData({
-        userId: "usr_demo",
-        kycTier: 2,
-        kycStatus: "verified",
-        frozen: false,
-        riskScore: 12,
-        isPep: false,
-        dailyLimitUsed: 1250,
-        dailyLimitTotal: 5000,
-        monthlyLimitUsed: 8500,
-        monthlyLimitTotal: 20000,
-        recentTriggers: [
-          {
-            id: "1",
-            triggerType: "user_registration",
-            status: "completed",
-            firedAt: new Date(Date.now() - 86400000 * 30).toISOString(),
-          },
-          {
-            id: "2",
-            triggerType: "transaction_over_1000",
-            status: "completed",
-            amount: 1500,
-            currency: "USD",
-            firedAt: new Date(Date.now() - 3600000).toISOString(),
-          },
-        ],
-      });
+      if (!res.ok) throw new Error(`KYC dashboard request failed with status ${res.status}`);
+      setData(await res.json() as KYCDashboardData);
+    } catch (cause) {
+      setData(null);
+      setError(cause instanceof Error ? cause.message : "KYC dashboard data could not be loaded from the backend.");
     } finally {
       setLoading(false);
     }
@@ -155,7 +131,15 @@ const KYCStatusTracker: React.FC = () => {
     );
   }
 
-  if (!data) return null;
+  if (!data) {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-6">
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error ?? "KYC dashboard data is unavailable."}
+        </div>
+      </div>
+    );
+  }
 
   const tierColor = TIER_COLORS[data.kycTier] ?? "gray";
   const dailyPercent = data.dailyLimitTotal > 0 ? (data.dailyLimitUsed / data.dailyLimitTotal) * 100 : 0;

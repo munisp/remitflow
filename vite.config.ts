@@ -1,5 +1,4 @@
 import { jsxLocPlugin } from "@builder.io/vite-plugin-jsx-loc";
-import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -16,7 +15,7 @@ import { VitePWA } from "vite-plugin-pwa";
 const BUILD_TIMESTAMP = new Date().toISOString();
 
 function generateBuildHash(): string {
-  const src = path.resolve(import.meta.dirname, "client", "src");
+  const src = path.resolve(import.meta.dirname, "uis", "pwa", "src");
   const hash = createHash("sha256");
   hash.update(BUILD_TIMESTAMP);
   try {
@@ -183,7 +182,6 @@ const isDev = process.env.NODE_ENV !== 'production';
 const plugins = [
   react(),
   ...(isDev ? [] : [jsxLocPlugin()]),
-  tailwindcss(),
   vitePluginBuildMetadata(),
   pwaPlugin,
 ];
@@ -191,14 +189,14 @@ export default defineConfig({
   plugins,
   resolve: {
     alias: {
-      "@": path.resolve(import.meta.dirname, "client", "src"),
+      "@": path.resolve(import.meta.dirname, "uis", "pwa", "src"),
       "@shared": path.resolve(import.meta.dirname, "shared"),
       "@assets": path.resolve(import.meta.dirname, "attached_assets"),
     },
   },
   envDir: path.resolve(import.meta.dirname),
-  root: path.resolve(import.meta.dirname, "client"),
-  publicDir: path.resolve(import.meta.dirname, "client", "public"),
+  root: path.resolve(import.meta.dirname, "uis", "pwa"),
+  publicDir: path.resolve(import.meta.dirname, "uis", "pwa", "public"),
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
@@ -230,6 +228,7 @@ export default defineConfig({
     ],
     fs: {
       strict: true,
+      allow: [path.resolve(import.meta.dirname)],
       deny: ["**/.*"],
     },
   },

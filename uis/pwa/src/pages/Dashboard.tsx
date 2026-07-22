@@ -1,12 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import {
-  accountService,
-  exchangeRateService,
-  transactionServiceCore,
-  type Transaction as CoreTransaction,
-  type ExchangeRate,
-} from "../services/api";
+import { exchangeRateService, type ExchangeRate } from "../services/api";
+import { accountService } from "../services/accountService";
+import { transactionServiceCore, type Transaction as CoreTransaction } from "../services/transactionService";
 import { useAuthStore } from "../stores/authStore";
 
 interface DashboardTx {
@@ -64,14 +60,6 @@ const Dashboard: React.FC = () => {
     // },
   ];
 
-  const fallbackTx: DashboardTx[] = [];
-  const fallbackRates: DashboardRate[] = [
-    { pair: "USD/NGN", rate: "1,550.00", change: "+0.5%", up: true },
-    { pair: "GBP/NGN", rate: "1,980.00", change: "-0.2%", up: false },
-    { pair: "EUR/NGN", rate: "1,700.00", change: "+0.3%", up: true },
-    { pair: "GHS/NGN", rate: "125.00", change: "+1.2%", up: true },
-  ];
-
   const fetchDashboardData = useCallback(async () => {
     setLoading(true);
     let gotBalance = false;
@@ -125,16 +113,8 @@ const Dashboard: React.FC = () => {
           accounts.filter((acc: any) => acc.status === "active").length,
         );
 
-        // Build exchange rate map from live API (fallback to static rates)
-        const exchangeRates: Record<string, number> = {
-          NGN: 1,
-          USD: 1550,
-          GBP: 1980,
-          EUR: 1700,
-          GHS: 125,
-          JPY: 0.01,
-          AUD: 1050,
-        };
+        // Build the conversion map exclusively from the live FX service.
+        const exchangeRates: Record<string, number> = { NGN: 1 };
 
         if (rateRes.status === "fulfilled") {
           const rateResponse = rateRes.value;
@@ -152,8 +132,9 @@ const Dashboard: React.FC = () => {
           .filter((acc: any) => acc.status === "active")
           .reduce((sum: number, acc: any) => {
             const balance = parseFloat(acc.balance) || 0;
-            const rate = exchangeRates[acc.account_currency] || 1;
-            return sum + balance * rate;
+            const rate = exchangeRates[acc.account_currency];
+            // Do not value foreign-currency balances using an invented rate.
+            return rate === undefined ? sum : sum + balance * rate;
           }, 0);
 
         setTotalBalance(total);
@@ -214,8 +195,8 @@ const Dashboard: React.FC = () => {
         setTotalBalance(0);
         setAccountCount(0);
       }
-      if (!gotTx) setRecentTransactions(fallbackTx);
-      if (!gotRates) setRates(fallbackRates);
+      if (!gotTx) setRecentTransactions([]);
+      if (!gotRates) setRates([]);
       setLoading(false);
     }
   }, []);

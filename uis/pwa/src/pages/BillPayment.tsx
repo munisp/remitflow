@@ -72,20 +72,7 @@ const BillPayment: React.FC = () => {
     education: 'bg-indigo-50 text-indigo-600',
   };
 
-  // Fallback static providers if API is unavailable
-  const staticProviders: Record<string, BillerItem[]> = {
-    electricity: [{ id: 'ikedc', name: 'IKEDC (Ikeja Electric)' }, { id: 'ekedc', name: 'EKEDC (Eko Electric)' }, { id: 'aedc', name: 'AEDC (Abuja Electric)' }, { id: 'phedc', name: 'PHEDC (Port Harcourt)' }],
-    water: [{ id: 'lagos-water', name: 'Lagos Water Corporation' }, { id: 'fcta-water', name: 'FCTA Water Board' }],
-    airtime: [{ id: 'MTN', name: 'MTN' }, { id: 'Glo', name: 'Glo' }, { id: 'Airtel', name: 'Airtel' }, { id: '9mobile', name: '9mobile' }],
-    data: [{ id: 'MTN', name: 'MTN Data' }, { id: 'Glo', name: 'Glo Data' }, { id: 'Airtel', name: 'Airtel Data' }, { id: '9mobile', name: '9mobile Data' }],
-    internet: [{ id: 'spectranet', name: 'Spectranet' }, { id: 'smile', name: 'Smile' }, { id: 'swift', name: 'Swift Networks' }],
-    cable: [{ id: 'dstv', name: 'DSTV' }, { id: 'gotv', name: 'GOtv' }, { id: 'startimes', name: 'StarTimes' }],
-    education: [{ id: 'waec', name: 'WAEC' }, { id: 'jamb', name: 'JAMB' }, { id: 'neco', name: 'NECO' }],
-  };
-
-  const getProviders = (category: string): BillerItem[] => {
-    return dynamicProviders[category] || staticProviders[category] || [];
-  };
+  const getProviders = (category: string): BillerItem[] => dynamicProviders[category] || [];
 
   const getFilteredOrganizations = (): Organization[] => {
     if (organizationFilter === 'all') return NIGERIAN_ORGANIZATIONS;
@@ -108,8 +95,9 @@ const BillPayment: React.FC = () => {
       if (Array.isArray(data) && data.length > 0) {
         setDynamicProviders(prev => ({ ...prev, [category]: data }));
       }
-    } catch {
-      // Fall back to static providers
+    } catch (cause) {
+      setDynamicProviders(prev => ({ ...prev, [category]: [] }));
+      setError(cause instanceof Error ? cause.message : "Billers could not be loaded from the backend.");
     } finally {
       setIsLoadingProviders(false);
     }

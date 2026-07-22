@@ -354,8 +354,10 @@ export const transferProtectionRouter = router({
           UPDATE transactions SET status = 'stuck', "updatedAt" = NOW()
           WHERE id = ${tx.id} AND status = 'processing'
         `);
+        const timeoutConfig = CORRIDOR_TIMEOUTS[rail] ?? CORRIDOR_TIMEOUTS.bank_transfer;
+        const elapsedHours = (status.minutesSinceUpdate / 60).toFixed(1);
         await notify(db, tx.userId, "transfer_stuck",
-          `Your transfer of ${tx.amount} (ref: ${tx.reference}) appears to be stuck after ${status.hoursElapsed}h. Expected: ${status.timeout.expectedSettlement}. Our team is investigating.`);
+          `Your transfer of ${tx.amount} (ref: ${tx.reference}) appears to be stuck after ${elapsedHours}h. The ${rail} review threshold is ${timeoutConfig.stuckThresholdHours}h. Our team is investigating.`);
       }
     }
 

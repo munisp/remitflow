@@ -12,6 +12,7 @@ const ReceiveMoney: React.FC = () => {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<Account | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const methods = [
     // { id: 'qr', name: 'QR Code', icon: 'M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z' },
@@ -61,20 +62,24 @@ const ReceiveMoney: React.FC = () => {
 
   const handleGenerateQR = async () => {
     setGenerating(true);
+    setError(null);
     try {
       const res = await receiveMoneyService.generateQR(
         amount ? parseFloat(amount) : undefined,
         "NGN",
       );
       setQrCode(res.data.qrCode);
-    } catch {
-      setQrCode("placeholder_qr");
+    } catch (cause) {
+      setQrCode(null);
+      setError(cause instanceof Error ? cause.message : "The QR code could not be issued by the receive-money service.");
+    } finally {
+      setGenerating(false);
     }
-    setGenerating(false);
   };
 
   const handleGenerateLink = async () => {
     setGenerating(true);
+    setError(null);
     try {
       const res = await receiveMoneyService.createPaymentLink({
         amount: parseFloat(amount) || 0,
@@ -82,10 +87,12 @@ const ReceiveMoney: React.FC = () => {
         description,
       });
       setPaymentLink(res.data.link);
-    } catch {
-      setPaymentLink("https://pay.54remitflow.com/u/johndoe");
+    } catch (cause) {
+      setPaymentLink(null);
+      setError(cause instanceof Error ? cause.message : "The payment link could not be issued by the receive-money service.");
+    } finally {
+      setGenerating(false);
     }
-    setGenerating(false);
   };
 
   const handleCopy = (text: string) => {
@@ -102,6 +109,12 @@ const ReceiveMoney: React.FC = () => {
           Choose how you want to receive funds
         </p>
       </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
 
       <div className="grid grid-cols-3 gap-3">
         {methods.map((method) => (

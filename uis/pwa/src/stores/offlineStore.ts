@@ -244,8 +244,8 @@ function mapTransferToPaymentHubPayload(data: Record<string, unknown>) {
   const amountValue = Number(data.amount || 0);
   const amount = Number.isFinite(amountValue) ? amountValue.toFixed(2) : "0.00";
   const currency = normalizePaymentHubCurrency(
-    data.currency,
-    data.destinationCurrency,
+    typeof data.currency === "string" ? data.currency : undefined,
+    typeof data.destinationCurrency === "string" ? data.destinationCurrency : undefined,
   );
 
   return {

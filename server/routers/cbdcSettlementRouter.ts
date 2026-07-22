@@ -17,24 +17,39 @@
 
 import { z } from "zod";
 import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
+import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
 import { withSpan } from "../telemetry/otel";
 import { publishPaymentInitiated } from "../middleware/kafka";
 
 // ── Service URLs ──────────────────────────────────────────────────────────────
 
-const STABLECOIN_ENGINE_URL = process.env.STABLECOIN_ENGINE_URL ?? "http://go-stablecoin-engine:8100";
-const CBDC_GATEWAY_URL = process.env.CBDC_GATEWAY_URL ?? "http://python-cbdc-gateway:8101";
-const FX_HEDGING_URL = process.env.FX_HEDGING_URL ?? "http://go-fx-hedging:8140";
-const AFRICBDC_URL = process.env.AFRICBDC_URL ?? "http://python-africbdc-adapter:8102";
-const STABLECOIN_BRIDGE_URL = process.env.STABLECOIN_BRIDGE_URL ?? "http://rust-stablecoin-bridge:8103";
+const STABLECOIN_ENGINE_URL = process.env.STABLECOIN_ENGINE_URL;
+const CBDC_GATEWAY_URL = process.env.CBDC_GATEWAY_URL;
+const FX_HEDGING_URL = process.env.FX_HEDGING_URL;
+const AFRICBDC_URL = process.env.AFRICBDC_URL;
+const STABLECOIN_BRIDGE_URL = process.env.STABLECOIN_BRIDGE_URL;
+
+const SettlementRailSchema = z.object({
+  railId: z.string().min(1),
+  name: z.string().min(1),
+  type: z.enum(["stablecoin", "cbdc"]),
+  estimatedFeePercent: z.number().nonnegative(),
+  estimatedDeliveryMinutes: z.number().nonnegative(),
+  minAmount: z.number().positive(),
+  maxAmount: z.number().positive(),
+  available: z.boolean(),
+  currencies: z.array(z.string().length(3)).min(1),
+});
+type SettlementRail = z.infer<typeof SettlementRailSchema>;
 
 async function serviceCall<T>(
-  url: string,
+  url: string | undefined,
   path: string,
   method: "GET" | "POST" = "POST",
   body?: unknown
 ): Promise<T | null> {
+  if (!url) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Required settlement service URL is not configured." });
   try {
     const res = await fetch(`${url}${path}`, {
       method,
@@ -73,60 +88,12 @@ export const cbdcSettlementRouter = router({
             { send_currency: input.sendCurrency, receive_currency: input.receiveCurrency }
           ),
         ]);
-
-        // Fallback with known rail data if services unavailable
-        const defaultRails = [
-          {
-            railId: "usdc-polygon",
-            name: "USDC (Polygon)",
-            type: "stablecoin",
-            estimatedFeePercent: 0.3,
-            estimatedDeliveryMinutes: 2,
-            minAmount: 1,
-            maxAmount: 100_000,
-            available: true,
-            currencies: ["USD", "NGN", "GHS", "KES"],
-          },
-          {
-            railId: "usdt-tron",
-            name: "USDT (TRON TRC-20)",
-            type: "stablecoin",
-            estimatedFeePercent: 0.2,
-            estimatedDeliveryMinutes: 3,
-            minAmount: 1,
-            maxAmount: 50_000,
-            available: true,
-            currencies: ["USD", "NGN", "GHS"],
-          },
-          {
-            railId: "enaira",
-            name: "eNaira (CBDC)",
-            type: "cbdc",
-            estimatedFeePercent: 0.0,
-            estimatedDeliveryMinutes: 1,
-            minAmount: 100,
-            maxAmount: 10_000_000,
-            available: input.receiveCurrency === "NGN",
-            currencies: ["NGN"],
-          },
-          {
-            railId: "ecedi",
-            name: "eCedi (CBDC)",
-            type: "cbdc",
-            estimatedFeePercent: 0.0,
-            estimatedDeliveryMinutes: 1,
-            minAmount: 10,
-            maxAmount: 5_000_000,
-            available: input.receiveCurrency === "GHS",
-            currencies: ["GHS"],
-          },
-        ];
-
-        const rails = [
-          ...(stablecoinRails?.rails ?? []),
-          ...(cbdcRails?.rails ?? []),
-          ...defaultRails,
-        ].filter((r: any) => r.available);
+        if (!stablecoinRails || !cbdcRails) {
+          throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "Settlement rail services are unavailable." });
+        }
+        const rails: SettlementRail[] = [...stablecoinRails.rails, ...cbdcRails.rails]
+          .map((rail) => SettlementRailSchema.parse(rail))
+          .filter((rail) => rail.available && rail.currencies.includes(input.receiveCurrency));
 
         return {
           sendCurrency: input.sendCurrency,

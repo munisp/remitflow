@@ -20,67 +20,92 @@ import { logger } from "../_core/logger.js";
 import { randomUUID } from "crypto";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
+/**
+ * Integration credentials and endpoints are deployment configuration, never
+ * application defaults. Failing at startup prevents a financial service from
+ * silently targeting localhost, sample credentials, or a mock dependency.
+ */
+function requiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`Missing required integration configuration: ${name}`);
+  return value;
+}
+
+function requiredNumberEnv(name: string): number {
+  const value = Number(requiredEnv(name));
+  if (!Number.isFinite(value)) throw new Error(`Integration configuration ${name} must be numeric`);
+  return value;
+}
+
+function optionalEnv(name: string): string {
+  return process.env[name]?.trim() ?? "";
+}
+
 const CONFIG = {
   redis: {
-    url: process.env.REDIS_URL || "redis://localhost:6379",
+    url: requiredEnv("REDIS_URL"),
     password: process.env.REDIS_PASSWORD,
-    db: parseInt(process.env.REDIS_DB || "0"),
+    db: Number(process.env.REDIS_DB ?? "0"),
     keyPrefix: "rf:",
     maxRetries: 3,
     retryDelayMs: 1000,
   },
   openSearch: {
-    node: process.env.OPENSEARCH_URL || "https://localhost:9200",
-    auth: { username: process.env.OPENSEARCH_USER || "admin", password: process.env.OPENSEARCH_PASSWORD || "admin" },
+    node: requiredEnv("OPENSEARCH_URL"),
+    auth: { username: requiredEnv("OPENSEARCH_USER"), password: requiredEnv("OPENSEARCH_PASSWORD") },
     ssl: { rejectUnauthorized: process.env.NODE_ENV === "production" },
   },
   keycloak: {
-    baseUrl: process.env.KEYCLOAK_URL || "http://localhost:8080",
-    realm: process.env.KEYCLOAK_REALM || "remitflow",
-    clientId: process.env.KEYCLOAK_CLIENT_ID || "remitflow-api",
-    clientSecret: process.env.KEYCLOAK_CLIENT_SECRET || "",
-    adminUser: process.env.KEYCLOAK_ADMIN || "admin",
-    adminPassword: process.env.KEYCLOAK_ADMIN_PASSWORD || "",
+    baseUrl: requiredEnv("KEYCLOAK_URL"),
+    realm: requiredEnv("KEYCLOAK_REALM"),
+    clientId: requiredEnv("KEYCLOAK_CLIENT_ID"),
+    clientSecret: requiredEnv("KEYCLOAK_CLIENT_SECRET"),
+    adminUser: requiredEnv("KEYCLOAK_ADMIN"),
+    adminPassword: requiredEnv("KEYCLOAK_ADMIN_PASSWORD"),
   },
   permify: {
-    endpoint: process.env.PERMIFY_ENDPOINT || "localhost:3478",
-    tenantId: process.env.PERMIFY_TENANT_ID || "remitflow",
+    endpoint: requiredEnv("PERMIFY_ENDPOINT"),
+    tenantId: requiredEnv("PERMIFY_TENANT_ID"),
   },
   dapr: {
-    host: process.env.DAPR_HOST || "localhost",
-    httpPort: parseInt(process.env.DAPR_HTTP_PORT || "3500"),
-    grpcPort: parseInt(process.env.DAPR_GRPC_PORT || "50001"),
-    appId: process.env.DAPR_APP_ID || "remitflow",
-    stateStore: process.env.DAPR_STATE_STORE || "statestore",
-    pubsub: process.env.DAPR_PUBSUB || "pubsub",
-    secretStore: process.env.DAPR_SECRET_STORE || "secretstore",
+    host: requiredEnv("DAPR_HOST"),
+    httpPort: requiredNumberEnv("DAPR_HTTP_PORT"),
+    grpcPort: requiredNumberEnv("DAPR_GRPC_PORT"),
+    appId: requiredEnv("DAPR_APP_ID"),
+    stateStore: requiredEnv("DAPR_STATE_STORE"),
+    pubsub: requiredEnv("DAPR_PUBSUB"),
+    secretStore: requiredEnv("DAPR_SECRET_STORE"),
   },
   apisix: {
-    adminUrl: process.env.APISIX_ADMIN_URL || "http://localhost:9180",
-    adminKey: process.env.APISIX_ADMIN_KEY || "edd1c9f034335f136f87ad84b625c8f1",
-    gatewayUrl: process.env.APISIX_GATEWAY_URL || "http://localhost:9080",
+    adminUrl: requiredEnv("APISIX_ADMIN_URL"),
+    adminKey: requiredEnv("APISIX_ADMIN_KEY"),
+    gatewayUrl: requiredEnv("APISIX_GATEWAY_URL"),
+    apiUpstream: requiredEnv("APISIX_UPSTREAM_API"),
+    lakehouseUpstream: requiredEnv("APISIX_UPSTREAM_LAKEHOUSE"),
   },
   tigerBeetle: {
-    addresses: (process.env.TIGERBEETLE_ADDRESSES || "3000").split(","),
-    clusterId: parseInt(process.env.TIGERBEETLE_CLUSTER_ID || "0"),
+    addresses: requiredEnv("TIGERBEETLE_ADDRESSES").split(","),
+    clusterId: requiredNumberEnv("TIGERBEETLE_CLUSTER_ID"),
   },
   fluvio: {
-    endpoint: process.env.FLUVIO_ENDPOINT || "localhost:9003",
-    profileName: process.env.FLUVIO_PROFILE || "remitflow",
+    endpoint: requiredEnv("FLUVIO_ENDPOINT"),
+    profileName: requiredEnv("FLUVIO_PROFILE"),
   },
   lakehouse: {
-    url: process.env.LAKEHOUSE_URL || "http://localhost:8102",
-    catalog: process.env.LAKEHOUSE_CATALOG || "remitflow",
-    warehouse: process.env.LAKEHOUSE_WAREHOUSE || "s3://remitflow-lakehouse/",
+    url: requiredEnv("LAKEHOUSE_URL"),
+    catalog: requiredEnv("LAKEHOUSE_CATALOG"),
+    warehouse: requiredEnv("LAKEHOUSE_WAREHOUSE"),
   },
   openAppSec: {
-    mgmtUrl: process.env.OPENAPPSEC_MGMT_URL || "http://localhost:4000",
-    token: process.env.OPENAPPSEC_TOKEN || "",
+    mgmtUrl: requiredEnv("OPENAPPSEC_MGMT_URL"),
+    token: process.env.OPENAPPSEC_TOKEN ?? "",
   },
+  // Mojaloop is not a required component of the selected deployment profile;
+  // methods throw explicitly when a caller attempts to use it without config.
   mojaloop: {
-    hubUrl: process.env.MOJALOOP_HUB_URL || "http://localhost:4001",
-    fspId: process.env.MOJALOOP_FSP_ID || "remitflow",
-    ilpSecret: process.env.MOJALOOP_ILP_SECRET || "",
+    hubUrl: optionalEnv("MOJALOOP_HUB_URL"),
+    fspId: optionalEnv("MOJALOOP_FSP_ID"),
+    ilpSecret: optionalEnv("MOJALOOP_ILP_SECRET"),
   },
 };
 
@@ -131,21 +156,22 @@ export class RedisIntegration {
       this.client = redisClient;
       this.connected = true;
     } catch (err) {
-      logger.warn({ err }, "[Redis] Connection failed, using in-memory fallback");
-      this.client = new InMemoryCache();
-      this.connected = true;
+      this.client = null;
+      this.connected = false;
+      this.connectAttempted = false;
+      throw new Error(`Redis connection failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  private async safeExec<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
-    if (!this.connected) await this.connect();
+  private async safeExec<T>(fn: () => Promise<T>, _fallback: T): Promise<T> {
+    if (!this.connected || !this.client) await this.connect();
     try {
       return await fn();
-    } catch {
-      if (!(this.client instanceof InMemoryCache)) {
-        this.client = new InMemoryCache();
-      }
-      try { return await fn(); } catch { return fallback; }
+    } catch (err) {
+      this.client = null;
+      this.connected = false;
+      this.connectAttempted = false;
+      throw new Error(`Redis operation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -216,8 +242,8 @@ export class RedisIntegration {
 
   async setRateLimit(key: string, maxRequests: number, windowSeconds: number): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
     const rlKey = `${CONFIG.redis.keyPrefix}rl:${key}`;
-    // Try Lua script for atomicity (only works with real Redis, not InMemoryCache)
-    if (this.client && !(this.client instanceof InMemoryCache)) {
+    // Use Redis Lua for atomic rate limiting.
+    if (this.client) {
       try {
         const rawClient = this.client as unknown as { sendCommand?: (args: string[]) => Promise<unknown> };
         if (rawClient.sendCommand) {
@@ -236,7 +262,7 @@ export class RedisIntegration {
         }
       } catch { /* Fall through to non-Lua path */ }
     }
-    // Fallback: non-atomic (InMemoryCache or Lua not available)
+    // Redis clients without EVAL support use the non-Lua retry-safe path.
     const current = await this.incr(`rl:${key}`);
     if (current === 1 && this.client) {
       await this.client.expire(rlKey, windowSeconds);
@@ -250,47 +276,7 @@ export class RedisIntegration {
   }
 
   isUsingFallback(): boolean {
-    return this.client instanceof InMemoryCache;
-  }
-}
-
-// ─── In-Memory Cache Fallback ─────────────────────────────────────────────────
-class InMemoryCache {
-  private store = new Map<string, { value: string; expiresAt?: number }>();
-
-  async get(key: string): Promise<string | null> {
-    const entry = this.store.get(key);
-    if (!entry) return null;
-    if (entry.expiresAt && Date.now() > entry.expiresAt) { this.store.delete(key); return null; }
-    return entry.value;
-  }
-
-  async set(key: string, value: string): Promise<void> { this.store.set(key, { value }); }
-  async setEx(key: string, ttl: number, value: string): Promise<void> {
-    this.store.set(key, { value, expiresAt: Date.now() + ttl * 1000 });
-  }
-  async del(key: string): Promise<void> { this.store.delete(key); }
-  async incr(key: string): Promise<number> {
-    const current = parseInt(await this.get(key) || "0") + 1;
-    this.store.set(key, { value: String(current), expiresAt: this.store.get(key)?.expiresAt });
-    return current;
-  }
-  async hSet(key: string, field: string, value: string): Promise<void> {
-    const hash = JSON.parse(await this.get(key) || "{}");
-    hash[field] = value;
-    await this.set(key, JSON.stringify(hash));
-  }
-  async hGetAll(key: string): Promise<Record<string, string>> {
-    return JSON.parse(await this.get(key) || "{}");
-  }
-  async expire(key: string, seconds: number): Promise<void> {
-    const entry = this.store.get(key);
-    if (entry) entry.expiresAt = Date.now() + seconds * 1000;
-  }
-  async ttl(key: string): Promise<number> {
-    const entry = this.store.get(key);
-    if (!entry?.expiresAt) return -1;
-    return Math.max(0, Math.ceil((entry.expiresAt - Date.now()) / 1000));
+    return false;
   }
 }
 
@@ -601,13 +587,34 @@ export class KeycloakIntegration {
     const rolesRes = await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/roles/${roleName}`, {
       headers: { Authorization: `Bearer ${adminToken}` },
     });
-    if (!rolesRes.ok) return;
+    if (!rolesRes.ok) throw new Error(`Keycloak role ${roleName} was not found`);
     const role = await rolesRes.json();
-    await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/users/${userId}/role-mappings/realm`, {
+    const response = await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/users/${userId}/role-mappings/realm`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
       body: JSON.stringify([role]),
     });
+    if (!response.ok) throw new Error(`Keycloak role assignment failed (${response.status})`);
+  }
+
+  async updateUserAttributes(userId: string, attributes: Record<string, string>): Promise<void> {
+    const adminToken = await this.getAdminToken();
+    const current = await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/users/${userId}`, {
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    if (!current.ok) throw new Error(`Keycloak user lookup failed (${current.status})`);
+    const user = await current.json() as { attributes?: Record<string, string[] | string> };
+    const mergedAttributes: Record<string, string[]> = {};
+    for (const [key, value] of Object.entries(user.attributes ?? {})) {
+      mergedAttributes[key] = Array.isArray(value) ? value.map(String) : [String(value)];
+    }
+    for (const [key, value] of Object.entries(attributes)) mergedAttributes[key] = [value];
+    const update = await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/users/${userId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ attributes: mergedAttributes }),
+    });
+    if (!update.ok) throw new Error(`Keycloak user attribute update failed (${update.status})`);
   }
 
   /** Ensure the RemitFlow realm exists with required roles and client */
@@ -1668,14 +1675,13 @@ export class APISIXIntegration {
   getGatewayUrl(): string { return this.gatewayUrl; }
 
   /** Auto-register all RemitFlow service routes with JWT auth + rate limiting */
-  async syncServiceRoutes(appPort = 3000): Promise<{ synced: number; errors: string[] }> {
+  async syncServiceRoutes(): Promise<{ synced: number; errors: string[] }> {
     if (this.routesSynced) return { synced: 0, errors: [] };
     const errors: string[] = [];
     const routes = [
-      { id: "remitflow-api", uri: "/api/*", upstream: `localhost:${appPort}` },
-      { id: "remitflow-trpc", uri: "/trpc/*", upstream: `localhost:${appPort}` },
-      { id: "lakehouse-etl", uri: "/lakehouse/*", upstream: "localhost:8089" },
-      { id: "gpu-engine", uri: "/gpu/*", upstream: "localhost:8120" },
+      { id: "remitflow-api", uri: "/api/*", upstream: CONFIG.apisix.apiUpstream },
+      { id: "remitflow-trpc", uri: "/trpc/*", upstream: CONFIG.apisix.apiUpstream },
+      { id: "lakehouse-etl", uri: "/lakehouse/*", upstream: CONFIG.apisix.lakehouseUpstream },
     ];
     let synced = 0;
     for (const r of routes) {
@@ -1838,15 +1844,17 @@ export class KafkaIntegration {
   private producer: any = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private consumers: Map<string, any> = new Map();
-  private brokers = (process.env.KAFKA_BROKERS || "localhost:9092").split(",");
-  private clientId = process.env.KAFKA_CLIENT_ID || "remitflow";
+  private brokers = requiredEnv("KAFKA_BROKERS").split(",");
+  private clientId = requiredEnv("KAFKA_CLIENT_ID");
   private connectionFailed = false;
   private lastConnectAttempt = 0;
   private static readonly RETRY_INTERVAL_MS = 60_000;
   private dlqTopic = "remitflow.dlq";
 
   async connect(): Promise<void> {
-    if (this.connectionFailed && Date.now() - this.lastConnectAttempt < KafkaIntegration.RETRY_INTERVAL_MS) return;
+    if (this.connectionFailed && Date.now() - this.lastConnectAttempt < KafkaIntegration.RETRY_INTERVAL_MS) {
+      throw new Error("Kafka producer is in its configured retry backoff window");
+    }
     this.lastConnectAttempt = Date.now();
     try {
       const { Kafka } = await import("kafkajs");
@@ -1858,13 +1866,13 @@ export class KafkaIntegration {
     } catch (err) {
       this.connectionFailed = true;
       this.producer = null;
-      logger.warn({ err }, `[Kafka] Producer connection failed — will retry in ${KafkaIntegration.RETRY_INTERVAL_MS / 1000}s`);
+      throw new Error(`Kafka producer connection failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   async produce(topic: string, key: string, value: string, headers?: Record<string, string>): Promise<void> {
     if (!this.producer) await this.connect();
-    if (!this.producer) return;
+    if (!this.producer) throw new Error("Kafka producer unavailable after connection attempt");
     await this.producer.send({
       topic,
       messages: [{ key, value, headers: headers ? Object.fromEntries(Object.entries(headers).map(([k, v]) => [k, Buffer.from(v)])) : undefined }],
@@ -1875,8 +1883,7 @@ export class KafkaIntegration {
   async sendToDLQ(originalTopic: string, key: string, value: string, error: string): Promise<void> {
     if (!this.producer) await this.connect();
     if (!this.producer) {
-      logger.error({ originalTopic, key, error }, "[Kafka] Cannot send to DLQ — producer unavailable");
-      return;
+      throw new Error(`Kafka producer unavailable while writing DLQ event for ${originalTopic}:${key}: ${error}`);
     }
     await this.producer.send({
       topic: this.dlqTopic,
@@ -1918,7 +1925,7 @@ export class KafkaIntegration {
       this.consumers.set(groupId, consumer);
       logger.info({ groupId, topics }, "[Kafka] Consumer started");
     } catch (err) {
-      logger.warn({ err, groupId }, "[Kafka] Consumer creation failed");
+      throw new Error(`Kafka consumer ${groupId} creation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1935,8 +1942,8 @@ export class KafkaIntegration {
 // ─── Temporal Integration ─────────────────────────────────────────────────────
 export class TemporalIntegration {
   private client: any = null;
-  private address = process.env.TEMPORAL_ADDRESS || "localhost:7233";
-  private namespace = process.env.TEMPORAL_NAMESPACE || "remitflow";
+  private address = requiredEnv("TEMPORAL_ADDRESS");
+  private namespace = requiredEnv("TEMPORAL_NAMESPACE");
 
   async connect(): Promise<void> {
     try {
@@ -1945,41 +1952,42 @@ export class TemporalIntegration {
       this.client = new Client({ connection, namespace: this.namespace });
       logger.info("[Temporal] Connected");
     } catch (err) {
-      logger.warn({ err }, "[Temporal] Connection failed");
+      this.client = null;
+      throw new Error(`Temporal connection failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
-  async startWorkflow(workflowId: string, workflowType: string, args: unknown[], taskQueue = "remitflow-tasks"): Promise<{ workflowId: string; runId: string } | null> {
+  async startWorkflow(workflowId: string, workflowType: string, args: unknown[], taskQueue = "remitflow-tasks"): Promise<{ workflowId: string; runId: string }> {
     if (!this.client) await this.connect();
-    if (!this.client) return null;
+    if (!this.client) throw new Error("Temporal client unavailable after connection attempt");
     const handle = await this.client.workflow.start(workflowType, { workflowId, taskQueue, args });
     return { workflowId: handle.workflowId, runId: handle.firstExecutionRunId };
   }
 
   async signalWorkflow(workflowId: string, signalName: string, args: unknown[]): Promise<void> {
     if (!this.client) await this.connect();
-    if (!this.client) return;
+    if (!this.client) throw new Error("Temporal client unavailable after connection attempt");
     const handle = this.client.workflow.getHandle(workflowId);
     await handle.signal(signalName, ...args);
   }
 
   async queryWorkflow(workflowId: string, queryType: string): Promise<unknown> {
     if (!this.client) await this.connect();
-    if (!this.client) return null;
+    if (!this.client) throw new Error("Temporal client unavailable after connection attempt");
     const handle = this.client.workflow.getHandle(workflowId);
     return handle.query(queryType);
   }
 
   async cancelWorkflow(workflowId: string): Promise<void> {
     if (!this.client) await this.connect();
-    if (!this.client) return;
+    if (!this.client) throw new Error("Temporal client unavailable after connection attempt");
     const handle = this.client.workflow.getHandle(workflowId);
     await handle.cancel();
   }
 
   async getWorkflowResult(workflowId: string): Promise<unknown> {
     if (!this.client) await this.connect();
-    if (!this.client) return null;
+    if (!this.client) throw new Error("Temporal client unavailable after connection attempt");
     const handle = this.client.workflow.getHandle(workflowId);
     return handle.result();
   }

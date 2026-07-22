@@ -32,8 +32,8 @@ import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
 import { db } from "../db-shim";
-import { getRedisClient } from "../middleware/redis";
-const redis = getRedisClient();
+import { requireRedisClient } from "../middleware/redis";
+const redis = requireRedisClient();
 import crypto from "node:crypto";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -219,7 +219,7 @@ export const webauthnRouter = router({
         attestationObject: z.string(),
         transports: z.array(z.string()).optional(),
       }),
-      clientExtensionResults: z.record(z.unknown()).optional(),
+      clientExtensionResults: z.record(z.string(), z.unknown()).optional(),
       deviceNickname: z.string().default("My Device"),
     }))
     .mutation(async ({ ctx, input }) => {

@@ -70,10 +70,11 @@ const unwrapApiData = <T,>(response: T | ApiResponse<T>): T => {
 };
 
 const normalizeGoal = (goal: Partial<SavingsGoal>): SavingsGoal => {
+  if (!goal.goal_id) throw new Error('Savings goal response is missing goal_id');
   const targetAmount = goal.target_amount ?? 0;
   const currentAmount = goal.current_amount ?? 0;
   return {
-    goal_id: goal.goal_id || goal.id || `goal-${Date.now()}`,
+    goal_id: goal.goal_id,
     user_id: goal.user_id || '',
     name: goal.name || 'Savings Goal',
     category: goal.category || 'OTHER',

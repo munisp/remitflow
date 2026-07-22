@@ -12,11 +12,12 @@ import {
     getTenantHeadersFromStorage,
 } from "./tenant/getTenantHeaders";
 
-// API Configuration
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ||
-  import.meta.env.VITE_CORE_BANKING_URL ||
-  "https://54remit.upi.dev";
+// API Configuration. A deployed PWA talks to the same origin by default;
+// an explicitly configured gateway or core-banking upstream may override it.
+const configuredApiBaseUrl =
+  import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_CORE_BANKING_URL;
+const API_BASE_URL = (configuredApiBaseUrl ||
+  (typeof window !== "undefined" ? `${window.location.origin}/api` : "/api")).replace(/\/$/, "");
 
 // Error types
 export class ApiError extends Error {
@@ -968,6 +969,9 @@ export const securityService = {
 
   disableTwoFactor: (code: string) =>
     api.post<void>("/security/2fa/disable", { code }),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    api.post<void>("/security/password/change", { currentPassword, newPassword }),
 
   changePin: (currentPin: string, newPin: string) =>
     api.post<void>("/security/pin/change", { currentPin, newPin }),
@@ -2090,42 +2094,5 @@ export interface PaymentInsight {
   value: number;
   change: number;
 }
-
-// Export account service for multi-currency account management from core banking
-export {
-    AccountCurrency,
-    accountService,
-    AccountStatus,
-    AccountType,
-    CurrencyLedgerId,
-    getCurrencyLedgerId,
-    type Account,
-    type AccountResponse,
-    type AccountsResponse,
-    type CheckAccountRequest,
-    type CreateAccountRequest,
-    type SetupPinRequest,
-    type VerifyPinRequest
-} from "./accountService";
-
-// Export transaction service for transaction history
-export {
-    transactionServiceCore,
-    type Transaction as CoreTransaction,
-    type GetTransactionsParams,
-    type TransactionHistory
-} from "./transactionService";
-
-// Export card service for card management
-export {
-    cardService,
-    CardStatus,
-    CardType,
-    type Card,
-    type CardResponse,
-    type CardsResponse,
-    type IssueCardRequest,
-    type SetCardPinRequest
-} from "./cardService";
 
 export default api;

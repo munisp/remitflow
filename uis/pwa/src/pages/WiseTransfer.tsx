@@ -10,7 +10,7 @@ interface WiseQuote {
   rate: number;
   fee: number;
   deliveryEstimate: string;
-  expiresAt: string;
+  expiresAt?: string;
 }
 
 interface WiseRecipient {
@@ -64,7 +64,7 @@ export default function WiseTransfer() {
   });
 
     const [successMessage, setSuccessMessage] = useState('');
-    const [_errorMessage, setErrorMessage] = useState('');
+    const [errorMessage, setErrorMessage] = useState('');
 
   useEffect(() => {
     loadData();
@@ -80,131 +80,67 @@ export default function WiseTransfer() {
 
   const loadData = async () => {
     setIsLoading(true);
-    try {
-      const [recipientsData, transfersData] = await Promise.all([
-        wiseTransferService.getRecipients().catch(() => null),
-        wiseTransferService.getTransfers().catch(() => null),
-      ]);
+    setErrorMessage('');
+    const [recipientsResult, transfersResult] = await Promise.allSettled([
+      wiseTransferService.getRecipients(),
+      wiseTransferService.getTransfers(),
+    ]);
 
-      if (recipientsData) {
-        setRecipients(recipientsData as unknown as WiseRecipient[]);
-      } else {
-        setRecipients([
-          {
-            id: '1',
-            name: 'Chioma Adeyemi',
-            accountNumber: '0123456789',
-            bankName: 'GTBank',
-            country: 'Nigeria',
-            currency: 'NGN',
-          },
-          {
-            id: '2',
-            name: 'James Smith',
-            accountNumber: '12345678',
-            bankName: 'Barclays',
-            country: 'United Kingdom',
-            currency: 'GBP',
-          },
-        ]);
-      }
-
-      if (transfersData) {
-        setTransfers(transfersData as unknown as WiseTransfer[]);
-      } else {
-        setTransfers([
-          {
-            id: '1',
-            recipient: 'Chioma Adeyemi',
-            sourceAmount: 500,
-            sourceCurrency: 'USD',
-            targetAmount: 775000,
-            targetCurrency: 'NGN',
-            status: 'completed',
-            reference: 'WISE123456',
-            createdAt: new Date(Date.now() - 86400000).toISOString(),
-          },
-          {
-            id: '2',
-            recipient: 'James Smith',
-            sourceAmount: 200,
-            sourceCurrency: 'USD',
-            targetAmount: 158,
-            targetCurrency: 'GBP',
-            status: 'processing',
-            reference: 'WISE789012',
-            createdAt: new Date(Date.now() - 3600000).toISOString(),
-          },
-        ]);
-      }
-    } catch {
-      // Use mock data
-      setRecipients([
-        {
-          id: '1',
-          name: 'Chioma Adeyemi',
-          accountNumber: '0123456789',
-          bankName: 'GTBank',
-          country: 'Nigeria',
-          currency: 'NGN',
-        },
-      ]);
-    } finally {
-      setIsLoading(false);
+    if (recipientsResult.status === 'fulfilled') {
+      setRecipients(recipientsResult.value.data.map((recipient) => ({
+        id: recipient.id,
+        name: recipient.name,
+        accountNumber: recipient.accountNumber,
+        bankName: recipient.bankCode,
+        country: recipient.country,
+        currency: recipient.currency,
+      })));
+    } else {
+      setRecipients([]);
+      setErrorMessage('Unable to load Wise recipients from the backend.');
     }
+
+    if (transfersResult.status === 'fulfilled') {
+      setTransfers(transfersResult.value.data.map((transfer) => ({
+        id: transfer.id,
+        recipient: transfer.recipientName,
+        sourceAmount: transfer.amount,
+        sourceCurrency: transfer.currency,
+        targetAmount: transfer.targetAmount,
+        targetCurrency: transfer.targetCurrency,
+        status: transfer.status as WiseTransfer['status'],
+        reference: transfer.id,
+        createdAt: transfer.date,
+      })));
+    } else {
+      setTransfers([]);
+      setErrorMessage((current) => current || 'Unable to load Wise transfer history from the backend.');
+    }
+    setIsLoading(false);
   };
 
   const getQuote = async () => {
+    setErrorMessage('');
     try {
-      const quoteData = await wiseTransferService.getQuote({
+      const response = await wiseTransferService.getQuote({
         sourceCurrency: formData.sourceCurrency,
         targetCurrency: formData.targetCurrency,
         sourceAmount: parseFloat(formData.amount),
-      }).catch(() => null);
-
-      if (quoteData) {
-        setQuote(quoteData as unknown as WiseQuote);
-      } else {
-        // Mock quote
-        const rates: Record<string, number> = {
-          'USD-NGN': 1550,
-          'USD-GBP': 0.79,
-          'USD-EUR': 0.92,
-          'USD-KES': 153,
-          'GBP-NGN': 1960,
-          'EUR-NGN': 1680,
-        };
-        const key = `${formData.sourceCurrency}-${formData.targetCurrency}`;
-        const rate = rates[key] || 1;
-        const amount = parseFloat(formData.amount);
-        const fee = amount * 0.005; // 0.5% fee
-        
-        setQuote({
-          id: Date.now().toString(),
-          sourceCurrency: formData.sourceCurrency,
-          targetCurrency: formData.targetCurrency,
-          sourceAmount: amount,
-          targetAmount: (amount - fee) * rate,
-          rate,
-          fee,
-          deliveryEstimate: '1-2 business days',
-          expiresAt: new Date(Date.now() + 1800000).toISOString(),
-        });
-      }
-    } catch {
-      // Mock quote on error
-      const amount = parseFloat(formData.amount);
+      });
+      const data = response.data;
       setQuote({
-        id: Date.now().toString(),
+        id: '',
         sourceCurrency: formData.sourceCurrency,
         targetCurrency: formData.targetCurrency,
-        sourceAmount: amount,
-        targetAmount: amount * 1550,
-        rate: 1550,
-        fee: amount * 0.005,
-        deliveryEstimate: '1-2 business days',
-        expiresAt: new Date(Date.now() + 1800000).toISOString(),
+        sourceAmount: parseFloat(formData.amount),
+        targetAmount: data.targetAmount,
+        rate: data.rate,
+        fee: data.fee,
+        deliveryEstimate: data.estimatedDelivery,
       });
+    } catch {
+      setQuote(null);
+      setErrorMessage('Unable to obtain a live Wise quote.');
     }
   };
 
@@ -215,30 +151,20 @@ export default function WiseTransfer() {
     setIsProcessing(true);
     setErrorMessage('');
     setSuccessMessage('');
-
     try {
-      const response = await wiseTransferService.createTransfer({
+      await wiseTransferService.createTransfer({
         recipientId: formData.recipientId,
         sourceCurrency: formData.sourceCurrency,
         targetCurrency: formData.targetCurrency,
         sourceAmount: quote.sourceAmount,
-        reference: quote.id,
-      }).catch(() => null);
-
-      if (response) {
-        setSuccessMessage('Transfer initiated successfully!');
-        setFormData({ ...formData, amount: '', recipientId: '' });
-        setQuote(null);
-        loadData();
-      } else {
-        setSuccessMessage('Transfer initiated successfully!');
-        setFormData({ ...formData, amount: '', recipientId: '' });
-        setQuote(null);
-      }
-    } catch {
-      setSuccessMessage('Transfer initiated successfully!');
+        reference: quote.id || undefined,
+      });
+      setSuccessMessage('Transfer submitted to the Wise backend.');
       setFormData({ ...formData, amount: '', recipientId: '' });
       setQuote(null);
+      await loadData();
+    } catch {
+      setErrorMessage('Transfer submission was not accepted by the Wise backend.');
     } finally {
       setIsProcessing(false);
     }
@@ -293,6 +219,13 @@ export default function WiseTransfer() {
         </div>
       )}
 
+      {errorMessage && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex items-center gap-3">
+          <p className="text-red-700">{errorMessage}</p>
+          <button onClick={() => setErrorMessage('')} className="ml-auto text-red-500" aria-label="Dismiss error">×</button>
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="flex gap-2 bg-slate-100 p-1 rounded-xl">
         {(['send', 'recipients', 'history'] as const).map((tab) => (
@@ -326,7 +259,7 @@ export default function WiseTransfer() {
                   value={formData.amount}
                   onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
                   className="input-field text-2xl font-bold"
-                  value="0.00"
+                  placeholder="0.00"
                 />
               </div>
               <select

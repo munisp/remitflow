@@ -10,7 +10,7 @@ export interface SseClient {
 }
 
 export interface AdminSseEvent {
-  type: "new_kyc" | "new_compliance_case" | "case_updated" | "kyc_updated" | "case_escalated" | "fraud_alert" | "fraud_alert_reviewed" | "kyc_provider_result" | "fx_alert_triggered" | "ping";
+  type: "new_kyc" | "new_compliance_case" | "case_updated" | "kyc_updated" | "case_escalated" | "fraud_alert" | "fraud_alert_reviewed" | "kyc_provider_result" | "fx_alert_triggered" | "transfer_update" | "system_health" | "ping";
   payload: Record<string, unknown>;
   timestamp: string;
 }

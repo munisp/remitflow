@@ -84,7 +84,7 @@ export const insertTransactionSchema = createInsertSchema(transactions, {
   fee: positiveDecimal.optional(),
   idempotencyKey: z.string().min(1).max(200).optional(),
 }).refine(
-  (data) => Number(data.fromAmount) > 0,
+  (data: { fromAmount: string }) => Number(data.fromAmount) > 0,
   { message: "fromAmount must be greater than 0", path: ["fromAmount"] }
 );
 
@@ -102,7 +102,7 @@ export const insertSavingsGoalSchema = createInsertSchema(savingsGoals, {
   targetAmount: positiveDecimal,
   currency: CurrencyCode.optional(),
 }).refine(
-  (data) => Number(data.targetAmount) > 0,
+  (data: { targetAmount: string }) => Number(data.targetAmount) > 0,
   { message: "targetAmount must be greater than 0", path: ["targetAmount"] }
 );
 
@@ -117,7 +117,7 @@ export const insertRecurringPaymentSchema = createInsertSchema(recurringPayments
   currency: CurrencyCode.optional(),
   targetCurrency: CurrencyCode.optional(),
 }).refine(
-  (data) => Number(data.amount) > 0,
+  (data: { amount: string }) => Number(data.amount) > 0,
   { message: "amount must be greater than 0", path: ["amount"] }
 );
 
@@ -158,7 +158,7 @@ export const insertTigerBeetleAccountSchema = createInsertSchema(tigerbeetleAcco
 export const insertTigerBeetleTransferSchema = createInsertSchema(tigerbeetleTransfers, {
   status: z.enum(["posted", "voided", "pending"]).optional(),
 }).refine(
-  (data) => data.amount > BigInt(0),
+  (data: { amount: bigint }) => data.amount > BigInt(0),
   { message: "amount must be greater than 0", path: ["amount"] }
 );
 
@@ -188,7 +188,7 @@ export const insertLakehouseSyncJobSchema = createInsertSchema(lakehouseSyncJobs
 
 export const insertOpenAppSecEventSchema = createInsertSchema(openappsecEvents, {
   action: z.enum(["block", "detect", "allow"]),
-  ipAddress: z.string().ip({ message: "Must be a valid IP address" }),
+  ipAddress: z.union([z.ipv4(), z.ipv6()]),
   score: z.number().int().min(0).max(100),
 });
 

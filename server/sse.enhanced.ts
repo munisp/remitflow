@@ -193,7 +193,7 @@ export interface SystemHealthEvent {
 export function notifySystemHealth(event: SystemHealthEvent): void {
   broadcastAdminEvent({
     type: "system_health",
-    payload: event,
+    payload: { ...event },
   });
 }
 

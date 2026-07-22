@@ -24,7 +24,7 @@ export async function syncApisixRoute(routeId: string, path: string, upstreamUrl
       }
     };
     
-    await apisix.updateRoute(routeId, config);
+    await apisix.createRoute(routeId, config);
     logger.info({ routeId, path }, "[APISIX] Route synced");
     
     // Log to audit table

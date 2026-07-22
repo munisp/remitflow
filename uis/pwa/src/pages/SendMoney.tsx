@@ -6,16 +6,18 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  bankService,
+  exchangeRateService,
+  transactionService,
+  type Bank,
+} from "../services/api";
+import {
   AccountCurrency,
   AccountStatus,
   AccountType,
   accountService,
-  bankService,
-  exchangeRateService,
-  transactionService,
   type Account,
-  type Bank,
-} from "../services/api";
+} from "../services/accountService";
 import { useAuthStore } from "../stores/authStore";
 import {
   useIsOnline,

@@ -109,6 +109,7 @@ export const transactions = pgTable("transactions", {
   recipientName: varchar("recipientName", { length: 128 }),
   recipientAccount: varchar("recipientAccount", { length: 64 }),
   recipientBank: varchar("recipientBank", { length: 128 }),
+  beneficiaryId: integer("beneficiaryId").references(() => beneficiaries.id),
   recipientCountry: varchar("recipientCountry", { length: 64 }),
   channel: varchar("channel", { length: 32 }),
   metadata: json("metadata"),
@@ -362,6 +363,18 @@ export const fxRateCache = pgTable("fxRateCache", {
   fetchedAt: timestamp("fetchedAt").defaultNow().notNull(),
 });
 
+// Hourly FX observations used by AI commentary, analytics, and rate-history APIs.
+export const fxRates = pgTable("fx_rates", {
+  id: serial("id").primaryKey(),
+  fromCurrency: varchar("from_currency", { length: 8 }).notNull(),
+  toCurrency: varchar("to_currency", { length: 8 }).notNull(),
+  rate: numeric("rate", { precision: 24, scale: 10 }).notNull(),
+  source: varchar("source", { length: 64 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+}, (table) => [
+  index("fx_rates_pair_created_at_idx").on(table.fromCurrency, table.toCurrency, table.createdAt),
+]);
+
 // ─── Type Exports ─────────────────────────────────────────────────────────────
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
@@ -537,6 +550,7 @@ export const mojaloopTransfers = pgTable("mojaloop_transfers", {
 export const posTerminals = pgTable("pos_terminals", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull(),
+  agentId: integer("agent_id").references(() => agentAccounts.id),
   terminalId: varchar("terminal_id", { length: 50 }).notNull(),
   merchantName: varchar("merchant_name", { length: 200 }).notNull(),
   merchantCategory: varchar("merchant_category", { length: 100 }),
@@ -623,6 +637,7 @@ export const outboxEvents = pgTable("outbox_events", {
   maxRetries: integer("max_retries").default(3),
   publishedAt: timestamp("published_at"),
   failedAt: timestamp("failed_at"),
+  nextRetryAt: timestamp("next_retry_at"),
   errorMessage: text("error_message"),
   createdAt: timestamp("created_at").defaultNow(),
 });
@@ -753,12 +768,15 @@ export const fraudAlerts = pgTable("fraud_alerts", {
   status: fraudAlertStatusEnum("status").default("pending"),
   flaggedReasons: json("flagged_reasons"),
   transactionAmount: integer("transaction_amount").default(0),
+  modelVersion: varchar("model_version", { length: 96 }),
   reviewerId: integer("reviewer_id"),
   reviewerNotes: text("reviewer_notes"),
   reviewedAt: timestamp("reviewed_at"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (t) => [
+  index("fraud_alerts_model_version_created_at_idx").on(t.modelVersion, t.createdAt),
+]);
 export type FraudAlert = typeof fraudAlerts.$inferSelect;
 export type InsertFraudAlert = typeof fraudAlerts.$inferInsert;
 
@@ -1360,6 +1378,8 @@ export const apiKeys = pgTable("api_keys", {
   name: varchar("name", { length: 100 }).notNull(),
   keyHash: varchar("key_hash", { length: 128 }).notNull().unique(),
   keyPrefix: varchar("key_prefix", { length: 12 }).notNull(),
+  keyId: varchar("key_id", { length: 64 }).notNull().unique(),
+  testMode: boolean("test_mode").notNull().default(false),
   scopes: json("scopes").$type<string[]>().default([]),
   status: apiKeyStatusEnum("status").default("active").notNull(),
   lastUsedAt: timestamp("last_used_at"),
@@ -1369,6 +1389,21 @@ export const apiKeys = pgTable("api_keys", {
   updatedAt: timestamp("updatedAt").defaultNow().notNull(),
 });
 export type ApiKey = typeof apiKeys.$inferSelect;
+
+// ─── Push Notification Tokens ─────────────────────────────────────────────────
+export const pushTokens = pgTable("push_tokens", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  token: text("token").notNull().unique(),
+  platform: varchar("platform", { length: 16 }).notNull(),
+  deviceId: varchar("device_id", { length: 128 }),
+  appVersion: varchar("app_version", { length: 64 }),
+  isActive: boolean("is_active").notNull().default(true),
+  lastUsedAt: timestamp("last_used_at"),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [index("push_tokens_user_active_idx").on(table.userId, table.isActive)]);
+export type PushToken = typeof pushTokens.$inferSelect;
 
 // ─── Payment Gateway Logs ─────────────────────────────────────────────────────
 export const gatewayEnum = pgEnum("gateway", ["stripe", "paypal", "flutterwave", "bank_transfer", "mpesa", "mojaloop"]);
@@ -5557,3 +5592,520 @@ export * from "./schema.kyc-pipeline";
 
 // ─── KYC/KYB Trigger & Pipeline Schema ───────────────────────────────────────
 export * from "./schema.kyc-triggers";
+
+
+// ─── Core Runtime Reconciliation (migration 0063) ─────────────────────────────
+// These tables mirror active raw-SQL service contracts. TigerBeetle is the
+// monetary system of record; ledgerEntries provides durable business references
+// and reconciliation metadata in PostgreSQL.
+export const ledgerEntries = pgTable("ledger_entries", {
+  id: text("id").primaryKey(),
+  debitAccountId: text("debit_account_id"),
+  creditAccountId: text("credit_account_id"),
+  amount: numeric("amount", { precision: 24, scale: 8 }).notNull(),
+  currency: varchar("currency", { length: 12 }).notNull(),
+  reference: text("reference"),
+  code: integer("code"),
+  type: varchar("type", { length: 64 }),
+  transferId: uuid("transfer_id"),
+  tigerbeetleTransferId: numeric("tigerbeetle_transfer_id", { precision: 39, scale: 0 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  metadata: jsonb("metadata").default({}).notNull(),
+}, (t) => [
+  index("ledger_entries_reference_idx").on(t.reference, t.createdAt),
+  index("ledger_entries_transfer_idx").on(t.transferId, t.createdAt),
+]);
+
+export const coreTransfers = pgTable("transfers", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: bigint("userId", { mode: "number" }).notNull(),
+  recipientId: bigint("recipientId", { mode: "number" }),
+  fromAmount: numeric("fromAmount", { precision: 24, scale: 8 }).notNull(),
+  toAmount: numeric("toAmount", { precision: 24, scale: 8 }),
+  fromCurrency: varchar("fromCurrency", { length: 12 }).notNull(),
+  toCurrency: varchar("toCurrency", { length: 12 }),
+  fxRate: numeric("fxRate", { precision: 24, scale: 12 }),
+  fee: numeric("fee", { precision: 24, scale: 8 }).default("0").notNull(),
+  referenceId: text("referenceId").notNull(),
+  reference: text("reference").notNull().unique(),
+  status: varchar("status", { length: 32 }).default("pending").notNull(),
+  payoutMethod: varchar("payoutMethod", { length: 64 }),
+  purpose: text("purpose"),
+  recipientName: text("recipientName"),
+  recipientAccount: text("recipientAccount"),
+  sourceOfFunds: text("sourceOfFunds"),
+  corridor: varchar("corridor", { length: 64 }),
+  failureReason: text("failure_reason"),
+  idempotencyKey: text("idempotency_key"),
+  createdAt: timestamp("createdAt", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("transfers_user_created_idx").on(t.userId, t.createdAt),
+  index("transfers_user_status_created_idx").on(t.userId, t.status, t.createdAt),
+  uniqueIndex("transfers_idempotency_key_idx").on(t.idempotencyKey),
+]);
+
+export const userFcmTokens = pgTable("user_fcm_tokens", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: bigint("user_id", { mode: "number" }).notNull(),
+  token: text("token").notNull(),
+  platform: varchar("platform", { length: 32 }),
+  deviceId: text("device_id"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+}, (t) => [
+  uniqueIndex("user_fcm_tokens_user_token_idx").on(t.userId, t.token),
+  index("user_fcm_tokens_user_idx").on(t.userId, t.updatedAt),
+]);
+
+export const userSessions = pgTable("user_sessions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: bigint("user_id", { mode: "number" }).notNull(),
+  sessionTokenHash: text("session_token_hash").notNull().unique(),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  deviceName: text("device_name"),
+  lastActiveAt: timestamp("last_active_at", { withTimezone: true }).defaultNow().notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("user_sessions_user_active_idx").on(t.userId, t.lastActiveAt),
+  index("user_sessions_expiry_idx").on(t.expiresAt),
+]);
+
+export const securityPolicies = pgTable("security_policies", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: text("name").notNull().unique(),
+  policy: jsonb("policy").notNull(),
+  enabled: boolean("enabled").default(true).notNull(),
+  createdBy: bigint("created_by", { mode: "number" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const recurringPaymentExecutions = pgTable("recurring_payment_executions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  recurringPaymentId: uuid("recurring_payment_id"),
+  userId: bigint("user_id", { mode: "number" }).notNull(),
+  idempotencyKey: text("idempotency_key").notNull().unique(),
+  status: varchar("status", { length: 32 }).default("pending").notNull(),
+  scheduledFor: timestamp("scheduled_for", { withTimezone: true }).notNull(),
+  executedAt: timestamp("executed_at", { withTimezone: true }),
+  reference: text("reference"),
+  failureReason: text("failure_reason"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("recurring_payment_executions_schedule_idx").on(t.status, t.scheduledFor),
+  index("recurring_payment_executions_user_idx").on(t.userId, t.createdAt),
+]);
+
+export const fxRateAlertTargets = pgTable("fx_rate_alert_targets", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: bigint("user_id", { mode: "number" }).notNull(),
+  fromCurrency: varchar("from_currency", { length: 12 }).notNull(),
+  toCurrency: varchar("to_currency", { length: 12 }).notNull(),
+  targetRate: numeric("target_rate", { precision: 24, scale: 12 }).notNull(),
+  direction: varchar("direction", { length: 16 }).notNull(),
+  active: boolean("active").default(true).notNull(),
+  triggeredAt: timestamp("triggered_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("fx_rate_alert_targets_pair_idx").on(t.fromCurrency, t.toCurrency, t.active),
+  index("fx_rate_alert_targets_user_idx").on(t.userId, t.createdAt),
+]);
+
+export const runtimeFxRates = pgTable("fx_rates", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  fromCurrency: varchar("from_currency", { length: 12 }).notNull(),
+  toCurrency: varchar("to_currency", { length: 12 }).notNull(),
+  rate: numeric("rate", { precision: 24, scale: 12 }).notNull(),
+  source: text("source").notNull(),
+  observedAt: timestamp("observed_at", { withTimezone: true }).defaultNow().notNull(),
+  metadata: jsonb("metadata").default({}).notNull(),
+}, (t) => [
+  index("fx_rates_pair_observed_idx").on(t.fromCurrency, t.toCurrency, t.observedAt),
+]);
+
+export const eventSnapshots = pgTable("event_snapshots", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  aggregateType: varchar("aggregate_type", { length: 128 }).notNull(),
+  aggregateId: text("aggregate_id").notNull(),
+  version: bigint("version", { mode: "number" }).notNull(),
+  payload: jsonb("payload").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  uniqueIndex("event_snapshots_aggregate_version_idx").on(t.aggregateType, t.aggregateId, t.version),
+  index("event_snapshots_aggregate_idx").on(t.aggregateType, t.aggregateId, t.version),
+]);
+
+export const deadLetterQueue = pgTable("dead_letter_queue", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  topic: text("topic").notNull(),
+  eventKey: text("event_key"),
+  payload: jsonb("payload").notNull(),
+  errorMessage: text("error_message").notNull(),
+  attempts: integer("attempts").default(0).notNull(),
+  nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("dead_letter_queue_retry_idx").on(t.nextRetryAt, t.createdAt),
+]);
+
+export const reconciliationResults = pgTable("reconciliation_results", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  provider: text("provider").notNull(),
+  reference: text("reference"),
+  status: varchar("status", { length: 32 }).notNull(),
+  expectedAmount: numeric("expected_amount", { precision: 24, scale: 8 }),
+  actualAmount: numeric("actual_amount", { precision: 24, scale: 8 }),
+  discrepancy: numeric("discrepancy", { precision: 24, scale: 8 }),
+  details: jsonb("details").default({}).notNull(),
+  reconciledAt: timestamp("reconciled_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("reconciliation_results_provider_status_idx").on(t.provider, t.status, t.createdAt),
+]);
+
+
+// ─── Agent Network and Cash Pickup (migration 0064) ───────────────────────────
+export const agentNetwork = pgTable("agent_network", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  name: text("name").notNull(),
+  country: varchar("country", { length: 2 }).notNull(),
+  city: text("city"),
+  address: text("address"),
+  phone: varchar("phone", { length: 32 }),
+  latitude: numeric("latitude", { precision: 10, scale: 7 }),
+  longitude: numeric("longitude", { precision: 10, scale: 7 }),
+  operatingHours: jsonb("operating_hours").default({}).notNull(),
+  services: jsonb("services").default([]).notNull(),
+  dailyLimit: numeric("daily_limit", { precision: 24, scale: 8 }).default("0").notNull(),
+  currency: varchar("currency", { length: 12 }).notNull(),
+  status: varchar("status", { length: 32 }).default("active").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("agent_network_lookup_idx").on(t.country, t.city, t.currency, t.status, t.name),
+]);
+
+export const cashPickupAssignments = pgTable("cash_pickup_assignments", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  transferReference: text("transfer_reference").notNull().unique(),
+  userId: bigint("user_id", { mode: "number" }).notNull(),
+  agentNetworkId: bigint("agent_network_id", { mode: "number" }).notNull(),
+  agentName: text("agent_name").notNull(),
+  agentAddress: text("agent_address"),
+  agentCity: text("agent_city"),
+  agentCountry: varchar("agent_country", { length: 2 }),
+  agentPhone: varchar("agent_phone", { length: 32 }),
+  pickupCodeHash: text("pickup_code_hash").notNull(),
+  amount: numeric("amount", { precision: 24, scale: 8 }).notNull(),
+  currency: varchar("currency", { length: 12 }).notNull(),
+  recipientName: text("recipient_name").notNull(),
+  status: varchar("status", { length: 32 }).default("pending").notNull(),
+  failedAttempts: integer("failed_attempts").default(0).notNull(),
+  verifiedByUserId: bigint("verified_by_user_id", { mode: "number" }),
+  disbursementReference: text("disbursement_reference"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  disbursedAt: timestamp("disbursed_at", { withTimezone: true }),
+}, (t) => [
+  index("cash_pickup_assignments_agent_pending_idx").on(t.agentNetworkId, t.status, t.expiresAt),
+  index("cash_pickup_assignments_user_created_idx").on(t.userId, t.createdAt),
+]);
+
+export const floatTopupRequests = pgTable("float_topup_requests", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  agentUserId: bigint("agent_user_id", { mode: "number" }).notNull(),
+  amount: numeric("amount", { precision: 24, scale: 8 }).notNull(),
+  currency: varchar("currency", { length: 12 }).notNull(),
+  status: varchar("status", { length: 32 }).default("pending").notNull(),
+  paymentReference: text("payment_reference").unique(),
+  requestedBy: bigint("requested_by", { mode: "number" }).notNull(),
+  reviewedBy: bigint("reviewed_by", { mode: "number" }),
+  reviewNote: text("review_note"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, (t) => [
+  index("float_topup_requests_agent_status_idx").on(t.agentUserId, t.status, t.createdAt),
+]);
+
+export const agentCashTransactions = pgTable("agent_cash_transactions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  agentUserId: bigint("agent_user_id", { mode: "number" }).notNull(),
+  assignmentId: uuid("assignment_id"),
+  transferReference: text("transfer_reference"),
+  type: varchar("type", { length: 32 }).notNull(),
+  amount: numeric("amount", { precision: 24, scale: 8 }).notNull(),
+  currency: varchar("currency", { length: 12 }).notNull(),
+  reference: text("reference").notNull().unique(),
+  metadata: jsonb("metadata").default({}).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("agent_cash_transactions_agent_created_idx").on(t.agentUserId, t.createdAt),
+  index("agent_cash_transactions_transfer_idx").on(t.transferReference, t.createdAt),
+]);
+
+
+// ─── Virtual Cards and BNPL (migration 0065) ─────────────────────────────────
+export const virtualCards = pgTable("virtual_cards", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: bigint("user_id", { mode: "number" }).notNull(),
+  cardNumberMasked: varchar("card_number_masked", { length: 32 }).notNull(),
+  cardType: varchar("card_type", { length: 32 }).notNull(),
+  network: varchar("network", { length: 32 }).notNull(),
+  currency: varchar("currency", { length: 12 }).notNull(),
+  balance: numeric("balance", { precision: 24, scale: 8 }).default("0").notNull(),
+  spendingLimit: numeric("spending_limit", { precision: 24, scale: 8 }),
+  status: varchar("status", { length: 32 }).default("active").notNull(),
+  freezeReason: text("freeze_reason"),
+  expiryMonth: integer("expiry_month"),
+  expiryYear: integer("expiry_year"),
+  provider: text("provider"),
+  providerCardId: text("provider_card_id").unique(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("virtual_cards_user_status_idx").on(t.userId, t.status, t.createdAt),
+]);
+
+export const cardTransactions = pgTable("card_transactions", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  cardId: uuid("card_id").notNull(),
+  userId: bigint("user_id", { mode: "number" }).notNull(),
+  amount: numeric("amount", { precision: 24, scale: 8 }).notNull(),
+  currency: varchar("currency", { length: 12 }).notNull(),
+  direction: varchar("direction", { length: 16 }).default("debit").notNull(),
+  merchantName: text("merchant_name"),
+  merchantCategory: text("merchant_category"),
+  description: text("description"),
+  status: varchar("status", { length: 32 }).default("pending").notNull(),
+  providerReference: text("provider_reference").unique(),
+  metadata: jsonb("metadata").default({}).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("card_transactions_card_created_idx").on(t.cardId, t.createdAt),
+  index("card_transactions_user_created_idx").on(t.userId, t.createdAt),
+]);
+
+export const bnplApplications = pgTable("bnpl_applications", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  userId: bigint("userId", { mode: "number" }).notNull(),
+  planId: text("plan_id"),
+  requestedAmount: numeric("requested_amount", { precision: 24, scale: 8 }).notNull(),
+  totalAmount: numeric("total_amount", { precision: 24, scale: 8 }),
+  currency: varchar("currency", { length: 12 }).notNull(),
+  installments: integer("installments").notNull(),
+  monthlyPayment: numeric("monthly_payment", { precision: 24, scale: 8 }),
+  status: varchar("status", { length: 32 }).default("pending").notNull(),
+  purpose: text("purpose"),
+  firstDueDate: date("first_due_date"),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("bnpl_applications_user_created_idx").on(t.userId, t.createdAt),
+  index("bnpl_applications_status_idx").on(t.status, t.createdAt),
+]);
+
+export const bnplInstallments = pgTable("bnpl_installments", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  planId: text("plan_id"),
+  applicationId: uuid("application_id"),
+  userId: bigint("user_id", { mode: "number" }),
+  installmentNumber: integer("installment_number").notNull(),
+  amountNgn: numeric("amount_ngn", { precision: 24, scale: 8 }),
+  amount: numeric("amount", { precision: 24, scale: 8 }),
+  dueDate: date("due_date").notNull(),
+  status: varchar("status", { length: 32 }).default("pending").notNull(),
+  paidAt: timestamp("paid_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("bnpl_installments_plan_status_idx").on(t.planId, t.status, t.dueDate),
+  index("bnpl_installments_application_status_idx").on(t.applicationId, t.status, t.dueDate),
+]);
+
+export const cardChargebacks = pgTable("card_chargebacks", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  cardId: uuid("card_id").notNull(),
+  cardTransactionId: uuid("card_transaction_id"),
+  userId: bigint("user_id", { mode: "number" }).notNull(),
+  amount: numeric("amount", { precision: 24, scale: 8 }).notNull(),
+  currency: varchar("currency", { length: 12 }).notNull(),
+  reason: text("reason"),
+  status: varchar("status", { length: 32 }).default("open").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+}, (t) => [
+  index("card_chargebacks_card_status_idx").on(t.cardId, t.status, t.createdAt),
+]);
+
+
+// ─── Ledger Service Reconciliation (migration 0066) ───────────────────────────
+export const ledgerAccounts = pgTable("ledger_accounts", {
+  id: text("id").primaryKey(),
+  userId: bigint("user_id", { mode: "number" }),
+  accountType: integer("account_type").notNull(),
+  currency: varchar("currency", { length: 12 }).notNull(),
+  ledger: integer("ledger").default(1).notNull(),
+  code: integer("code").default(1).notNull(),
+  debitsPending: numeric("debits_pending", { precision: 30, scale: 0 }).default("0").notNull(),
+  debitsPosted: numeric("debits_posted", { precision: 30, scale: 0 }).default("0").notNull(),
+  creditsPending: numeric("credits_pending", { precision: 30, scale: 0 }).default("0").notNull(),
+  creditsPosted: numeric("credits_posted", { precision: 30, scale: 0 }).default("0").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("ledger_accounts_user_currency_idx").on(t.userId, t.currency, t.accountType),
+]);
+
+export const ledgerTransfers = pgTable("ledger_transfers", {
+  id: text("id").primaryKey(),
+  debitAccountId: text("debit_account_id").notNull(),
+  creditAccountId: text("credit_account_id").notNull(),
+  amount: numeric("amount", { precision: 30, scale: 0 }).notNull(),
+  pendingId: text("pending_id"),
+  ledger: integer("ledger").default(1).notNull(),
+  code: integer("code").default(1).notNull(),
+  flags: integer("flags").default(0).notNull(),
+  timeout: integer("timeout").default(0).notNull(),
+  status: varchar("status", { length: 32 }).default("posted").notNull(),
+  idempotencyKey: text("idempotency_key"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("ledger_transfers_debit_idx").on(t.debitAccountId, t.createdAt),
+  index("ledger_transfers_credit_idx").on(t.creditAccountId, t.createdAt),
+  index("ledger_transfers_status_idx").on(t.status, t.createdAt),
+  uniqueIndex("ledger_transfers_idempotency_idx").on(t.idempotencyKey),
+]);
+
+export const ledgerEvents = pgTable("ledger_events", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  eventType: text("event_type").notNull(),
+  transferId: text("transfer_id"),
+  payload: jsonb("payload").default({}).notNull(),
+  publishedToKafka: boolean("published_to_kafka").default(false).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("ledger_events_transfer_idx").on(t.transferId, t.createdAt),
+]);
+
+
+// ─── Loyalty Points (migration 0067) ──────────────────────────────────────────
+export const loyaltyAccounts = pgTable("loyalty_accounts", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  userId: bigint("user_id", { mode: "number" }).notNull().unique(),
+  balance: integer("balance").default(0).notNull(),
+  lifetimeEarned: integer("lifetime_earned").default(0).notNull(),
+  lifetimeRedeemed: integer("lifetime_redeemed").default(0).notNull(),
+  tier: varchar("tier", { length: 20 }).default("bronze").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("loyalty_accounts_tier_earned_idx").on(t.tier, t.lifetimeEarned),
+]);
+
+export const loyaltyTransactions = pgTable("loyalty_transactions", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  userId: bigint("user_id", { mode: "number" }).notNull(),
+  type: varchar("type", { length: 20 }).notNull(),
+  amount: integer("amount").notNull(),
+  description: varchar("description", { length: 500 }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  expired: boolean("expired").default(false).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("loyalty_transactions_user_created_idx").on(t.userId, t.createdAt),
+  index("loyalty_transactions_expiry_idx").on(t.expiresAt),
+]);
+
+
+// ─── Agent Registration (migration 0068) ─────────────────────────────────────
+export const agentRegistrations = pgTable("agent_registrations", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  userId: bigint("user_id", { mode: "number" }).notNull().unique(),
+  agentCode: varchar("agent_code", { length: 32 }).notNull().unique(),
+  businessName: varchar("business_name", { length: 255 }).notNull(),
+  businessType: varchar("business_type", { length: 100 }).notNull(),
+  state: varchar("state", { length: 100 }).notNull(),
+  lga: varchar("lga", { length: 100 }),
+  address: varchar("address", { length: 500 }),
+  phone: varchar("phone", { length: 20 }).notNull(),
+  tier: varchar("tier", { length: 20 }).default("basic").notNull(),
+  status: varchar("status", { length: 32 }).default("pending").notNull(),
+  dailyLimitNgn: numeric("daily_limit_ngn", { precision: 24, scale: 8 }).default("0").notNull(),
+  commissionRatePct: numeric("commission_rate_pct", { precision: 8, scale: 4 }).default("0").notNull(),
+  monthlyVolumeNgn: numeric("monthly_volume_ngn", { precision: 24, scale: 8 }).default("0").notNull(),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  approvedBy: bigint("approved_by", { mode: "number" }),
+  rejectionReason: text("rejection_reason"),
+  createdAt: timestamp("createdAt", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("agent_registrations_discovery_idx").on(t.status, t.state, t.tier, t.monthlyVolumeNgn),
+]);
+
+// ─── Durable Financial Product Configuration ───────────────────────────────────
+export const savingsRoundupPreferences = pgTable("savings_roundup_preferences", {
+  userId: integer("user_id").primaryKey().references(() => users.id),
+  enabled: boolean("enabled").notNull().default(false),
+  roundUpTo: integer("round_up_to").notNull(),
+  savingsGoalId: integer("savings_goal_id").references(() => savingsGoals.id),
+  currency: varchar("currency", { length: 8 }).notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const autosaveRules = pgTable("autosave_rules", {
+  id: varchar("id", { length: 128 }).primaryKey(),
+  userId: integer("user_id").notNull().references(() => users.id),
+  savingsGoalId: integer("savings_goal_id").references(() => savingsGoals.id),
+  amount: numeric("amount", { precision: 24, scale: 8 }).notNull(),
+  currency: varchar("currency", { length: 8 }).notNull(),
+  frequency: varchar("frequency", { length: 16 }).notNull(),
+  startDate: timestamp("start_date").notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("active"),
+  nextExecutionAt: timestamp("next_execution_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [index("autosave_rules_user_status_idx").on(table.userId, table.status, table.nextExecutionAt)]);
+
+export const savingsStreaks = pgTable("savings_streaks", {
+  userId: integer("user_id").primaryKey().references(() => users.id),
+  currentStreak: integer("current_streak").notNull().default(0),
+  longestStreak: integer("longest_streak").notNull().default(0),
+  lastSaveDate: timestamp("last_save_date"),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const investmentCatalogProducts = pgTable("investment_catalog_products", {
+  id: varchar("id", { length: 128 }).primaryKey(),
+  currency: varchar("currency", { length: 8 }).notNull(),
+  name: text("name").notNull(),
+  issuer: text("issuer").notNull(),
+  minimumAmount: numeric("minimum_amount", { precision: 24, scale: 8 }).notNull(),
+  expectedYield: numeric("expected_yield", { precision: 12, scale: 6 }),
+  term: text("term").notNull(),
+  riskLevel: varchar("risk_level", { length: 16 }).notNull(),
+  productType: varchar("product_type", { length: 64 }).notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("active"),
+  source: text("source").notNull(),
+  sourceUpdatedAt: timestamp("source_updated_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+}, (table) => [index("investment_catalog_currency_status_idx").on(table.currency, table.status, table.sourceUpdatedAt)]);
+
+export type SavingsRoundupPreference = typeof savingsRoundupPreferences.$inferSelect;
+export type AutosaveRule = typeof autosaveRules.$inferSelect;
+export type InvestmentCatalogProduct = typeof investmentCatalogProducts.$inferSelect;

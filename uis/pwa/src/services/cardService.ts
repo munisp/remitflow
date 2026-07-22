@@ -37,6 +37,29 @@ export interface Card {
   name_on_card?: string;
 }
 
+export interface VirtualCard {
+  id: string;
+  cardNumber: string;
+  expiryDate: string;
+  cvv: string;
+  cardType: string;
+  currency: string;
+  balance: number;
+  limit: number;
+  status: "active" | "frozen" | "expired";
+  createdAt: string;
+}
+
+export interface CardTransaction {
+  id: string;
+  cardId: string;
+  amount: number;
+  currency: string;
+  merchant: string;
+  status: string;
+  createdAt: string;
+}
+
 // Card Service - Matches customer banking API
 export const cardService = {
   /**

@@ -153,11 +153,8 @@ func minorToAmount(minor int64) float64 {
 func initDB() *sql.DB {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		// FAIL-CLOSED: never fall back to hardcoded credentials in production.
-		if os.Getenv("NODE_ENV") == "production" || os.Getenv("GO_ENV") == "production" {
-			log.Fatalf("[ledger-service] DATABASE_URL is required in production")
-		}
-		dbURL = "postgresql://remitflow:remitflow123@localhost:5432/remitflow?sslmode=disable"
+		// A financial ledger must not guess a connection string in any environment.
+		log.Fatalf("[ledger-service] DATABASE_URL is required")
 	}
 
 	db, err := sql.Open("postgres", dbURL)

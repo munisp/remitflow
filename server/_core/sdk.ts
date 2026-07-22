@@ -1,7 +1,6 @@
 import { AXIOS_TIMEOUT_MS, COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 import { ForbiddenError } from "@shared/_core/errors";
 import axios, { type AxiosInstance } from "axios";
-import { parse as parseCookieHeader } from "cookie";
 import type { Request } from "express";
 import { SignJWT, jwtVerify } from "jose";
 import type { User } from "../../drizzle/schema";
@@ -144,13 +143,22 @@ class SDKServer {
     } as GetUserInfoResponse;
   }
 
-  private parseCookies(cookieHeader: string | undefined) {
-    if (!cookieHeader) {
-      return new Map<string, string>();
+  private parseCookies(cookieHeader: string | undefined): Map<string, string> {
+    const cookies = new Map<string, string>();
+    if (!cookieHeader) return cookies;
+    for (const part of cookieHeader.split(";")) {
+      const separator = part.indexOf("=");
+      if (separator <= 0) continue;
+      const name = part.slice(0, separator).trim();
+      const encodedValue = part.slice(separator + 1).trim();
+      if (!name) continue;
+      try {
+        cookies.set(name, decodeURIComponent(encodedValue));
+      } catch {
+        // Ignore malformed individual values rather than accepting an ambiguous session token.
+      }
     }
-
-    const parsed = parseCookieHeader(cookieHeader);
-    return new Map(Object.entries(parsed));
+    return cookies;
   }
 
   private getSessionSecret() {
@@ -272,7 +280,8 @@ class SDKServer {
     // If user not in DB, sync from OAuth server automatically
     if (!user) {
       try {
-        const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
+        if (!sessionCookie) throw ForbiddenError("Invalid session cookie");
+        const userInfo = await this.getUserInfoWithJwt(sessionCookie);
         await db.upsertUser({
           openId: userInfo.openId,
           name: userInfo.name || null,

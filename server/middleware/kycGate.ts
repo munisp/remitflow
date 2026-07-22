@@ -97,8 +97,10 @@ export interface KYCStatus {
 }
 
 export async function getUserKYCStatus(userId: string): Promise<KYCStatus | null> {
+  const numericUserId = Number(userId);
+  if (!Number.isSafeInteger(numericUserId) || numericUserId <= 0) return null;
   const user = await db.query.users.findFirst({
-    where: eq(users.id, userId),
+    where: eq(users.id, numericUserId),
     columns: {
       id: true,
       kycStatus: true,

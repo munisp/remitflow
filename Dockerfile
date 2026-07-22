@@ -59,7 +59,6 @@ RUN pnpm install --frozen-lockfile --prod
 
 # Copy built artifacts from builder
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/client/dist ./client/dist
 COPY --from=builder /app/drizzle ./drizzle
 
 # Copy scripts
@@ -82,4 +81,4 @@ ENV NODE_ENV=production \
     PORT=3000
 
 # Start the server
-CMD ["node", "dist/server/index.js"]
+CMD ["node", "dist/index.js"]

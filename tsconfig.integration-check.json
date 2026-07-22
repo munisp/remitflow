@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "server/middleware/middlewareIntegration.ts",
+    "server/lib/middleware-orchestrator.ts",
+    "server/_core/index.ts",
+    "server/_core/featurePersistence.ts",
+    "drizzle/schema.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "build",
+    "dist",
+    "client",
+    "uis"
+  ]
+}

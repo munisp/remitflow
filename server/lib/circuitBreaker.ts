@@ -2,7 +2,7 @@
  * circuitBreaker.ts — Re-exports CircuitBreaker from circuit-breaker.ts with
  * a compatibility shim for the { failureThreshold, resetTimeoutMs } options shape.
  */
-export { CircuitBreakerOpenError, circuitBreakerRegistry, breakers } from "./circuit-breaker";
+export { CircuitBreakerOpenError, circuitBreakerRegistry, breakers, getAllCircuitStatus } from "./circuit-breaker";
 export type { CircuitState, CircuitBreakerOptions } from "./circuit-breaker";
 import { CircuitBreaker as _CircuitBreaker } from "./circuit-breaker";
 

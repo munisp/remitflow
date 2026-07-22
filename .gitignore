@@ -115,3 +115,6 @@ coverage/
 .vscode/settings.json
 .idea/workspace.xml
 uis/pwa/node_modules/
+
+# Local audit and validation artifacts
+.audit/

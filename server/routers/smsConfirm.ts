@@ -12,7 +12,6 @@
  * SMS provider abstraction supports:
  * - Africa's Talking (primary — covers 18 African countries)
  * - Twilio (fallback — global)
- * - Mock mode (no SMS_PROVIDER env set — OTP logged to console)
  */
 
 import { z } from "zod";
@@ -59,16 +58,17 @@ async function deleteOtpEntry(key: string): Promise<void> {
 }
 
 /**
- * Send SMS via configured provider.
- * Falls back to console log in development/mock mode.
+ * Send SMS via an explicitly configured provider.
  */
 async function sendSms(phone: string, message: string): Promise<boolean> {
-  const provider = process.env.SMS_PROVIDER ?? "mock";
+  const provider = process.env.SMS_PROVIDER?.trim();
+  if (!provider) throw new Error("SMS_PROVIDER is required for transfer confirmation");
 
   if (provider === "africas_talking") {
     try {
-      const apiKey = process.env.AFRICAS_TALKING_API_KEY ?? "";
-      const username = process.env.AFRICAS_TALKING_USERNAME ?? "sandbox";
+      const apiKey = process.env.AFRICAS_TALKING_API_KEY?.trim();
+      const username = process.env.AFRICAS_TALKING_USERNAME?.trim();
+      if (!apiKey || !username) throw new Error("Africa's Talking credentials are required");
       const body = new URLSearchParams({
         username,
         to: phone,
@@ -93,9 +93,10 @@ async function sendSms(phone: string, message: string): Promise<boolean> {
 
   if (provider === "twilio") {
     try {
-      const accountSid = process.env.TWILIO_ACCOUNT_SID ?? "";
-      const authToken = process.env.TWILIO_AUTH_TOKEN ?? "";
-      const from = process.env.TWILIO_FROM_NUMBER ?? "";
+      const accountSid = process.env.TWILIO_ACCOUNT_SID?.trim();
+      const authToken = process.env.TWILIO_AUTH_TOKEN?.trim();
+      const from = process.env.TWILIO_FROM_NUMBER?.trim();
+      if (!accountSid || !authToken || !from) throw new Error("Twilio credentials are required");
       const credentials = Buffer.from(`${accountSid}:${authToken}`).toString("base64");
       const body = new URLSearchParams({ To: phone, From: from, Body: message });
       const res = await fetch(
@@ -117,9 +118,7 @@ async function sendSms(phone: string, message: string): Promise<boolean> {
     }
   }
 
-  // Mock mode — log OTP to structured logger for testing (intentional: visible in dev logs)
-  logger.info({ phone: phone.slice(0, 6) + '****', msgLen: message.length }, '[SMS/Mock] OTP delivery (dev mode)');
-  return true;
+  throw new Error(`Unsupported SMS_PROVIDER: ${provider}`);
 }
 
 // ── tRPC Router ───────────────────────────────────────────────────────────────
@@ -139,14 +138,7 @@ export const smsConfirmRouter = {
       const otp = generateOtp();
       const key = `${ctx.user.id}:${input.transferId}`;
 
-      await setOtpEntry(key, {
-        code: otp,
-        transferId: input.transferId,
-        phone: input.phone,
-        expiresAt: Date.now() + OTP_TTL_SECONDS * 1000,
-        attempts: 0,
-      });
-
+      const expiresAt = Date.now() + OTP_TTL_SECONDS * 1000;
       const message = `RemitFlow: Your transfer confirmation code is ${otp}. Valid for 10 minutes. Do not share this code.`;
       const sent = await sendSms(input.phone, message);
 
@@ -156,13 +148,18 @@ export const smsConfirmRouter = {
           message: "Failed to send SMS. Please try again or use the app.",
         });
       }
+      await setOtpEntry(key, {
+        code: otp,
+        transferId: input.transferId,
+        phone: input.phone,
+        expiresAt,
+        attempts: 0,
+      });
 
-      const isMock = !process.env.SMS_PROVIDER || process.env.SMS_PROVIDER === "mock";
       return {
         sent: true,
         phone: input.phone.replace(/(\+\d{3})\d+(\d{3})/, "$1****$2"),
-        expiresAt: Date.now() + OTP_TTL_SECONDS * 1000,
-        ...(isMock ? { sandboxOtp: otp } : {}),
+        expiresAt,
       };
     }),
 
@@ -221,10 +218,10 @@ export const smsConfirmRouter = {
    * Get SMS provider status (admin only).
    */
   getProviderStatus: publicProcedure.query(() => {
-    const provider = process.env.SMS_PROVIDER ?? "mock";
+    const provider = process.env.SMS_PROVIDER?.trim() ?? "unconfigured";
     return {
       provider,
-      configured: provider !== "mock",
+      configured: provider === "africas_talking" || provider === "twilio",
       africasTalkingConfigured: !!(
         process.env.AFRICAS_TALKING_API_KEY && process.env.AFRICAS_TALKING_USERNAME
       ),

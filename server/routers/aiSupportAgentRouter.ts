@@ -21,8 +21,8 @@ import { z } from "zod";
 import { router, protectedProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
-import { getRedisClient } from "../middleware/redis";
-const redis = getRedisClient();
+import { requireRedisClient } from "../middleware/redis";
+const redis = requireRedisClient();
 import { ollamaChat, runARTAgent, type OllamaMessage } from "../ollama.service";
 import { db } from "../db-shim";
 import { transactions, wallets, users } from "../../drizzle/schema";
@@ -128,7 +128,7 @@ export const aiSupportAgentRouter = router({
       try {
         const [dbUser] = await db.select({
           kycTier: users.kycTier,
-          firstName: users.firstName,
+          name: users.name,
         }).from(users).where(eq(users.id, userId)).limit(1);
 
         if (dbUser) {
@@ -139,8 +139,8 @@ export const aiSupportAgentRouter = router({
         if (transferRef) {
           const [txn] = await db.select({
             status: transactions.status,
-            amount: transactions.amount,
-            currency: transactions.currency,
+            amount: transactions.fromAmount,
+            currency: transactions.fromCurrency,
             createdAt: transactions.createdAt,
           }).from(transactions).where(
             and(
@@ -228,7 +228,7 @@ ${language !== "en" ? `IMPORTANT: Respond in ${language === "fr" ? "French" : la
     .mutation(async ({ input, ctx }) => {
       const result = await runARTAgent(
         `[Customer Support Query] ${input.question}`,
-        SUPPORT_MODEL,
+        5,
       );
 
       logger.info({
