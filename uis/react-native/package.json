@@ -28,7 +28,7 @@
     "react-native-gesture-handler": "2.15.0",
     "react-native-paper": "5.12.3",
     "react-native-chart-kit": "6.12.0",
-    "react-native-svg": "15.1.0",
+    "react-native-svg": "15.15.5",
     "react-native-biometrics": "3.0.1",
     "react-native-push-notification": "8.1.1",
     "@react-native-community/netinfo": "11.2.1",
