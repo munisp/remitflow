@@ -189,6 +189,10 @@ export function registerMojaloopWebhooks(app: Express) {
   // Transfer committed callback — PUT /api/mojaloop/callback/transfers/:transferId
   app.put("/api/mojaloop/callback/transfers/:transferId", async (req: Request, res: Response) => {
     const { transferId } = req.params;
+    if (!transferId) {
+      res.status(400).json({ error: "Missing transferId" });
+      return;
+    }
     const payload = req.body as MojaloopTransferCallback;
     const correlationId = `transfer:${transferId}`;
 
@@ -204,7 +208,7 @@ export function registerMojaloopWebhooks(app: Express) {
             completedAt: payload.completedTimestamp ? new Date(payload.completedTimestamp) : new Date(),
             fulfilment: payload.fulfilment ?? null,
           })
-          .where(eq(mojaloopTransfers.transferId, transferId));
+          .where(sql`${mojaloopTransfers.transferId} = ${transferId}`);
       }
     } catch (err) {
       logger.warn({ data: err }, '[Mojaloop] DB update failed for transfer ${transferId}:');
@@ -243,6 +247,10 @@ export function registerMojaloopWebhooks(app: Express) {
   // Transfer error callback — PUT /api/mojaloop/callback/transfers/:transferId/error
   app.put("/api/mojaloop/callback/transfers/:transferId/error", async (req: Request, res: Response) => {
     const { transferId } = req.params;
+    if (!transferId) {
+      res.status(400).json({ error: "Missing transferId" });
+      return;
+    }
     const payload = req.body as MojaloopTransferCallback;
     const correlationId = `transfer:${transferId}`;
 
@@ -257,7 +265,7 @@ export function registerMojaloopWebhooks(app: Express) {
             errorCode: payload.errorInformation?.errorCode ?? "UNKNOWN",
             errorDescription: payload.errorInformation?.errorDescription ?? "Transfer aborted",
           })
-          .where(eq(mojaloopTransfers.transferId, transferId));
+          .where(sql`${mojaloopTransfers.transferId} = ${transferId}`);
       }
     } catch (err) {
       logger.warn({ data: err }, '[Mojaloop] DB update failed for aborted transfer ${transferId}:');
@@ -320,7 +328,7 @@ export function registerMojaloopWebhooks(app: Express) {
               status: transferState ?? "COMMITTED",
               completedAt: new Date(),
             })
-            .where(eq(mojaloopTransfers.transferId, transferId));
+            .where(sql`${mojaloopTransfers.transferId} = ${transferId}`);
         }
       } catch { /* ignore */ }
     }

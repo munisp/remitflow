@@ -22,7 +22,8 @@ const STORAGE_BUCKET = process.env.STORAGE_BUCKET ?? "";
 
 export function registerStorageProxy(app: Express) {
   app.get("/icons/*", async (req, res) => {
-    const key = (req.params as Record<string, string>)[0];
+    const params = req.params as unknown as Record<string, string | undefined>;
+    const key = params["0"];
     if (!key) {
       res.status(400).send("Missing asset key");
       return;
