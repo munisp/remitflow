@@ -118,3 +118,4 @@ uis/pwa/node_modules/
 
 # Local audit and validation artifacts
 .audit/
+!uis/react-native/package-lock.json
