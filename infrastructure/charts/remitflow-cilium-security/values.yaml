@@ -1,0 +1,60 @@
+# The chart is safe to install in observation mode. Set enforcement.enabled=true
+# only after the Hubble policy-verdict review in infrastructure/cilium/README.md.
+enforcement:
+  enabled: false
+  # Apply strict default-deny only to workloads that have completed the Hubble
+  # audit and are explicitly labeled for enforcement.
+  targetSelector:
+    security.remitflow.io/network-policy: strict
+
+platform:
+  selector:
+    app.kubernetes.io/part-of: remitflow
+
+dns:
+  namespace: kube-system
+  selector:
+    k8s-app: kube-dns
+  ports:
+    - "53"
+
+gateway:
+  selector:
+    app.kubernetes.io/name: gateway-config
+  port: "80"
+
+api:
+  # The main transaction-entry workload. Override for deployments that package
+  # the root API under a different Helm chart or release name.
+  selector:
+    app.kubernetes.io/name: transfer-engine
+  port: "80"
+
+# The API is permitted to call only declared internal services. Extend this list
+# from observed Hubble verdicts before enabling enforcement.
+coreServices:
+  - name: auth-service
+    port: "80"
+  - name: user-service
+    port: "80"
+  - name: ledger-service
+    port: "80"
+  - name: risk-engine
+    port: "80"
+  - name: shared-middleware
+    port: "80"
+  - name: travel-rule-service
+    port: "80"
+  - name: tenant-management
+    port: "80"
+  - name: aml-engine
+    port: "80"
+  - name: fx-engine
+    port: "80"
+
+# External egress is denied by the default policy. Add only audited endpoints,
+# for example payment or regulatory providers, with explicit TLS ports.
+externalFQDNs: []
+# - name: api.example-provider.com
+#   ports:
+#     - "443"

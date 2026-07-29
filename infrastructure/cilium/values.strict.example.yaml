@@ -1,0 +1,14 @@
+# Copy outside source control, replace the FQDNs with reviewed provider domains,
+# and pass as STRICT_POLICY_VALUES to scripts/deploy.sh.
+
+enforcement:
+  enabled: true
+  targetSelector:
+    security.remitflow.io/network-policy: strict
+
+# Use exact provider names whenever possible. Do not use broad wildcards for
+# financial, KYC, SMS, regulatory, or FX providers without a documented review.
+externalFQDNs: []
+# - name: "api.provider.example"
+#   ports:
+#     - "443"

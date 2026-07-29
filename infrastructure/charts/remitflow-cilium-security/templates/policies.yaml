@@ -1,0 +1,167 @@
+{{- if .Values.enforcement.enabled }}
+{{- $target := .Values.enforcement.targetSelector }}
+{{- $apiSelector := mergeOverwrite (deepCopy $target) .Values.api.selector }}
+{{- $gatewaySelector := mergeOverwrite (deepCopy $target) .Values.gateway.selector }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "remitflow-cilium-security.fullname" . }}-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "remitflow-cilium-security.labels" . | nindent 4 }}
+spec:
+  description: "Default deny for RemitFlow workloads approved for strict Cilium enforcement."
+  endpointSelector:
+    matchLabels:
+      {{- toYaml $target | nindent 6 }}
+  enableDefaultDeny:
+    ingress: true
+    egress: true
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "remitflow-cilium-security.fullname" . }}-allow-health
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "remitflow-cilium-security.labels" . | nindent 4 }}
+spec:
+  description: "Allow Cilium health probing for strictly enforced RemitFlow endpoints."
+  endpointSelector:
+    matchLabels:
+      {{- toYaml $target | nindent 6 }}
+  ingress:
+    - fromEntities:
+        - health
+  egress:
+    - toEntities:
+        - health
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "remitflow-cilium-security.fullname" . }}-allow-dns
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "remitflow-cilium-security.labels" . | nindent 4 }}
+spec:
+  description: "Allow DNS only through the configured in-cluster resolver for strictly enforced RemitFlow endpoints."
+  endpointSelector:
+    matchLabels:
+      {{- toYaml $target | nindent 6 }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ .Values.dns.namespace | quote }}
+            {{- range $key, $value := .Values.dns.selector }}
+            k8s:{{ $key }}: {{ $value | quote }}
+            {{- end }}
+      toPorts:
+        - ports:
+            {{- range .Values.dns.ports }}
+            - port: {{ . | quote }}
+              protocol: ANY
+            {{- end }}
+          rules:
+            dns:
+              - matchPattern: "*"
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "remitflow-cilium-security.fullname" . }}-gateway-to-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "remitflow-cilium-security.labels" . | nindent 4 }}
+spec:
+  description: "Allow only the approved RemitFlow gateway workload to reach the transaction API."
+  endpointSelector:
+    matchLabels:
+      {{- toYaml $apiSelector | nindent 6 }}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            {{- toYaml $gatewaySelector | nindent 12 }}
+      toPorts:
+        - ports:
+            - port: {{ .Values.api.port | quote }}
+              protocol: TCP
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "remitflow-cilium-security.fullname" . }}-gateway-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "remitflow-cilium-security.labels" . | nindent 4 }}
+spec:
+  description: "Allow external traffic to the approved gateway on its declared listener port only."
+  endpointSelector:
+    matchLabels:
+      {{- toYaml $gatewaySelector | nindent 6 }}
+  ingress:
+    - fromEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: {{ .Values.gateway.port | quote }}
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            {{- toYaml $apiSelector | nindent 12 }}
+      toPorts:
+        - ports:
+            - port: {{ .Values.api.port | quote }}
+              protocol: TCP
+{{- range .Values.coreServices }}
+{{- $serviceSelector := mergeOverwrite (deepCopy $target) (dict "app.kubernetes.io/name" .name) }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "remitflow-cilium-security.fullname" $ }}-api-to-{{ .name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "remitflow-cilium-security.labels" $ | nindent 4 }}
+spec:
+  description: "Allow the approved transaction API to call the {{ .name }} internal service only on its declared port."
+  endpointSelector:
+    matchLabels:
+      {{- toYaml $serviceSelector | nindent 6 }}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            {{- toYaml $apiSelector | nindent 12 }}
+      toPorts:
+        - ports:
+            - port: {{ .port | quote }}
+              protocol: TCP
+{{- end }}
+{{- if .Values.externalFQDNs }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "remitflow-cilium-security.fullname" . }}-api-external-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "remitflow-cilium-security.labels" . | nindent 4 }}
+spec:
+  description: "Permit the approved transaction API to reach only explicitly reviewed external provider FQDNs."
+  endpointSelector:
+    matchLabels:
+      {{- toYaml $apiSelector | nindent 6 }}
+  egress:
+    {{- range .Values.externalFQDNs }}
+    - toFQDNs:
+        - matchName: {{ .name | quote }}
+      toPorts:
+        - ports:
+            {{- range .ports }}
+            - port: {{ . | quote }}
+              protocol: TCP
+            {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

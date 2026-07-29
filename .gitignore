@@ -119,3 +119,6 @@ uis/pwa/node_modules/
 # Local audit and validation artifacts
 .audit/
 !uis/react-native/package-lock.json
+
+# Generated Cilium Helm render outputs
+infrastructure/cilium/tests/rendered-*.yaml

@@ -1,0 +1,124 @@
+# RemitFlow Cilium production overlay.
+#
+# This file is validated against the official Cilium 1.19.6 Helm chart. It is
+# intentionally cloud-neutral and does not select a provider-specific IPAM or
+# routing mode. Supply those settings only after validating the target cluster.
+#
+# Do not enable kubeProxyReplacement on an existing cluster without following
+# the staged migration runbook in README.md. Doing so disrupts live Service
+# connections by design.
+
+cluster:
+  name: remitflow
+  id: 1
+
+k8sClientRateLimit:
+  qps: 20
+  burst: 40
+  operator:
+    qps: 40
+    burst: 80
+
+configDriftDetection:
+  enabled: true
+  driftChecker: true
+
+rollOutCiliumPods: true
+
+operator:
+  replicas: 2
+
+# eBPF datapath hardening and operational signal.
+bpf:
+  autoMount:
+    enabled: true
+  masquerade: true
+  ctAccounting: true
+  monitorAggregation: medium
+  policyMapPressureMetricsThreshold: 0.1
+  events:
+    default:
+      rateLimit: 1000
+      burstLimit: 2000
+    drop:
+      enabled: true
+    policyVerdict:
+      enabled: true
+    trace:
+      enabled: true
+
+# Cilium's Envoy integration is required for L7-aware network policy.
+l7Proxy: true
+policyEnforcementMode: default
+
+# Keep the APISIX/OpenAppSec ingress path as the north-south gateway. Cilium
+# supplies CNI, eBPF service handling, policy enforcement, and observability;
+# it does not replace the established API gateway in this overlay.
+ingressController:
+  enabled: false
+gatewayAPI:
+  enabled: false
+
+# Transparent east-west encryption. Validate kernel WireGuard support and permit
+# UDP/51871 between every Kubernetes node before enabling this overlay.
+encryption:
+  enabled: true
+  type: wireguard
+  nodeEncryption: true
+  strictMode:
+    egress:
+      # Enable only after setting the actual non-overlapping IPv4 pod CIDR in a
+      # cluster-specific secret-free override.
+      enabled: false
+      cidr: ""
+      allowRemoteNodeIdentities: false
+    ingress:
+      enabled: false
+
+# Hubble exposes policy-correlated flow telemetry while redacting sensitive
+# banking request metadata. The UI remains ClusterIP-only; expose it only via a
+# separately authenticated administrative access path.
+hubble:
+  enabled: true
+  eventBufferCapacity: "16383"
+  networkPolicyCorrelation:
+    enabled: true
+  redact:
+    enabled: true
+    http:
+      urlQuery: true
+      userInfo: true
+      headers:
+        allow:
+          - traceparent
+          - tracestate
+          - x-request-id
+  metrics:
+    enabled:
+      - dns:query;ignoreAAAA
+      - drop
+      - tcp
+      - flow
+      - icmp
+      - http
+    enableOpenMetrics: true
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+  tls:
+    enabled: true
+    auto:
+      enabled: true
+      method: cronJob
+      certValidityDuration: 365
+      schedule: "0 3 1 */3 *"
+  relay:
+    enabled: true
+    replicas: 2
+  ui:
+    enabled: true
+
+# Do not flip an established cluster to eBPF kube-proxy replacement in place.
+# A cluster-specific new-cluster overlay may set this to true with an explicit
+# Kubernetes API endpoint only after the migration acceptance checks succeed.
+kubeProxyReplacement: false

@@ -1,0 +1,20 @@
+# Apply only to a NEW Kubernetes cluster provisioned without kube-proxy, or after
+# a documented maintenance-window migration. Never apply this overlay blindly to
+# a running kube-proxy cluster.
+#
+# Supply the real control-plane endpoint with Helm --set flags or a secure
+# environment-specific overlay; no endpoint is hard-coded in source control.
+
+kubeProxyReplacement: true
+
+# Use direct routing only after validating that every node can route Pod CIDRs.
+# routingMode: native
+# ipv4NativeRoutingCIDR: "10.244.0.0/16"
+
+# Preserve stable backend choice for north-south financial API traffic. Generate
+# a shared secret seed once per cluster and provide it outside source control.
+loadBalancer:
+  algorithm: maglev
+maglev:
+  tableSize: 16381
+  # hashSeed: "set-via-secure-cluster-override"

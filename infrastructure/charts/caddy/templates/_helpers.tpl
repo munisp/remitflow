@@ -29,6 +29,7 @@ helm.sh/chart: {{ include "caddy.name" . }}-{{ .Chart.Version | replace "+" "_" 
 {{ include "caddy.selectorLabels" . }}
 app.kubernetes.io/version: {{ .Values.image.tag | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: remitflow
 {{- end }}
 
 {{/*
