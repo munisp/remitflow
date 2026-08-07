@@ -122,3 +122,5 @@ uis/pwa/node_modules/
 
 # Generated Cilium Helm render outputs
 infrastructure/cilium/tests/rendered-*.yaml
+
+docs/attached-incident-report-pdf/

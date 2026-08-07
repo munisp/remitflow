@@ -1,0 +1,120 @@
+# RemitFlow controlled resilience drills adapted from the attached platform requirements.
+# These resources are intentionally unscheduled. Apply only to a dedicated staging/canary
+# namespace after setting remitflow.io/chaos-approved=true on the target namespace.
+# Never apply to production; execute one experiment at a time and attach run evidence.
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: remitflow-redis-idempotency-fallback
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    remitflow.io/runbook: durable-idempotency
+spec:
+  action: partition
+  mode: one
+  selector:
+    namespaces: [remitflow-staging]
+    labelSelectors:
+      app.kubernetes.io/name: api
+  direction: to
+  target:
+    mode: all
+    selector:
+      namespaces: [remitflow-staging]
+      labelSelectors:
+        app.kubernetes.io/name: redis
+  duration: 90s
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: remitflow-tigerbeetle-single-node-failure
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    remitflow.io/runbook: ledger-resilience
+spec:
+  action: pod-failure
+  mode: one
+  selector:
+    namespaces: [remitflow-staging]
+    labelSelectors:
+      app.kubernetes.io/name: tigerbeetle
+  duration: 60s
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: remitflow-temporal-postgres-degradation
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    remitflow.io/runbook: workflow-recovery
+spec:
+  action: delay
+  mode: one
+  selector:
+    namespaces: [remitflow-staging]
+    labelSelectors:
+      app.kubernetes.io/name: temporal
+  direction: to
+  target:
+    mode: all
+    selector:
+      namespaces: [remitflow-staging]
+      labelSelectors:
+        app.kubernetes.io/name: postgres
+  delay:
+    latency: 300ms
+    jitter: 100ms
+    correlation: "25"
+  duration: 120s
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: remitflow-fluvio-broker-failure
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    remitflow.io/runbook: sar-event-ingestion
+spec:
+  action: pod-failure
+  mode: one
+  selector:
+    namespaces: [remitflow-staging]
+    labelSelectors:
+      app.kubernetes.io/name: fluvio-sc
+  duration: 60s
+---
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: remitflow-cross-region-jitter-canary
+  namespace: remitflow-staging
+  labels:
+    app.kubernetes.io/part-of: remitflow
+    remitflow.io/runbook: multi-region-dr
+spec:
+  action: delay
+  mode: one
+  selector:
+    namespaces: [remitflow-staging]
+    labelSelectors:
+      app.kubernetes.io/name: api
+      topology.kubernetes.io/region: eu-west-1
+  direction: to
+  target:
+    mode: all
+    selector:
+      namespaces: [remitflow-staging]
+      labelSelectors:
+        app.kubernetes.io/name: api
+        topology.kubernetes.io/region: ap-southeast-1
+  delay:
+    latency: 250ms
+    jitter: 120ms
+    correlation: "20"
+  duration: 120s

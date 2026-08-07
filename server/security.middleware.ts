@@ -30,6 +30,8 @@ import cors from "cors";
 import crypto from "crypto";
 import { Request, Response, NextFunction, Express, RequestHandler } from "express";
 import { logger } from './_core/logger';
+import { durableIdempotencyMiddleware } from "./middleware/durableIdempotency";
+import { attachTrustedPrincipal } from "./middleware/trustedPrincipal";
 
 // ── PostgreSQL Write-Through ─────────────────────────────────────────────────
 let _wtDb_securitymiddlewarets: any = null;
@@ -172,14 +174,12 @@ export const helmetMiddleware = helmet({
 
 // ─── RATE LIMITING ────────────────────────────────────────────────────────────
 
-// Per-user rate limit: 200 req/min per authenticated user (extracted from cookie)
-// Falls back to IP if no session cookie present
+// Per-user rate limit: 200 req/min per authenticated user. The user is
+// attached by `attachTrustedPrincipal` through verified session authentication;
+// no caller-controlled headers participate in the rate-limit key.
 function getUserOrIpKey(req: Request): string {
-  // Try to extract user ID from X-User-ID header set by context middleware
-  const userId = req.headers["x-user-id"] as string;
-  if (userId) return `user:${userId}`;
-  // Use ipKeyGenerator for proper IPv6 handling
-  // ipKeyGenerator expects an IP string, not the request object
+  if (req.remitflowUser) return `user:${req.remitflowUser.id}`;
+  // Use ipKeyGenerator for proper IPv6 handling.
   return ipKeyGenerator(req.ip ?? req.socket?.remoteAddress ?? "unknown");
 }
 
@@ -394,40 +394,11 @@ export function validateRedirectOrigin(origin: string | undefined): string {
 }
 
 // ─── IDEMPOTENCY KEY MIDDLEWARE ───────────────────────────────────────────────
-const idempotencyCache = new Map<string, { status: number; body: unknown; timestamp: number }>();
-
-// Clean up expired idempotency keys every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, value] of Array.from(idempotencyCache.entries())) {
-    if (now - value.timestamp > 24 * 60 * 60 * 1000) {
-      idempotencyCache.delete(key);
-      _deleteFromDb("wt_security.middleware_idempotency_cache", String(key)).catch(() => {});
-    }
-  }
-}, 5 * 60 * 1000);
-
-export function idempotencyMiddleware(req: Request, res: Response, next: NextFunction) {
-  const idempotencyKey = req.headers["x-idempotency-key"] as string;
-  if (!idempotencyKey || req.method !== "POST") return next();
-
-  const cached = idempotencyCache.get(idempotencyKey);
-  if (cached) {
-    return res.status(cached.status).json(cached.body);
-  }
-
-  const originalJson = res.json.bind(res);
-  res.json = (body: unknown) => {
-    idempotencyCache.set(idempotencyKey, {
-      status: res.statusCode,
-      body,
-      timestamp: Date.now(),
-    });
-    return originalJson(body);
-  };
-
-  next();
-}
+// The mounted implementation derives user and tenant scope from the verified
+// session, stores a PostgreSQL reservation before execution, and replays only
+// a response bound to the same request hash. It intentionally has no in-memory
+// or Redis cache fallback for financial mutations.
+export const idempotencyMiddleware = durableIdempotencyMiddleware;
 
 // ─── VELOCITY CHECK ───────────────────────────────────────────────────────────
 interface VelocityEntry {
@@ -661,7 +632,9 @@ export function registerSecurityMiddleware(app: Express) {
 
   // 8. General rate limiting (IP-based)
   app.use("/api/", generalRateLimit);
-  // 8b. Per-user rate limiting (user-based, stricter for authenticated users)
+  // 8b. Attach verified identity before any user- or tenant-sensitive controls.
+  app.use("/api/trpc/", attachTrustedPrincipal);
+  // 8c. Per-user rate limiting (verified user-based, stricter for authenticated users)
   app.use("/api/trpc/", perUserRateLimit);
 
   // 9. Auth-specific rate limiting (brute-force protection)

@@ -1,0 +1,30 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "drizzle/schema.ts",
+    "server/_core/context.ts",
+    "server/types/africastalking.d.ts",
+    "server/_core/index.ts",
+    "server/_core/startup-validation.ts",
+    "server/routers.ts",
+    "server/routers/operationsMap.ts",
+    "server/metrics.ts",
+    "server/middleware/requestId.ts",
+    "server/middleware/durableIdempotency.ts",
+    "server/middleware/idempotency.ts",
+    "server/middleware/permify.ts",
+    "server/middleware/trustedPrincipal.ts",
+    "server/security.middleware.ts",
+    "server/services/regulatoryFilingQueue.ts",
+    "server/routers/complianceRouter.ts",
+    "uis/pwa/src/pages/TransferTracking.tsx",
+    "uis/pwa/src/pages/OperationsMap.tsx",
+    "uis/pwa/src/components/Layout.tsx",
+    "uis/pwa/src/App.tsx",
+    "uis/pwa/src/main.tsx",
+    "uis/pwa/src/services/trpc.ts",
+    "uis/pwa/src/services/authService.ts",
+    "uis/pwa/src/stores/authStore.ts"
+  ],
+  "exclude": ["node_modules", "build", "dist", "**/*.test.ts"]
+}

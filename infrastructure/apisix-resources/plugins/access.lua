@@ -25,6 +25,16 @@ local schema = {
             minLength = 1,
             description = "The url used to retreive tenant keycloak public key",
         },
+        tenant_claim = {
+            type = "string",
+            default = "tenant_id",
+            description = "Verified JWT claim that must match x-tenant-id when require_tenant_claim is enabled",
+        },
+        require_tenant_claim = {
+            type = "boolean",
+            default = false,
+            description = "Require a signed token tenant claim in addition to authorizer realm validation",
+        },
     },
     required = {"authorizer_url", "mint_account_url", "keycloak_public_key_url"},
 }
@@ -132,56 +142,64 @@ local function get_cookie(ctx, cookie_name)
     return nil
 end
 
--- Helper function to retrieve token from the request context
+-- Extract a credential without writing secrets to APISIX logs. Query-string tokens
+-- are intentionally unsupported because they leak through proxy logs and referrers.
 local function get_token(ctx)
-    -- Try to get the token from query parameter
-    local token = core.request.get_uri_args(ctx).token
+    local token = get_cookie(ctx, "access_token")
+    if token then
+        return token
+    end
+    local auth_header = core.request.header(ctx, "Authorization")
+    if auth_header then
+        return auth_header:match("^Bearer%s+([A-Za-z0-9_-]+%.[A-Za-z0-9_-]+%.[A-Za-z0-9_-]+)$")
+    end
+    return nil
+end
 
-    -- Fallback to cookies if token is not in query parameter
-    if not token then
-        token = get_cookie(ctx, "access_token")
-
-        if token then 
-            core.log.warn("Token from cookie: " .. token)
-        else
-            core.log.warn("Token from cookie: null")
+local function validate_jwt_shape(token, conf, tenant_id)
+    if not token or #token > 16384 then
+        return nil, "Malformed JWT token"
+    end
+    local header, claims, signature = token:match("^([A-Za-z0-9_-]+)%.([A-Za-z0-9_-]+)%.([A-Za-z0-9_-]+)$")
+    if not header or not claims or not signature or #header > 2048 or #claims > 8192 or #signature > 8192 then
+        return nil, "JWT must have exactly three bounded base64url segments"
+    end
+    local parsed = jwt:load_jwt(token)
+    if not parsed or not parsed.valid or not parsed.header or not parsed.payload then
+        return nil, "JWT header or payload is invalid"
+    end
+    if parsed.header.alg == "none" or not parsed.header.alg then
+        return nil, "Unsigned JWTs are not permitted"
+    end
+    if conf.require_tenant_claim then
+        local claimed_tenant = parsed.payload[conf.tenant_claim]
+        if type(claimed_tenant) ~= "string" or claimed_tenant ~= tenant_id then
+            return nil, "JWT tenant claim does not match the requested tenant"
         end
     end
-
-     -- Fallback to Authorization header if token is still not found
-    if not token then
-        local auth_header = core.request.header(ctx, "Authorization")
-        if auth_header and auth_header:match("^Bearer%s+(%S+)$") then
-            token = auth_header:match("^Bearer%s+(%S+)$")
-            core.log.warn("Token from Authorization header: " .. token)
-        else
-            core.log.warn("Token from Authorization header: null")
-        end
-    end
-
-    return token
+    return parsed
 end
 
 function _M.access(conf, ctx)
+    -- Preflight carries no credential and must not be evaluated as a tenant request.
+    if ctx.var.request_method == "OPTIONS" then
+        return
+    end
+
     local tenant_id = core.request.header(ctx, "x-tenant-id")
+    if type(tenant_id) ~= "string" or not tenant_id:match("^[A-Za-z0-9_-]+$") or #tenant_id > 128 then
+        return 400, {message = "Missing or invalid tenant identifier"}
+    end
     local keycloak_realm = "54remit_" .. tenant_id
     local ledger_id = "1"
 
-    if not tenant_id then
-        core.log.warn("Tenant ID not found")
-        return 400, {message = "Missing tenant identifier"}
-    end
-
-    -- Ignore OPTIONS requests
-    if ctx.var.request_method == "OPTIONS" then
-        core.log.info("Skipping OPTIONS request")
-        return
-    end
-    
     local token = get_token(ctx)
     if not token then
-        core.log.warn("JWT token not found")
-        return 401, {message = "Missing JWT token"}
+        return 401, {message = "Missing or malformed bearer JWT"}
+    end
+    local _, jwt_err = validate_jwt_shape(token, conf, tenant_id)
+    if jwt_err then
+        return 401, {message = jwt_err}
     end
 
     local keycloak_public_key, err = fetch_tenant_keycloak_public_key(conf.keycloak_public_key_url, tenant_id)

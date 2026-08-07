@@ -1,0 +1,112 @@
+{
+  "project_info": {
+    "title": "RemitFlow Resilience & Zero-Trust Architecture",
+    "created": 1786114111.67,
+    "last_updated": 1786114352.401,
+    "total_slides": 10
+  },
+  "slides": [
+    {
+      "id": "cover",
+      "state": "edited",
+      "pageNum": 1
+    },
+    {
+      "id": "domain_translation",
+      "state": "edited",
+      "pageNum": 2
+    },
+    {
+      "id": "trusted_principal",
+      "state": "edited",
+      "pageNum": 3
+    },
+    {
+      "id": "durable_idempotency",
+      "state": "edited",
+      "pageNum": 4
+    },
+    {
+      "id": "regulatory_queue",
+      "state": "edited",
+      "pageNum": 5
+    },
+    {
+      "id": "edge_and_ebpf",
+      "state": "edited",
+      "pageNum": 6
+    },
+    {
+      "id": "correlated_observability",
+      "state": "edited",
+      "pageNum": 7
+    },
+    {
+      "id": "disaster_recovery",
+      "state": "edited",
+      "pageNum": 8
+    },
+    {
+      "id": "operations_map",
+      "state": "edited",
+      "pageNum": 9
+    },
+    {
+      "id": "validation_gate",
+      "state": "edited",
+      "pageNum": 10
+    }
+  ],
+  "outline": [
+    {
+      "id": "cover",
+      "title": "RemitFlow Resilience & Zero-Trust Architecture",
+      "summary": "Cover slide introducing the implementation of the attached requirements as adapted for RemitFlow’s regulated payments and compliance platform."
+    },
+    {
+      "id": "domain_translation",
+      "title": "Requirements Reframed for Payments",
+      "summary": "Translate insurance-oriented requirements into RemitFlow controls for payment mutations, ledger integrity, regulatory filing, tenant isolation, and agent operations."
+    },
+    {
+      "id": "trusted_principal",
+      "title": "A Verified Principal Anchors Sensitive Paths",
+      "summary": "Show how Keycloak-backed trusted identity and PostgreSQL RLS replace caller-controlled identity assumptions across rate limiting, idempotency, and tenant controls."
+    },
+    {
+      "id": "durable_idempotency",
+      "title": "Financial Mutations Survive Cache Loss",
+      "summary": "Explain durable PostgreSQL idempotency reservations, leases, request hashes, and replay state that prevent duplicate financial execution after Redis or process failure."
+    },
+    {
+      "id": "regulatory_queue",
+      "title": "Regulatory Filing Becomes a Durable Workflow",
+      "summary": "Describe the tenant-scoped SAR and CTR queue with atomic claims, retry, dead-letter, administrative requeue, auditability, and Prometheus telemetry."
+    },
+    {
+      "id": "edge_and_ebpf",
+      "title": "Gateway and eBPF Layers Enforce Zero Trust",
+      "summary": "Show APISIX JWT and tenant-claim defenses together with Cilium workload policy, Hubble visibility, and staged strict enforcement."
+    },
+    {
+      "id": "correlated_observability",
+      "title": "One Trace Connects Edge, Service, and Policy Evidence",
+      "summary": "Explain validated W3C trace context, Prometheus metrics, APISIX correlation, Cilium/Hubble flows, and actionable alerting."
+    },
+    {
+      "id": "disaster_recovery",
+      "title": "Recovery Is Immutable, Cross-Region, and Testable",
+      "summary": "Show immutable Object Lock backup, replication, checksum manifests, scheduled backup jobs, and explicitly isolated restore drills."
+    },
+    {
+      "id": "operations_map",
+      "title": "Operations Maps Expose Approved Data Only",
+      "summary": "Present the tenant-scoped MapLibre administrator experience for agent, corridor, and approved fraud-response operations, with no customer telemetry or public tile fallback."
+    },
+    {
+      "id": "validation_gate",
+      "title": "Production Promotion Requires Evidence",
+      "summary": "Summarize passing build/type/test validation and the staging-only evidence gates required for regulated production promotion."
+    }
+  ]
+}

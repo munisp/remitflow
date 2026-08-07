@@ -40,6 +40,7 @@ export interface User {
   status?: string;
   createdAt?: string;
   tenant_id?: string;
+  role?: "admin" | "user" | "partner";
 }
 
 class AuthService {
@@ -154,6 +155,7 @@ class AuthService {
           status: loginUser.status,
           createdAt: loginUser.createdAt,
           tenant_id: loginUser.tenant_id || tenantService.getTenantId() || undefined,
+          role: loginUser.role,
         };
         this.setUser(userData);
       } else {

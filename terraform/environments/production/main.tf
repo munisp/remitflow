@@ -226,3 +226,22 @@ module "route53" {
 
   tags = local.tags
 }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GLOBAL: Immutable Cross-Region Backup and Restore Storage
+# ══════════════════════════════════════════════════════════════════════════════
+module "backup_dr" {
+  source = "../../modules/backup-dr"
+  providers = {
+    aws.primary = aws.us_east_1
+    aws.replica = aws.eu_west_1
+  }
+
+  name                               = local.name
+  primary_bucket_name                = var.backup_primary_bucket_name
+  replica_bucket_name                = var.backup_replica_bucket_name
+  object_lock_retention_days         = var.backup_object_lock_retention_days
+  glacier_transition_days            = 90
+  noncurrent_version_expiration_days = 2555
+  tags                               = merge(local.tags, { Control = "immutable-backup", RPO = "15m", RTO = "4h" })
+}

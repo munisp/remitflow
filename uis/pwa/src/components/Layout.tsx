@@ -140,6 +140,17 @@ const sidebarSections = [
     ],
   },
   {
+    title: "Operations",
+    items: [
+      {
+        name: "Operations Map",
+        href: "/operations-map",
+        adminOnly: true,
+        icon: "M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.553-.832L9 7.75m0 12.25V7.75m0 12.25l6-3m-6-9.5l6-3m0 12.5l4.447 2.224A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.832L15 4.25m0 12.75V4.25",
+      },
+    ],
+  },
+  {
     title: "Settings",
     items: [
       {
@@ -234,6 +245,7 @@ const Layout: React.FC = () => {
               {section.title}
             </p>
             {section.items.map((item) => {
+              if ((item as { adminOnly?: boolean }).adminOnly && user?.role !== "admin") return null;
               if ((item as any).action === "logout") {
                 return (
                   <button

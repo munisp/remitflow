@@ -1,0 +1,6 @@
+apiVersion: v2
+name: remitflow-dr
+description: Immutable PostgreSQL backup and isolated restore-drill jobs for RemitFlow
+version: 0.1.0
+appVersion: "1.0.0"
+type: application

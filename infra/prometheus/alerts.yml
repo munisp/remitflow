@@ -209,3 +209,70 @@ groups:
         annotations:
           summary: "Low disk space on {{ $labels.instance }}"
           description: "Disk space is {{ $value }}% available on {{ $labels.instance }}."
+
+  # ═══ REGULATORY FILING AND ZERO-TRUST ALERTS ═══════════════════════════════════
+  - name: remitflow.compliance-resilience
+    interval: 30s
+    rules:
+      - alert: RegulatoryFilingDeadLetterDetected
+        expr: sum(remitflow_regulatory_filing_queue_depth{status="dead_letter"}) > 0
+        for: 1m
+        labels:
+          severity: critical
+          team: compliance
+        annotations:
+          summary: "Regulatory filing reached the dead-letter queue"
+          description: "{{ $value }} regulatory filings require an authorized compliance-officer review and manual requeue."
+          runbook: "https://runbooks.remitflow.io/compliance/regulatory-filing-dlq"
+
+      - alert: RegulatoryFilingRetryBacklog
+        expr: sum(remitflow_regulatory_filing_queue_depth{status=~"pending|retry"}) > 25
+        for: 10m
+        labels:
+          severity: warning
+          team: compliance
+        annotations:
+          summary: "Regulatory filing retry backlog exceeds operating threshold"
+          description: "{{ $value }} SAR, STR, CTR, or LCTR filings are pending/retrying; verify provider availability and worker health."
+
+      - alert: RegulatoryFilingWorkerStalled
+        expr: |
+          sum(remitflow_regulatory_filing_queue_depth{status=~"pending|retry"}) > 0
+          and increase(remitflow_regulatory_filing_outcomes_total{outcome=~"submitted|retry|dead_letter"}[15m]) == 0
+        for: 15m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Regulatory filing worker appears stalled"
+          description: "The queue has work but emitted no terminal/retry lifecycle outcome for fifteen minutes."
+
+      - alert: CiliumPolicyDeniedSurge
+        expr: sum(increase(hubble_drop_total{reason=~"POLICY_DENIED|POLICY_DENY"}[5m])) > 50
+        for: 2m
+        labels:
+          severity: warning
+          team: security
+        annotations:
+          summary: "Cilium policy-denied traffic surge"
+          description: "{{ $value }} eBPF policy drops in five minutes; correlate Hubble flows with the most recent policy or deployment change."
+
+      - alert: CiliumAgentUnavailable
+        expr: min(up{job=~"cilium.*"}) < 1
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Cilium agent or Hubble scrape target is unavailable"
+          description: "At least one Cilium/Hubble monitoring target is down; zero-trust enforcement and telemetry require investigation."
+
+      - alert: ImmutableBackupJobFailed
+        expr: max(kube_job_status_failed{job_name=~"remitflow-immutable-backup.*"}) > 0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Immutable RemitFlow backup job failed"
+          description: "A scheduled PostgreSQL backup did not complete; inspect the backup manifest, S3 Object Lock status, and cross-region replication."

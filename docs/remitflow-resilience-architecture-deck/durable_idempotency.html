@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" />
+<style>
+*{box-sizing:border-box} body{margin:0}
+.slide-container{width:1280px;min-height:720px;background:#F1F5F9;color:#09090B;font-family:Arial,Helvetica,sans-serif;position:relative}
+.title{position:absolute;left:72px;top:58px;width:1050px;font-size:55px;line-height:1;font-weight:900;letter-spacing:-2.8px}.title span{color:#EA580C}
+.lead{position:absolute;left:74px;top:132px;width:925px;font-size:19px;line-height:1.35;font-weight:600;color:#27272A}
+.flow{position:absolute;left:72px;top:226px;width:1136px;display:grid;grid-template-columns:230px 50px 230px 50px 230px 50px 230px;align-items:stretch}
+.stage{min-height:260px;border-top:5px solid #09090B;border-bottom:1px solid #A1A1AA;padding-top:20px;padding-right:20px}.stage strong{display:block;font-size:15px;letter-spacing:1.2px;color:#EA580C;margin-bottom:18px}.stage h2{font-size:29px;line-height:1.03;letter-spacing:-1.1px;font-weight:900;margin:0 0 18px}.stage p{font-size:18px;line-height:1.32;font-weight:600;color:#27272A;margin:0}
+.arrow{font-size:42px;font-weight:900;color:#EA580C;text-align:center;padding-top:100px}
+.assertion{position:absolute;left:72px;top:548px;width:1136px;border-top:2px solid #09090B;padding-top:17px;display:grid;grid-template-columns:225px 1fr;gap:30px}.assertion .label{font-size:15px;font-weight:900;letter-spacing:1.1px;color:#EA580C}.assertion .text{font-size:22px;line-height:1.25;font-weight:800}.footer-rule{position:absolute;left:72px;right:72px;bottom:48px;height:8px;background:#EA580C}
+</style></head>
+<body><div class="slide-container">
+<div class="title">Financial mutations <span>survive</span> cache loss</div>
+<div class="lead">A completed payment request is not remembered by a process or a cache. It is reserved, bound, leased, and replayed through a tenant-scoped PostgreSQL correctness path.</div>
+<div class="flow">
+<div class="stage"><strong>01 / BIND</strong><h2>Verified request scope</h2><p>Tenant, user, operation, idempotency key, and request hash establish the only valid replay identity.</p></div><div class="arrow">→</div>
+<div class="stage"><strong>02 / RESERVE</strong><h2>Durable row lease</h2><p>PostgreSQL records a processing state, lock token, and expiration before the money-moving operation begins.</p></div><div class="arrow">→</div>
+<div class="stage"><strong>03 / EXECUTE</strong><h2>One protected mutation</h2><p>Concurrent requests observe the lease rather than execute again; database isolation protects the tenant boundary.</p></div><div class="arrow">→</div>
+<div class="stage"><strong>04 / REPLAY</strong><h2>Bound response state</h2><p>A matching completed request receives the stored result. A changed payload conflicts instead of being replayed.</p></div>
+</div>
+<div class="assertion"><div class="label">RESILIENCE POSITION</div><div class="text">Redis improves speed. <span style="color:#EA580C">PostgreSQL decides correctness</span> when a worker, cache, or process disappears.</div></div>
+<div class="footer-rule"></div></div></body></html>

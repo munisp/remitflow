@@ -46,6 +46,7 @@ const TransferTracking = lazy(() => import("./pages/TransferTracking"));
 const BatchPayments = lazy(() => import("./pages/BatchPayments"));
 const SavingsGoals = lazy(() => import("./pages/SavingsGoals"));
 const FXAlerts = lazy(() => import("./pages/FXAlerts"));
+const OperationsMap = lazy(() => import("./pages/OperationsMap"));
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -58,6 +59,13 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
     return <Navigate to="/login" replace />;
   }
 
+  return <>{children}</>;
+};
+
+const AdminRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
+  const { isAuthenticated, user } = useAuthStore();
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  if (user?.role !== "admin") return <Navigate to="/" replace />;
   return <>{children}</>;
 };
 
@@ -210,6 +218,7 @@ const App: React.FC = () => {
             <Route path="batch-payments" element={<BatchPayments />} />
             <Route path="savings-goals" element={<SavingsGoals />} />
             <Route path="fx-alerts" element={<FXAlerts />} />
+            <Route path="operations-map" element={<AdminRoute><OperationsMap /></AdminRoute>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/" replace />} />

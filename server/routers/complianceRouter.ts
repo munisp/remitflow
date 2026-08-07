@@ -12,7 +12,8 @@
  */
 
 import { z } from "zod";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
+import { TRPCError } from "@trpc/server";
 import {
   requiresTravelRule,
   buildIVMS101Payload,
@@ -24,7 +25,6 @@ import {
   generateCTR,
   generateSAR,
   detectStructuring,
-  submitReport,
   shouldFileCTR,
   getJurisdiction,
   CTR_THRESHOLDS,
@@ -50,6 +50,13 @@ import {
   requiresEDD,
   SANCTIONS_LISTS,
 } from "../lib/enhancedScreening";
+import {
+  enqueueRegulatoryFiling,
+  getRegulatoryFilingQueueSummary,
+  listRegulatoryFilings,
+  requeueDeadLetterRegulatoryFiling,
+} from "../services/regulatoryFilingQueue";
+import { resolveTenantContext } from "../tenantMiddleware";
 import {
   processOnfidoWebhook,
   processSmileWebhook,
@@ -145,7 +152,12 @@ export const complianceRouter = router({
           jurisdiction: input.jurisdiction,
           filedBy: `user-${ctx.user.id}`,
         });
-        return submitReport(report);
+        const tenant = await resolveTenantContext(ctx.user.id);
+        if (!tenant.tenantId) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "An active tenant is required to queue a regulatory filing." });
+        }
+        const queued = await enqueueRegulatoryFiling({ tenantId: tenant.tenantId, requestedBy: ctx.user.id, report });
+        return { reportId: report.id, queueId: queued.id, status: queued.status };
       }),
 
     fileSAR: protectedProcedure
@@ -182,7 +194,12 @@ export const complianceRouter = router({
           filedBy: `user-${ctx.user.id}`,
           dateRange: input.dateRange,
         });
-        return submitReport(report);
+        const tenant = await resolveTenantContext(ctx.user.id);
+        if (!tenant.tenantId) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "An active tenant is required to queue a regulatory filing." });
+        }
+        const queued = await enqueueRegulatoryFiling({ tenantId: tenant.tenantId, requestedBy: ctx.user.id, report });
+        return { reportId: report.id, queueId: queued.id, status: queued.status };
       }),
 
     detectStructuring: protectedProcedure
@@ -209,6 +226,28 @@ export const complianceRouter = router({
 
     getIndicators: protectedProcedure.query(() => SUSPICIOUS_INDICATORS),
     getCTRThresholds: protectedProcedure.query(() => CTR_THRESHOLDS),
+
+    queueSummary: protectedProcedure.query(async ({ ctx }) => {
+      const tenant = await resolveTenantContext(ctx.user.id);
+      if (!tenant.tenantId) throw new TRPCError({ code: "FORBIDDEN", message: "An active tenant is required." });
+      return getRegulatoryFilingQueueSummary(tenant.tenantId, ctx.user.id);
+    }),
+
+    listQueue: protectedProcedure
+      .input(z.object({ status: z.enum(["pending", "processing", "retry", "submitted", "dead_letter"]).optional() }))
+      .query(async ({ input, ctx }) => {
+        const tenant = await resolveTenantContext(ctx.user.id);
+        if (!tenant.tenantId) throw new TRPCError({ code: "FORBIDDEN", message: "An active tenant is required." });
+        return listRegulatoryFilings(tenant.tenantId, ctx.user.id, input.status);
+      }),
+
+    requeueDeadLetter: adminProcedure
+      .input(z.object({ queueId: z.number().int().positive() }))
+      .mutation(async ({ input, ctx }) => {
+        const tenant = await resolveTenantContext(ctx.user.id);
+        if (!tenant.tenantId) throw new TRPCError({ code: "FORBIDDEN", message: "An active tenant is required." });
+        return requeueDeadLetterRegulatoryFiling({ tenantId: tenant.tenantId, queueId: input.queueId, requeuedBy: ctx.user.id });
+      }),
   }),
 
   // ── Enhanced Screening ──────────────────────────────────────────────────

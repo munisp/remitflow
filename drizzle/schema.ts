@@ -613,15 +613,22 @@ export const kybRecords = pgTable("kyb_records", {
 export const idempotencyKeys = pgTable("idempotency_keys", {
   id: serial("id").primaryKey(),
   key: varchar("key", { length: 200 }).notNull(),
+  tenantId: integer("tenant_id").references(() => tenants.id),
   userId: integer("user_id"),
   operation: varchar("operation", { length: 100 }).notNull(),
+  requestHash: text("request_hash"),
+  state: text("state").notNull().default("processing"),
+  lockToken: uuid("lock_token"),
+  lockExpiresAt: timestamp("lock_expires_at"),
   responseStatus: integer("response_status"),
   responseBody: text("response_body"),
   expiresAt: timestamp("expires_at").notNull(),
   createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
-  uniqueIndex("idempotencyKeys_key_unique_idx").on(t.key),
+  uniqueIndex("idempotencyKeys_tenant_user_operation_key_uidx").on(t.tenantId, t.userId, t.operation, t.key),
   index("idempotencyKeys_userId_idx").on(t.userId),
+  index("idempotencyKeys_tenant_state_idx").on(t.tenantId, t.state, t.lockExpiresAt),
   index("idempotencyKeys_expiresAt_idx").on(t.expiresAt),
 ]);
 
@@ -6109,3 +6116,80 @@ export const investmentCatalogProducts = pgTable("investment_catalog_products", 
 export type SavingsRoundupPreference = typeof savingsRoundupPreferences.$inferSelect;
 export type AutosaveRule = typeof autosaveRules.$inferSelect;
 export type InvestmentCatalogProduct = typeof investmentCatalogProducts.$inferSelect;
+
+// ─── Durable Regulatory Filing Queue ──────────────────────────────────────────
+export const regulatoryFilingQueueStatusEnum = pgEnum("regulatory_filing_queue_status", [
+  "pending",
+  "processing",
+  "retry",
+  "submitted",
+  "dead_letter",
+]);
+
+export const regulatoryFilingQueue = pgTable("regulatory_filing_queue", {
+  id: bigint("id", { mode: "number" }).primaryKey(),
+  reportId: text("report_id").notNull().unique(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  requestedBy: integer("requested_by").notNull().references(() => users.id),
+  reportType: text("report_type").notNull(),
+  jurisdiction: text("jurisdiction").notNull(),
+  payload: jsonb("payload").notNull(),
+  status: regulatoryFilingQueueStatusEnum("status").notNull().default("pending"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  maxAttempts: integer("max_attempts").notNull().default(8),
+  nextAttemptAt: timestamp("next_attempt_at").notNull().defaultNow(),
+  lockToken: uuid("lock_token"),
+  lockedUntil: timestamp("locked_until"),
+  lastAttemptAt: timestamp("last_attempt_at"),
+  submittedAt: timestamp("submitted_at"),
+  providerReference: text("provider_reference"),
+  lastHttpStatus: integer("last_http_status"),
+  lastError: text("last_error"),
+  requeuedBy: integer("requeued_by").references(() => users.id),
+  requeuedAt: timestamp("requeued_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("regulatoryFilingQueue_due_idx").on(t.nextAttemptAt, t.createdAt),
+  index("regulatoryFilingQueue_tenant_idx").on(t.tenantId, t.status, t.createdAt),
+]);
+
+// ─── Operational Geospatial Intelligence ─────────────────────────────────────
+export const operationalGeoLocations = pgTable("operational_geo_locations", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  locationType: varchar("location_type", { length: 32 }).notNull(),
+  externalRef: varchar("external_ref", { length: 255 }).notNull(),
+  displayLabel: varchar("display_label", { length: 255 }).notNull(),
+  countryCode: char("country_code", { length: 2 }).notNull(),
+  latitude: numeric("latitude", { precision: 9, scale: 6 }).notNull(),
+  longitude: numeric("longitude", { precision: 9, scale: 6 }).notNull(),
+  operationalStatus: varchar("operational_status", { length: 32 }).notNull().default("active"),
+  metadata: jsonb("metadata").notNull().default({}),
+  observedAt: timestamp("observed_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("operationalGeoLocations_tenant_type_ref_uidx").on(t.tenantId, t.locationType, t.externalRef),
+  index("operationalGeoLocations_tenant_type_status_idx").on(t.tenantId, t.locationType, t.operationalStatus, t.observedAt),
+]);
+
+export const operationalGeoCorridors = pgTable("operational_geo_corridors", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  corridorCode: varchar("corridor_code", { length: 64 }).notNull(),
+  originLocationId: bigint("origin_location_id", { mode: "number" }).notNull().references(() => operationalGeoLocations.id),
+  destinationLocationId: bigint("destination_location_id", { mode: "number" }).notNull().references(() => operationalGeoLocations.id),
+  operationalStatus: varchar("operational_status", { length: 32 }).notNull().default("active"),
+  p95CompletionSeconds: integer("p95_completion_seconds"),
+  failureRateBps: integer("failure_rate_bps"),
+  observedAt: timestamp("observed_at").notNull().defaultNow(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("operationalGeoCorridors_tenant_code_uidx").on(t.tenantId, t.corridorCode),
+  index("operationalGeoCorridors_tenant_status_idx").on(t.tenantId, t.operationalStatus, t.observedAt),
+]);
+
+export type OperationalGeoLocation = typeof operationalGeoLocations.$inferSelect;
+export type OperationalGeoCorridor = typeof operationalGeoCorridors.$inferSelect;

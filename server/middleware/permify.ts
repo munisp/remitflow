@@ -4,8 +4,8 @@ import { logger } from '../_core/logger';
  * Fine-grained authorization for all platform resources
  */
 
-const PERMIFY_URL = process.env.PERMIFY_URL || "http://localhost:3476";
-const PERMIFY_TENANT = process.env.PERMIFY_TENANT || "remitflow";
+const PERMIFY_URL = process.env.PERMIFY_URL || process.env.PERMIFY_HTTP_URL || "";
+const PERMIFY_TENANT = process.env.PERMIFY_TENANT || process.env.PERMIFY_TENANT_ID || "";
 
 // ── Permission Check Types ────────────────────────────────────────────────────
 
@@ -24,17 +24,24 @@ export interface RelationshipWrite {
 // ── Permify Client ────────────────────────────────────────────────────────────
 
 class PermifyClient {
-  private baseUrl: string;
+  private baseUrl: string | null;
   private available = false;
 
   constructor() {
-    this.baseUrl = `${PERMIFY_URL}/v1/tenants/${PERMIFY_TENANT}`;
+    this.baseUrl = PERMIFY_URL && PERMIFY_TENANT
+      ? `${PERMIFY_URL.replace(/\/$/, "")}/v1/tenants/${PERMIFY_TENANT}`
+      : null;
     this.checkAvailability();
   }
 
   private async checkAvailability(): Promise<void> {
+    if (!PERMIFY_URL || !PERMIFY_TENANT || !this.baseUrl) {
+      this.available = false;
+      logger.error("[PERMIFY] PERMIFY_URL/PERMIFY_HTTP_URL and PERMIFY_TENANT_ID must be configured; denying authorization checks.");
+      return;
+    }
     try {
-      const res = await fetch(`${PERMIFY_URL}/healthz`, {
+      const res = await fetch(`${PERMIFY_URL.replace(/\/$/, "")}/healthz`, {
         signal: AbortSignal.timeout(1000),
       });
       this.available = res.ok;
@@ -43,7 +50,7 @@ class PermifyClient {
       }
     } catch {
       this.available = false;
-      logger.info("[PERMIFY] Not available, using role-based fallback");
+      logger.error("[PERMIFY] Authorization service unavailable; denying authorization checks.");
     }
   }
 
@@ -52,12 +59,9 @@ class PermifyClient {
   }
 
   async check(check: PermissionCheck): Promise<boolean> {
-    if (!this.available) {
-      if (process.env.NODE_ENV === "production") {
-        logger.warn("[PERMIFY] Unavailable in production — denying by default (fail-closed)");
-        return false;
-      }
-      return true;
+    if (!this.available || !this.baseUrl) {
+      logger.warn("[PERMIFY] Unavailable or unconfigured — denying by default");
+      return false;
     }
 
     try {
@@ -77,7 +81,7 @@ class PermifyClient {
       const data = (await res.json()) as { can: "CHECK_RESULT_ALLOWED" | "CHECK_RESULT_DENIED" };
       return data.can === "CHECK_RESULT_ALLOWED";
     } catch {
-      return process.env.NODE_ENV !== "production";
+      return false;
     }
   }
 
@@ -89,7 +93,7 @@ class PermifyClient {
   private static CACHE_TTL_MS = 30_000;
 
   private getCacheKey(check: PermissionCheck): string {
-    return `${check.entity.type}:${check.entity.id}:${check.permission}:${check.subject.type}:${check.subject.id}`;
+    return `${PERMIFY_TENANT}:${check.entity.type}:${check.entity.id}:${check.permission}:${check.subject.type}:${check.subject.id}`;
   }
 
   async checkCached(check: PermissionCheck): Promise<boolean> {
@@ -114,13 +118,9 @@ class PermifyClient {
   }
 
   async writeRelationship(rel: RelationshipWrite): Promise<boolean> {
-    // Fail-closed when Permify unavailable in production
-    if (!this.available) {
-      if (process.env.NODE_ENV === "production") {
-        logger.warn("[PERMIFY] Unavailable in production — denying write (fail-closed)");
-        return false;
-      }
-      return true;
+    if (!this.available || !this.baseUrl) {
+      logger.warn("[PERMIFY] Unavailable or unconfigured — denying relationship write");
+      return false;
     }
 
     try {
@@ -153,13 +153,9 @@ class PermifyClient {
   }
 
   async deleteRelationship(rel: RelationshipWrite): Promise<boolean> {
-    // Fail-closed when Permify unavailable in production
-    if (!this.available) {
-      if (process.env.NODE_ENV === "production") {
-        logger.warn("[PERMIFY] Unavailable in production — denying delete (fail-closed)");
-        return false;
-      }
-      return true;
+    if (!this.available || !this.baseUrl) {
+      logger.warn("[PERMIFY] Unavailable or unconfigured — denying relationship delete");
+      return false;
     }
 
     try {

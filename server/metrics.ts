@@ -18,6 +18,7 @@ const counters = {
   fraud_alerts_blocked: 0,
   fx_rate_fetches: 0,
   scheduler_executions: 0,
+  regulatory_filing_outcomes: new Map<string, number>(),
 };
 
 const histograms = {
@@ -50,6 +51,9 @@ export function incFraudAlert(blocked = false) {
 }
 export function incFxFetch() { counters.fx_rate_fetches++; }
 export function incSchedulerExecution() { counters.scheduler_executions++; }
+export function incRegulatoryFilingOutcome(outcome: "queued" | "submitted" | "retry" | "dead_letter" | "requeued") {
+  counters.regulatory_filing_outcomes.set(outcome, (counters.regulatory_filing_outcomes.get(outcome) ?? 0) + 1);
+}
 
 // ─── Histogram helpers ────────────────────────────────────────────────────────
 function percentile(arr: number[], p: number): number {
@@ -65,6 +69,21 @@ function avg(arr: number[]): number {
 }
 
 // ─── DB metrics query ─────────────────────────────────────────────────────────
+async function getRegulatoryFilingMetrics() {
+  try {
+    const db = await getDb();
+    if (!db) return null;
+    const result = await db.execute(sql.raw(`
+      SELECT status, COUNT(*)::int AS count
+      FROM regulatory_filing_queue
+      GROUP BY status
+    `));
+    return (result as any).rows ?? result ?? [];
+  } catch {
+    return null;
+  }
+}
+
 async function getDbMetrics() {
   try {
     const db = await getDb();
@@ -101,7 +120,7 @@ function formatGauge(name: string, help: string, value: number, labels?: string)
 
 // ─── Metrics handler ──────────────────────────────────────────────────────────
 export async function metricsHandler(_req: Request, res: Response) {
-  const dbMetrics = await getDbMetrics();
+  const [dbMetrics, regulatoryFilingMetrics] = await Promise.all([getDbMetrics(), getRegulatoryFilingMetrics()]);
   const lines: string[] = [];
 
   // Process info
@@ -152,6 +171,18 @@ export async function metricsHandler(_req: Request, res: Response) {
   lines.push(formatCounter("remitflow_fraud_blocked_total", "Total transfers blocked by fraud", counters.fraud_alerts_blocked));
   lines.push(formatCounter("remitflow_fx_fetches_total", "Total FX rate fetch operations", counters.fx_rate_fetches));
   lines.push(formatCounter("remitflow_scheduler_executions_total", "Total scheduler job executions", counters.scheduler_executions));
+  lines.push("# HELP remitflow_regulatory_filing_outcomes_total Regulatory filing queue lifecycle outcomes\n# TYPE remitflow_regulatory_filing_outcomes_total counter");
+  for (const [outcome, count] of Array.from(counters.regulatory_filing_outcomes.entries())) {
+    lines.push(`remitflow_regulatory_filing_outcomes_total{outcome="${outcome}"} ${count}`);
+  }
+  lines.push("");
+  if (regulatoryFilingMetrics) {
+    lines.push("# HELP remitflow_regulatory_filing_queue_depth Regulatory filing queue rows by lifecycle state\n# TYPE remitflow_regulatory_filing_queue_depth gauge");
+    for (const row of regulatoryFilingMetrics as Array<{ status: string; count: number }>) {
+      lines.push(`remitflow_regulatory_filing_queue_depth{status="${row.status}"} ${Number(row.count)}`);
+    }
+    lines.push("");
+  }
 
   // DB-derived gauges
   if (dbMetrics) {

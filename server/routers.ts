@@ -251,6 +251,7 @@ import { cbdcSettlementRouter } from "./routers/cbdcSettlementRouter.js";
 import { webauthnRouter } from "./routers/webauthnRouter.js";
 import { multiTenancyRouter } from "./routers/multiTenancyRouter.js";
 import { analyticsDashboardRouter } from "./routers/analyticsDashboardRouter.js";
+import { operationsMapRouter } from "./routers/operationsMap.js";
 import { cbnComplianceRouter } from "./routers/cbnCompliance.js";
 import { outboundRouter } from "./routers/outbound.js";
 import { westAfricaRouter } from "./routers/westAfrica.js";
@@ -6991,6 +6992,7 @@ Case: #${input.caseId}`,
   webauthn: webauthnRouter,
   multiTenancy: multiTenancyRouter,
   analyticsDashboard: analyticsDashboardRouter,
+  operationsMap: operationsMapRouter,
   cbnCompliance: cbnComplianceRouter,
   outbound: outboundRouter,
   westAfrica: westAfricaRouter,

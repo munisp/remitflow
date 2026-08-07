@@ -56,7 +56,7 @@ const TransferTracking: React.FC = () => {
   
   const [tracking, setTracking] = useState<TransferTracking | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, _setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [notificationPrefs, setNotificationPrefs] = useState({
     sms: true,
     whatsapp: false,
@@ -65,57 +65,18 @@ const TransferTracking: React.FC = () => {
   });
 
   const fetchTracking = useCallback(async () => {
-    if (!transferId) return;
-    
+    if (!transferId) {
+      setError('A transfer identifier is required.');
+      setLoading(false);
+      return;
+    }
     try {
-      const data = await transferTrackingService.getTracking(transferId).catch(() => null);
-      if (data) {
-        setTracking(data as unknown as TransferTracking);
-      } else {
-        setTracking({
-          transfer_id: transferId,
-          tracking_id: `TRK-${transferId.slice(0, 8).toUpperCase()}`,
-          current_state: 'IN_NETWORK',
-          progress_percent: 60,
-          sender_name: 'John Doe',
-          recipient_name: 'Jane Smith',
-          amount: 500,
-          currency: 'GBP',
-          destination_currency: 'NGN',
-          destination_amount: 975250,
-          corridor: 'MOJALOOP',
-          created_at: new Date(Date.now() - 3600000).toISOString(),
-          estimated_completion: new Date(Date.now() + 1800000).toISOString(),
-          events: [
-            { state: 'INITIATED', timestamp: new Date(Date.now() - 3600000).toISOString(), description: 'Transfer initiated' },
-            { state: 'PENDING', timestamp: new Date(Date.now() - 3500000).toISOString(), description: 'Awaiting verification' },
-            { state: 'RESERVED', timestamp: new Date(Date.now() - 3000000).toISOString(), description: 'Funds reserved from sender account' },
-            { state: 'IN_NETWORK', timestamp: new Date(Date.now() - 1800000).toISOString(), description: 'Processing via Mojaloop network', location: 'Lagos Hub' },
-          ],
-        });
-      }
-    } catch {
-      setTracking({
-        transfer_id: transferId,
-        tracking_id: `TRK-${transferId.slice(0, 8).toUpperCase()}`,
-        current_state: 'IN_NETWORK',
-        progress_percent: 60,
-        sender_name: 'John Doe',
-        recipient_name: 'Jane Smith',
-        amount: 500,
-        currency: 'GBP',
-        destination_currency: 'NGN',
-        destination_amount: 975250,
-        corridor: 'MOJALOOP',
-        created_at: new Date(Date.now() - 3600000).toISOString(),
-        estimated_completion: new Date(Date.now() + 1800000).toISOString(),
-        events: [
-          { state: 'INITIATED', timestamp: new Date(Date.now() - 3600000).toISOString(), description: 'Transfer initiated' },
-          { state: 'PENDING', timestamp: new Date(Date.now() - 3500000).toISOString(), description: 'Awaiting verification' },
-          { state: 'RESERVED', timestamp: new Date(Date.now() - 3000000).toISOString(), description: 'Funds reserved from sender account' },
-          { state: 'IN_NETWORK', timestamp: new Date(Date.now() - 1800000).toISOString(), description: 'Processing via Mojaloop network', location: 'Lagos Hub' },
-        ],
-      });
+      const response = await transferTrackingService.getTracking(transferId);
+      setTracking(response.data as TransferTracking);
+      setError(null);
+    } catch (cause) {
+      setTracking(null);
+      setError(cause instanceof Error ? cause.message : 'Transfer tracking is currently unavailable.');
     } finally {
       setLoading(false);
     }
@@ -128,11 +89,14 @@ const TransferTracking: React.FC = () => {
   }, [fetchTracking]);
 
   const updateNotificationPrefs = async (channel: string, enabled: boolean) => {
+    if (!transferId) return;
+    const previous = notificationPrefs;
     setNotificationPrefs(prev => ({ ...prev, [channel]: enabled }));
     try {
-      await transferTrackingService.updateNotificationPrefs(transferId!, { channel, enabled });
-    } catch {
-      // Ignore errors
+      await transferTrackingService.updateNotificationPrefs(transferId, { channel, enabled });
+    } catch (cause) {
+      setNotificationPrefs(previous);
+      setError(cause instanceof Error ? cause.message : 'Notification preference could not be updated.');
     }
   };
 

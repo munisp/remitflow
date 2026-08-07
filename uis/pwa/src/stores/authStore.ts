@@ -18,6 +18,7 @@ interface User {
   status?: string;
   createdAt?: string;
   tenant_id?: string;
+  role?: "admin" | "user" | "partner";
 }
 
 interface AuthState {

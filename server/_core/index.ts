@@ -22,7 +22,7 @@ import { metricsHandler } from "../metrics";
 import { registerMojaloopWebhooks } from "../mojaloop.webhook";
 import { registerPaymentRailWebhooks } from "../payment-rail-webhooks";
 import { registerSseClient, registerUserSseClient } from "../sse.service";
-import { requestIdMiddleware } from "../middleware/requestId";
+import { requestIdMiddleware, requestLoggingMiddleware } from "../middleware/requestId";
 import { kycGateMiddleware } from "../middleware/kycGate";
 import { publishPlatformEvent, checkMiddlewareHealth } from "../lib/middleware-orchestrator";
 import { attachServicesHealthWS, stopServicesHealthWS } from "../ws-services-health.js";
@@ -71,8 +71,14 @@ async function startServer() {
   // Pod lifecycle observability — Prometheus /metrics, shutdown coordination, in-flight tracking
   app.use(podLifecycleMiddleware);
 
-  // Request ID tracing — adds X-Request-ID header to every request
+  // Request ID tracing and structured request observability.
   app.use(requestIdMiddleware);
+  app.use(requestLoggingMiddleware);
+
+  // Parse ordinary API payloads before body-dependent security controls. Raw-body
+  // payment and KYC webhook routes were registered above this point.
+  app.use(express.json({ limit: "1mb" }));
+  app.use(express.urlencoded({ limit: "1mb", extended: true }));
 
   // Security middleware: helmet, CORS, rate limiting, AML screening, idempotency
   registerSecurityMiddleware(app);
@@ -91,10 +97,6 @@ async function startServer() {
     res.setHeader("X-Server-Version", "69.0.0");
     next();
   });
-
-  // Body parser — 1MB for API payloads (KYC uploads go through S3 presigned URLs)
-  app.use(express.json({ limit: "1mb" }));
-  app.use(express.urlencoded({ limit: "1mb", extended: true }));
 
   // KYC/KYB gate middleware — enforces tier-based access control on all payment routes
   // Triggers KYC verification workflows for users who haven't completed the required tier
@@ -1321,6 +1323,16 @@ async function startServer() {
       port,
       timestamp: new Date().toISOString(),
     }).catch(err => logger.warn({ errMsg: err?.message }, "[Middleware] Startup event publish failed (non-blocking):"));
+    // Start durable regulatory filing worker after migrations have been verified.
+    try {
+      const { startRegulatoryFilingRetryWorker } = await import("../services/regulatoryFilingQueue.js");
+      startRegulatoryFilingRetryWorker();
+      logger.info("[Compliance] Regulatory filing retry worker started");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "unknown";
+      logger.error({ errMsg: message }, "[Compliance] Regulatory filing retry worker failed to start:");
+    }
+
     // Start webhook retry scheduler (exponential backoff for failed payment callbacks)
     try {
       const { ensureWebhookQueueTable, startWebhookRetryScheduler } = await import("../lib/webhookRetryQueue.js");
@@ -1361,6 +1373,13 @@ async function gracefulShutdown(signal: string) {
     logger.error("[Shutdown] Forced exit after 30s timeout");
     process.exit(1);
   }, 30_000);
+
+  // Stop regulatory filing retry worker before closing the database.
+  try {
+    const { stopRegulatoryFilingRetryWorker } = await import("../services/regulatoryFilingQueue.js");
+    stopRegulatoryFilingRetryWorker();
+    logger.info("[Shutdown] Regulatory filing retry worker stopped");
+  } catch { /* non-critical */ }
 
   // Stop webhook retry scheduler
   try {

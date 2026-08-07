@@ -1300,6 +1300,10 @@ video {
   height: 18px;
 }
 
+.h-\[520px\]{
+  height: 520px;
+}
+
 .h-full{
   height: 100%;
 }
@@ -3051,6 +3055,11 @@ video {
   color: rgb(146 64 14 / var(--tw-text-opacity, 1));
 }
 
+.text-amber-900{
+  --tw-text-opacity: 1;
+  color: rgb(120 53 15 / var(--tw-text-opacity, 1));
+}
+
 .text-amber-950{
   --tw-text-opacity: 1;
   color: rgb(69 26 3 / var(--tw-text-opacity, 1));
@@ -4144,6 +4153,10 @@ body {
 
   .sm\:grid-cols-4{
     grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .sm\:p-6{
+    padding: 1.5rem;
   }
 
   .sm\:px-6{
