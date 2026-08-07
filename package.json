@@ -105,7 +105,7 @@
     "drizzle-orm": "^0.45.2",
     "drizzle-zod": "^0.8.2",
     "embla-carousel-react": "^8.6.0",
-    "express": "^4.21.2",
+    "express": "^5.2.1",
     "express-rate-limit": "^8.3.2",
     "express-slow-down": "^3.1.0",
     "falkordb": "^6.6.2",
