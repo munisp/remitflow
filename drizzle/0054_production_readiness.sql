@@ -19,11 +19,6 @@ CREATE TABLE IF NOT EXISTS outbox_events (
   processed_at    TIMESTAMPTZ,
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_outbox_events_status_created
-  ON outbox_events (status, created_at)
-  WHERE status = 'pending';
-CREATE INDEX IF NOT EXISTS idx_outbox_events_aggregate
-  ON outbox_events (aggregate_type, aggregate_id);
 
 -- ─── Fluvio Consumer Offsets ──────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS fluvio_offsets (
@@ -31,12 +26,10 @@ CREATE TABLE IF NOT EXISTS fluvio_offsets (
   topic           VARCHAR(255)  NOT NULL,
   partition       INTEGER       NOT NULL DEFAULT 0,
   consumer_group  VARCHAR(255)  NOT NULL,
-  offset          BIGINT        NOT NULL DEFAULT 0,
+  "offset"       BIGINT        NOT NULL DEFAULT 0,
   updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
   UNIQUE (topic, partition, consumer_group)
 );
-CREATE INDEX IF NOT EXISTS idx_fluvio_offsets_topic
-  ON fluvio_offsets (topic, consumer_group);
 
 -- ─── TigerBeetle Account Mappings ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS tigerbeetle_accounts (
@@ -52,10 +45,6 @@ CREATE TABLE IF NOT EXISTS tigerbeetle_accounts (
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_tb_accounts_user_id
-  ON tigerbeetle_accounts (user_id);
-CREATE INDEX IF NOT EXISTS idx_tb_accounts_ledger
-  ON tigerbeetle_accounts (ledger, status);
 
 -- ─── TigerBeetle Transfer Records ────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS tigerbeetle_transfers (
@@ -71,12 +60,6 @@ CREATE TABLE IF NOT EXISTS tigerbeetle_transfers (
   transaction_id  BIGINT        REFERENCES transactions(id),
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_tb_transfers_debit
-  ON tigerbeetle_transfers (debit_account_id);
-CREATE INDEX IF NOT EXISTS idx_tb_transfers_credit
-  ON tigerbeetle_transfers (credit_account_id);
-CREATE INDEX IF NOT EXISTS idx_tb_transfers_transaction
-  ON tigerbeetle_transfers (transaction_id);
 
 -- ─── Lakehouse Sync State ─────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS lakehouse_sync_state (
@@ -102,13 +85,6 @@ CREATE TABLE IF NOT EXISTS fraud_alerts (
   review_notes    TEXT,
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_fraud_alerts_user_id
-  ON fraud_alerts (user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_fraud_alerts_risk_tier
-  ON fraud_alerts (risk_tier, created_at DESC)
-  WHERE risk_tier IN ('HIGH','CRITICAL');
-CREATE INDEX IF NOT EXISTS idx_fraud_alerts_transaction
-  ON fraud_alerts (transaction_id);
 
 -- ─── Keycloak Session Sync ────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS keycloak_sessions (
@@ -125,11 +101,6 @@ CREATE TABLE IF NOT EXISTS keycloak_sessions (
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
   last_seen_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_kc_sessions_user_id
-  ON keycloak_sessions (user_id);
-CREATE INDEX IF NOT EXISTS idx_kc_sessions_expires
-  ON keycloak_sessions (expires_at)
-  WHERE expires_at > NOW();
 
 -- ─── Permify Policy Audit Log ─────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS permify_audit_log (
@@ -145,13 +116,6 @@ CREATE TABLE IF NOT EXISTS permify_audit_log (
   latency_ms      INTEGER,
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_permify_audit_user
-  ON permify_audit_log (user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_permify_audit_entity
-  ON permify_audit_log (entity_type, entity_id);
-CREATE INDEX IF NOT EXISTS idx_permify_audit_denied
-  ON permify_audit_log (decision, created_at DESC)
-  WHERE decision = 'DENY';
 
 -- ─── APISIX Route Audit Log ───────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS apisix_route_audit (
@@ -162,8 +126,6 @@ CREATE TABLE IF NOT EXISTS apisix_route_audit (
   performed_by    BIGINT        REFERENCES users(id),
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_apisix_route_audit_route
-  ON apisix_route_audit (route_id, created_at DESC);
 
 -- ─── OpenAppSec WAF Events ────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS waf_events (
@@ -179,14 +141,6 @@ CREATE TABLE IF NOT EXISTS waf_events (
   rule_id         VARCHAR(100),
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_waf_events_severity
-  ON waf_events (severity, created_at DESC)
-  WHERE severity IN ('high','critical');
-CREATE INDEX IF NOT EXISTS idx_waf_events_source_ip
-  ON waf_events (source_ip, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_waf_events_user
-  ON waf_events (user_id, created_at DESC)
-  WHERE user_id IS NOT NULL;
 
 -- ─── Dapr State/PubSub Audit ──────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS dapr_events (
@@ -200,11 +154,6 @@ CREATE TABLE IF NOT EXISTS dapr_events (
   error_message   TEXT,
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_dapr_events_topic
-  ON dapr_events (topic, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_dapr_events_status
-  ON dapr_events (status, created_at DESC)
-  WHERE status IN ('failed','retrying');
 
 -- ─── Compliance Cases ─────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS compliance_cases (
@@ -222,11 +171,6 @@ CREATE TABLE IF NOT EXISTS compliance_cases (
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_compliance_cases_user
-  ON compliance_cases (user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_compliance_cases_status
-  ON compliance_cases (status, priority)
-  WHERE status IN ('open','under_review','escalated');
 
 -- ─── Notifications ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS notifications (
@@ -238,9 +182,6 @@ CREATE TABLE IF NOT EXISTS notifications (
   read_at         TIMESTAMPTZ,
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_notifications_user_unread
-  ON notifications (user_id, created_at DESC)
-  WHERE read_at IS NULL;
 
 -- ─── Settlement Batches ───────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS settlement_batches (
@@ -257,21 +198,127 @@ CREATE TABLE IF NOT EXISTS settlement_batches (
   created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_settlement_batches_status
-  ON settlement_batches (status, created_at DESC);
 
 -- ─── Performance: Missing FK Indexes ─────────────────────────────────────────
 -- Add indexes on commonly queried FK columns that were missing
-CREATE INDEX IF NOT EXISTS idx_transactions_user_id
-  ON transactions (user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_transactions_status
-  ON transactions (status, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_wallets_user_id
-  ON wallets (user_id);
-CREATE INDEX IF NOT EXISTS idx_kyc_documents_user_id
-  ON kyc_documents (user_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id
-  ON audit_logs (user_id, created_at DESC)
-  WHERE user_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_audit_logs_action
-  ON audit_logs (action, created_at DESC);
+
+-- Index compatibility layer for the retained mixed snake_case/camelCase legacy schema.
+-- Required columns and predicate identifiers are resolved from information_schema before each index is created.
+DO $$
+DECLARE
+  target record;
+  source_spec text;
+  source_column text;
+  direction text;
+  resolved_column text;
+  mapped_specs text[];
+  rendered_columns text;
+  rendered_predicate text;
+  token text;
+  can_create boolean;
+BEGIN
+  FOR target IN
+    SELECT * FROM (VALUES
+    ('idx_outbox_events_status_created', 'outbox_events', ARRAY['status', 'created_at'], 'status = ''pending'''),
+    ('idx_outbox_events_aggregate', 'outbox_events', ARRAY['aggregate_type', 'aggregate_id'], NULL),
+    ('idx_fluvio_offsets_topic', 'fluvio_offsets', ARRAY['topic', 'consumer_group'], NULL),
+    ('idx_tb_accounts_user_id', 'tigerbeetle_accounts', ARRAY['user_id'], NULL),
+    ('idx_tb_accounts_ledger', 'tigerbeetle_accounts', ARRAY['ledger', 'status'], NULL),
+    ('idx_tb_transfers_debit', 'tigerbeetle_transfers', ARRAY['debit_account_id'], NULL),
+    ('idx_tb_transfers_credit', 'tigerbeetle_transfers', ARRAY['credit_account_id'], NULL),
+    ('idx_tb_transfers_transaction', 'tigerbeetle_transfers', ARRAY['transaction_id'], NULL),
+    ('idx_fraud_alerts_user_id', 'fraud_alerts', ARRAY['user_id', 'created_at DESC'], NULL),
+    ('idx_fraud_alerts_risk_tier', 'fraud_alerts', ARRAY['risk_tier', 'created_at DESC'], 'risk_tier IN (''HIGH'',''CRITICAL'')'),
+    ('idx_fraud_alerts_transaction', 'fraud_alerts', ARRAY['transaction_id'], NULL),
+    ('idx_kc_sessions_user_id', 'keycloak_sessions', ARRAY['user_id'], NULL),
+    ('idx_kc_sessions_expires', 'keycloak_sessions', ARRAY['expires_at'], 'expires_at IS NOT NULL'),
+    ('idx_permify_audit_user', 'permify_audit_log', ARRAY['user_id', 'created_at DESC'], NULL),
+    ('idx_permify_audit_entity', 'permify_audit_log', ARRAY['entity_type', 'entity_id'], NULL),
+    ('idx_permify_audit_denied', 'permify_audit_log', ARRAY['decision', 'created_at DESC'], 'decision = ''DENY'''),
+    ('idx_apisix_route_audit_route', 'apisix_route_audit', ARRAY['route_id', 'created_at DESC'], NULL),
+    ('idx_waf_events_severity', 'waf_events', ARRAY['severity', 'created_at DESC'], 'severity IN (''high'',''critical'')'),
+    ('idx_waf_events_source_ip', 'waf_events', ARRAY['source_ip', 'created_at DESC'], NULL),
+    ('idx_waf_events_user', 'waf_events', ARRAY['user_id', 'created_at DESC'], 'user_id IS NOT NULL'),
+    ('idx_dapr_events_topic', 'dapr_events', ARRAY['topic', 'created_at DESC'], NULL),
+    ('idx_dapr_events_status', 'dapr_events', ARRAY['status', 'created_at DESC'], 'status IN (''failed'',''retrying'')'),
+    ('idx_compliance_cases_user', 'compliance_cases', ARRAY['user_id', 'created_at DESC'], NULL),
+    ('idx_compliance_cases_status', 'compliance_cases', ARRAY['status', 'priority'], 'status IN (''open'',''under_review'',''escalated'')'),
+    ('idx_notifications_user_unread', 'notifications', ARRAY['user_id', 'created_at DESC'], 'read_at IS NULL'),
+    ('idx_settlement_batches_status', 'settlement_batches', ARRAY['status', 'created_at DESC'], NULL),
+    ('idx_transactions_user_id', 'transactions', ARRAY['user_id', 'created_at DESC'], NULL),
+    ('idx_transactions_status', 'transactions', ARRAY['status', 'created_at DESC'], NULL),
+    ('idx_wallets_user_id', 'wallets', ARRAY['user_id'], NULL),
+    ('idx_kyc_documents_user_id', 'kyc_documents', ARRAY['user_id', 'created_at DESC'], NULL),
+    ('idx_audit_logs_user_id', 'audit_logs', ARRAY['user_id', 'created_at DESC'], 'user_id IS NOT NULL'),
+    ('idx_audit_logs_action', 'audit_logs', ARRAY['action', 'created_at DESC'], NULL)
+    ) AS requested(index_name, table_name, column_specs, predicate)
+  LOOP
+    mapped_specs := ARRAY[]::text[];
+    can_create := true;
+
+    FOREACH source_spec IN ARRAY target.column_specs LOOP
+      source_column := regexp_replace(source_spec, '\s+(ASC|DESC)$', '', 'i');
+      direction := CASE WHEN source_spec ~* '\s+DESC$' THEN ' DESC' WHEN source_spec ~* '\s+ASC$' THEN ' ASC' ELSE '' END;
+      SELECT columns.column_name
+        INTO resolved_column
+        FROM information_schema.columns AS columns
+       WHERE columns.table_schema = 'public'
+         AND columns.table_name = target.table_name
+         AND (
+           columns.column_name = source_column
+           OR lower(replace(columns.column_name, '_', '')) = lower(replace(source_column, '_', ''))
+         )
+       ORDER BY CASE WHEN columns.column_name = source_column THEN 0 ELSE 1 END
+       LIMIT 1;
+      IF resolved_column IS NULL THEN
+        can_create := false;
+        EXIT;
+      END IF;
+      mapped_specs := array_append(mapped_specs, quote_ident(resolved_column) || direction);
+    END LOOP;
+
+    rendered_predicate := target.predicate;
+    IF can_create AND rendered_predicate IS NOT NULL THEN
+      FOR token IN
+        SELECT DISTINCT (match)[1]
+          FROM regexp_matches(
+            regexp_replace(rendered_predicate, '''[^'']*''', '', 'g'),
+            '\m([A-Za-z_][A-Za-z0-9_]*)\M',
+            'g'
+          ) AS match
+         WHERE lower((match)[1]) NOT IN ('and', 'or', 'is', 'not', 'null', 'in', 'true', 'false')
+      LOOP
+        SELECT columns.column_name
+          INTO resolved_column
+          FROM information_schema.columns AS columns
+         WHERE columns.table_schema = 'public'
+           AND columns.table_name = target.table_name
+           AND (
+             columns.column_name = token
+             OR lower(replace(columns.column_name, '_', '')) = lower(replace(token, '_', ''))
+           )
+         ORDER BY CASE WHEN columns.column_name = token THEN 0 ELSE 1 END
+         LIMIT 1;
+        IF resolved_column IS NULL THEN
+          can_create := false;
+          EXIT;
+        END IF;
+        rendered_predicate := replace(rendered_predicate, token, quote_ident(resolved_column));
+      END LOOP;
+    END IF;
+
+    IF can_create THEN
+      SELECT string_agg(specification, ', ')
+        INTO rendered_columns
+        FROM unnest(mapped_specs) AS specification;
+      EXECUTE format(
+        'CREATE INDEX IF NOT EXISTS %I ON %I.%I (%s)%s',
+        target.index_name,
+        'public',
+        target.table_name,
+        rendered_columns,
+        CASE WHEN rendered_predicate IS NULL THEN '' ELSE ' WHERE ' || rendered_predicate END
+      );
+    END IF;
+  END LOOP;
+END $$;

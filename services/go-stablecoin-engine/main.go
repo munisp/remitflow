@@ -497,7 +497,7 @@ func main() {
 	go func() {
 		slog.Info("go-stablecoin-engine starting", "port", cfg.Port)
 		startupMs := time.Since(_processStartTime).Milliseconds()
-		_ = json.Marshal(map[string]interface{}{
+		_, _ = json.Marshal(map[string]interface{}{
 			"event": "startup_complete", "service": "go-stablecoin-engine",
 			"port": cfg.Port, "startup_ms": startupMs,
 		})

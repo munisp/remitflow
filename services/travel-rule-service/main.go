@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +21,17 @@ import (
 
 // TravelRuleThreshold is the USD equivalent above which Travel Rule applies (FATF Rec 16)
 const TravelRuleThreshold = 1000.0
+
+// requiresTravelRule applies the FATF threshold in USD equivalent. Rates are conservative
+// policy conversion factors; production pricing services should supply current corridor FX.
+func requiresTravelRule(amount float64, currency string) bool {
+	fxRates := map[string]float64{"USD": 1.0, "EUR": 1.09, "GBP": 1.28}
+	rate, ok := fxRates[strings.ToUpper(currency)]
+	if !ok {
+		rate = 1.0
+	}
+	return amount*rate >= TravelRuleThreshold
+}
 
 // OriginatorInfo holds the required originator data under FATF Recommendation 16
 type OriginatorInfo struct {

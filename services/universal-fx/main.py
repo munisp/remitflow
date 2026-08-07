@@ -637,6 +637,11 @@ def init_pg_tables():
         """)
     except Exception as e:
         print(f"[DB] Table init error: {e}")
+        raise
+
+
+# Ensure the PostgreSQL-backed cache and lock tables exist before endpoint access.
+init_pg_tables()
 
 
 if __name__ == "__main__":

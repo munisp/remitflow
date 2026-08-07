@@ -1,150 +1,110 @@
--- RemitFlow: Integration Enhancement Migration
--- Adds missing constraints, indexes, and performance improvements
--- for all 12 infrastructure integrations.
+-- Canonical integration indexes across the retained mixed-case legacy schema.
+-- Column names are resolved against information_schema by exact name, then by snake/camel-insensitive normalization.
+-- The former NOW()-based expiry predicate is replaced with an immutable non-null predicate; expiry filtering remains in the query.
 
--- ─── TigerBeetle ─────────────────────────────────────────────────────────────
--- Add FK from tigerbeetle_transfers to tigerbeetle_accounts
-ALTER TABLE "tigerbeetle_transfers"
-  ADD COLUMN IF NOT EXISTS "source_account_ref" integer REFERENCES "tigerbeetle_accounts"("id");
+DO $$
+DECLARE
+  target record;
+  source_column text;
+  resolved_column text;
+  mapped_columns text[];
+  rendered_columns text;
+  rendered_predicate text;
+  can_create boolean;
+BEGIN
+  FOR target IN
+    SELECT * FROM (VALUES
+    ('idx_tb_transfers_debit_credit', 'tigerbeetle_transfers', ARRAY['debit_account_id', 'credit_account_id'], NULL, false),
+    ('idx_keycloak_sessions_active', 'keycloak_sessions', ARRAY['user_id'], '"revoked_at" IS NULL', false),
+    ('idx_temporal_executions_running', 'temporal_executions', ARRAY['status', 'created_at'], '"status" = ''RUNNING''', false),
+    ('idx_permify_audit_subject_permission', 'permify_audit_logs', ARRAY['subject_id', 'permission', 'created_at'], NULL, false),
+    ('idx_fluvio_offsets_consumer', 'fluvio_offsets', ARRAY['consumer_group', 'topic'], NULL, false),
+    ('idx_openappsec_events_recent_blocks', 'openappsec_events', ARRAY['action', 'created_at'], '"action" = ''block''', false),
+    ('idx_lakehouse_sync_failed', 'lakehouse_sync_jobs', ARRAY['status', 'created_at'], '"status" = ''failed''', false),
+    ('idx_outbox_events_pending', 'outbox_events', ARRAY['status', 'created_at'], '"status" = ''pending''', false),
+    ('idx_outbox_events_retry', 'outbox_events', ARRAY['status', 'retry_count'], '"status" = ''failed'' AND "retry_count" < 3', false),
+    ('idx_idempotency_keys_expiry', 'idempotency_keys', ARRAY['expires_at'], '"expires_at" IS NOT NULL', false),
+    ('idx_transactions_pending', 'transactions', ARRAY['user_id', 'created_at'], '"status" IN (''pending'', ''processing'')', false),
+    ('idx_transactions_failed', 'transactions', ARRAY['created_at'], '"status" = ''failed''', false),
+    ('idx_wallets_active', 'wallets', ARRAY['user_id', 'currency'], '"status" = ''active''', false),
+    ('idx_kyc_documents_review_queue', 'kycDocuments', ARRAY['status', 'created_at'], '"status" = ''under_review''', false),
+    ('idx_compliance_cases_open', 'complianceCases', ARRAY['status', 'created_at'], '"status" IN (''open'', ''under_review'')', false),
+    ('idx_audit_logs_critical', 'auditLogs', ARRAY['severity', 'created_at'], '"severity" = ''critical''', false),
+    ('idx_fraud_alerts_unresolved', 'fraud_alerts', ARRAY['user_id', 'created_at'], '"resolved_at" IS NULL', false),
+    ('idx_notifications_unread', 'notifications', ARRAY['user_id', 'created_at'], '"isRead" = false', false),
+    ('idx_savings_goals_active', 'savingsGoals', ARRAY['user_id'], '"status" = ''active''', false),
+    ('idx_fx_alerts_active', 'fxAlerts', ARRAY['user_id', 'fromCurrency', 'toCurrency'], '"isActive" = true AND "triggered" = false', false),
+    ('idx_recurring_payments_active', 'recurringPayments', ARRAY['user_id', 'nextRunAt'], '"status" = ''active''', false),
+    ('idx_sanctions_checks_pending', 'sanctions_checks', ARRAY['created_at'], '"result" = ''pending_review''', false),
+    ('idx_beneficiaries_favorites', 'beneficiaries', ARRAY['user_id'], '"isFavorite" = true', false),
+    ('idx_rate_locks_active', 'rate_locks', ARRAY['user_id', 'expires_at'], '"status" = ''active''', false),
+    ('idx_p2p_transfers_inflight', 'p2p_transfers', ARRAY['sender_id', 'created_at'], '"status" NOT IN (''completed'', ''failed'', ''cancelled'')', false),
+    ('idx_stablecoin_wallets_active', 'stablecoin_wallets', ARRAY['user_id'], '"status" = ''active''', false),
+    ('idx_temporal_executions_type', 'temporal_executions', ARRAY['workflow_type', 'status', 'created_at'], NULL, false),
+    ('idx_apisix_route_logs_recent', 'apisix_route_logs', ARRAY['created_at'], NULL, false),
+    ('idx_redis_cache_audit_miss', 'redis_cache_audit', ARRAY['key_pattern', 'miss_count'], NULL, false)
+    ) AS requested(index_name, table_name, columns, predicate, is_unique)
+  LOOP
+    mapped_columns := ARRAY[]::text[];
+    can_create := true;
 
--- Add composite index for fast balance queries
-CREATE INDEX IF NOT EXISTS "idx_tb_transfers_debit_credit" 
-  ON "tigerbeetle_transfers" ("debit_account_id", "credit_account_id");
+    FOREACH source_column IN ARRAY target.columns LOOP
+      SELECT columns.column_name
+        INTO resolved_column
+        FROM information_schema.columns AS columns
+       WHERE columns.table_schema = 'public'
+         AND columns.table_name = target.table_name
+         AND (
+           columns.column_name = source_column
+           OR lower(replace(columns.column_name, '_', '')) = lower(replace(source_column, '_', ''))
+         )
+       ORDER BY CASE WHEN columns.column_name = source_column THEN 0 ELSE 1 END
+       LIMIT 1;
+      IF resolved_column IS NULL THEN
+        can_create := false;
+        EXIT;
+      END IF;
+      mapped_columns := array_append(mapped_columns, resolved_column);
+    END LOOP;
 
--- ─── Keycloak ─────────────────────────────────────────────────────────────────
--- Add index for active sessions
-CREATE INDEX IF NOT EXISTS "idx_keycloak_sessions_active"
-  ON "keycloak_sessions" ("user_id") WHERE "revoked_at" IS NULL;
+    rendered_predicate := target.predicate;
+    IF can_create AND rendered_predicate IS NOT NULL THEN
+      FOR source_column IN
+        SELECT DISTINCT (match)[1]
+          FROM regexp_matches(rendered_predicate, '"([^"]+)"', 'g') AS match
+      LOOP
+        SELECT columns.column_name
+          INTO resolved_column
+          FROM information_schema.columns AS columns
+         WHERE columns.table_schema = 'public'
+           AND columns.table_name = target.table_name
+           AND (
+             columns.column_name = source_column
+             OR lower(replace(columns.column_name, '_', '')) = lower(replace(source_column, '_', ''))
+           )
+         ORDER BY CASE WHEN columns.column_name = source_column THEN 0 ELSE 1 END
+         LIMIT 1;
+        IF resolved_column IS NULL THEN
+          can_create := false;
+          EXIT;
+        END IF;
+        rendered_predicate := replace(rendered_predicate, format('"%s"', source_column), quote_ident(resolved_column));
+      END LOOP;
+    END IF;
 
--- ─── Temporal ─────────────────────────────────────────────────────────────────
--- Add index for running workflows
-CREATE INDEX IF NOT EXISTS "idx_temporal_executions_running"
-  ON "temporal_executions" ("status", "created_at") WHERE "status" = 'RUNNING';
-
--- ─── Permify ─────────────────────────────────────────────────────────────────
--- Add composite index for permission lookups
-CREATE INDEX IF NOT EXISTS "idx_permify_audit_subject_permission"
-  ON "permify_audit_logs" ("subject_id", "permission", "created_at");
-
--- ─── Fluvio ──────────────────────────────────────────────────────────────────
--- Add index for consumer group offset lookups
-CREATE INDEX IF NOT EXISTS "idx_fluvio_offsets_consumer"
-  ON "fluvio_offsets" ("consumer_group", "topic");
-
--- ─── OpenAppSec ──────────────────────────────────────────────────────────────
--- Add index for recent blocked events
-CREATE INDEX IF NOT EXISTS "idx_openappsec_events_recent_blocks"
-  ON "openappsec_events" ("action", "created_at") WHERE "action" = 'block';
-
--- ─── Lakehouse ───────────────────────────────────────────────────────────────
--- Add index for failed sync jobs
-CREATE INDEX IF NOT EXISTS "idx_lakehouse_sync_failed"
-  ON "lakehouse_sync_jobs" ("status", "created_at") WHERE "status" = 'failed';
-
--- ─── Outbox Events ────────────────────────────────────────────────────────────
--- Add index for pending outbox events (transactional outbox pattern)
-CREATE INDEX IF NOT EXISTS "idx_outbox_events_pending"
-  ON "outbox_events" ("status", "created_at") WHERE "status" = 'pending';
-
--- Add index for failed outbox events with retry count
-CREATE INDEX IF NOT EXISTS "idx_outbox_events_retry"
-  ON "outbox_events" ("status", "retry_count") WHERE "status" = 'failed' AND "retry_count" < 3;
-
--- ─── Idempotency Keys ────────────────────────────────────────────────────────
--- Add index for expiry cleanup
-CREATE INDEX IF NOT EXISTS "idx_idempotency_keys_expiry"
-  ON "idempotency_keys" ("expires_at") WHERE "expires_at" < NOW();
-
--- ─── Transactions ─────────────────────────────────────────────────────────────
--- Add partial index for pending transactions (most common query)
-CREATE INDEX IF NOT EXISTS "idx_transactions_pending"
-  ON "transactions" ("user_id", "created_at") WHERE "status" IN ('pending', 'processing');
-
--- Add index for failed transactions for reconciliation
-CREATE INDEX IF NOT EXISTS "idx_transactions_failed"
-  ON "transactions" ("created_at") WHERE "status" = 'failed';
-
--- ─── Wallets ──────────────────────────────────────────────────────────────────
--- Add partial index for active wallets
-CREATE INDEX IF NOT EXISTS "idx_wallets_active"
-  ON "wallets" ("user_id", "currency") WHERE "status" = 'active';
-
--- ─── KYC Documents ───────────────────────────────────────────────────────────
--- Add index for pending KYC review queue
-CREATE INDEX IF NOT EXISTS "idx_kyc_documents_review_queue"
-  ON "kycDocuments" ("status", "created_at") WHERE "status" = 'under_review';
-
--- ─── Compliance Cases ─────────────────────────────────────────────────────────
--- Add index for open compliance cases
-CREATE INDEX IF NOT EXISTS "idx_compliance_cases_open"
-  ON "complianceCases" ("status", "created_at") WHERE "status" IN ('open', 'under_review');
-
--- ─── Audit Logs ───────────────────────────────────────────────────────────────
--- Add index for critical audit events
-CREATE INDEX IF NOT EXISTS "idx_audit_logs_critical"
-  ON "auditLogs" ("severity", "created_at") WHERE "severity" = 'critical';
-
--- ─── Fraud Alerts ─────────────────────────────────────────────────────────────
--- Add index for unresolved fraud alerts
-CREATE INDEX IF NOT EXISTS "idx_fraud_alerts_unresolved"
-  ON "fraud_alerts" ("user_id", "created_at") WHERE "resolved_at" IS NULL;
-
--- ─── Notifications ────────────────────────────────────────────────────────────
--- Add partial index for unread notifications
-CREATE INDEX IF NOT EXISTS "idx_notifications_unread"
-  ON "notifications" ("user_id", "created_at") WHERE "isRead" = false;
-
--- ─── Savings Goals ────────────────────────────────────────────────────────────
--- Add partial index for active savings goals
-CREATE INDEX IF NOT EXISTS "idx_savings_goals_active"
-  ON "savingsGoals" ("user_id") WHERE "status" = 'active';
-
--- ─── FX Alerts ────────────────────────────────────────────────────────────────
--- Add partial index for active FX alerts
-CREATE INDEX IF NOT EXISTS "idx_fx_alerts_active"
-  ON "fxAlerts" ("user_id", "fromCurrency", "toCurrency") WHERE "isActive" = true AND "triggered" = false;
-
--- ─── Recurring Payments ───────────────────────────────────────────────────────
--- Add partial index for active recurring payments
-CREATE INDEX IF NOT EXISTS "idx_recurring_payments_active"
-  ON "recurringPayments" ("user_id", "nextRunAt") WHERE "status" = 'active';
-
--- ─── Sanctions Checks ────────────────────────────────────────────────────────
--- Add index for pending sanctions checks
-CREATE INDEX IF NOT EXISTS "idx_sanctions_checks_pending"
-  ON "sanctions_checks" ("created_at") WHERE "result" = 'pending_review';
-
--- ─── Beneficiaries ───────────────────────────────────────────────────────────
--- Add index for favorite beneficiaries
-CREATE INDEX IF NOT EXISTS "idx_beneficiaries_favorites"
-  ON "beneficiaries" ("user_id") WHERE "isFavorite" = true;
-
--- ─── Rate Locks ───────────────────────────────────────────────────────────────
--- Add partial index for active rate locks
-CREATE INDEX IF NOT EXISTS "idx_rate_locks_active"
-  ON "rate_locks" ("user_id", "expires_at") WHERE "status" = 'active';
-
--- ─── P2P Transfers ────────────────────────────────────────────────────────────
--- Add index for in-flight P2P transfers
-CREATE INDEX IF NOT EXISTS "idx_p2p_transfers_inflight"
-  ON "p2p_transfers" ("sender_id", "created_at") WHERE "status" NOT IN ('completed', 'failed', 'cancelled');
-
--- ─── Stablecoin Wallets ───────────────────────────────────────────────────────
--- Add index for active stablecoin wallets
-CREATE INDEX IF NOT EXISTS "idx_stablecoin_wallets_active"
-  ON "stablecoin_wallets" ("user_id") WHERE "status" = 'active';
-
--- ─── Temporal Executions ─────────────────────────────────────────────────────
--- Add index for workflow type lookups
-CREATE INDEX IF NOT EXISTS "idx_temporal_executions_type"
-  ON "temporal_executions" ("workflow_type", "status", "created_at");
-
--- ─── APISIX Route Logs ────────────────────────────────────────────────────────
--- Add index for recent route changes
-CREATE INDEX IF NOT EXISTS "idx_apisix_route_logs_recent"
-  ON "apisix_route_logs" ("created_at");
-
--- ─── Redis Cache Audit ────────────────────────────────────────────────────────
--- Add index for cache miss analysis
-CREATE INDEX IF NOT EXISTS "idx_redis_cache_audit_miss"
-  ON "redis_cache_audit" ("key_pattern", "miss_count");
+    IF can_create THEN
+      SELECT string_agg(quote_ident(column_name), ', ')
+        INTO rendered_columns
+        FROM unnest(mapped_columns) AS column_name;
+      EXECUTE format(
+        'CREATE %sINDEX IF NOT EXISTS %I ON %I.%I (%s)%s',
+        CASE WHEN target.is_unique THEN 'UNIQUE ' ELSE '' END,
+        target.index_name,
+        'public',
+        target.table_name,
+        rendered_columns,
+        CASE WHEN rendered_predicate IS NULL THEN '' ELSE ' WHERE ' || rendered_predicate END
+      );
+    END IF;
+  END LOOP;
+END $$;

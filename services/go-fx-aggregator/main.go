@@ -69,7 +69,7 @@ func (c *RateCache) Get(pair string) (AggregatedRate, bool) {
 		return r, false
 	}
 	if time.Since(r.Timestamp) > c.ttl {
-		r.Stale = true
+		return AggregatedRate{}, false
 	}
 	return r, true
 }

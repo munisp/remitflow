@@ -538,12 +538,38 @@ func loadFromDB() {
 	slog.Info("loaded persisted state from database", "records", count, "table", "security_hardening_state")
 }
 
-// panicRecoveryMiddleware catches panics and returns 500 instead of crashing
+// panicRecoveryMiddleware catches panics, records the event, and returns a bounded error response.
 func panicRecoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
-			if err := recover(); err != nil {
-				srv := &http.Server{
+			if recovered := recover(); recovered != nil {
+				log.Printf("[SECURITY] recovered panic for %s: %v", r.URL.Path, recovered)
+				if db != nil {
+					_ = dbLogEvent("handler_panic", map[string]string{"path": r.URL.Path})
+				}
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func main() {
+	if err := initDB(); err != nil {
+		log.Printf("[SECURITY] database initialization failed; persistence is unavailable: %v", err)
+	} else {
+		loadFromDB()
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/security/rate-limit", rateLimitCheckHandler)
+	mux.HandleFunc("/security/scan", attackScanHandler)
+	mux.HandleFunc("/security/fraud-check", fraudCheckHandler)
+	mux.HandleFunc("/security/ddos-check", ddosProtectionHandler)
+
+	addr := ":" + port
+	srv := &http.Server{
 		Addr:         addr,
 		Handler:      panicRecoveryMiddleware(mux),
 		ReadTimeout:  15 * time.Second,
@@ -555,17 +581,15 @@ func panicRecoveryMiddleware(next http.Handler) http.Handler {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Printf("[PANIC] Graceful shutdown initiated...")
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(ctx); err != nil {
-			log.Printf("[PANIC] Shutdown error: %v", err)
+			log.Printf("[SECURITY] graceful shutdown failed: %v", err)
 		}
 	}()
 
-	log.Printf("[PANIC] Listening on %s", addr)
+	log.Printf("[SECURITY] listening on %s", addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("[PANIC] Server error: %v", err)
+		log.Fatalf("[SECURITY] server error: %v", err)
 	}
-	log.Printf("[PANIC] Server stopped")
 }

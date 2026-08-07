@@ -1,0 +1,64 @@
+name: remitflow-validation
+
+services:
+  postgres:
+    image: postgres:16.6-bookworm
+    network_mode: host
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: remitflow_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d remitflow_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  redis:
+    image: redis:7.4-alpine
+    network_mode: host
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  permify:
+    image: ghcr.io/permify/permify:v1.0.0
+    network_mode: host
+    command: ["serve", "--database-engine=memory"]
+
+  verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    working_dir: /workspace
+    environment:
+      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/remitflow_test
+      REDIS_URL: redis://127.0.0.1:6379
+      PERMIFY_HTTP_URL: http://127.0.0.1:3476
+      PERMIFY_GRPC_URL: 127.0.0.1:3478
+      NODE_ENV: test
+    volumes:
+      - ../..:/workspace
+      - remitflow-go-cache:/tmp/go-modcache
+      - remitflow-go-build-cache:/tmp/go-buildcache
+      - remitflow-cargo-home:/tmp/cargo-home
+      - remitflow-cargo-target:/tmp/cargo-target
+    command: ["bash", "qa/container-validation/run-language-suite.sh", "all"]
+
+volumes:
+  remitflow-go-cache:
+  remitflow-go-build-cache:
+  remitflow-cargo-home:
+  remitflow-cargo-target:

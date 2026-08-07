@@ -656,16 +656,6 @@ CREATE TABLE IF NOT EXISTS rail_failover_decisions (
 	);
 
 -- Source: services/go-multi-rail-failover/main.go
-CREATE TABLE IF NOT EXISTS rail_health_checks (
-		id SERIAL PRIMARY KEY,
-		rail_id TEXT NOT NULL REFERENCES rail_registry(id),
-		is_healthy BOOLEAN NOT NULL,
-		latency_ms BIGINT NOT NULL DEFAULT 0,
-		error_message TEXT,
-		checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	);
-
--- Source: services/go-multi-rail-failover/main.go
 CREATE TABLE IF NOT EXISTS rail_registry (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -674,6 +664,16 @@ CREATE TABLE IF NOT EXISTS rail_registry (
 		min_amount NUMERIC NOT NULL DEFAULT 0.01,
 		is_active BOOLEAN NOT NULL DEFAULT true,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+-- Source: services/go-multi-rail-failover/main.go
+CREATE TABLE IF NOT EXISTS rail_health_checks (
+		id SERIAL PRIMARY KEY,
+		rail_id TEXT NOT NULL REFERENCES rail_registry(id),
+		is_healthy BOOLEAN NOT NULL,
+		latency_ms BIGINT NOT NULL DEFAULT 0,
+		error_message TEXT,
+		checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);
 
 -- Source: services/python-tigerbeetle-reconciliation/main.py

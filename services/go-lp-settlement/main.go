@@ -600,7 +600,7 @@ func main() {
 	go func() {
 		slog.Info("go-lp-settlement starting", "port", cfg.Port)
 		startupMs := time.Since(_processStartTime).Milliseconds()
-		_ = json.Marshal(map[string]interface{}{
+			_, _ = json.Marshal(map[string]interface{}{
 			"event": "startup_complete", "service": "go-lp-settlement",
 			"port": cfg.Port, "startup_ms": startupMs,
 		})

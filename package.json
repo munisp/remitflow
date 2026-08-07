@@ -6,7 +6,7 @@
   "scripts": {
     "styles:build": "tailwindcss -c uis/pwa/tailwind.config.cjs -i uis/pwa/src/styles.source.css -o uis/pwa/src/index.css",
     "dev": "pnpm run styles:build && NODE_ENV=development tsx watch server/_core/index.ts",
-    "build": "pnpm run styles:build && vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
+    "build": "pnpm run styles:build && vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist && mkdir -p dist/proto && cp server/proto/remitflow.proto dist/proto/remitflow.proto",
     "start": "NODE_ENV=production node dist/index.js",
     "worker:temporal": "tsx server/temporal/worker.ts",
     "check": "tsc --noEmit",

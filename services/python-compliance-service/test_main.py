@@ -5,6 +5,13 @@ Comprehensive tests for the RemitFlow Python Compliance & Fraud-Score Microservi
 import pytest
 from fastapi.testclient import TestClient
 from main import app, compute_checksum, is_round_amount, is_near_threshold, normalize_name, fuzzy_sanctions_match
+import main as compliance_main
+
+# Deterministic unit-test fixture. Production screening loads configured regulator feeds at startup.
+compliance_main._sanctions._names.update({
+    normalize_name("John Doe Terrorist"),
+    normalize_name("Offshore Laundry Ltd"),
+})
 
 client = TestClient(app)
 

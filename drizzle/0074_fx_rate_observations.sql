@@ -7,5 +7,5 @@ CREATE TABLE IF NOT EXISTS fx_rates (
   source VARCHAR(64) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS fx_rates_pair_created_at_idx
-  ON fx_rates (from_currency, to_currency, created_at DESC);
+CREATE INDEX IF NOT EXISTS fx_rates_pair_observed_at_idx
+  ON fx_rates (from_currency, to_currency, observed_at DESC);

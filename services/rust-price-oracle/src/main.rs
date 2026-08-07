@@ -74,7 +74,7 @@ impl OracleState {
         let symbols = vec!["USDC", "USDT", "DAI", "PYUSD", "EURC", "NGNT", "cUSD", "BUSD", "FRAX", "LUSD"];
         let mut prices = HashMap::new();
         let mut history = HashMap::new();
-        let mut circuit_breakers = HashMap::new();
+        let mut breaker_states = HashMap::new();
         let now = unix_now();
 
         for sym in &symbols {
@@ -94,7 +94,7 @@ impl OracleState {
                 last_updated:    now,
             });
             history.insert(sym.to_string(), VecDeque::with_capacity(HISTORY_BUFFER_SIZE));
-            circuit_breakers.insert(sym.to_string(), CircuitBreakerState {
+            breaker_states.insert(sym.to_string(), CircuitBreakerState {
                 symbol:        sym.to_string(),
                 tripped:       false,
                 tripped_at:    None,
@@ -102,7 +102,7 @@ impl OracleState {
                 auto_reset_at: None,
             });
         }
-        Self { prices, history, circuit_breakers }
+        Self { prices, history, circuit_breakers: breaker_states }
     }
 }
 
@@ -222,10 +222,10 @@ async fn refresh_prices(state: SharedState) {
             let pyth_price = fetch_pyth_simulated(sym);
             let chainlink_price = fetch_chainlink_simulated(sym);
 
-            let mut all_prices = vec![pyth_price, chainlink_price];
-            if let Some(p) = cg_price { all_prices.push(p); }
+            let mut source_prices = vec![pyth_price, chainlink_price];
+            if let Some(p) = cg_price { source_prices.push(p); }
 
-            let aggregated = median(&mut all_prices);
+            let aggregated = median(&mut source_prices);
 
             let target = match *sym {
                 "EURC" => 1.085,
@@ -239,7 +239,7 @@ async fn refresh_prices(state: SharedState) {
             if hist.len() >= HISTORY_BUFFER_SIZE { hist.pop_front(); }
             hist.push_back(PricePoint { price: aggregated, timestamp: now, source: "aggregated".to_string() });
 
-            let twap = compute_twap(hist, TWAP_WINDOW_MINUTES);
+            let computed_twap = compute_twap(hist, TWAP_WINDOW_MINUTES);
 
             // Determine severity
             let severity = if deviation_pct >= CIRCUIT_BREAKER_THRESHOLD * 100.0 {
@@ -253,8 +253,8 @@ async fn refresh_prices(state: SharedState) {
             };
 
             // Circuit breaker logic
-            let circuit_breaker = deviation_pct >= CIRCUIT_BREAKER_THRESHOLD * 100.0;
-            if circuit_breaker {
+            let is_circuit_breaker_tripped = deviation_pct >= CIRCUIT_BREAKER_THRESHOLD * 100.0;
+            if is_circuit_breaker_tripped {
                 let cb = state_w.circuit_breakers.entry(sym.to_string()).or_insert(CircuitBreakerState {
                     symbol: sym.to_string(), tripped: false, tripped_at: None, reason: None, auto_reset_at: None,
                 });
@@ -292,10 +292,10 @@ async fn refresh_prices(state: SharedState) {
             state_w.prices.insert(sym.to_string(), AggregatedPrice {
                 symbol: sym.to_string(),
                 price: aggregated,
-                twap_1h: twap,
+                twap_1h: computed_twap,
                 deviation_pct,
                 sources,
-                circuit_breaker,
+                circuit_breaker: is_circuit_breaker_tripped,
                 severity: severity.to_string(),
                 last_updated: now,
             });

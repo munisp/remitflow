@@ -24,6 +24,7 @@ import base64
 import io
 import logging
 import os
+import signal
 import time
 from collections import defaultdict, deque
 from datetime import datetime, timezone
@@ -31,7 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -537,7 +538,7 @@ app = FastAPI(
     version="1.0.0",
 )
 
-@app.get("/metrics")
+@app.get("/metrics/pod")
 async def _prometheus_metrics():
     uptime = _time_mod.time() - _PROCESS_START_TIME
     return Response(
@@ -588,8 +589,8 @@ async def _on_shutdown():
     logging.getLogger("python-deepfake-detector").info("FastAPI shutdown event — cleaning up resources")
 
 
-# Initialize PostgreSQL tables (middleware-ready)
-_db_ensure_tables("deepfake_detector")
+# Initialise the primary PostgreSQL persistence connection before serving requests.
+_get_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -706,8 +707,9 @@ async def metrics():
 @app.on_event("startup")
 async def startup():
     logger.info("Starting RemitFlow Deepfake Detection Service v1.0.0")
-    # Pre-warm the model in the background (non-blocking)
-    asyncio.create_task(_load_model())
+    # Test mode exercises deterministic fail-closed fallbacks without fetching external model artifacts.
+    if os.getenv("REMITFLOW_TEST_MODE", "false").lower() != "true":
+        asyncio.create_task(_load_model())
 
 
 if __name__ == "__main__":

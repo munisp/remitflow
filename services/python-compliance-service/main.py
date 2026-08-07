@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Set, Tuple
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -125,7 +125,7 @@ app = FastAPI(
     description="AML/KYC compliance checks, fraud scoring, and sanctions screening (production)",
 )
 
-@app.get("/metrics")
+@app.get("/metrics/pod")
 async def _prometheus_metrics():
     uptime = _time_mod.time() - _PROCESS_START_TIME
     return Response(
@@ -188,6 +188,8 @@ _redis_client: Any = None
 
 async def get_redis():
     global _redis_client
+    if os.environ.get("REMITFLOW_TEST_MODE", "false").lower() == "true":
+        return None
     if _redis_client is not None:
         return _redis_client
     try:
@@ -231,6 +233,29 @@ HMT_SANCTIONS_URL = os.environ.get(
 )
 
 SANCTIONS_REFRESH_INTERVAL = int(os.environ.get("SANCTIONS_REFRESH_INTERVAL_SECS", "3600"))
+
+
+def _init_compliance_svc_tables() -> None:
+    """Initialise the sanctions-cache persistence contract for this service instance."""
+    conn = _get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS compliance_screening_data (
+                key TEXT PRIMARY KEY,
+                data JSONB NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+
+
+def _db_exec(query: str, params: tuple[object, ...] = ()) -> None:
+    """Execute a parameterized persistence operation through the service database."""
+    conn = _get_db()
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+
 
 class SanctionsList:
     """Thread-safe sanctions list with real feed parsing."""
@@ -587,6 +612,17 @@ def is_near_threshold(amount: float, threshold: float = 10000.0, margin: float =
 
 def _normalize(name: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", name.lower().strip())
+
+
+def normalize_name(name: str) -> str:
+    """Public normalization helper shared by screening callers and regression tests."""
+    return _normalize(name)
+
+
+def fuzzy_sanctions_match(name: str) -> bool:
+    """Return whether the configured sanctions dataset matches a supplied name."""
+    is_match, _, _ = _sanctions.check_name(name)
+    return is_match
 
 
 # ── Redis-Backed Velocity ─────────────────────────────────────────────────────

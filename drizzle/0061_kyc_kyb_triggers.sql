@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS kyc_trigger_events (
   trigger_type      kyc_trigger_type NOT NULL,
   entity_type       kyc_entity_type NOT NULL DEFAULT 'user',
   entity_id         VARCHAR(255) NOT NULL,
-  user_id           UUID REFERENCES users(id) ON DELETE CASCADE,
+  user_id           INTEGER REFERENCES users(id) ON DELETE CASCADE,
   business_id       UUID,
   amount            DECIMAL(20, 8),
   currency          VARCHAR(10),
@@ -64,7 +64,7 @@ CREATE INDEX IF NOT EXISTS kyc_trigger_events_entity_idx ON kyc_trigger_events(e
 -- KYC Freeze Log — log of all account freezes and unfreezes
 CREATE TABLE IF NOT EXISTS kyc_freeze_log (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   business_id       UUID,
   freeze_reason     kyc_freeze_reason NOT NULL,
   frozen_by         VARCHAR(255) NOT NULL DEFAULT 'system',
@@ -90,7 +90,7 @@ CREATE POLICY kyc_freeze_log_tenant_policy ON kyc_freeze_log
 -- KYC Re-KYC Schedule — scheduled re-KYC events
 CREATE TABLE IF NOT EXISTS kyc_rekyc_schedule (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id           UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   kyc_tier          INTEGER NOT NULL DEFAULT 0,
   schedule_reason   VARCHAR(100) NOT NULL,
   due_at            TIMESTAMPTZ NOT NULL,
@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS kyb_trigger_events (
   id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   trigger_type          VARCHAR(100) NOT NULL,
   business_id           UUID NOT NULL,
-  user_id               UUID REFERENCES users(id),
+  user_id               INTEGER REFERENCES users(id),
   correlation_id        UUID NOT NULL DEFAULT gen_random_uuid(),
   status                kyc_trigger_status NOT NULL DEFAULT 'fired',
   workflow_id           VARCHAR(255),

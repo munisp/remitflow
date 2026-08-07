@@ -608,8 +608,11 @@ func (r *MLSmartRouter) applyExploration(candidates []*RoutingDecision) *Routing
 	// With probability epsilon, explore (random selection)
 	// With probability 1-epsilon, exploit (best selection)
 	if len(candidates) > 1 && time.Now().UnixNano()%100 < int64(r.mlConfig.ExplorationRate*100) {
-		// Explore: select randomly from top 3
-		maxIdx := min(3, len(candidates))
+		// Explore: select randomly from the top three candidates.
+		maxIdx := len(candidates)
+		if maxIdx > 3 {
+			maxIdx = 3
+		}
 		randomIdx := int(time.Now().UnixNano() % int64(maxIdx))
 		return candidates[randomIdx]
 	}

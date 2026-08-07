@@ -34,7 +34,7 @@ CREATE INDEX IF NOT EXISTS webhook_endpoints_tenant_idx ON webhook_endpoints(ten
 -- ── Webhook delivery logs ─────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS webhook_delivery_logs (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  webhook_id   UUID NOT NULL REFERENCES webhook_endpoints(id) ON DELETE CASCADE,
+  webhook_id   INTEGER NOT NULL REFERENCES webhook_endpoints(id) ON DELETE CASCADE,
   event        TEXT NOT NULL,
   payload      JSONB,
   status_code  INTEGER,

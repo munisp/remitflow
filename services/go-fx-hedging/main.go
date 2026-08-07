@@ -43,17 +43,23 @@ var (
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type ForwardContract struct {
-	ID            string  `json:"id"`
-	UserID        int64   `json:"user_id"`
-	FromCurrency  string  `json:"from_currency"`
-	ToCurrency    string  `json:"to_currency"`
-	NotionalUSD   float64 `json:"notional_usd"`
-	ForwardRate   float64 `json:"forward_rate"`
-	SpotRateAtEntry float64 `json:"spot_rate_at_entry"`
-	SettlementDate int64   `json:"settlement_date"`
-	Status        string  `json:"status"` // active | settled | cancelled
-	PnL           float64 `json:"pnl_usd"`
-	CreatedAt     int64   `json:"created_at"`
+	ID              string    `json:"id"`
+	UserID          int64     `json:"user_id"`
+	FromCurrency    string    `json:"from_currency"`
+	ToCurrency      string    `json:"to_currency"`
+	NotionalUSD     float64   `json:"notional_usd"`
+	ForwardRate     float64   `json:"forward_rate"`
+	SpotRateAtEntry float64   `json:"spot_rate_at_entry"`
+	SettlementDate  int64     `json:"settlement_date"`
+	Status          string    `json:"status"` // active | settled | cancelled
+	PnL             float64   `json:"pnl_usd"`
+	CreatedAt       int64     `json:"created_at"`
+	// Validated risk-contract fields used by the hedging engine.
+	Notional        float64   `json:"notional,omitempty"`
+	CurrencyPair    string    `json:"currency_pair,omitempty"`
+	ExpiryDate      time.Time `json:"expiry_date,omitempty"`
+	ContractRate    float64   `json:"contract_rate,omitempty"`
+	Direction       string    `json:"direction,omitempty"`
 }
 
 type FxOption struct {

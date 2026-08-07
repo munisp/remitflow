@@ -238,7 +238,6 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
     Ok(())
 }
 
-#[actix_web::main]
 async fn load_from_db(pool: &PgPool) {
     match sqlx::query_as::<_, (String, serde_json::Value)>(
         "SELECT id, data FROM idempotency_state ORDER BY updated_at DESC LIMIT 1000"
@@ -254,6 +253,7 @@ async fn load_from_db(pool: &PgPool) {
     }
 }
 
+#[actix_web::main]
 async fn main() -> std::io::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         let msg = info.payload().downcast_ref::<&str>().copied()
@@ -274,6 +274,7 @@ async fn main() -> std::io::Result<()> {
 
     let state = web::Data::new(AppState {
         store: Mutex::new(HashMap::new()),
+        db_pool: Some(pool.clone()),
     });
 
     // Background cleanup every 5 minutes

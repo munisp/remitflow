@@ -3,6 +3,7 @@ import json
 import os
 import pickle
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -14,7 +15,23 @@ MODELS_DIR = Path(__file__).parent / "models"
 
 
 class TestModelTraining(unittest.TestCase):
-    """Verify trained models exist and produce valid scores."""
+    """Verify the local CPU training workflow produces usable model artifacts."""
+
+    @classmethod
+    def setUpClass(cls):
+        global MODELS_DIR
+        import train_models
+
+        cls._temporary_models = tempfile.TemporaryDirectory()
+        MODELS_DIR = Path(cls._temporary_models.name)
+        train_models.MODELS_DIR = MODELS_DIR
+        train_models.train_isolation_forest()
+        train_models.train_login_velocity_model()
+        train_models.train_beneficiary_change_model()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._temporary_models.cleanup()
 
     def test_isolation_forest_model_exists(self):
         model_path = MODELS_DIR / "isolation_forest.pkl"

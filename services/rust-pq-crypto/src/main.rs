@@ -19,6 +19,7 @@ use std::net::TcpListener;
 use postgres::{Client, NoTls};
 
 static DB_CLIENT: std::sync::OnceLock<Mutex<Client>> = std::sync::OnceLock::new();
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 fn init_db() {
     let dsn = std::env::var("DATABASE_URL")

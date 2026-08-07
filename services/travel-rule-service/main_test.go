@@ -229,15 +229,6 @@ func calculateRiskScore(origCountry, beneCountry string, amount float64, assetTy
 	return score
 }
 
-func requiresTravelRule(amount float64, currency string) bool {
-	fxRates := map[string]float64{"GBP": 1.27, "EUR": 1.09, "USD": 1.0}
-	rate, ok := fxRates[currency]
-	if !ok {
-		rate = 1.0
-	}
-	return amount*rate >= 1000.0
-}
-
 func isValidStatus(s string) bool {
 	valid := map[string]bool{
 		"pending": true, "sent": true, "acknowledged": true,

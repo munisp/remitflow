@@ -250,11 +250,32 @@ func initDB() {
 		settled_at TIMESTAMPTZ,
 		metadata JSONB DEFAULT '{}'
 	)`)
+	if err == nil {
+		_, err = db.Exec(`CREATE TABLE IF NOT EXISTS fiat_rail_state (
+			state_key TEXT PRIMARY KEY,
+			state_value JSONB NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`)
+	}
 	if err != nil {
 		slog.Error("[FIAT-RAILS] Table creation failed", "error", err)
 	} else {
 		slog.Info("[FIAT-RAILS] PostgreSQL ready")
 	}
+}
+
+func dbUpsert(key string, value interface{}) error {
+	if db == nil {
+		return fmt.Errorf("fiat rail database is unavailable")
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`INSERT INTO fiat_rail_state (state_key, state_value, updated_at)
+		VALUES ($1, $2::jsonb, NOW())
+		ON CONFLICT (state_key) DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = NOW()`, key, string(payload))
+	return err
 }
 
 func persistPayout(p PayoutResult, req PayoutRequest) {

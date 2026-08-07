@@ -334,9 +334,10 @@ async function startServer() {
   // PIX + UPI + CIPS + Mojaloop + SWIFT payment rail webhooks
   registerPaymentRailWebhooks(app);
 
-  // OpenAPI/Swagger documentation — serves spec at /api/docs and /api/docs.json
+  // OpenAPI/Swagger documentation — serves the generated contract at the
+  // canonical /api/docs.json endpoint and the public SDK-compatible /openapi.json alias.
   const { generateOpenApiSpec } = await import("../lib/openapi");
-  app.get("/api/docs.json", (_req, res) => {
+  app.get(["/api/docs.json", "/openapi.json"], (_req, res) => {
     res.json(generateOpenApiSpec());
   });
   app.get("/api/docs", (_req, res) => {

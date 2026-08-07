@@ -163,7 +163,7 @@ func handleIngest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	entry.ID = fmt.Sprintf("audit_%s_%d", time.Now().Format("20060102150405"), store.entries)
+	entry.ID = fmt.Sprintf("audit_%s_%d", time.Now().Format("20060102150405"), len(store.entries))
 	if entry.Timestamp == "" {
 		entry.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}

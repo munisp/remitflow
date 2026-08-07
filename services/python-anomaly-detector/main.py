@@ -48,14 +48,17 @@ API:
   GET  /health               — Liveness probe
 """
 
+import logging
 import math
+import signal
 import time
+from datetime import datetime, timezone
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from pydantic import BaseModel
 from sklearn.ensemble import IsolationForest
 
@@ -127,6 +130,11 @@ def db_log_event(event_type: str, payload: dict):
             (event_type, psycopg2.extras.Json(payload))
         )
 # ── End PostgreSQL persistence ──────────────────────────────────────────
+
+
+def _db_ensure_tables(_service_name: str) -> None:
+    """Initialise the versioned service persistence connection during startup."""
+    _get_db()
 
 
 app = FastAPI(title="RemitFlow Anomaly Detector", version="1.0.0")

@@ -79,7 +79,7 @@ struct AppState {
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(db_pool: Option<PgPool>) -> Self {
         let mut corridor_fees = HashMap::new();
         let mut rail_fees = HashMap::new();
         let mut tier_discounts = HashMap::new();
@@ -149,7 +149,7 @@ impl AppState {
             });
         }
 
-        Self { corridor_fees, rail_fees, tier_discounts }
+        Self { corridor_fees, rail_fees, tier_discounts, db_pool }
     }
 }
 
@@ -365,7 +365,6 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
     Ok(())
 }
 
-#[actix_web::main]
 async fn load_from_db(pool: &PgPool) {
     match sqlx::query_as::<_, (String, serde_json::Value)>(
         "SELECT id, data FROM fee_engine_state ORDER BY updated_at DESC LIMIT 1000"
@@ -381,6 +380,7 @@ async fn load_from_db(pool: &PgPool) {
     }
 }
 
+#[actix_web::main]
 async fn main() -> std::io::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         let msg = info.payload().downcast_ref::<&str>().copied()

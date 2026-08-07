@@ -1,0 +1,48 @@
+services:
+  go-verifier:
+    image: golang:1.25-bookworm
+    network_mode: host
+    user: "1000:1000"
+    working_dir: /workspace
+    environment:
+      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/remitflow_test
+      REDIS_URL: redis://127.0.0.1:6379
+      PERMIFY_HTTP_URL: http://127.0.0.1:3476
+      GOMODCACHE: /workspace/.audit/container-validation/go-modcache
+      GOCACHE: /workspace/.audit/container-validation/go-buildcache
+    volumes:
+      - ../..:/workspace
+    command: ["bash", "qa/container-validation/run-language-suite.sh", "go"]
+
+  rust-verifier:
+    image: rust:1.94-bookworm
+    network_mode: host
+    user: "1000:1000"
+    working_dir: /workspace
+    environment:
+      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/remitflow_test
+      REDIS_URL: redis://127.0.0.1:6379
+      PERMIFY_HTTP_URL: http://127.0.0.1:3476
+      CARGO_HOME: /workspace/.audit/container-validation/cargo-home
+      CARGO_TARGET_DIR: /workspace/.audit/container-validation/cargo-target
+    volumes:
+      - ../..:/workspace
+    command: ["bash", "qa/container-validation/run-language-suite.sh", "rust"]
+
+  python-verifier:
+    build:
+      context: .
+      dockerfile: Dockerfile.python
+      network: host
+    network_mode: host
+    user: "1000:1000"
+    working_dir: /workspace
+    environment:
+      DATABASE_URL: postgresql://test:test@127.0.0.1:5432/remitflow_test
+      REDIS_URL: redis://127.0.0.1:6379
+      PERMIFY_HTTP_URL: http://127.0.0.1:3476
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../..:/workspace
+    command: ["bash", "qa/container-validation/run-language-suite.sh", "python"]

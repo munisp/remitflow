@@ -137,90 +137,104 @@ BEGIN
   END LOOP;
 END $$;
 
--- ── RLS Policies: transfers ───────────────────────────────────────────────────
-DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='transfers') THEN
-    DROP POLICY IF EXISTS transfers_tenant_isolation ON transfers;
-    CREATE POLICY transfers_tenant_isolation ON transfers
-      USING (
-        app_bypass_rls()
-        OR tenant_id = app_current_tenant_id()
-        OR user_id   = app_current_user_id()
-      );
-  END IF;
+-- ── Canonical RLS policies across the mixed legacy schema ─────────────────────
+-- Some pre-0051 relations use camelCase (`userId`), while newer relations use
+-- snake_case (`user_id`). Resolve the physical column names before creating the
+-- policy so PostgreSQL remains the final, fail-closed tenant-isolation boundary.
+DO $$
+DECLARE
+  t TEXT;
+  tenant_column TEXT;
+  user_column TEXT;
+  predicate TEXT;
+  scoped_tables TEXT[] := ARRAY[
+    'transfers', 'wallets', 'beneficiaries', 'kyc_records',
+    'webhook_endpoints', 'developer_api_keys', 'fx_hedging_positions',
+    'cost_attribution_entries', 'chaos_experiments',
+    'compliance_transaction_scores', 'slo_events', 'slo_reports'
+  ];
+BEGIN
+  FOREACH t IN ARRAY scoped_tables LOOP
+    IF EXISTS (
+      SELECT 1 FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = t
+    ) THEN
+      SELECT column_name INTO tenant_column
+        FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = t
+         AND column_name IN ('tenant_id', 'tenantId')
+       ORDER BY CASE column_name WHEN 'tenant_id' THEN 0 ELSE 1 END
+       LIMIT 1;
+      SELECT column_name INTO user_column
+        FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND table_name = t
+         AND column_name IN ('user_id', 'userId')
+       ORDER BY CASE column_name WHEN 'user_id' THEN 0 ELSE 1 END
+       LIMIT 1;
+
+      IF tenant_column IS NOT NULL OR user_column IS NOT NULL THEN
+        predicate := 'app_bypass_rls()';
+        IF tenant_column IS NOT NULL THEN
+          predicate := predicate || format(' OR %I::text = app_current_tenant_id()', tenant_column);
+        END IF;
+        IF user_column IS NOT NULL THEN
+          predicate := predicate || format(' OR %I::text = app_current_user_id()::text', user_column);
+        END IF;
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %I', t);
+        EXECUTE format(
+          'CREATE POLICY tenant_isolation ON %I USING (%s) WITH CHECK (%s)',
+          t,
+          predicate,
+          predicate
+        );
+      END IF;
+    END IF;
+  END LOOP;
 END $$;
 
--- ── RLS Policies: wallets ─────────────────────────────────────────────────────
-DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='wallets') THEN
-    DROP POLICY IF EXISTS wallets_tenant_isolation ON wallets;
-    CREATE POLICY wallets_tenant_isolation ON wallets
-      USING (
-        app_bypass_rls()
-        OR user_id = app_current_user_id()
-      );
-  END IF;
-END $$;
-
--- ── RLS Policies: beneficiaries ───────────────────────────────────────────────
-DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='beneficiaries') THEN
-    DROP POLICY IF EXISTS beneficiaries_tenant_isolation ON beneficiaries;
-    CREATE POLICY beneficiaries_tenant_isolation ON beneficiaries
-      USING (
-        app_bypass_rls()
-        OR user_id = app_current_user_id()
-      );
-  END IF;
-END $$;
-
--- ── RLS Policies: webhook_endpoints ──────────────────────────────────────────
-DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='webhook_endpoints') THEN
-    DROP POLICY IF EXISTS webhook_endpoints_tenant_isolation ON webhook_endpoints;
-    CREATE POLICY webhook_endpoints_tenant_isolation ON webhook_endpoints
-      USING (
-        app_bypass_rls()
-        OR tenant_id = app_current_tenant_id()
-        OR user_id   = app_current_user_id()
-      );
-  END IF;
-END $$;
-
--- ── RLS Policies: developer_api_keys ─────────────────────────────────────────
-DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='developer_api_keys') THEN
-    DROP POLICY IF EXISTS developer_api_keys_tenant_isolation ON developer_api_keys;
-    CREATE POLICY developer_api_keys_tenant_isolation ON developer_api_keys
-      USING (
-        app_bypass_rls()
-        OR tenant_id = app_current_tenant_id()
-        OR user_id   = app_current_user_id()
-      );
-  END IF;
-END $$;
-
--- ── RLS Policies: fx_hedging_positions ───────────────────────────────────────
-DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='fx_hedging_positions') THEN
-    DROP POLICY IF EXISTS fx_hedging_positions_tenant_isolation ON fx_hedging_positions;
-    CREATE POLICY fx_hedging_positions_tenant_isolation ON fx_hedging_positions
-      USING (
-        app_bypass_rls()
-        OR tenant_id = app_current_tenant_id()
-      );
-  END IF;
-END $$;
-
--- ── RLS Policies: cost_attribution_entries ────────────────────────────────────
-DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='cost_attribution_entries') THEN
-    DROP POLICY IF EXISTS cost_attribution_entries_tenant_isolation ON cost_attribution_entries;
-    CREATE POLICY cost_attribution_entries_tenant_isolation ON cost_attribution_entries
-      USING (
-        app_bypass_rls()
-        OR tenant_id = app_current_tenant_id()
-      );
+-- Delivery logs inherit ownership from their webhook endpoint; they have no direct
+-- tenant or user column and therefore require a parent-scoped policy.
+DO $$
+DECLARE
+  tenant_column TEXT;
+  user_column TEXT;
+  endpoint_predicate TEXT := 'app_bypass_rls()';
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = 'webhook_delivery_logs'
+  ) AND EXISTS (
+    SELECT 1 FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = 'webhook_endpoints'
+  ) THEN
+    SELECT column_name INTO tenant_column
+      FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'webhook_endpoints'
+       AND column_name IN ('tenant_id', 'tenantId')
+     ORDER BY CASE column_name WHEN 'tenant_id' THEN 0 ELSE 1 END
+     LIMIT 1;
+    SELECT column_name INTO user_column
+      FROM information_schema.columns
+     WHERE table_schema = 'public'
+       AND table_name = 'webhook_endpoints'
+       AND column_name IN ('user_id', 'userId')
+     ORDER BY CASE column_name WHEN 'user_id' THEN 0 ELSE 1 END
+     LIMIT 1;
+    IF tenant_column IS NOT NULL THEN
+      endpoint_predicate := endpoint_predicate || format(' OR endpoint.%I::text = app_current_tenant_id()', tenant_column);
+    END IF;
+    IF user_column IS NOT NULL THEN
+      endpoint_predicate := endpoint_predicate || format(' OR endpoint.%I::text = app_current_user_id()::text', user_column);
+    END IF;
+    EXECUTE 'DROP POLICY IF EXISTS tenant_isolation ON webhook_delivery_logs';
+    EXECUTE format(
+      'CREATE POLICY tenant_isolation ON webhook_delivery_logs USING (EXISTS (SELECT 1 FROM webhook_endpoints AS endpoint WHERE endpoint.id = webhook_id AND (%s))) WITH CHECK (EXISTS (SELECT 1 FROM webhook_endpoints AS endpoint WHERE endpoint.id = webhook_id AND (%s)))',
+      endpoint_predicate,
+      endpoint_predicate
+    );
   END IF;
 END $$;
 
