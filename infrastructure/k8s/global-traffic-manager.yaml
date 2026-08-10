@@ -1,0 +1,91 @@
+# RemitFlow Global Traffic Manager Configuration
+# Routes users to nearest compliant region based on origin and data residency requirements
+
+regions:
+  eu:
+    endpoint: https://api.eu.remitflow.com
+    data_residency: EU
+    compliance: [GDPR, FCA]
+    countries: [GB, DE, FR, NL, ES, IT, IE, SE, DK, FI, NO, AT, BE, PT, LU, MT, CY, EE, LV, LT, PL, CZ, SK, HU, SI, HR, RO, BG, GR]
+    health_check:
+      path: /health
+      interval: 10s
+      timeout: 5s
+      healthy_threshold: 2
+      unhealthy_threshold: 3
+
+  us:
+    endpoint: https://api.us.remitflow.com
+    data_residency: US
+    compliance: [FinCEN, OFAC, BSA]
+    countries: [US, CA]
+    health_check:
+      path: /health
+      interval: 10s
+      timeout: 5s
+      healthy_threshold: 2
+      unhealthy_threshold: 3
+
+  default:
+    endpoint: https://api.eu.remitflow.com
+    data_residency: EU
+    compliance: [GDPR]
+
+routing_rules:
+  - name: gdpr_mandated
+    condition: "user.country IN eu.countries"
+    action: "route_to: eu"
+    priority: 1
+
+  - name: us_regulated
+    condition: "user.country IN ['US', 'CA']"
+    action: "route_to: us"
+    priority: 2
+
+  - name: data_residency
+    condition: "user.data_residency_preference == 'EU'"
+    action: "route_to: eu"
+    priority: 3
+
+  - name: latency_based
+    condition: "default"
+    action: "route_to_nearest"
+    priority: 10
+
+failover:
+  eu_to_us: true   # Allow EU traffic to US during EU outage (with GDPR warning)
+  us_to_eu: false  # Never route US traffic to EU (FinCEN requirement)
+
+  gdpr_fallback:
+    enabled: true
+    warning_header: "X-GDPR-Fallback: true"
+    user_consent_required: true
+    max_duration_hours: 4
+
+cross_region_replication:
+  enabled: true
+  method: "async"
+  lag_threshold_seconds: 5
+  conflict_resolution: "timestamp_wins"
+
+  excluded_tables:
+    - mfa_methods        # Never replicate MFA secrets
+    - mfa_challenges     # Session-bound
+    - kyc_liveness_sessions  # Contains biometric data
+    - sar_attachments    # Jurisdiction-specific
+
+data_classification:
+  public: [fx_rates, fx_quotes]
+  internal: [transactions, accounts]
+  confidential: [screening_alerts, aml_scores]
+  restricted: [mfa_methods, kyc_liveness_sessions, sar_reports, travel_rule_messages]
+
+encryption:
+  in_transit: TLS_1_3
+  at_rest: AES_256_GCM
+  key_management: AWS_KMS_REGION_ISOLATED  # Each region has its own KMS key
+
+  cross_region:
+    method: "re_encrypt"
+    source_region_kms: true
+    target_region_kms: true

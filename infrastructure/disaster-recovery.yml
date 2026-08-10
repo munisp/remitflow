@@ -1,0 +1,66 @@
+# RemitFlow Disaster Recovery Configuration
+# PostgreSQL Streaming Replication + Automated Failover
+
+# Primary Database (Region A)
+primary:
+  host: db-primary.remitflow.com
+  port: 5432
+  ssl_mode: require
+  max_connections: 500
+  wal_level: replica
+  max_wal_senders: 10
+  max_replication_slots: 10
+  synchronous_commit: remote_apply
+  synchronous_standby_names: "db-replica-1, db-replica-2"
+
+# Replica Database (Region B - Cross-region DR)
+replica:
+  host: db-replica.remitflow.com
+  port: 5432
+  ssl_mode: require
+  hot_standby: on
+  hot_standby_feedback: on
+  primary_conninfo: "host=db-primary.remitflow.com port=5432 user=replicator sslmode=require"
+  primary_slot_name: remitflow_replica_slot
+  recovery_target_timeline: latest
+
+# Automated Failover (Patroni + etcd)
+failover:
+  enabled: true
+  method: patroni
+  dcs: etcd  # or consul, zookeeper
+  etcd_hosts:
+    - etcd-1.remitflow.com:2379
+    - etcd-2.remitflow.com:2379
+    - etcd-3.remitflow.com:2379
+  ttl: 30
+  loop_wait: 10
+  retry_timeout: 10
+  maximum_lag_on_failover: 1048576  # 1MB
+
+# Backup Strategy
+backup:
+  method: pgBackRest
+  retention_full: 4  # Keep 4 full backups
+  retention_diff: 7  # Keep 7 differential backups
+  schedule:
+    full: "0 2 * * 0"   # Sundays at 2 AM
+    diff: "0 2 * * 1-6" # Mon-Sat at 2 AM
+  archive_mode: on
+  archive_command: "pgbackrest --stanza=remitflow archive-push %p"
+  restore_command: "pgbackrest --stanza=remitflow archive-get %f %p"
+  s3_bucket: remitflow-backups-prod
+  s3_region: eu-west-1
+  encryption: AES-256
+
+# Point-in-Time Recovery (PITR)
+pitr:
+  enabled: true
+  recovery_target_action: promote
+  min_recovery_apply_delay: "0s"
+
+# Monitoring
+monitoring:
+  replication_lag_threshold_ms: 5000
+  failover_alert_webhook: https://alerts.remitflow.com/dr
+  health_check_interval: 5s

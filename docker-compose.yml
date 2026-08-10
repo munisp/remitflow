@@ -28,6 +28,39 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─── Kafka (for local dev; use managed Kafka in production) ───────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: remitflow-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      - zookeeper
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: remitflow-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
 
   # ─── Compliance ML ────────────────────────────────────────────────────────
   compliance-ml:
@@ -42,8 +75,11 @@ services:
       - COMPLYADVANTAGE_API_KEY=${COMPLYADVANTAGE_API_KEY}
       - DOWJONES_API_KEY=${DOWJONES_API_KEY}
       - DOWJONES_API_SECRET=${DOWJONES_API_SECRET}
+      - REDIS_URL=redis://redis:6379
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -63,10 +99,13 @@ services:
     environment:
       - DATABASE_URL=postgresql://remitflow:remitflow123@postgres:5432/remitflow
       - UNIFACE_MODEL_PATH=/models/minifasnet.onnx
+      - REDIS_URL=redis://redis:6379
     volumes:
       - ./models:/models:ro
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -87,10 +126,13 @@ services:
       - DATABASE_URL=postgresql://remitflow:remitflow123@postgres:5432/remitflow
       - MODEL_PATH=/models/aml_model.joblib
       - MODEL_METADATA_PATH=/models/aml_model_metadata.json
+      - REDIS_URL=redis://redis:6379
     volumes:
       - ./models:/models:ro
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -111,8 +153,11 @@ services:
       - DATABASE_URL=postgresql://remitflow:remitflow123@postgres:5432/remitflow
       - EXCHANGERATE_API_KEY=${EXCHANGERATE_API_KEY}
       - OPENEXCHANGERATES_APP_ID=${OPENEXCHANGERATES_APP_ID}
+      - REDIS_URL=redis://redis:6379
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -131,11 +176,14 @@ services:
       - "8092:8092"
     environment:
       - DATABASE_URL=postgresql://remitflow:remitflow123@postgres:5432/remitflow
-      - CORE_BANKING_BASE_URL=${CORE_BANKING_BASE_URL}
-      - CORE_BANKING_API_KEY=${CORE_BANKING_API_KEY}
-      - CORE_BANKING_API_SECRET=${CORE_BANKING_API_SECRET}
+      - TREASURY_PRIME_API_KEY=${TREASURY_PRIME_API_KEY}
+      - TREASURY_PRIME_API_SECRET=${TREASURY_PRIME_API_SECRET}
+      - TREASURY_PRIME_BASE_URL=${TREASURY_PRIME_BASE_URL}
+      - REDIS_URL=redis://redis:6379
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -155,12 +203,124 @@ services:
     environment:
       - DATABASE_URL=postgresql://remitflow:remitflow123@postgres:5432/remitflow
       - PORT=8081
+      - REDIS_URL=redis://redis:6379
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── Travel Rule ──────────────────────────────────────────────────────────
+  travel-rule:
+    build:
+      context: ./services/travel-rule
+      dockerfile: Dockerfile
+    container_name: remitflow-travel-rule
+    ports:
+      - "8098:8098"
+    environment:
+      - DATABASE_URL=postgresql://remitflow:remitflow123@postgres:5432/remitflow
+      - TRISA_ENDPOINT=${TRISA_ENDPOINT}
+      - SYGNA_API_KEY=${SYGNA_API_KEY}
+      - SYGNA_API_SECRET=${SYGNA_API_SECRET}
+      - OPENVASP_NODE_ID=${OPENVASP_NODE_ID}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8098/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── SAR Filing ───────────────────────────────────────────────────────────
+  sar-filing:
+    build:
+      context: ./services/sar-filing
+      dockerfile: Dockerfile
+    container_name: remitflow-sar-filing
+    ports:
+      - "8099:8099"
+    environment:
+      - DATABASE_URL=postgresql://remitflow:remitflow123@postgres:5432/remitflow
+      - NCA_API_KEY=${NCA_API_KEY}
+      - NCA_API_SECRET=${NCA_API_SECRET}
+      - FINCEN_API_KEY=${FINCEN_API_KEY}
+      - FINCEN_API_SECRET=${FINCEN_API_SECRET}
+      - JURISDICTION=${JURISDICTION:-GB}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8099/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── Kafka Streaming ──────────────────────────────────────────────────────
+  kafka-streaming:
+    build:
+      context: ./services/kafka-streaming
+      dockerfile: Dockerfile
+    container_name: remitflow-kafka-streaming
+    ports:
+      - "8100:8100"
+    environment:
+      - DATABASE_URL=postgresql://remitflow:remitflow123@postgres:5432/remitflow
+      - KAFKA_BROKERS=kafka:29092
+      - KAFKA_SECURITY_PROTOCOL=PLAINTEXT
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ─── MFA Service ──────────────────────────────────────────────────────────
+  mfa-service:
+    build:
+      context: ./services/mfa-service
+      dockerfile: Dockerfile
+    container_name: remitflow-mfa-service
+    ports:
+      - "8101:8101"
+    environment:
+      - DATABASE_URL=postgresql://remitflow:remitflow123@postgres:5432/remitflow
+      - MFA_ISSUER_NAME=RemitFlow
+      - WEBAUTHN_RP_ID=remitflow.com
+      - WEBAUTHN_RP_NAME=RemitFlow
+      - WEBAUTHN_ORIGIN=https://admin.remitflow.com
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8101/health"]
       interval: 10s
       timeout: 5s
       retries: 3

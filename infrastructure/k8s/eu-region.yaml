@@ -1,0 +1,150 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remitflow-eu
+  namespace: production
+  labels:
+    app: remitflow
+    region: eu
+    compliance: gdpr
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: remitflow
+      region: eu
+  template:
+    metadata:
+      labels:
+        app: remitflow
+        region: eu
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: topology.kubernetes.io/region
+                operator: In
+                values: ["eu-west-1", "eu-west-2"]
+      containers:
+      - name: compliance-ml
+        image: remitflow/compliance-ml:v2.0
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: eu-db-credentials
+              key: url
+        - name: COMPLYADVANTAGE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: eu-api-keys
+              key: complyadvantage
+        - name: JURISDICTION
+          value: "EU"
+        - name: GDPR_MODE
+          value: "strict"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8097
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8097
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      - name: transaction-processor
+        image: remitflow/rust-transaction-processor:v2.0
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: eu-db-credentials
+              key: url
+        - name: REDIS_URL
+          valueFrom:
+            secretKeyRef:
+              name: eu-cache-credentials
+              key: url
+        ports:
+        - containerPort: 8081
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      - name: encryption-at-rest
+        image: remitflow/encryption-at-rest:v2.0
+        env:
+        - name: AWS_KMS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: eu-kms-keys
+              key: primary
+        - name: GDPR_MODE
+          value: "strict"
+      volumes:
+      - name: tls-certs
+        secret:
+          secretName: eu-tls-certs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: remitflow-eu-service
+  namespace: production
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+spec:
+  type: LoadBalancer
+  selector:
+    app: remitflow
+    region: eu
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8081
+  - name: https
+    port: 443
+    targetPort: 8443
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: remitflow-eu-ingress
+  namespace: production
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "1000"
+spec:
+  tls:
+  - hosts:
+    - api.eu.remitflow.com
+    secretName: eu-tls-secret
+  rules:
+  - host: api.eu.remitflow.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: remitflow-eu-service
+            port:
+              number: 80

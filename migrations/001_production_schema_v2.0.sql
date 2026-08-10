@@ -1,5 +1,5 @@
 -- =============================================================================
--- RemitFlow Production Database Migration v2.0
+-- RemitFlow Production Database Migration v2.0 — Complete Schema
 -- Run this BEFORE starting any services
 -- =============================================================================
 
@@ -112,9 +112,39 @@ CREATE TABLE IF NOT EXISTS core_banking_events (
     account_id TEXT,
     payload JSONB,
     provider_response JSONB,
+    error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_cb_events_type ON core_banking_events(event_type, created_at);
+
+CREATE TABLE IF NOT EXISTS core_banking_accounts (
+    account_id TEXT PRIMARY KEY,
+    tp_account_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    account_type TEXT NOT NULL DEFAULT 'checking',
+    currency TEXT NOT NULL DEFAULT 'USD',
+    status TEXT NOT NULL DEFAULT 'active',
+    balance_cents BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cb_accounts_user ON core_banking_accounts(user_id);
+CREATE INDEX IF NOT EXISTS idx_cb_accounts_status ON core_banking_accounts(status);
+
+CREATE TABLE IF NOT EXISTS core_banking_transfers (
+    transfer_id TEXT PRIMARY KEY,
+    tp_transfer_id TEXT,
+    source_account_id TEXT NOT NULL,
+    destination_account_id TEXT NOT NULL,
+    amount_cents BIGINT NOT NULL,
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    reference TEXT,
+    provider_response JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cb_transfers_status ON core_banking_transfers(status);
 
 -- ─── Rust Transaction Processor (Double-Entry Ledger) ───────────────────────
 CREATE TABLE IF NOT EXISTS accounts (
@@ -174,6 +204,145 @@ CREATE TABLE IF NOT EXISTS settlement_events (
 CREATE INDEX IF NOT EXISTS idx_settlement_tx ON settlement_events(transaction_id);
 CREATE INDEX IF NOT EXISTS idx_settlement_type ON settlement_events(event_type, created_at);
 
+-- ─── Travel Rule ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS travel_rule_messages (
+    id BIGSERIAL PRIMARY KEY,
+    message_id TEXT UNIQUE NOT NULL,
+    transaction_id TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    originator_vasp TEXT,
+    beneficiary_vasp TEXT,
+    originator_data JSONB,
+    beneficiary_data JSONB,
+    amount REAL NOT NULL,
+    currency TEXT NOT NULL,
+    raw_payload JSONB,
+    response_payload JSONB,
+    error_message TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_tr_tx ON travel_rule_messages(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_tr_status ON travel_rule_messages(status);
+
+CREATE TABLE IF NOT EXISTS travel_rule_vasps (
+    vasp_id TEXT PRIMARY KEY,
+    vasp_name TEXT NOT NULL,
+    vasp_did TEXT,
+    trisa_endpoint TEXT,
+    sygna_vasp_code TEXT,
+    openvasp_node_id TEXT,
+    supported_protocols TEXT[],
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ─── SAR Filing ─────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS sar_reports (
+    sar_id TEXT PRIMARY KEY,
+    transaction_id TEXT,
+    user_id TEXT,
+    jurisdiction TEXT NOT NULL,
+    filing_status TEXT NOT NULL DEFAULT 'draft',
+    nca_reference TEXT,
+    fincen_boid TEXT,
+    risk_score REAL,
+    risk_factors TEXT[],
+    amount_usd REAL,
+    sender_country TEXT,
+    receiver_country TEXT,
+    narrative TEXT,
+    raw_submission JSONB,
+    fiu_response JSONB,
+    error_message TEXT,
+    filed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sar_tx ON sar_reports(transaction_id);
+CREATE INDEX IF NOT EXISTS idx_sar_status ON sar_reports(filing_status);
+CREATE INDEX IF NOT EXISTS idx_sar_jurisdiction ON sar_reports(jurisdiction);
+
+CREATE TABLE IF NOT EXISTS sar_attachments (
+    attachment_id BIGSERIAL PRIMARY KEY,
+    sar_id TEXT NOT NULL REFERENCES sar_reports(sar_id),
+    file_name TEXT NOT NULL,
+    file_type TEXT NOT NULL,
+    file_data BYTEA,
+    file_hash TEXT,
+    uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ─── Kafka Streaming ────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS kafka_dlq (
+    id BIGSERIAL PRIMARY KEY,
+    topic TEXT NOT NULL,
+    partition INT,
+    key TEXT,
+    payload JSONB NOT NULL,
+    error TEXT,
+    retry_count INT DEFAULT 0,
+    next_retry_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_dlq_topic ON kafka_dlq(topic);
+CREATE INDEX IF NOT EXISTS idx_dlq_retry ON kafka_dlq(next_retry_at) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_dlq_created ON kafka_dlq(created_at);
+
+CREATE TABLE IF NOT EXISTS kafka_events (
+    id BIGSERIAL PRIMARY KEY,
+    topic TEXT NOT NULL,
+    partition INT,
+    offset BIGINT,
+    key TEXT,
+    payload JSONB NOT NULL,
+    produced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_events_topic ON kafka_events(topic, produced_at DESC);
+
+-- ─── MFA Service ──────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS mfa_methods (
+    id BIGSERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    method_type TEXT NOT NULL CHECK (method_type IN ('totp', 'webauthn', 'backup_codes')),
+    secret TEXT,
+    public_key BYTEA,
+    credential_id BYTEA,
+    sign_count INT DEFAULT 0,
+    confirmed BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at TIMESTAMPTZ,
+    UNIQUE(user_id, method_type)
+);
+CREATE INDEX IF NOT EXISTS idx_mfa_user ON mfa_methods(user_id);
+
+CREATE TABLE IF NOT EXISTS mfa_challenges (
+    challenge_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    method_type TEXT NOT NULL,
+    challenge_data TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_mfa_challenge ON mfa_challenges(challenge_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS mfa_audit (
+    id BIGSERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    method_type TEXT NOT NULL,
+    action TEXT NOT NULL,
+    ip_address TEXT,
+    user_agent TEXT,
+    success BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_mfa_audit_user ON mfa_audit(user_id, created_at DESC);
+
 -- ─── Audit & Compliance Views ───────────────────────────────────────────────
 CREATE OR REPLACE VIEW v_transaction_audit AS
 SELECT
@@ -206,6 +375,16 @@ SELECT
 FROM screening_alerts s
 GROUP BY 1, 2, 3;
 
--- ─── Row-Level Security (Optional — enable for multi-tenant deployments) ────
--- ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
--- CREATE POLICY account_isolation ON accounts USING (user_id = current_setting('app.current_user_id'));
+CREATE OR REPLACE VIEW v_sar_overdue AS
+SELECT
+    sar_id,
+    transaction_id,
+    user_id,
+    jurisdiction,
+    filing_status,
+    created_at,
+    (created_at + INTERVAL '30 days') AS deadline,
+    NOW() - (created_at + INTERVAL '30 days') AS overdue_by
+FROM sar_reports
+WHERE filing_status IN ('draft', 'pending_manual_review')
+AND created_at < NOW() - INTERVAL '30 days';
