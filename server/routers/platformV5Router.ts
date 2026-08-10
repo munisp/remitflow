@@ -22,18 +22,18 @@ import {
   redisGet, redisSet, acquireLock, releaseLock, checkRateLimit, getRedisHealth,
 } from "../middleware/redisHardened";
 import {
-  fluvioPublish, fluvioConsume, getFluvioHealth, initFluvio,
-} from "../middleware/fluvioHardened";
+  fluvioProduce, getFluvioBridgeHealth, FluvioError,
+} from "../integrations/fluvio/streaming";
 import {
-  lakehouseWrite, lakehouseRead, getLakehouseHealth, initLakehouse,
-} from "../middleware/lakehouseHardened";
+  lakehouseWrite, lakehouseRead, getLakehouseHealth,
+} from "../lakehouse.service";
 import {
   getBridgeQuote, executeBridge, estimateGas, buildUserOperation,
   submitUserOperation, getOnChainHealth,
 } from "../middleware/onChainExecution";
 import {
   encryptField, decryptField, encryptPIIFields, enforceDataResidency,
-  validateCrossBorderTransfer, generateTraceparent, buildPropagationHeaders,
+  validateCrossBorderTransfer, generateTraceparent,
   getDataResidencyHealth,
 } from "../middleware/dataResidency";
 
@@ -485,8 +485,8 @@ export const platformV5Router = router({
   healthAll: publicProcedure.query(async () => {
     const [redis, fluvio, lakehouse, onChain, dataResidency] = await Promise.all([
       getRedisHealth(),
-      Promise.resolve(getFluvioHealth()),
-      Promise.resolve(getLakehouseHealth()),
+      getFluvioBridgeHealth(),
+      getLakehouseHealth(),
       Promise.resolve(getOnChainHealth()),
       Promise.resolve(getDataResidencyHealth()),
     ]);
@@ -532,6 +532,10 @@ export const platformV5Router = router({
     }),
 
   // ── Fluvio Operations ───────────────────────────────────────────────────────
+  // Backed by server/integrations/fluvio/streaming.ts — publishes go through the
+  // real Fluvio HTTP bridge and FAIL LOUDLY (FluvioError) when the bridge is not
+  // configured, unreachable, or rejects the record. The old in-memory ring-buffer
+  // fake (middleware/fluvioHardened.ts) has been deleted.
   fluvioPublish: protectedProcedure
     .input(z.object({
       topic: z.string(),
@@ -540,10 +544,15 @@ export const platformV5Router = router({
       smartModule: z.string().optional(),
     }))
     .mutation(async ({ input }) => {
-      return fluvioPublish(input.topic, input.key, input.value, {
-        smartModule: input.smartModule,
-        headers: buildPropagationHeaders(),
-      });
+      try {
+        await fluvioProduce(input.topic, input.key, input.value);
+        return { published: true, topic: input.topic };
+      } catch (err) {
+        if (err instanceof FluvioError) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: err.message });
+        }
+        throw err;
+      }
     }),
 
   fluvioConsume: protectedProcedure
@@ -552,10 +561,14 @@ export const platformV5Router = router({
       smartModule: z.string().optional(),
       maxRecords: z.number().default(100),
     }))
-    .query(async ({ input }) => {
-      return fluvioConsume(input.topic, {
-        smartModule: input.smartModule,
-        maxRecords: input.maxRecords,
+    .query(async () => {
+      // No real pull-consume backing exists: the previous implementation served
+      // records from an in-memory ring buffer (deleted). Fluvio consumption runs
+      // through consumer groups / the outbox worker, not ad-hoc tRPC pulls.
+      // Fail loudly instead of fabricating records.
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "[Fluvio] Ad-hoc consume is not available — consumption runs via Fluvio consumer groups and the outbox worker. The in-memory fake backing this endpoint was removed (audit F1).",
       });
     }),
 
@@ -581,7 +594,15 @@ export const platformV5Router = router({
         });
       }
 
-      return lakehouseWrite(input.table, input.data, { country: input.country });
+      try {
+        return await lakehouseWrite(input.table, input.data, { country: input.country });
+      } catch (err) {
+        logger.error({ err, table: input.table }, "[Lakehouse] Write failed");
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: (err as Error).message,
+        });
+      }
     }),
 
   lakehouseRead: protectedProcedure
@@ -591,10 +612,18 @@ export const platformV5Router = router({
       limit: z.number().default(100),
     }))
     .query(async ({ input }) => {
-      return lakehouseRead(input.table, {
-        country: input.country,
-        limit: input.limit,
-      });
+      try {
+        return await lakehouseRead(input.table, {
+          country: input.country,
+          limit: input.limit,
+        });
+      } catch (err) {
+        logger.error({ err, table: input.table }, "[Lakehouse] Read failed");
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: (err as Error).message,
+        });
+      }
     }),
 
   // ── On-Chain Operations ─────────────────────────────────────────────────────

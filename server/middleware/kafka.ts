@@ -45,6 +45,8 @@ export const KAFKA_TOPICS = {
   KYC_SANCTIONS_FREEZE: "kyc.sanctions.freeze",
   KYC_EDD_REQUIRED: "kyc.edd.required",
   KYC_REKYC_REQUIRED: "kyc.rekyc.required",
+  // ── Dead Letter Queue — failed consumer messages land here after retries ──
+  DLQ: "remitflow.dlq",
 } as const;
 
 export type KafkaTopic = typeof KAFKA_TOPICS[keyof typeof KAFKA_TOPICS];
@@ -151,8 +153,10 @@ export async function getKafkaProducer(): Promise<Producer | null> {
   try {
     _producer = getRealKafka().producer({
       allowAutoTopicCreation: true,
-      // Idempotent producer — exactlyonce semantics configured at Kafka broker level
-      // kafkajs applies idempotent: true via the Kafka protocol when maxInFlightRequests=1
+      // Idempotent producer: exactly-once per partition. Requires
+      // maxInFlightRequests=1 so retries cannot reorder batches.
+      idempotent: true,
+      maxInFlightRequests: 1,
     } as Parameters<Kafka['producer']>[0]);
     await _producer.connect();
     _isConnected = true;
@@ -172,10 +176,10 @@ export async function sendToDLQ(originalTopic: string, key: string, value: strin
   const producer = await getKafkaProducer();
   if (!producer) {
     logger.error({ originalTopic, key, error }, "[Kafka] Cannot send to DLQ — producer unavailable");
-    return;
+    throw new Error(`[Kafka] DLQ publish failed — producer unavailable (originalTopic=${originalTopic})`);
   }
   await producer.send({
-    topic: "remitflow.dlq",
+    topic: KAFKA_TOPICS.DLQ,
     messages: [{
       key,
       value: JSON.stringify({ originalTopic, originalValue: value, error, failedAt: new Date().toISOString() }),
@@ -255,7 +259,9 @@ export async function publishEvent<T>(topic: KafkaTopic | string, key: string, p
         headers: {
           'x-schema-version': Buffer.from('v1'),
           'x-source': Buffer.from('remitflow-app'),
-          'x-idempotency-key': Buffer.from(`${topic}:${key}:${Date.now()}`),
+          // Deterministic idempotency key: stable for a given (topic, aggregate/event id)
+          // so retries of the same logical event dedupe instead of duplicating.
+          'x-idempotency-key': Buffer.from(`${topic}:${key}`),
         },
       }],
     });

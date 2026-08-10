@@ -37,6 +37,36 @@ const MOJALOOP_API_KEY = mojaloopEnv("MOJALOOP_API_KEY", "remitflow-sandbox-key"
 const MOJALOOP_CALLBACK_URL =
   process.env.MOJALOOP_CALLBACK_URL ?? "https://remitflow.example.com/api/mojaloop/callback";
 
+// ─── FSPIOP JWS keys ──────────────────────────────────────────────────────────
+// MOJALOOP_JWS_PRIVATE_KEY — our RSA private key (PEM) used to sign outgoing requests.
+// MOJALOOP_JWS_PUBLIC_KEY  — the switch's RSA public key (PEM) used to verify callbacks.
+// Both accept literal PEM or a single-line env value with "\n" escapes.
+function loadPemEnv(name: string): string {
+  const raw = process.env[name];
+  if (!raw) return "";
+  return raw.includes("BEGIN") ? raw.replace(/\\n/g, "\n") : "";
+}
+
+const MOJALOOP_JWS_PRIVATE_KEY = loadPemEnv("MOJALOOP_JWS_PRIVATE_KEY");
+const MOJALOOP_JWS_PUBLIC_KEY = loadPemEnv("MOJALOOP_JWS_PUBLIC_KEY");
+
+if (IS_PRODUCTION && !MOJALOOP_JWS_PRIVATE_KEY) {
+  logger.error("[Mojaloop] CRITICAL: MOJALOOP_JWS_PRIVATE_KEY is not set in production — outbound FSPIOP calls will fail closed");
+}
+if (IS_PRODUCTION && !MOJALOOP_JWS_PUBLIC_KEY) {
+  logger.error("[Mojaloop] CRITICAL: MOJALOOP_JWS_PUBLIC_KEY is not set in production — inbound FSPIOP callbacks will be rejected");
+}
+
+/** Typed error for all Mojaloop rail failures. Never swallowed into fake success. */
+export class MojaloopError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "MojaloopError";
+    this.code = code;
+  }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface MojaloopParty {
   partyIdType: "MSISDN" | "ACCOUNT_ID" | "EMAIL" | "PERSONAL_ID" | "BUSINESS" | "DEVICE" | "IBAN" | "ALIAS";
@@ -90,33 +120,241 @@ function generateUUID(): string {
   return crypto.randomUUID();
 }
 
-function generateILPCondition(): string {
-  // In production: use ILP library to generate real condition from fulfillment
-  // For sandbox: use a deterministic SHA-256 preimage
-  const preimage = crypto.randomBytes(32);
-  const condition = crypto.createHash("sha256").update(preimage).digest("base64url");
-  return condition;
+// ─── ILPv4 packet serialization (IL-RFC-27) ──────────────────────────────────
+// An ILP Prepare packet is:
+//   type      UInt8   (12 = ILP Prepare)
+//   length    UInt32BE (length of contents)
+//   contents: amount    UInt64BE
+//             expiresAt TIMESTAMP (17 bytes ASCII "YYYYMMDDHHMMSS.mmm", UTC)
+//             condition OCTET STRING (32 bytes)
+//             destination Address (VarOctetString)
+//             data      OCTET STRING (VarOctetString)
+// The FSPIOP ilpPacket field is the base64url encoding of this binary packet.
+
+/** ISO-4217 minor-unit exponents for currencies on our Mojaloop corridors. */
+const CURRENCY_DECIMALS: Record<string, number> = {
+  NGN: 2, KES: 2, GHS: 2, TZS: 2, UGX: 0, ZAR: 2, XOF: 0, MWK: 2, ZMW: 2,
+  USD: 2, EUR: 2, GBP: 2, INR: 2, BRL: 2,
+};
+
+/** Convert a decimal amount string to minor units (exact string math, no floats). */
+export function toMinorUnits(amount: string, currency: string): bigint {
+  const decimals = CURRENCY_DECIMALS[currency.toUpperCase()] ?? 2;
+  const trimmed = amount.trim();
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+    throw new MojaloopError("3201", `Invalid amount for ILP packet: "${amount}"`);
+  }
+  const [whole, frac = ""] = trimmed.split(".");
+  if (frac.length > decimals) {
+    throw new MojaloopError("3201", `Amount "${amount}" exceeds ${decimals} decimal places for ${currency}`);
+  }
+  const fracPadded = (frac + "0".repeat(decimals)).slice(0, decimals);
+  return BigInt(whole) * BigInt(10 ** decimals) + BigInt(fracPadded || "0");
 }
 
-function generateILPPacket(amount: string, currency: string, destination: string): string {
-  // Simplified ILP packet (base64url encoded)
-  // In production: use ilp-packet library
-  const packet = Buffer.from(
-    JSON.stringify({ amount, currency, destination, expiry: new Date(Date.now() + 30000).toISOString() })
-  ).toString("base64url");
-  return packet;
+function writeVarOctetString(value: Buffer): Buffer {
+  if (value.length > 255) {
+    throw new MojaloopError("3200", "ILP field too long for single-byte length prefix");
+  }
+  return Buffer.concat([Buffer.from([value.length]), value]);
 }
 
-function getMojaloopHeaders(contentType = "application/json"): Record<string, string> {
-  return {
-    "Content-Type": contentType,
+function formatIlpTimestamp(d: Date): Buffer {
+  // TIMESTAMP per IL-RFC-27: "YYYYMMDDHHMMSS.mmm" in UTC — exactly 17 bytes
+  const pad = (n: number, w = 2) => String(n).padStart(w, "0");
+  const s =
+    String(d.getUTCFullYear()) +
+    pad(d.getUTCMonth() + 1) +
+    pad(d.getUTCDate()) +
+    pad(d.getUTCHours()) +
+    pad(d.getUTCMinutes()) +
+    pad(d.getUTCSeconds()) +
+    "." +
+    pad(d.getUTCMilliseconds(), 3);
+  return Buffer.from(s, "ascii");
+}
+
+export interface IlpPrepareParams {
+  amountMinorUnits: bigint;
+  /** ILP destination address, e.g. "g.fspid.account" */
+  destination: string;
+  /** 32-byte condition (= SHA-256 of the fulfillment) */
+  condition: Buffer;
+  expiresAt: Date;
+  data?: Buffer;
+}
+
+/** Serialize a real ILPv4 Prepare packet (binary, per IL-RFC-27). */
+export function serializeIlpPrepare(p: IlpPrepareParams): Buffer {
+  if (p.condition.length !== 32) {
+    throw new MojaloopError("3200", `ILP condition must be 32 bytes, got ${p.condition.length}`);
+  }
+  const amount = Buffer.alloc(8);
+  amount.writeBigUInt64BE(p.amountMinorUnits);
+  const destination = Buffer.from(p.destination, "ascii");
+  const contents = Buffer.concat([
+    amount,
+    formatIlpTimestamp(p.expiresAt),
+    p.condition,
+    writeVarOctetString(destination),
+    writeVarOctetString(p.data ?? Buffer.alloc(0)),
+  ]);
+  const header = Buffer.alloc(5);
+  header.writeUInt8(12, 0); // ILP Prepare
+  header.writeUInt32BE(contents.length, 1);
+  return Buffer.concat([header, contents]);
+}
+
+// ─── FSPIOP v1.1 JWS signing ──────────────────────────────────────────────────
+// Per the FSPIOP API Definition v1.1 signature scheme:
+//   protectedHeader = base64url(JSON({
+//     alg: "RS256", "FSPIOP-URI", "FSPIOP-HTTP-Method",
+//     "FSPIOP-Source", "FSPIOP-Destination"?, "Date"
+//   }))
+//   signingInput = protectedHeader + "." + base64url(payload)   (payload "" for GET)
+//   signature    = base64url(RSA-SHA256(signingInput, privateKey))
+//   FSPIOP-Signature header = protectedHeader + ".." + signature  (detached JWS)
+
+function b64url(buf: Buffer | string): string {
+  return (typeof buf === "string" ? Buffer.from(buf, "utf8") : buf).toString("base64url");
+}
+
+interface FSPIOPSigningContext {
+  method: string;
+  uri: string;
+  source: string;
+  destination?: string;
+  date: string;
+}
+
+function buildProtectedHeader(ctx: FSPIOPSigningContext): string {
+  const header: Record<string, string> = {
+    alg: "RS256",
+    "FSPIOP-URI": ctx.uri,
+    "FSPIOP-HTTP-Method": ctx.method.toUpperCase(),
+    "FSPIOP-Source": ctx.source,
+  };
+  if (ctx.destination) header["FSPIOP-Destination"] = ctx.destination;
+  header["Date"] = ctx.date;
+  return b64url(JSON.stringify(header));
+}
+
+function rsaSign(signingInput: string, privateKeyPem: string): string {
+  const signer = crypto.createSign("RSA-SHA256");
+  signer.update(signingInput);
+  signer.end();
+  return signer.sign(privateKeyPem).toString("base64url");
+}
+
+/**
+ * Produce the FSPIOP-Signature header value for an outgoing request.
+ * Returns null only in non-production when no private key is configured.
+ * Fails closed (throws) in production when the key is absent.
+ */
+function signFSPIOPRequest(ctx: FSPIOPSigningContext, payload: string): string | null {
+  if (!MOJALOOP_JWS_PRIVATE_KEY) {
+    if (IS_PRODUCTION) {
+      throw new MojaloopError("2000", "MOJALOOP_JWS_PRIVATE_KEY is not configured — refusing to send unsigned FSPIOP request in production");
+    }
+    return null; // dev/simulator: switch does not verify signatures
+  }
+  const protectedHeader = buildProtectedHeader(ctx);
+  const signature = rsaSign(`${protectedHeader}.${b64url(payload)}`, MOJALOOP_JWS_PRIVATE_KEY);
+  return `${protectedHeader}..${signature}`;
+}
+
+export interface FSPIOPVerificationResult {
+  valid: boolean;
+  reason?: string;
+  source?: string;
+}
+
+/**
+ * Verify an inbound FSPIOP-Signature header against the switch's public key.
+ * `payload` must be the exact raw request body string ("" for empty bodies).
+ */
+export function verifyFSPIOPSignature(opts: {
+  signatureHeader: string | undefined | null;
+  method: string;
+  uri: string;
+  payload: string;
+  date?: string;
+}): FSPIOPVerificationResult {
+  if (!MOJALOOP_JWS_PUBLIC_KEY) {
+    return { valid: false, reason: "No switch public key configured (MOJALOOP_JWS_PUBLIC_KEY)" };
+  }
+  const header = opts.signatureHeader;
+  if (!header) return { valid: false, reason: "Missing FSPIOP-Signature header" };
+
+  const parts = header.split(".");
+  if (parts.length !== 3 || parts[1] !== "") {
+    return { valid: false, reason: "Malformed FSPIOP-Signature (expected detached JWS compact form)" };
+  }
+  const [protectedHeaderB64, , signatureB64] = parts;
+
+  let claims: Record<string, string>;
+  try {
+    claims = JSON.parse(Buffer.from(protectedHeaderB64, "base64url").toString("utf8"));
+  } catch {
+    return { valid: false, reason: "Protected header is not valid base64url JSON" };
+  }
+  if (claims.alg !== "RS256") return { valid: false, reason: `Unsupported alg: ${claims.alg}` };
+  if (claims["FSPIOP-HTTP-Method"] !== opts.method.toUpperCase()) {
+    return { valid: false, reason: "FSPIOP-HTTP-Method mismatch" };
+  }
+  if (claims["FSPIOP-URI"] !== opts.uri) {
+    return { valid: false, reason: `FSPIOP-URI mismatch (got ${claims["FSPIOP-URI"]}, want ${opts.uri})` };
+  }
+
+  const signingInput = `${protectedHeaderB64}.${b64url(opts.payload)}`;
+  let ok = false;
+  try {
+    const verifier = crypto.createVerify("RSA-SHA256");
+    verifier.update(signingInput);
+    verifier.end();
+    ok = verifier.verify(MOJALOOP_JWS_PUBLIC_KEY, Buffer.from(signatureB64, "base64url"));
+  } catch (err: any) {
+    return { valid: false, reason: `Signature verification error: ${err.message}` };
+  }
+  return ok
+    ? { valid: true, source: claims["FSPIOP-Source"] }
+    : { valid: false, reason: "RSA-SHA256 signature mismatch" };
+}
+
+/** True when inbound callbacks can be cryptographically verified. */
+export function isFSPIOPVerificationConfigured(): boolean {
+  return Boolean(MOJALOOP_JWS_PUBLIC_KEY);
+}
+
+function getMojaloopHeaders(opts: {
+  method: string;
+  uri: string;
+  payload?: string;
+  destination?: string;
+  contentType?: string;
+}): Record<string, string> {
+  const date = new Date().toUTCString();
+  const headers: Record<string, string> = {
+    "Content-Type": opts.contentType ?? "application/vnd.interoperability.transfers+json;version=1.1",
     "Accept": "application/vnd.interoperability.transfers+json;version=1.1",
     "FSPIOP-Source": MOJALOOP_FSP_ID,
-    "FSPIOP-Destination": "central-ledger",
-    "Date": new Date().toUTCString(),
-    "Authorization": `Bearer ${MOJALOOP_API_KEY}`,
-    "X-Forwarded-For": "127.0.0.1",
+    "Date": date,
   };
+  if (opts.destination) headers["FSPIOP-Destination"] = opts.destination;
+  if (MOJALOOP_API_KEY) headers["Authorization"] = `Bearer ${MOJALOOP_API_KEY}`;
+
+  const signature = signFSPIOPRequest(
+    {
+      method: opts.method,
+      uri: opts.uri,
+      source: MOJALOOP_FSP_ID,
+      destination: opts.destination,
+      date,
+    },
+    opts.payload ?? ""
+  );
+  if (signature) headers["FSPIOP-Signature"] = signature;
+  return headers;
 }
 
 // ─── Party Lookup ─────────────────────────────────────────────────────────────
@@ -124,11 +362,12 @@ export async function lookupParty(
   partyIdType: MojaloopParty["partyIdType"],
   partyIdentifier: string
 ): Promise<{ found: boolean; party?: MojaloopParty; fspId?: string; error?: string }> {
+  const uri = `/parties/${partyIdType}/${encodeURIComponent(partyIdentifier)}`;
   try {
-    const url = `${MOJALOOP_BASE_URL}/parties/${partyIdType}/${encodeURIComponent(partyIdentifier)}`;
+    const url = `${MOJALOOP_BASE_URL}${uri}`;
     const resp = await circuitBreakers.mojaloop.execute(() => fetch(url, {
       method: "GET",
-      headers: getMojaloopHeaders(),
+      headers: getMojaloopHeaders({ method: "GET", uri }),
       signal: AbortSignal.timeout(10000),
     }));
     if (resp.status === 200) {
@@ -153,21 +392,8 @@ export async function lookupParty(
     } else {
       logger.warn({ data: err.message }, '[Mojaloop] Party lookup failed');
     }
-    if (IS_PRODUCTION) {
-      return { found: false, error: `Mojaloop party lookup failed: ${err.message}` };
-    }
-    // Graceful fallback for development environments only
-    return {
-      found: true,
-      party: {
-        partyIdType,
-        partyIdentifier,
-        fspId: "ecobank-ng",
-        name: "Mojaloop Test Payee",
-        personalInfo: { complexName: { firstName: "Test", lastName: "Payee" } },
-      },
-      fspId: "ecobank-ng",
-    };
+    // Fail closed in ALL environments — never fabricate a party or FSP.
+    return { found: false, error: `Mojaloop party lookup failed: ${err.message}` };
   }
 }
 
@@ -218,48 +444,60 @@ export async function requestQuote(params: {
   };
 
   try {
+    const payload = JSON.stringify(quoteRequest);
     const resp = await circuitBreakers.mojaloop.execute(() => fetch(`${MOJALOOP_BASE_URL}/quotes`, {
       method: "POST",
-      headers: getMojaloopHeaders(),
-      body: JSON.stringify(quoteRequest),
+      headers: getMojaloopHeaders({
+        method: "POST",
+        uri: "/quotes",
+        payload,
+        destination: params.payeeFspId,
+      }),
+      body: payload,
       signal: AbortSignal.timeout(15000),
     }));
 
-    if (resp.status === 200 || resp.status === 202) {
-      // Async callback pattern: 202 means accepted, real quote comes via PUT /quotes/{quoteId}
-      const expiration = new Date(Date.now() + 60000).toISOString();
-      const ilpPacket = generateILPPacket(params.amount, params.currency, params.payeeMsisdn);
-      const condition = generateILPCondition();
+    if (resp.status === 200) {
+      // Synchronous quote response — use ONLY values returned by the switch.
+      const body = await resp.json() as any;
+      if (!body.transferAmount || !body.ilpPacket || !body.condition) {
+        throw new MojaloopError("2003", "Quote response missing transferAmount/ilpPacket/condition");
+      }
+      return {
+        quoteId: body.quoteId ?? quoteId,
+        transactionId: body.transactionId ?? transactionId,
+        transferAmount: body.transferAmount,
+        payeeFspFee: body.payeeFspFee,
+        payeeFspCommission: body.payeeFspCommission,
+        expiration: body.expiration ?? new Date(Date.now() + 60000).toISOString(),
+        ilpPacket: body.ilpPacket,
+        condition: body.condition,
+      };
+    }
+    if (resp.status === 202) {
+      // Async pattern: the real quote (fees, ilpPacket, condition) arrives via
+      // PUT /quotes/{quoteId} callback. Return the pending correlation IDs —
+      // fees and ILP fields are intentionally absent, never fabricated.
       return {
         quoteId,
         transactionId,
         transferAmount: { currency: params.currency, amount: params.amount },
-        payeeFspFee: { currency: params.currency, amount: "0.50" },
-        expiration,
-        ilpPacket,
-        condition,
+        expiration: new Date(Date.now() + 60000).toISOString(),
+        ilpPacket: "",
+        condition: "",
       };
     }
-    throw new Error(`Quote request failed: ${resp.status}`);
+    const errBody = await resp.text().catch(() => "");
+    throw new MojaloopError(String(resp.status), `Quote request failed: ${resp.status} ${errBody}`);
   } catch (err: any) {
     if (err instanceof CircuitOpenError) {
       logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — quote unavailable');
     } else {
       logger.warn({ data: err.message }, '[Mojaloop] Quote request failed');
     }
-    if (IS_PRODUCTION) {
-      throw new Error(`Mojaloop quote request failed: ${err.message}`);
-    }
-    const expiration = new Date(Date.now() + 60000).toISOString();
-    return {
-      quoteId,
-      transactionId,
-      transferAmount: { currency: params.currency, amount: params.amount },
-      payeeFspFee: { currency: params.currency, amount: "0.50" },
-      expiration,
-      ilpPacket: generateILPPacket(params.amount, params.currency, params.payeeMsisdn),
-      condition: generateILPCondition(),
-    };
+    if (err instanceof MojaloopError) throw err;
+    // Fail closed in ALL environments — never fabricate a quote.
+    throw new MojaloopError("2000", `Mojaloop quote request failed: ${err.message}`);
   }
 }
 
@@ -289,13 +527,16 @@ export async function initiateTransfer(params: {
   };
 
   try {
+    const payload = JSON.stringify(transferRequest);
     const resp = await circuitBreakers.mojaloop.execute(() => fetch(`${MOJALOOP_BASE_URL}/transfers`, {
       method: "POST",
-      headers: {
-        ...getMojaloopHeaders(),
-        "FSPIOP-Destination": params.payeeFspId,
-      },
-      body: JSON.stringify(transferRequest),
+      headers: getMojaloopHeaders({
+        method: "POST",
+        uri: "/transfers",
+        payload,
+        destination: params.payeeFspId,
+      }),
+      body: payload,
       signal: AbortSignal.timeout(30000),
     }));
 
@@ -342,9 +583,10 @@ export async function initiateTransfer(params: {
 // ─── Transfer Status ──────────────────────────────────────────────────────────
 export async function getTransferStatus(transferId: string): Promise<MojaloopTransferResult> {
   try {
-    const resp = await circuitBreakers.mojaloop.execute(() => fetch(`${MOJALOOP_BASE_URL}/transfers/${transferId}`, {
+    const uri = `/transfers/${transferId}`;
+    const resp = await circuitBreakers.mojaloop.execute(() => fetch(`${MOJALOOP_BASE_URL}${uri}`, {
       method: "GET",
-      headers: getMojaloopHeaders(),
+      headers: getMojaloopHeaders({ method: "GET", uri }),
       signal: AbortSignal.timeout(10000),
     }));
     if (resp.status === 200) {
@@ -375,7 +617,7 @@ export async function getFSPParticipants(): Promise<Array<{
 }>> {
   try {
     const resp = await circuitBreakers.mojaloop.execute(() => fetch(`${MOJALOOP_BASE_URL}/participants`, {
-      headers: getMojaloopHeaders(),
+      headers: getMojaloopHeaders({ method: "GET", uri: "/participants" }),
       signal: AbortSignal.timeout(8000),
     }));
     if (resp.ok) {
@@ -421,8 +663,10 @@ export function verifyIlpFulfillment(condition: string, fulfillment: string): bo
 }
 
 /**
- * Generate a full ILP packet for a transfer request.
- * Includes destination address, amount, and expiry.
+ * Generate a full ILPv4 Prepare packet for a transfer request.
+ * Real binary serialization per IL-RFC-27 (no JSON payloads).
+ * The condition commits to the fulfillment; both are returned so the caller
+ * can store the fulfillment and reveal it only on commit.
  */
 export function buildIlpPacket(params: {
   amount: string;
@@ -430,19 +674,20 @@ export function buildIlpPacket(params: {
   destinationFspId: string;
   destinationAccount: string;
   expirySeconds?: number;
+  data?: Record<string, unknown>;
 }): { ilpPacket: string; condition: string; fulfillment: string } {
   const { condition, fulfillment } = generateIlpConditionPair();
-  const expiry = new Date(Date.now() + (params.expirySeconds || 30) * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + (params.expirySeconds || 30) * 1000);
 
-  const packet = {
-    amount: { amount: params.amount, currency: params.currency },
+  const packetBytes = serializeIlpPrepare({
+    amountMinorUnits: toMinorUnits(params.amount, params.currency),
     destination: `g.${params.destinationFspId}.${params.destinationAccount}`,
-    data: { transactionType: { scenario: "TRANSFER", initiator: "PAYER", initiatorType: "CONSUMER" } },
-    expiration: expiry,
-  };
+    condition: Buffer.from(condition, "base64url"),
+    expiresAt,
+    data: params.data ? Buffer.from(JSON.stringify(params.data), "utf8") : undefined,
+  });
 
-  const ilpPacket = Buffer.from(JSON.stringify(packet)).toString("base64url");
-  return { ilpPacket, condition, fulfillment };
+  return { ilpPacket: packetBytes.toString("base64url"), condition, fulfillment };
 }
 
 // ─── Webhook Receiver (Mojaloop Callback Handlers) ───────────────────────────
@@ -457,8 +702,10 @@ export interface MojaloopCallback {
 
 /** Pending transfers awaiting callback — keyed by transferId */
 
-// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
-// All in-memory Maps are persisted to PostgreSQL on write and loaded on startup.
+// ── PostgreSQL persistence for pending transfers ─────────────────────────────
+// Only serializable state (condition, expiry) is persisted — never resolve
+// functions or timer handles. On startup, surviving rows are re-registered
+// with fresh timeouts so callbacks arriving after a restart still match.
 
 let _wtDb: ReturnType<typeof import("drizzle-orm/postgres-js").drizzle> | null = null;
 
@@ -473,65 +720,111 @@ async function _getWtDb() {
   }
 }
 
-async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
+async function _persistPendingTransfer(transferId: string, condition: string, expiresAt: Date): Promise<void> {
   const db = await _getWtDb();
   if (!db) return;
   try {
     const { sql } = await import("drizzle-orm");
     await (db as any).execute(sql`
-      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
-      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
-      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+      INSERT INTO mojaloop_pending_transfers (transfer_id, condition, expires_at, updated_at)
+      VALUES (${transferId}, ${condition}, ${expiresAt.toISOString()}, NOW())
+      ON CONFLICT (transfer_id) DO UPDATE
+        SET condition = EXCLUDED.condition, expires_at = EXCLUDED.expires_at, updated_at = NOW()
     `);
-  } catch { /* silent — hot cache still works */ }
+  } catch (err: any) {
+    logger.warn({ data: err.message }, "[Mojaloop] Failed to persist pending transfer (continuing in-memory)");
+  }
 }
 
-async function _loadFromDb(table: string): Promise<Map<string, any>> {
-  const result = new Map<string, any>();
-  const db = await _getWtDb();
-  if (!db) return result;
-  try {
-    const { sql } = await import("drizzle-orm");
-    const rows = await (db as any).execute(sql`SELECT key, data FROM ${sql.raw(table)}`);
-    for (const row of rows) {
-      result.set(row.key, row.data);
-    }
-  } catch { /* silent */ }
-  return result;
-}
-
-async function _deleteFromDb(table: string, key: string): Promise<void> {
+async function _deletePendingTransfer(transferId: string): Promise<void> {
   const db = await _getWtDb();
   if (!db) return;
   try {
     const { sql } = await import("drizzle-orm");
-    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
+    await (db as any).execute(sql`DELETE FROM mojaloop_pending_transfers WHERE transfer_id = ${transferId}`);
   } catch { /* silent */ }
 }
 
-async function _ensureWriteThroughTables(): Promise<void> {
+async function _loadPendingTransfer(transferId: string): Promise<{ condition: string; expiresAt: Date } | null> {
+  const db = await _getWtDb();
+  if (!db) return null;
+  try {
+    const { sql } = await import("drizzle-orm");
+    const rows = await (db as any).execute(
+      sql`SELECT condition, expires_at FROM mojaloop_pending_transfers WHERE transfer_id = ${transferId}`
+    );
+    const row = (rows as any[])[0];
+    if (!row) return null;
+    return { condition: row.condition, expiresAt: new Date(row.expires_at) };
+  } catch {
+    return null;
+  }
+}
+
+async function _ensurePendingTransfersTable(): Promise<void> {
   const db = await _getWtDb();
   if (!db) return;
   try {
     const { sql } = await import("drizzle-orm");
     await (db as any).execute(sql`
       CREATE TABLE IF NOT EXISTS mojaloop_pending_transfers (
-        key TEXT PRIMARY KEY,
-        data JSONB NOT NULL DEFAULT '{}'::jsonb,
-        updated_at TIMESTAMPTZ DEFAULT NOW()
+        transfer_id TEXT PRIMARY KEY,
+        condition TEXT NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
   } catch { /* silent */ }
 }
 
-// Initialize tables on module load
-_ensureWriteThroughTables().catch(() => {});
-
 const pendingTransfers = new Map<string, {
-  condition: string; // Persisted to PostgreSQL table "mojaloop_pending_transfers"
-  resolve: (result: MojaloopCallback) => void;
+  condition: string;
+  /** undefined for entries restored after a process restart (no waiter) */
+  resolve?: (result: MojaloopCallback) => void;
   timeout: ReturnType<typeof setTimeout>;
 }>();
+
+/**
+ * Re-register transfers that were pending when the process last stopped.
+ * Each gets a fresh timeout for its remaining lifetime; callbacks that arrive
+ * are matched, verified, and cleared even though the original waiter is gone.
+ */
+async function _restorePendingTransfers(): Promise<void> {
+  const db = await _getWtDb();
+  if (!db) return;
+  try {
+    const { sql } = await import("drizzle-orm");
+    const rows = await (db as any).execute(
+      sql`SELECT transfer_id, condition, expires_at FROM mojaloop_pending_transfers`
+    );
+    const now = Date.now();
+    for (const row of rows as any[]) {
+      const expiresAt = new Date(row.expires_at).getTime();
+      const remainingMs = expiresAt - now;
+      if (remainingMs <= 0) {
+        await _deletePendingTransfer(row.transfer_id);
+        continue;
+      }
+      const timeout = setTimeout(() => {
+        pendingTransfers.delete(row.transfer_id);
+        _deletePendingTransfer(row.transfer_id).catch(() => {});
+        logger.warn(`[Mojaloop] Restored pending transfer expired: ${row.transfer_id}`);
+      }, remainingMs);
+      pendingTransfers.set(row.transfer_id, { condition: row.condition, timeout });
+    }
+    if ((rows as any[]).length > 0) {
+      logger.info(`[Mojaloop] Restored ${(rows as any[]).length} pending transfer(s) from PostgreSQL`);
+    }
+  } catch (err: any) {
+    logger.warn({ data: err.message }, "[Mojaloop] Could not restore pending transfers");
+  }
+}
+
+// Initialize table and restore surviving pending transfers on module load
+_ensurePendingTransfersTable()
+  .then(() => _restorePendingTransfers())
+  .catch(() => {});
 
 /**
  * Register a transfer as pending, waiting for Mojaloop callback.
@@ -546,7 +839,7 @@ export function awaitTransferCallback(
     const timeout = setTimeout(() => {
       pendingTransfers.delete(transferId);
 
-      _deleteFromDb("mojaloop_pending_transfers", transferId).catch(() => {});
+      _deletePendingTransfer(transferId).catch(() => {});
       resolve({
         transferId,
         transferState: "ABORTED",
@@ -556,8 +849,7 @@ export function awaitTransferCallback(
 
     pendingTransfers.set(transferId, { condition, resolve, timeout });
 
-
-    _writeThrough("mojaloop_pending_transfers", transferId, { condition, resolve, timeout }).catch(() => {});
+    _persistPendingTransfer(transferId, condition, new Date(Date.now() + timeoutMs)).catch(() => {});
   });
 }
 
@@ -575,12 +867,12 @@ export function handleMojaloopCallback(callback: MojaloopCallback): { accepted: 
   clearTimeout(pending.timeout);
   pendingTransfers.delete(callback.transferId);
 
-  _deleteFromDb("mojaloop_pending_transfers", callback.transferId).catch(() => {});
+  _deletePendingTransfer(callback.transferId).catch(() => {});
 
   // Verify ILP fulfillment if present
   if (callback.fulfilment && !verifyIlpFulfillment(pending.condition, callback.fulfilment)) {
     logger.error(`[Mojaloop] ILP fulfillment mismatch for ${callback.transferId}`);
-    pending.resolve({
+    pending.resolve?.({
       ...callback,
       transferState: "ABORTED",
       errorInformation: { errorCode: "5105", errorDescription: "ILP fulfillment mismatch" },
@@ -588,6 +880,33 @@ export function handleMojaloopCallback(callback: MojaloopCallback): { accepted: 
     return { accepted: false, reason: "Fulfillment mismatch" };
   }
 
-  pending.resolve(callback);
+  if (pending.resolve) {
+    pending.resolve(callback);
+  } else {
+    logger.info(`[Mojaloop] Callback matched restored pending transfer: ${callback.transferId} state=${callback.transferState}`);
+  }
+  return { accepted: true };
+}
+
+/**
+ * Async variant of handleMojaloopCallback that can match transfers persisted
+ * before a restart even when they were never restored to memory.
+ */
+export async function handleMojaloopCallbackPersistent(
+  callback: MojaloopCallback
+): Promise<{ accepted: boolean; reason?: string }> {
+  const inMemory = handleMojaloopCallback(callback);
+  if (inMemory.accepted || inMemory.reason !== "Unknown transfer") return inMemory;
+
+  const row = await _loadPendingTransfer(callback.transferId);
+  if (!row) return inMemory;
+
+  if (callback.fulfilment && !verifyIlpFulfillment(row.condition, callback.fulfilment)) {
+    logger.error(`[Mojaloop] ILP fulfillment mismatch for persisted transfer ${callback.transferId}`);
+    await _deletePendingTransfer(callback.transferId);
+    return { accepted: false, reason: "Fulfillment mismatch" };
+  }
+  await _deletePendingTransfer(callback.transferId);
+  logger.info(`[Mojaloop] Callback matched persisted transfer: ${callback.transferId}`);
   return { accepted: true };
 }

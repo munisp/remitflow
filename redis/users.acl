@@ -4,61 +4,36 @@
 # Implements principle of least privilege for all Redis clients.
 # Passwords are injected at runtime via Docker secrets — placeholders below.
 #
+# FORMAT NOTE: Redis aclfile requires ONE user rule per line (no backslash
+# line continuation — the server rejects malformed lines at startup).
+#
 # ACL Syntax: user <name> on|off >password ~key-pattern &channel-pattern +commands
 #
-# CVE-2025-49844 mitigation: All users explicitly deny EVAL, EVALSHA, SCRIPT.
+# CVE-2025-49844 mitigation: Lua (EVAL) is granted ONLY to the application and
+# rate-limiter users, which require atomic Lua for distributed locks and
+# sliding-window rate limiting (redisHardened.ts / go-rate-limiter). All other
+# users are explicitly denied EVAL/EVALSHA/SCRIPT. The patched 7.4.2 image
+# plus this ACL scoping replaces the previous global EVAL ban that broke
+# legitimate Lua call paths.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Disable the default user (no anonymous access)
 user default off nopass nocommands nokeys
 
-# ── Application User (API server, rate limiter) ───────────────────────────────
-# Can SET/GET/DEL keys in remitflow: namespace, use pub/sub, use streams.
-# Explicitly denied: EVAL, EVALSHA, SCRIPT, DEBUG, CONFIG, FLUSHALL, FLUSHDB.
-user remitflow_app on >REMITFLOW_APP_PASSWORD_PLACEHOLDER \
-  ~remitflow:* ~session:* ~ratelimit:* ~cache:* \
-  &remitflow.* \
-  +GET +SET +DEL +EXPIRE +TTL +PTTL +PERSIST \
-  +HGET +HSET +HDEL +HGETALL +HMSET +HMGET \
-  +LPUSH +RPUSH +LPOP +RPOP +LRANGE +LLEN \
-  +SADD +SREM +SMEMBERS +SISMEMBER +SCARD \
-  +ZADD +ZREM +ZRANGE +ZRANGEBYSCORE +ZCARD +ZSCORE \
-  +INCR +DECR +INCRBY +DECRBY \
-  +PUBLISH +SUBSCRIBE +UNSUBSCRIBE +PSUBSCRIBE +PUNSUBSCRIBE \
-  +XADD +XREAD +XLEN +XRANGE +XREVRANGE \
-  +PING +ECHO +SELECT +QUIT \
-  -EVAL -EVALSHA -SCRIPT -DEBUG -CONFIG \
-  -FLUSHALL -FLUSHDB -KEYS -MIGRATE -MONITOR
+# ── Application User (API server) ─────────────────────────────────────────────
+# Gets +EVAL/+EVALSHA for atomic Lua in redisHardened.ts (distributed-lock
+# release, sliding-window rate limit). Denied: SCRIPT, DEBUG, CONFIG, FLUSH*.
+user remitflow_app on >REMITFLOW_APP_PASSWORD_PLACEHOLDER ~remitflow:* ~session:* ~ratelimit:* ~cache:* ~lock:* ~idempotency:* ~fx:* ~user:* ~risk:* ~kyc:* ~limit:* ~compliance:* ~referral:* ~sessions:* &remitflow.* +GET +SET +SETEX +GETDEL +DEL +EXPIRE +PEXPIRE +TTL +PTTL +PERSIST +HGET +HSET +HDEL +HGETALL +HMSET +HMGET +LPUSH +RPUSH +LPOP +RPOP +LRANGE +LLEN +SADD +SREM +SMEMBERS +SISMEMBER +SCARD +ZADD +ZREM +ZRANGE +ZRANGEBYSCORE +ZREMRANGEBYSCORE +ZCARD +ZSCORE +INCR +DECR +INCRBY +DECRBY +EVAL +EVALSHA +PUBLISH +SUBSCRIBE +UNSUBSCRIBE +PSUBSCRIBE +PUNSUBSCRIBE +XADD +XREAD +XLEN +XRANGE +XREVRANGE +PING +ECHO +SELECT +QUIT -SCRIPT -DEBUG -CONFIG -FLUSHALL -FLUSHDB -KEYS -MIGRATE -MONITOR
 
 # ── Rate Limiter User (go-rate-limiter service) ───────────────────────────────
-user remitflow_ratelimiter on >REMITFLOW_RATELIMITER_PASSWORD_PLACEHOLDER \
-  ~ratelimit:* \
-  +GET +SET +INCR +INCRBY +EXPIRE +TTL +DEL \
-  +PING +QUIT \
-  -EVAL -EVALSHA -SCRIPT -DEBUG -CONFIG \
-  -FLUSHALL -FLUSHDB -KEYS -MONITOR
+# Gets +EVAL/+EVALSHA for token-bucket and sliding-window Lua scripts.
+user remitflow_ratelimiter on >REMITFLOW_RATELIMITER_PASSWORD_PLACEHOLDER ~ratelimit:* +GET +SET +SETEX +INCR +INCRBY +EXPIRE +PEXPIRE +TTL +DEL +HMGET +HMSET +HGETALL +ZADD +ZCARD +ZRANGE +ZREMRANGEBYSCORE +EVAL +EVALSHA +PING +QUIT -SCRIPT -DEBUG -CONFIG -FLUSHALL -FLUSHDB -KEYS -MONITOR
 
 # ── Session Store User (Keycloak session cache) ───────────────────────────────
-user remitflow_sessions on >REMITFLOW_SESSIONS_PASSWORD_PLACEHOLDER \
-  ~session:* \
-  +GET +SET +DEL +EXPIRE +TTL \
-  +PING +QUIT \
-  -EVAL -EVALSHA -SCRIPT -DEBUG -CONFIG \
-  -FLUSHALL -FLUSHDB -KEYS -MONITOR
+user remitflow_sessions on >REMITFLOW_SESSIONS_PASSWORD_PLACEHOLDER ~session:* ~sessions:* +GET +SET +SETEX +DEL +EXPIRE +TTL +PING +QUIT -EVAL -EVALSHA -SCRIPT -DEBUG -CONFIG -FLUSHALL -FLUSHDB -KEYS -MONITOR
 
 # ── Read-Only Analytics User ──────────────────────────────────────────────────
-user remitflow_readonly on >REMITFLOW_READONLY_PASSWORD_PLACEHOLDER \
-  ~remitflow:* ~cache:* \
-  +GET +HGET +HGETALL +LRANGE +SMEMBERS +ZRANGE \
-  +TTL +PTTL +TYPE +OBJECT \
-  +PING +QUIT \
-  -EVAL -EVALSHA -SCRIPT -DEBUG -CONFIG \
-  -FLUSHALL -FLUSHDB -KEYS -MONITOR -SET -DEL
+user remitflow_readonly on >REMITFLOW_READONLY_PASSWORD_PLACEHOLDER ~remitflow:* ~cache:* +GET +HGET +HGETALL +LRANGE +SMEMBERS +ZRANGE +TTL +PTTL +TYPE +OBJECT +PING +QUIT -EVAL -EVALSHA -SCRIPT -DEBUG -CONFIG -FLUSHALL -FLUSHDB -KEYS -MONITOR -SET -DEL
 
 # ── Admin User (monitoring, ops — restricted access) ─────────────────────────
-user remitflow_admin on >REMITFLOW_ADMIN_PASSWORD_PLACEHOLDER \
-  ~* \
-  +INFO +DBSIZE +SLOWLOG +LATENCY +MEMORY +CLIENT \
-  +PING +QUIT \
-  -EVAL -EVALSHA -SCRIPT -DEBUG \
-  -FLUSHALL -FLUSHDB -MIGRATE -MONITOR
+user remitflow_admin on >REMITFLOW_ADMIN_PASSWORD_PLACEHOLDER ~* +INFO +DBSIZE +SLOWLOG +LATENCY +MEMORY +CLIENT +PING +QUIT -EVAL -EVALSHA -SCRIPT -DEBUG -FLUSHALL -FLUSHDB -MIGRATE -MONITOR

@@ -1,0 +1,125 @@
+// ============================================================================
+// RemitFlow — Canonical Permify Schema
+// ============================================================================
+// This is the SINGLE source of truth for the Permify authorization model used
+// by the RemitFlow application code (server/middleware/permify.ts,
+// server/middleware/middlewareIntegration.ts, server/pbac.ts,
+// server/routers/transferDispute.ts, server/routers/futureProofing.ts,
+// server/integrations/orchestrator.ts).
+//
+// Reconciliation note: enhanced_schema.perm models the 54remit multi-bank
+// platform (bank/branch/account hierarchy). That entity model is retained
+// unchanged in enhanced_schema.perm; this canonical schema EXTENDS the same
+// flat @user-typed relation conventions to cover every entity and permission
+// the RemitFlow code actually checks. Do not fork — new checks must be added
+// here first, then deployed.
+//
+// Deployment:
+//   pnpm tsx scripts/permify-bootstrap.ts          (tenant create + schema write)
+//   services/auth-service/adapters/permify.py      (multi-pod schema fan-out)
+//
+// Tuple ownership (application layer writes):
+//   wallet#owner              on user provisioning (orchestrator.provisionNewUser)
+//   transaction#owner         on transfer/dispute creation (transferDispute.raise)
+//   dispute#owner             on dispute creation (transferDispute.raise)
+//   kyc_record#owner          on KYC verification start (orchestrator.orchestrateKycVerification)
+//   plan#subscriber           on subscription change (futureProofing.subscribe)
+//   organization#member       on user seeding (PermifyIntegration.seedUserRelationships)
+// ============================================================================
+
+entity user {
+  // Self-ownership tuple written during provisioning (user:<id>#owner@user:<id>)
+  // so user-scoped checks have a concrete relation to evaluate.
+  relation owner @user
+}
+
+entity platform {
+  relation admin  @user
+  relation member @user
+
+  permission manage = admin
+  permission access = member or admin
+}
+
+entity organization {
+  relation member @user
+  relation admin  @user
+
+  permission access = member or admin
+  permission manage = admin
+}
+
+// ── Wallet ───────────────────────────────────────────────────────────────────
+// Checked by: orchestrator.orchestrateTransfer (transfer),
+//             canAccessWallet (view, deposit, withdraw, freeze)
+entity wallet {
+  relation owner   @user
+  relation auditor @user
+
+  permission view     = owner or auditor
+  permission transfer = owner
+  permission deposit  = owner
+  permission withdraw = owner
+  permission freeze   = auditor
+  permission audit    = auditor
+}
+
+// ── Transaction ──────────────────────────────────────────────────────────────
+// Checked by: canAccessTransaction (view, cancel, refund, approve)
+entity transaction {
+  relation owner    @user
+  relation reviewer @user
+  relation auditor  @user
+
+  permission view    = owner or reviewer or auditor
+  permission cancel  = owner
+  permission refund  = owner or reviewer
+  permission approve = reviewer
+  permission audit   = auditor
+}
+
+// ── Dispute ──────────────────────────────────────────────────────────────────
+// Checked by: canAccessDispute (view, submit, respond, escalate, resolve),
+//             pbac.ts dispute.resolve (adjudicator relation or platform admin)
+entity dispute {
+  relation owner       @user
+  relation adjudicator @user
+
+  permission view     = owner or adjudicator
+  permission submit   = owner
+  permission respond  = owner or adjudicator
+  permission escalate = owner or adjudicator
+  permission resolve  = adjudicator
+}
+
+// ── KYC Record ───────────────────────────────────────────────────────────────
+// Checked by: canManageKYC (view, submit, approve, reject)
+entity kyc_record {
+  relation owner              @user
+  relation compliance_officer @user
+
+  permission view    = owner or compliance_officer
+  permission submit  = owner
+  permission update  = owner or compliance_officer
+  permission approve = compliance_officer
+  permission reject  = compliance_officer
+}
+
+// ── PII Token ────────────────────────────────────────────────────────────────
+// Checked by: futureProofing.pii.detokenize (detokenize)
+entity pii_token {
+  relation owner              @user
+  relation compliance_officer @user
+
+  permission view       = owner or compliance_officer
+  permission detokenize = owner or compliance_officer
+}
+
+// ── Subscription Plan ────────────────────────────────────────────────────────
+// Written by: futureProofing.subscribe (plan:<tier>#subscriber@user:<id>)
+entity plan {
+  relation subscriber @user
+
+  permission subscribe = subscriber
+  permission access    = subscriber
+}

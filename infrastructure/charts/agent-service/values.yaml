@@ -45,7 +45,7 @@ dapr:
   memory-limit: 1000Mi
 secrets:
   DATABASE_URI: CHANGE_ME
-  DAPR_PUBSUB_NAME: pubsub
+  DAPR_PUBSUB: pubsub
   PORT: 80
   VERIFICATION_SERVICE_URL: https://54remit.upi.dev/verification
   VERIFICATION_CLIENT_ID: CHANGE_ME

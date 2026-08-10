@@ -257,12 +257,17 @@ services:
     image: opensearchproject/opensearch:2.13.0
     environment:
       discovery.type: single-node
-      DISABLE_SECURITY_PLUGIN: "true"
+      # Security plugin ENABLED — the initial admin password must satisfy
+      # OpenSearch complexity rules; it is the same OPENSEARCH_PASSWORD the
+      # api authenticates with.
+      DISABLE_SECURITY_PLUGIN: "false"
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: ${OPENSEARCH_PASSWORD:?OPENSEARCH_PASSWORD is required}
       OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
     volumes:
       - opensearch-data:/usr/share/opensearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9200/_cluster/health >/dev/null"]
+      # HTTPS + admin auth (self-signed demo certs → -k).
+      test: ["CMD-SHELL", "curl -ksf -u admin:$${OPENSEARCH_PASSWORD} https://localhost:9200/_cluster/health >/dev/null"]
       interval: 15s
       timeout: 5s
       retries: 15
@@ -292,9 +297,15 @@ services:
       LAKEHOUSE_URL: http://lakehouse:8102
       LAKEHOUSE_CATALOG: ${LAKEHOUSE_CATALOG:?LAKEHOUSE_CATALOG is required}
       LAKEHOUSE_WAREHOUSE: ${LAKEHOUSE_WAREHOUSE:?LAKEHOUSE_WAREHOUSE is required}
-      OPENSEARCH_URL: http://opensearch:9200
-      OPENSEARCH_USER: ${OPENSEARCH_USER:?OPENSEARCH_USER is required}
+      # Security plugin is enabled on the opensearch service: HTTPS required.
+      OPENSEARCH_URL: https://opensearch:9200
+      # Canonical env name is OPENSEARCH_USERNAME; OPENSEARCH_USER is the legacy
+      # alias still read by server/middleware/opensearch.ts.
+      OPENSEARCH_USERNAME: ${OPENSEARCH_USERNAME:?OPENSEARCH_USERNAME is required}
+      OPENSEARCH_USER: ${OPENSEARCH_USERNAME:?OPENSEARCH_USERNAME is required}
       OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:?OPENSEARCH_PASSWORD is required}
+      # Self-signed demo certs on the single-node dev cluster — never set in production.
+      OPENSEARCH_INSECURE: ${OPENSEARCH_INSECURE:-true}
       DAPR_HOST: 127.0.0.1
       DAPR_HTTP_PORT: "3500"
       DAPR_GRPC_PORT: "50001"

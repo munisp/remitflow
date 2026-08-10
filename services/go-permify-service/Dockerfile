@@ -8,16 +8,19 @@ LABEL org.opencontainers.image.vendor="RemitFlow" \
 
 WORKDIR /app
 COPY go.mod go.sum* ./
-RUN go mod download 2>/dev/null || true
+# Resolve and pin module hashes (writes go.sum inside the image if absent).
+# Strict: a dependency resolution failure must fail the build, not be hidden.
+RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/server ./cmd/main.go
+# Build the whole ./cmd package — cmd/main.go depends on cmd/metrics.go.
+RUN CGO_ENABLED=0 GOOS=linux go build -o /app/server ./cmd
 
 FROM alpine:3.19
 RUN apk --no-cache add ca-certificates wget curl
 WORKDIR /app
 COPY --from=builder /app/server .
-EXPOSE ${PORT:-8080}
-HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD wget -qO- http://localhost:${PORT:-8080}/health || exit 1
+EXPOSE ${PORT:-8109} ${METRICS_PORT:-9109}
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD wget -qO- http://localhost:${PORT:-8109}/health || exit 1
 RUN addgroup --system --gid 1001 appgroup && \
     adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
 USER appuser

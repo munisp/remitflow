@@ -2,6 +2,7 @@ import { and, desc, eq, like, or, sql } from "drizzle-orm";
 import { randomBytes } from "crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
+import { applyTenantGuc, getRequestTenantContext } from "./_core/tenantGuc";
 import {
   InsertUser, auditLogs, batchPayments, beneficiaries, bnplPlans, cards, caseComments,
   cbdcWallets, complianceCases, directDebitMandates, disputes, fxAlerts, fxRateCache,
@@ -134,7 +135,22 @@ export async function getUserByOpenId(openId: string) {
   return result[0];
 }
 
+/**
+ * Demo-data seeder. This fabricates funded wallets, counterparties, cards and
+ * transactions for UI demos. It must NEVER run in production — it creates fake
+ * money. It runs only when explicitly opted in via ENABLE_DEMO_SEED=true in a
+ * non-production environment. Default: off.
+ */
+const DEMO_SEED_ENABLED =
+  process.env.NODE_ENV !== "production" && process.env.ENABLE_DEMO_SEED === "true";
+
 async function autoSeedUser(userId: number) {
+  if (!DEMO_SEED_ENABLED) {
+    if (process.env.ENABLE_DEMO_SEED === "true" && process.env.NODE_ENV === "production") {
+      logger.error("[DB] ENABLE_DEMO_SEED=true ignored in production — refusing to fabricate demo wallets");
+    }
+    return;
+  }
   const db = await getDb();
   if (!db) return;
   const existing = await db.select({ id: wallets.id }).from(wallets).where(eq(wallets.userId, userId)).limit(1);
@@ -368,6 +384,66 @@ export async function createAuditLog(data: { userId: number; action: string; des
   if (!db) return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   await db.insert(auditLogs).values({ ...data, severity: (data.severity || "info") as any });
+}
+
+// ─── Transactional Outbox Helpers ─────────────────────────────────────────────
+// Canonical outbox_events columns (migration 0000 + 0076 + 0083):
+//   aggregate_id, aggregate_type, event_type, payload (text), status,
+//   retry_count, max_retries, published_at, failed_at, next_retry_at,
+//   error_message, locked_at, locked_by, created_at
+// The outbox worker (server/workers/outbox.worker.ts) routes on aggregate_type
+// (Fluvio topic name or "dapr.*" routing key) and publishes payload verbatim.
+
+export interface OutboxEventInput {
+  /** Partition/ordering key — FIFO is preserved per aggregate_id. */
+  aggregateId: string;
+  /** Fluvio topic (e.g. "transfer-events") or Dapr routing key ("dapr.*"). */
+  aggregateType: string;
+  eventType: string;
+  /** Serializable payload — stored as JSON text. */
+  payload: unknown;
+  maxRetries?: number;
+}
+
+/**
+ * Insert an outbox event inside an existing transaction. ALWAYS use this (or
+ * withTransactionOutbox) for outbox writes so the domain change and its event
+ * commit or roll back atomically — a bare INSERT outside the transaction is
+ * the classic dual-write bug.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function insertOutboxEvent(tx: any, event: OutboxEventInput): Promise<void> {
+  const payloadText = typeof event.payload === "string" ? event.payload : JSON.stringify(event.payload);
+  await tx.execute(sql`
+    INSERT INTO outbox_events (aggregate_id, aggregate_type, event_type, payload, status, max_retries, created_at)
+    VALUES (${event.aggregateId}, ${event.aggregateType}, ${event.eventType}, ${payloadText}, 'pending', ${event.maxRetries ?? 5}, NOW())
+  `);
+}
+
+/**
+ * Run `operation` inside a single database transaction and append outbox
+ * events in the SAME transaction — domain write + event publish are atomic.
+ * When a request tenant context is bound (tRPC tenant middleware), the RLS
+ * GUCs (app.current_tenant_id / app.current_user_id) are set on the
+ * transaction before any other statement. Throws (and rolls everything back)
+ * when the DB is unavailable.
+ */
+export async function withTransactionOutbox<T>(
+  operation: (
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tx: any,
+    emit: (event: OutboxEventInput) => Promise<void>,
+  ) => Promise<T>,
+): Promise<T> {
+  const db = await requireDb();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return db.transaction(async (tx: any) => {
+    // Set RLS GUCs when running inside a request context; outside a request
+    // (workers/cron) there is deliberately no tenant binding.
+    await applyTenantGuc(tx, { required: getRequestTenantContext() !== undefined });
+    const emit = (event: OutboxEventInput) => insertOutboxEvent(tx, event);
+    return operation(tx, emit);
+  });
 }
 
 export async function getVirtualAccountsByUserId(userId: number) {

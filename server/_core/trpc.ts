@@ -3,6 +3,8 @@ import { initTRPC, TRPCError } from "@trpc/server";
 import superjson from "superjson";
 import type { TrpcContext } from "./context";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
+import { resolveTenantContext } from "../tenantMiddleware";
+import { runWithTenantContext } from "./tenantGuc";
 
 const trpcTracer = trace.getTracer("remitflow-trpc", "2.0.0");
 
@@ -49,7 +51,34 @@ const requireUser = t.middleware(async opts => {
   return next({ ctx: { ...ctx, user: ctx.user } });
 });
 
-export const protectedProcedure = t.procedure.use(requireUser);
+// ── Tenant GUC middleware (RLS, audit PG4) ────────────────────────────────────
+// Resolves the caller's tenant once per request and binds it to the
+// AsyncLocalStorage request context (server/_core/tenantGuc.ts). Every
+// request-scoped DB transaction picks the context up via applyTenantGuc() and
+// sets app.current_tenant_id / app.current_user_id so RLS policies apply.
+// FAILS CLOSED: a tenant-resolution error aborts the request — we never run
+// queries with unknown tenant isolation.
+const tenantGucMiddleware = t.middleware(async opts => {
+  const { ctx, next } = opts;
+  if (!ctx.user) return next();
+  let tenantId: number | null;
+  try {
+    const tenant = await resolveTenantContext(ctx.user.id);
+    tenantId = tenant.tenantId;
+  } catch (err) {
+    throw new TRPCError({
+      code: "INTERNAL_SERVER_ERROR",
+      message: "Tenant context resolution failed — request refused (fail-closed)",
+      cause: err,
+    });
+  }
+  return runWithTenantContext(
+    { tenantId: tenantId == null ? null : String(tenantId), userId: String(ctx.user.id) },
+    () => next(),
+  );
+});
+
+export const protectedProcedure = t.procedure.use(requireUser).use(tenantGucMiddleware);
 
 export const adminProcedure = t.procedure.use(
   t.middleware(async opts => {
@@ -59,7 +88,7 @@ export const adminProcedure = t.procedure.use(
     }
     return next({ ctx: { ...ctx, user: ctx.user } });
   }),
-);
+).use(tenantGucMiddleware);
 
 // ── Audit middleware ──────────────────────────────────────────────────────────
 // Wraps a protected procedure and automatically sends a fire-and-forget
@@ -101,7 +130,7 @@ const auditMiddleware = t.middleware(async opts => {
 });
 
 /** Protected procedure + automatic Rust audit log on every call */
-export const auditedProcedure = t.procedure.use(requireUser).use(auditMiddleware);
+export const auditedProcedure = t.procedure.use(requireUser).use(tenantGucMiddleware).use(auditMiddleware);
 
 /** Admin procedure + automatic Rust audit log on every call */
 export const auditedAdminProcedure = t.procedure
@@ -114,6 +143,7 @@ export const auditedAdminProcedure = t.procedure
       return next({ ctx: { ...ctx, user: ctx.user } });
     }),
   )
+  .use(tenantGucMiddleware)
   .use(auditMiddleware);
 
 // ── Rate-limit middleware ─────────────────────────────────────────────────────
@@ -142,11 +172,13 @@ function makeRateLimitMiddleware(limit: number, windowSecs: number) {
 /** Protected + audited + rate-limited (60 req/min default) */
 export const rateLimitedProcedure = t.procedure
   .use(requireUser)
+  .use(tenantGucMiddleware)
   .use(auditMiddleware)
   .use(makeRateLimitMiddleware(60, 60));
 
 /** Protected + audited + strict rate-limited (10 req/min — for sensitive ops) */
 export const strictRateLimitedProcedure = t.procedure
   .use(requireUser)
+  .use(tenantGucMiddleware)
   .use(auditMiddleware)
   .use(makeRateLimitMiddleware(10, 60));

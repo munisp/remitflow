@@ -1791,11 +1791,17 @@ const businessModelRouter = router({
           ON CONFLICT (user_id) DO UPDATE SET plan_id = ${input.planId}, status = 'active', current_period_end = NOW() + INTERVAL '30 days'
         `);
 
-        // Write relationship to Permify for plan-based authorization
-        await permify.writeRelationship({
-          entity: "plan", entityId: input.planId, relation: "subscriber",
-          subject: "user", subjectId: String(ctx.user.id),
+        // Write relationship to Permify for plan-based authorization. Retried
+        // inline; on rejection the tuple is deferred to the Permify outbox so
+        // plan checks become consistent once Permify recovers.
+        const { writeRelationshipWithRetry } = await import("../middleware/permify");
+        const subscriberTupleWritten = await writeRelationshipWithRetry({
+          entityType: "plan", entityId: input.planId, relation: "subscriber",
+          subjectType: "user", subjectId: String(ctx.user.id),
         });
+        if (!subscriberTupleWritten) {
+          logger.warn({ userId: ctx.user.id, planId: input.planId }, "[Subscriptions] plan subscriber tuple deferred to Permify outbox");
+        }
 
         await createAuditLog({ userId: ctx.user.id, action: "SUBSCRIPTION_CHANGED", metadata: { subId, plan: input.planId } });
         return { subscriptionId: subId, plan: input.planId, status: "active" };

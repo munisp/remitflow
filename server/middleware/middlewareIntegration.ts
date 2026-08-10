@@ -17,6 +17,7 @@
  * Each integration uses real client libraries with circuit breaker + retry.
  */
 import { logger } from "../_core/logger.js";
+import { verifyKeycloakAccessToken } from "../lib/keycloak-jwks.js";
 import { randomUUID } from "crypto";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -548,17 +549,24 @@ export class KeycloakIntegration {
     return this.accessToken;
   }
 
+  /**
+   * Verify a realm access token locally against the Keycloak JWKS
+   * (RS256 signature + issuer + audience + expiry — see server/lib/keycloak-jwks.ts).
+   * This replaces the previous introspection call, which required admin
+   * credentials and had no backing service in this deployment. Any
+   * verification failure returns { active: false } — never a fabricated allow.
+   */
   async verifyToken(token: string): Promise<{ active: boolean; sub?: string; preferred_username?: string; realm_access?: { roles: string[] } }> {
     try {
-      const adminToken = await this.getAdminToken();
-      const res = await fetch(`${CONFIG.keycloak.baseUrl}/realms/${CONFIG.keycloak.realm}/protocol/openid-connect/token/introspect`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Authorization: `Bearer ${adminToken}` },
-        body: new URLSearchParams({ token, client_id: CONFIG.keycloak.clientId, client_secret: CONFIG.keycloak.clientSecret }),
-      });
-      return await res.json() as any;
+      const claims = await verifyKeycloakAccessToken(token);
+      return {
+        active: true,
+        sub: claims.sub,
+        preferred_username: claims.preferred_username,
+        realm_access: claims.realm_access,
+      };
     } catch (err) {
-      logger.warn({ err }, "[Keycloak] Token verification failed");
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Keycloak] Token verification failed");
       return { active: false };
     }
   }
@@ -767,35 +775,42 @@ export class PermifyIntegration {
     return results.map(r => r.status === "fulfilled" ? r.value : false);
   }
 
+  /**
+   * Write a relationship tuple. Throws on ANY failure — HTTP error status,
+   * network error, or unavailable service in production. A swallowed write
+   * means subsequent permission checks evaluate against missing data, which is
+   * worse than a loud error. Callers that can tolerate a deferred write must
+   * catch and route the tuple to the Permify outbox (server/middleware/permify.ts).
+   */
   async writeRelationship(params: { entity: string; entityId: string; relation: string; subject: string; subjectId: string }): Promise<boolean> {
     if (!(await this.ensureAvailable())) {
-      const failClosed = process.env.NODE_ENV === "production";
-      if (failClosed) {
-        logger.error("[Permify] Unavailable in production — writeRelationship denied (fail-closed)");
-        return false;
+      const message = "[Permify] Unavailable — cannot write relationship";
+      if (process.env.NODE_ENV === "production") {
+        logger.error(`${message} (fail-closed)`);
+        throw new Error(message);
       }
-      logger.warn("[Permify] Unavailable — skipping writeRelationship in dev mode");
+      logger.warn(`${message} (dev mode)`);
       return false;
     }
-    try {
-      await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/relationships/write`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          metadata: { schema_version: this.schemaVersion },
-          tuples: [{ entity: { type: params.entity, id: params.entityId }, relation: params.relation, subject: { type: params.subject, id: params.subjectId } }],
-        }),
-        signal: AbortSignal.timeout(3000),
-      });
-      // Invalidate cache for this entity on write
-      Array.from(this.permCache.keys()).forEach(k => {
-        if (k.startsWith(`${params.entity}:${params.entityId}:`)) this.permCache.delete(k);
-      });
-      return true;
-    } catch (err) {
-      logger.warn({ err }, "[Permify] Write relationship failed");
-      return false;
+    const res = await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/relationships/write`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        metadata: { schema_version: this.schemaVersion },
+        tuples: [{ entity: { type: params.entity, id: params.entityId }, relation: params.relation, subject: { type: params.subject, id: params.subjectId } }],
+      }),
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      logger.error({ status: res.status, body: body.slice(0, 500), params }, "[Permify] Relationship write rejected");
+      throw new Error(`[Permify] Relationship write failed with HTTP ${res.status}`);
     }
+    // Invalidate cache for this entity on write
+    Array.from(this.permCache.keys()).forEach(k => {
+      if (k.startsWith(`${params.entity}:${params.entityId}:`)) this.permCache.delete(k);
+    });
+    return true;
   }
 
   async deleteRelationship(params: { entity: string; entityId: string; relation: string; subject: string; subjectId: string }): Promise<boolean> {
@@ -808,7 +823,7 @@ export class PermifyIntegration {
       return false;
     }
     try {
-      await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/relationships/delete`, {
+      const res = await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/relationships/delete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -820,6 +835,10 @@ export class PermifyIntegration {
         }),
         signal: AbortSignal.timeout(3000),
       });
+      if (!res.ok) {
+        logger.error({ status: res.status, params }, "[Permify] Relationship delete rejected");
+        return false;
+      }
       // Invalidate cache on delete
       Array.from(this.permCache.keys()).forEach(k => {
         if (k.startsWith(`${params.entity}:${params.entityId}:`)) this.permCache.delete(k);
@@ -841,9 +860,13 @@ export class PermifyIntegration {
     let succeeded = 0;
     let failed = 0;
     for (const rel of relationships) {
-      const ok = await this.writeRelationship(rel);
-      if (ok) succeeded++;
-      else failed++;
+      try {
+        const ok = await this.writeRelationship(rel);
+        if (ok) succeeded++;
+        else failed++;
+      } catch {
+        failed++;
+      }
     }
     return { succeeded, failed };
   }

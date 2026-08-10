@@ -12,6 +12,33 @@ const CORE_BANKING_BASE = (
   (typeof window !== "undefined" ? `${window.location.origin}/api` : "/api")
 ).replace(/\/$/, "");
 
+/**
+ * Base URL of the RemitFlow platform API (the server that owns
+ * /api/auth/keycloak/login, /api/oauth/callback and /api/trpc).
+ * In a unified deployment this is same-origin; an explicit gateway
+ * base may be provided via VITE_API_BASE_URL (with or without the
+ * trailing /api path segment).
+ */
+const PLATFORM_API_BASE = (() => {
+  const configured = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "");
+  if (configured) {
+    return configured.endsWith("/api") ? configured : `${configured}/api`;
+  }
+  return typeof window !== "undefined" ? `${window.location.origin}/api` : "/api";
+})();
+
+/** Contract returned by GET /api/auth/keycloak/login (PKCE initiation). */
+export interface KeycloakLoginInitiation {
+  authorizationUrl: string;
+  state: string;
+}
+
+interface PendingSsoFlow {
+  state: string;
+  returnTo: string;
+  startedAt: number;
+}
+
 export interface LoginCredentials {
   email: string;
   password: string;
@@ -49,6 +76,226 @@ class AuthService {
   private readonly AUTH_USER_KEY = "auth_user";
   private readonly KEYCLOAK_ID_KEY = "keycloak_id";
   private readonly TOKEN_EXPIRY_KEY = "token_expiry";
+  private readonly SSO_PENDING_KEY = "keycloak_sso_pending";
+  private readonly SSO_PROBE_KEY = "keycloak_sso_probe";
+  private readonly SSO_PROBE_TTL_MS = 5 * 60 * 1000;
+
+  // ─── Keycloak SSO (Authorization Code + PKCE) ─────────────────────────────
+
+  /**
+   * Fetch a fresh PKCE login initiation from the platform server.
+   * Throws when the endpoint is absent (Keycloak unconfigured) or the
+   * payload does not match the documented { authorizationUrl, state }
+   * contract — callers use this to fall back to credential login.
+   */
+  private async fetchKeycloakLoginInitiation(): Promise<KeycloakLoginInitiation> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    let response: Response;
+    try {
+      response = await fetch(`${PLATFORM_API_BASE}/auth/keycloak/login`, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        credentials: "include",
+        signal: controller.signal,
+      });
+    } catch {
+      clearTimeout(timeoutId);
+      throw new Error("SSO unavailable: could not reach the platform server.");
+    }
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(
+        response.status === 404 || response.status === 501
+          ? "SSO is not configured on this deployment."
+          : `SSO initiation failed (HTTP ${response.status}).`,
+      );
+    }
+
+    const data = (await response.json().catch(() => null)) as Partial<KeycloakLoginInitiation> | null;
+    if (
+      !data ||
+      typeof data.authorizationUrl !== "string" ||
+      data.authorizationUrl.length === 0 ||
+      typeof data.state !== "string" ||
+      data.state.length === 0
+    ) {
+      throw new Error("SSO is not configured on this deployment.");
+    }
+    return { authorizationUrl: data.authorizationUrl, state: data.state };
+  }
+
+  /**
+   * Probe whether Keycloak SSO is available on this deployment.
+   * Result is cached in sessionStorage for 5 minutes to avoid hammering
+   * the initiation endpoint on every login-page render.
+   */
+  async probeKeycloakSso(): Promise<boolean> {
+    try {
+      const cached = sessionStorage.getItem(this.SSO_PROBE_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached) as { available: boolean; at: number };
+        if (Date.now() - parsed.at < this.SSO_PROBE_TTL_MS) {
+          return parsed.available;
+        }
+      }
+    } catch {
+      // Corrupt cache — re-probe below.
+    }
+
+    let available = false;
+    try {
+      await this.fetchKeycloakLoginInitiation();
+      available = true;
+    } catch {
+      available = false;
+    }
+
+    try {
+      sessionStorage.setItem(
+        this.SSO_PROBE_KEY,
+        JSON.stringify({ available, at: Date.now() }),
+      );
+    } catch {
+      // Storage unavailable (private mode) — probe result still returned.
+    }
+    return available;
+  }
+
+  /**
+   * Begin the Keycloak PKCE flow: fetches a fresh authorization URL from
+   * the platform server, records the pending flow, and redirects the
+   * browser to Keycloak. The server-side /api/oauth/callback endpoint
+   * performs the code exchange and redirects back to the app.
+   */
+  async initiateKeycloakLogin(returnTo: string = "/"): Promise<void> {
+    const initiation = await this.fetchKeycloakLoginInitiation();
+    const pending: PendingSsoFlow = {
+      state: initiation.state,
+      returnTo,
+      startedAt: Date.now(),
+    };
+    try {
+      sessionStorage.setItem(this.SSO_PENDING_KEY, JSON.stringify(pending));
+    } catch {
+      // Continue without local marker — completion will fail closed below.
+    }
+    window.location.assign(initiation.authorizationUrl);
+  }
+
+  /** True when an SSO flow was started from this tab and not yet completed. */
+  hasPendingSso(): boolean {
+    try {
+      return sessionStorage.getItem(this.SSO_PENDING_KEY) !== null;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Abandon any pending SSO flow (used on explicit user cancel). */
+  clearPendingSso(): void {
+    try {
+      sessionStorage.removeItem(this.SSO_PENDING_KEY);
+    } catch {
+      // Ignore storage errors.
+    }
+  }
+
+  /**
+   * Verify the cookie-based platform SSO session by calling the tRPC
+   * `auth.me` endpoint. Returns the mapped user when a valid session
+   * exists and null when the server definitively rejects the session.
+   * Throws when the server cannot be reached, so callers can
+   * distinguish "no session" from "indeterminate".
+   */
+  async fetchSsoSessionUser(): Promise<User | null> {
+    const input = encodeURIComponent(JSON.stringify({ json: null }));
+    let response: Response;
+    try {
+      response = await fetch(`${PLATFORM_API_BASE}/trpc/auth.me?input=${input}`, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        credentials: "include",
+      });
+    } catch {
+      throw new Error("Could not reach the platform server to verify the session.");
+    }
+    if (!response.ok) return null;
+
+    // tRPC v11 + superjson envelope: { result: { data: { json: <user> } } }
+    const envelope = (await response.json().catch(() => null)) as {
+      result?: { data?: { json?: Record<string, unknown> } };
+    } | null;
+    const platformUser = envelope?.result?.data?.json;
+    if (!platformUser || typeof platformUser !== "object") return null;
+
+    const name = typeof platformUser.name === "string" ? platformUser.name : "";
+    const [firstName, ...rest] = name.trim().split(/\s+/).filter(Boolean);
+    const openId =
+      typeof platformUser.openId === "string" ? platformUser.openId : undefined;
+    const role =
+      platformUser.role === "admin" || platformUser.role === "partner"
+        ? platformUser.role
+        : "user";
+
+    return {
+      id: openId || String(platformUser.id ?? ""),
+      email: typeof platformUser.email === "string" ? platformUser.email : "",
+      firstName: firstName || undefined,
+      lastName: rest.length > 0 ? rest.join(" ") : undefined,
+      keycloak_id: openId,
+      keycloakId: openId,
+      status: typeof platformUser.status === "string" ? platformUser.status : undefined,
+      role,
+    };
+  }
+
+  /**
+   * Complete the SSO flow after the platform server redirects back to the
+   * app. The server has already exchanged the authorization code and set
+   * the session cookie; here we verify a real session exists via
+   * `auth.me` and map the platform user onto the local user shape.
+   *
+   * Fails loudly (throws) when no pending flow exists or the session is
+   * missing/invalid — never fabricates an authenticated state.
+   */
+  async completeKeycloakLogin(): Promise<User> {
+    let pending: PendingSsoFlow | null = null;
+    try {
+      const raw = sessionStorage.getItem(this.SSO_PENDING_KEY);
+      pending = raw ? (JSON.parse(raw) as PendingSsoFlow) : null;
+    } catch {
+      pending = null;
+    }
+    if (!pending) {
+      throw new Error("No SSO sign-in is in progress.");
+    }
+
+    // Stale flows (older than 15 minutes) are abandoned.
+    if (Date.now() - pending.startedAt > 15 * 60 * 1000) {
+      this.clearPendingSso();
+      throw new Error("SSO sign-in expired. Please try again.");
+    }
+
+    let user: User | null = null;
+    try {
+      user = await this.fetchSsoSessionUser();
+    } catch {
+      throw new Error("Could not verify the SSO session. Please try again.");
+    }
+    if (!user) {
+      this.clearPendingSso();
+      throw new Error(
+        "SSO sign-in did not establish a session. Please try again or sign in with email and password.",
+      );
+    }
+
+    this.clearPendingSso();
+    this.setUser(user);
+    if (user.keycloak_id) this.setKeycloakId(user.keycloak_id);
+    return user;
+  }
 
   /**
    * Login user with email and password

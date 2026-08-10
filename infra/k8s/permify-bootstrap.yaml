@@ -1,0 +1,49 @@
+# ─── Permify Bootstrap Job ────────────────────────────────────────────────────
+# Runs ONCE after the Permify Deployment is healthy to:
+#   1. create the canonical tenant (PERMIFY_TENANT_ID), and
+#   2. write the canonical authorization schema
+#      (infrastructure/integration/permify_policies/remitflow_schema.perm).
+# It executes scripts/permify-bootstrap.ts, which ships inside the api image
+# and exits non-zero on failure (Job backoffLimit retries it). It is
+# idempotent — safe to re-apply after schema changes.
+#
+# Apply AFTER the permify Deployment:
+#   kubectl apply -f infra/k8s/permify-bootstrap.yaml
+#   kubectl -n remitflow wait --for=condition=complete job/permify-bootstrap --timeout=120s
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: permify-bootstrap
+  namespace: remitflow
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: permify-bootstrap
+        job: bootstrap
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bootstrap
+          # Same image as the api Deployment (see infra/k8s/services.yaml);
+          # replace the tag with your registry's pinned release tag.
+          image: remitflow/api:latest
+          imagePullPolicy: IfNotPresent
+          command: ["pnpm", "tsx", "scripts/permify-bootstrap.ts"]
+          env:
+            - name: PERMIFY_URL
+              value: "http://permify:3476"
+            - name: PERMIFY_TENANT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: remitflow-config
+                  key: permify-tenant-id
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi

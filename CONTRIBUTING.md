@@ -5,7 +5,7 @@
 - `services/` — independent Go, Rust, and Python microservices. Each is self-contained: its own `go.mod`/`Cargo.toml`/`requirements.txt`, its own `Dockerfile` (where containerized), no shared code across services today.
 - `services/payment-gateways/` — one directory per payment rail/provider, each with its own `client.py`/`service.py` pair.
 - `uis/pwa` — the customer/agent-facing Progressive Web App (Vite + React + TypeScript + Tailwind).
-- `infrastructure/` — Helm charts (`charts/`), a chart generator (`templates/template-chart`, driven by `00_provision_chart.sh`), APISIX gateway config (`apisix-resources/`), Dapr manifests (`manifests/dapr/`), and Permify authorization policies (`integration/permify_policies/`).
+- `infrastructure/` — Helm charts (`charts/`), a chart generator (`templates/template-chart`, driven by `00_provision_chart.sh`), APISIX gateway config (`../infra/apisix/`, `../services/gateway-config/`), Dapr manifests (`manifests/dapr/`), and Permify authorization policies (`integration/permify_policies/`).
 - `.github/workflows/` — CI (lint/build/test), security scanning, and deploy pipelines.
 
 ## Local setup

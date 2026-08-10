@@ -14,7 +14,7 @@ import { getDb } from "../db";
 import { sql } from "drizzle-orm";
 import { createAuditLog } from "../audit.service";
 import { notifyOwner } from "../_core/notification";
-import { canAccessDispute, grantTransactionAccess } from "../middleware/permify";
+import { canAccessTransaction, writeRelationshipWithRetry } from "../middleware/permify";
 import { logger } from '../_core/logger';
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 
@@ -63,10 +63,24 @@ const raiseDispute = protectedProcedure
     if (!txRows.length) {
       throw new TRPCError({ code: "NOT_FOUND", message: "Transaction not found or does not belong to you" });
     }
-    // PBAC: grant Permify access record for this user<>transaction pair (idempotent)
-    await grantTransactionAccess(String(ctx.user.id), String(input.transactionId));
-    // Verify access via Permify (non-blocking fallback: allow if Permify is unavailable)
-    const pbacAllowed = await canAccessDispute(String(ctx.user.id), String(input.transactionId)).catch(() => true);
+    // PBAC: write the owner tuple for this user<>transaction pair (idempotent,
+    // retried with backoff; deferred to the Permify outbox if Permify rejects it).
+    await writeRelationshipWithRetry({
+      entityType: "transaction",
+      entityId: String(input.transactionId),
+      relation: "owner",
+      subjectType: "user",
+      subjectId: String(ctx.user.id),
+    });
+    // Verify access via Permify. Fail CLOSED on error — a dispute must never be
+    // raised when the policy engine cannot confirm the caller's access.
+    let pbacAllowed = false;
+    try {
+      pbacAllowed = await canAccessTransaction(String(ctx.user.id), String(input.transactionId), "view");
+    } catch (err) {
+      logger.error({ err: err instanceof Error ? err.message : String(err), transactionId: input.transactionId }, "[TransferDispute] Permify check errored — denying");
+      pbacAllowed = false;
+    }
     if (!pbacAllowed) {
       throw new TRPCError({ code: "FORBIDDEN", message: "Access denied by policy engine" });
     }
@@ -94,6 +108,18 @@ const raiseDispute = protectedProcedure
     `) as any[];
 
     const disputeId = result[0]?.id ?? null;
+
+    // Write the dispute owner tuple so dispute-scoped permission checks
+    // (view/respond/escalate) have data to evaluate. Outbox-backed write-behind.
+    if (disputeId != null) {
+      await writeRelationshipWithRetry({
+        entityType: "dispute",
+        entityId: String(disputeId),
+        relation: "owner",
+        subjectType: "user",
+        subjectId: String(ctx.user.id),
+      });
+    }
 
     await createAuditLog({
       userId: ctx.user.id,

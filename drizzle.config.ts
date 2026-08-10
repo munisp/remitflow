@@ -7,7 +7,11 @@ if (!databaseUrl) {
 
 export default {
   schema: "./drizzle/schema.ts",
-  out: "./drizzle/migrations",
+  // Canonical migration track is the repo-root drizzle/ directory — the same
+  // path scripts/migrate.mjs applies at deploy time. The former
+  // ./drizzle/migrations subdirectory was a divergent second track and has
+  // been removed (see drizzle/MIGRATIONS.md).
+  out: "./drizzle",
   dialect: "postgresql",
   dbCredentials: {
     url: databaseUrl,

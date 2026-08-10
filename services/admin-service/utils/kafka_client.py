@@ -107,6 +107,14 @@ class KafkaClient:
             buffer_size: Maximum events to buffer before flushing
             flush_interval: Seconds between automatic flushes
         """
+        # Exactly-once producer semantics: the idempotent producer guarantees
+        # per-partition ordering + dedupe on retries and implies acks=all.
+        # Explicit overrides in the caller-supplied config win.
+        config = {
+            "enable.idempotence": True,
+            "acks": "all",
+            **config,
+        }
         self.producer = Producer(config)
         self.config = config
         self.buffer_size = buffer_size

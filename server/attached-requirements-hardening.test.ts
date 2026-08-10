@@ -31,18 +31,19 @@ describe("attached requirements — RemitFlow security and resilience controls",
     expect(router).toContain("requeueDeadLetterRegulatoryFiling");
   });
 
-  it("rejects malformed JWTs at the custom APISIX tenant boundary without logging credentials", () => {
-    const plugin = text("infrastructure/apisix-resources/plugins/access.lua");
-    const route = text("infrastructure/apisix-resources/routes/account-service.yaml");
-    expect(plugin).toContain("exactly three bounded base64url segments");
-    expect(plugin).toContain("Unsigned JWTs are not permitted");
-    expect(plugin).toContain("require_tenant_claim");
-    expect(plugin).not.toContain("Token from Authorization header:");
-    expect(plugin).not.toContain("Token from cookie:");
-    expect(route).toContain("54remit-access-plugin");
-    expect(route).toContain("require_tenant_claim: true");
-    expect(route).toContain('allow_origins: "https://54remit.upi.dev"');
-    expect(route).not.toContain('allow_origins: "*"');
+  it("protects the APISIX /api/* boundary with OIDC, no default admin key, and no foreign-project config", () => {
+    const manager = text("services/go-apisix-manager/main.go");
+    // OIDC via Keycloak discovery on the bootstrap route, bearer_only for
+    // machine endpoints, ssl_verify on by default.
+    expect(manager).toContain("openid-connect");
+    expect(manager).toContain("KEYCLOAK_DISCOVERY_URL");
+    expect(manager).toContain("OIDCBearerOnly");
+    expect(manager).toContain(`getEnv("APISIX_OIDC_SSL_VERIFY", "true")`);
+    // Fail-fast when the admin key is absent — no hardcoded fallback key.
+    expect(manager).toContain("APISIX_ADMIN_KEY is not set");
+    expect(manager).not.toContain("edd1c9f034335f136f87ad84b625c8f1");
+    // Rate-limit updates must merge, not clobber, route config.
+    expect(manager).toContain("GetRoute");
   });
 
   it("preserves W3C-compatible trace context and regulatory queue metrics", () => {

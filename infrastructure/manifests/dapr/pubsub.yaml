@@ -1,3 +1,30 @@
+# Redis credentials for the Dapr pubsub component.
+# PLACEHOLDER ONLY — rotate immediately. In production, do NOT apply this
+# manifest; sync the secret from a secrets manager instead, e.g.:
+#
+#   apiVersion: external-secrets.io/v1beta1
+#   kind: ExternalSecret
+#   metadata:
+#     name: redis-dapr-pubsub
+#     namespace: 54remit
+#   spec:
+#     secretStoreRef: { name: <your-cluster-secret-store>, kind: ClusterSecretStore }
+#     target: { name: redis-dapr-pubsub }
+#     data:
+#       - secretKey: redis-password
+#         remoteRef: { key: remitflow/redis, property: password }
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-dapr-pubsub
+  namespace: 54remit
+type: Opaque
+stringData:
+  # CHANGE_ME — replace with the real Redis password (or delete and use the
+  # ExternalSecret sketched above). ROTATE: this value previously existed in
+  # plaintext in this file's git history and must be considered compromised.
+  redis-password: "CHANGE_ME_ROTATE_REQUIRED"
+---
 apiVersion: dapr.io/v1alpha1
 kind: Component
 metadata:
@@ -10,7 +37,9 @@ spec:
     - name: redisHost
       value: redis-master.redis.svc.cluster.local:6379
     - name: redisPassword
-      value: "A4bOBNkq9d"
+      secretKeyRef:
+        name: redis-dapr-pubsub
+        key: redis-password
     - name: enableTLS
       value: "false"
     - name: dialTimeout
@@ -31,3 +60,5 @@ spec:
       value: "5m"
     - name: idleCheckFrequency
       value: "1m"
+auth:
+  secretStore: kubernetes

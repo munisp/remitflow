@@ -6,12 +6,25 @@
 import { Client } from "@opensearch-project/opensearch";
 import { logger } from '../_core/logger';
 
+// Canonical env names: OPENSEARCH_USERNAME / OPENSEARCH_PASSWORD (matches .env.example).
+// Legacy aliases OPENSEARCH_USER / OPENSEARCH_PASS are still honored for backward compatibility.
 const OPENSEARCH_URL = process.env.OPENSEARCH_URL || "http://localhost:9200";
-const OPENSEARCH_USER = process.env.OPENSEARCH_USER || "admin";
-const OPENSEARCH_PASS = process.env.OPENSEARCH_PASS || "";
+const OPENSEARCH_USER = process.env.OPENSEARCH_USERNAME || process.env.OPENSEARCH_USER || "admin";
+const OPENSEARCH_PASS = process.env.OPENSEARCH_PASSWORD || process.env.OPENSEARCH_PASS || "";
 
-if (!process.env.OPENSEARCH_PASS && process.env.NODE_ENV === "production") {
-  logger.warn("[OpenSearch] OPENSEARCH_PASS not set in production — authentication will fail");
+// TLS verification is ON by default. Set OPENSEARCH_INSECURE=true ONLY for local dev
+// against self-signed certs — never in production.
+const OPENSEARCH_INSECURE = process.env.OPENSEARCH_INSECURE === "true";
+const IS_PROD = process.env.NODE_ENV === "production";
+
+if (OPENSEARCH_INSECURE && IS_PROD) {
+  logger.error("[OpenSearch] OPENSEARCH_INSECURE=true in production — TLS certificate verification is DISABLED. This is a security violation.");
+} else if (OPENSEARCH_INSECURE) {
+  logger.warn("[OpenSearch] OPENSEARCH_INSECURE=true — TLS certificate verification disabled (dev only)");
+}
+
+if (!OPENSEARCH_PASS && IS_PROD) {
+  logger.warn("[OpenSearch] OPENSEARCH_PASSWORD not set in production — authentication will fail");
 }
 
 // ── Index Names ───────────────────────────────────────────────────────────────
@@ -59,7 +72,7 @@ export async function getRealOSClient(): Promise<Client | null> {
     _realClient = new Client({
       node: OPENSEARCH_URL,
       auth: { username: OPENSEARCH_USER, password: OPENSEARCH_PASS },
-      ssl: { rejectUnauthorized: false },
+      ssl: { rejectUnauthorized: !OPENSEARCH_INSECURE },
       requestTimeout: 5000,
     });
     await _realClient.ping();
@@ -155,8 +168,11 @@ const INDEX_MAPPINGS: Record<string, Record<string, unknown>> = {
 
 export async function ensureIndicesExist(): Promise<void> {
   const c = await getRealOSClient();
-  if (!c) return;
+  if (!c) {
+    throw new Error("[OpenSearch] Cannot bootstrap indices — OpenSearch cluster unavailable");
+  }
   const allIndices = [...Object.values(INDICES), ...Object.values(OS_INDICES)];
+  const failures: string[] = [];
   for (const index of allIndices) {
     try {
       const exists = await c.indices.exists({ index });
@@ -171,8 +187,108 @@ export async function ensureIndicesExist(): Promise<void> {
         });
         logger.info(`[OpenSearch] Created index ${index} with mappings`);
       }
-    } catch { /* ignore */ }
+    } catch (err) {
+      failures.push(`${index}: ${(err as Error).message}`);
+      logger.error({ err, index }, `[OpenSearch] Failed to ensure index ${index}`);
+    }
   }
+  if (failures.length > 0) {
+    throw new Error(`[OpenSearch] Index bootstrap failed for ${failures.length} index(es): ${failures.join("; ")}`);
+  }
+}
+
+// ── Index Templates + ILM Bootstrap ──────────────────────────────────────────
+
+interface StablecoinTemplateFile {
+  ilm_policy?: { name: string; policy: Record<string, unknown> };
+  index_templates?: Array<{
+    name: string;
+    index_patterns: string[];
+    template: Record<string, unknown>;
+  }>;
+}
+
+function loadTemplateFile(): StablecoinTemplateFile {
+  // Resolve repo-root-relative path regardless of CWD (tsx runtime vs bundled dist).
+  const candidates = [
+    "infra/opensearch/stablecoin-index-templates.json",
+    "../../infra/opensearch/stablecoin-index-templates.json",
+  ];
+  for (const rel of candidates) {
+    try {
+      const fs = require("node:fs") as typeof import("node:fs");
+      const path = require("node:path") as typeof import("node:path");
+      const full = path.resolve(process.cwd(), rel);
+      if (fs.existsSync(full)) {
+        return JSON.parse(fs.readFileSync(full, "utf-8")) as StablecoinTemplateFile;
+      }
+    } catch { /* try next candidate */ }
+  }
+  throw new Error(
+    `[OpenSearch] stablecoin-index-templates.json not found (searched: ${candidates.join(", ")} from cwd=${process.cwd()})`,
+  );
+}
+
+/**
+ * Apply stablecoin index templates + ILM policy from
+ * infra/opensearch/stablecoin-index-templates.json to the cluster.
+ * Real API calls only — throws (loudly) if the cluster rejects any request.
+ */
+export async function applyIndexTemplates(): Promise<{ templatesApplied: string[]; ilmApplied: boolean }> {
+  const c = await getRealOSClient();
+  if (!c) {
+    throw new Error("[OpenSearch] Cannot apply index templates — OpenSearch cluster unavailable");
+  }
+
+  const spec = loadTemplateFile();
+  const templatesApplied: string[] = [];
+
+  for (const tpl of spec.index_templates ?? []) {
+    await c.indices.putIndexTemplate({
+      name: tpl.name,
+      body: {
+        index_patterns: tpl.index_patterns,
+        template: tpl.template,
+      },
+    });
+    templatesApplied.push(tpl.name);
+    logger.info(`[OpenSearch] Applied index template ${tpl.name} (patterns: ${tpl.index_patterns.join(",")})`);
+  }
+
+  let ilmApplied = false;
+  if (spec.ilm_policy) {
+    // The policy file uses Elasticsearch ILM phase syntax. Attempt the ES-compatible
+    // endpoint first; on OpenSearch clusters without ES-ILM compatibility this will
+    // fail loudly rather than fabricate success.
+    try {
+      await c.transport.request({
+        method: "PUT",
+        path: `_ilm/policy/${encodeURIComponent(spec.ilm_policy.name)}`,
+        body: { policy: spec.ilm_policy.policy },
+      });
+      ilmApplied = true;
+      logger.info(`[OpenSearch] Applied ILM policy ${spec.ilm_policy.name}`);
+    } catch (err) {
+      logger.error(
+        { err, policy: spec.ilm_policy.name },
+        "[OpenSearch] ILM policy apply failed — cluster may not support ES-style _ilm/policy " +
+        "(OpenSearch ISM uses a different schema via _plugins/_ism/policies). " +
+        "Index templates were applied; retention policy must be configured via ISM.",
+      );
+      throw new Error(`[OpenSearch] Failed to apply ILM policy '${spec.ilm_policy.name}': ${(err as Error).message}`);
+    }
+  }
+
+  return { templatesApplied, ilmApplied };
+}
+
+/**
+ * Full OpenSearch bootstrap: indices + templates + ILM.
+ * Called once from server startup; throws on failure so the caller can log loudly.
+ */
+export async function bootstrapOpenSearch(): Promise<void> {
+  await ensureIndicesExist();
+  await applyIndexTemplates();
 }
 
 /** Retry OpenSearch connection — allows recovery after transient failures */

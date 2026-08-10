@@ -3,6 +3,12 @@
  * ──────────────────────────────────────────
  * Type-safe Fluvio producer/consumer wrappers for real-time event streaming.
  *
+ * Delivery semantics (post-audit F2): fluvioProduce() talks directly to the
+ * Fluvio HTTP bridge and THROWS a typed FluvioError on any failure — the
+ * outbox worker converts that into retries / dead-letter. No silent fallback,
+ * no empty-success fabrication. Producers that explicitly want async delivery
+ * use enqueueFluvioOutbox().
+ *
  * Topics:
  *   - transfer-events: All transfer lifecycle events
  *   - kyc-events: KYC verification events
@@ -81,45 +87,109 @@ export interface FluvioFxEvent {
   timestamp: string;
 }
 
+// ─── Errors ──────────────────────────────────────────────────────────────────
+/**
+ * Typed Fluvio delivery failure. The outbox worker (server/workers/outbox.worker.ts)
+ * catches these, applies its backoff schedule, and dead-letters after max retries.
+ * There is deliberately NO silent fallback: a failed produce must surface.
+ */
+export type FluvioErrorCode = "BRIDGE_NOT_CONFIGURED" | "BRIDGE_UNREACHABLE" | "BRIDGE_REJECTED";
+
+export class FluvioError extends Error {
+  readonly code: FluvioErrorCode;
+  readonly topic: string;
+  constructor(code: FluvioErrorCode, topic: string, detail: string) {
+    super(`[Fluvio] ${code}: topic=${topic} — ${detail}`);
+    this.name = "FluvioError";
+    this.code = code;
+    this.topic = topic;
+  }
+}
+
 // ─── Producer ─────────────────────────────────────────────────────────────────
 /**
- * Produces a message to a Fluvio topic.
- * Falls back to the outbox pattern if Fluvio is unavailable.
+ * Produces a message to a Fluvio topic via the Fluvio HTTP bridge.
+ *
+ * FAILS LOUDLY: throws FluvioError when the bridge is not configured, is
+ * unreachable, or rejects the record. Callers that need async delivery must
+ * explicitly enqueue via enqueueFluvioOutbox() — nothing is fabricated here.
  */
 export async function fluvioProduce(
-  topic: FluvioTopic,
+  topic: FluvioTopic | string,
   key: string,
   value: unknown
 ): Promise<void> {
   const payload = typeof value === "string" ? value : JSON.stringify(value);
 
-  try {
-    // Try direct Fluvio HTTP bridge (if configured)
-    const bridgeUrl = process.env.FLUVIO_HTTP_BRIDGE_URL;
-    if (bridgeUrl) {
-      const res = await fetch(`${bridgeUrl}/produce`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, key, value: payload }),
-        signal: AbortSignal.timeout(3000),
-      });
-      if (res.ok) {
-        logger.debug({ topic, key }, "[Fluvio] Message produced");
-        return;
-      }
-    }
+  const bridgeUrl = process.env.FLUVIO_HTTP_BRIDGE_URL;
+  if (!bridgeUrl) {
+    throw new FluvioError("BRIDGE_NOT_CONFIGURED", topic, "FLUVIO_HTTP_BRIDGE_URL is not set");
+  }
 
-    // Fallback: write to outbox table for async delivery
-    const db = await getDb();
-    if (db) {
-      await (db as any).execute(sql`
-        INSERT INTO outbox_events (aggregate_id, aggregate_type, event_type, payload, status, created_at)
-        VALUES (${key}, ${topic}, 'fluvio.message', ${payload}, 'pending', NOW())
-      `);
-      logger.debug({ topic, key }, "[Fluvio] Message queued in outbox");
-    }
+  let res: Response;
+  try {
+    res = await fetch(`${bridgeUrl}/produce`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic, key, value: payload }),
+      signal: AbortSignal.timeout(3000),
+    });
   } catch (err) {
-    logger.error({ err, topic, key }, "[Fluvio] Produce failed");
+    throw new FluvioError("BRIDGE_UNREACHABLE", topic, (err as Error).message);
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new FluvioError("BRIDGE_REJECTED", topic, `HTTP ${res.status} ${body}`.trim());
+  }
+
+  logger.debug({ topic, key }, "[Fluvio] Message produced");
+}
+
+/**
+ * Explicit outbox enqueue for producers that want async, retried delivery.
+ * The outbox worker will later call fluvioProduce() and dead-letter on
+ * persistent bridge failure.
+ */
+export async function enqueueFluvioOutbox(
+  topic: FluvioTopic | string,
+  key: string,
+  value: unknown
+): Promise<void> {
+  const payload = typeof value === "string" ? value : JSON.stringify(value);
+  const db = await getDb();
+  if (!db) {
+    throw new FluvioError("BRIDGE_UNREACHABLE", topic, "database unavailable — cannot enqueue outbox event");
+  }
+  await (db as any).execute(sql`
+    INSERT INTO outbox_events (aggregate_id, aggregate_type, event_type, payload, status, created_at)
+    VALUES (${key}, ${topic}, 'fluvio.message', ${payload}, 'pending', NOW())
+  `);
+  logger.debug({ topic, key }, "[Fluvio] Message queued in outbox");
+}
+
+/**
+ * Real health check against the Fluvio HTTP bridge. Never fabricates a
+ * healthy status — reports configured/connected plus the error when down.
+ */
+export async function getFluvioBridgeHealth(): Promise<{
+  configured: boolean;
+  connected: boolean;
+  endpoint: string | null;
+  error: string | null;
+}> {
+  const bridgeUrl = process.env.FLUVIO_HTTP_BRIDGE_URL;
+  if (!bridgeUrl) {
+    return { configured: false, connected: false, endpoint: null, error: "FLUVIO_HTTP_BRIDGE_URL is not set" };
+  }
+  try {
+    const res = await fetch(`${bridgeUrl}/health`, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) {
+      return { configured: true, connected: false, endpoint: bridgeUrl, error: `HTTP ${res.status}` };
+    }
+    return { configured: true, connected: true, endpoint: bridgeUrl, error: null };
+  } catch (err) {
+    return { configured: true, connected: false, endpoint: bridgeUrl, error: (err as Error).message };
   }
 }
 

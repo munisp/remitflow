@@ -3111,6 +3111,19 @@ export const appRouter = router({
           ilpPacket = quote.ilpPacket;
           condition = quote.condition;
         }
+        if (!ilpPacket || !condition) {
+          // Quote is pending via async callback (HTTP 202) — build a real
+          // ILPv4 packet + condition locally instead of sending empty fields.
+          const { buildIlpPacket } = await import("./mojaloop.service.js");
+          const built = buildIlpPacket({
+            amount: input.amount.toFixed(2),
+            currency: input.currency,
+            destinationFspId: input.payeeFsp,
+            destinationAccount: input.payeeId,
+          });
+          ilpPacket = built.ilpPacket;
+          condition = built.condition;
+        }
         // Step 2: Initiate transfer via Mojaloop Switch
         const result = await initiateTransfer({
           payerFspId: "remitflow-fsp",

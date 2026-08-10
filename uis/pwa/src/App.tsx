@@ -47,6 +47,7 @@ const BatchPayments = lazy(() => import("./pages/BatchPayments"));
 const SavingsGoals = lazy(() => import("./pages/SavingsGoals"));
 const FXAlerts = lazy(() => import("./pages/FXAlerts"));
 const OperationsMap = lazy(() => import("./pages/OperationsMap"));
+const PlatformHealth = lazy(() => import("./pages/PlatformHealth"));
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -72,7 +73,7 @@ const AdminRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
 const App: React.FC = () => {
   const [tenantLoading, setTenantLoading] = useState(true);
   const [tenantError, setTenantError] = useState<string | null>(null);
-  const { refreshAuth, token } = useAuthStore();
+  const { refreshAuth, token, isAuthenticated } = useAuthStore();
 
   // Load tenant configuration and initialize auth on app startup
   useEffect(() => {
@@ -87,9 +88,13 @@ const App: React.FC = () => {
           console.log("✓ Tenant configuration loaded");
         }
 
-        // If user has a token, set it in the API client and check if it needs refresh
+        // If user has a token, set it in the API client and check if it needs refresh.
+        // Cookie-based SSO sessions carry no bearer token but still need
+        // re-verification against the platform server on every boot.
         if (token) {
           setAuthToken(token);
+        }
+        if (token || isAuthenticated) {
           await refreshAuth();
         }
 
@@ -106,7 +111,7 @@ const App: React.FC = () => {
     };
 
     initializeApp();
-  }, [token, refreshAuth]);
+  }, [token, isAuthenticated, refreshAuth]);
 
   // Show loading screen while loading tenant config
   if (tenantLoading) {
@@ -219,6 +224,7 @@ const App: React.FC = () => {
             <Route path="savings-goals" element={<SavingsGoals />} />
             <Route path="fx-alerts" element={<FXAlerts />} />
             <Route path="operations-map" element={<AdminRoute><OperationsMap /></AdminRoute>} />
+            <Route path="platform-status" element={<PlatformHealth />} />
           </Route>
 
           <Route path="*" element={<Navigate to="/" replace />} />

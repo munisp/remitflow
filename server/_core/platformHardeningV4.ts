@@ -1300,28 +1300,63 @@ export const APISIX_ROUTES: APISixRouteConfig[] = [
 
 export async function syncAPISixRoutes(): Promise<void> {
   const APISIX_ADMIN_URL = process.env.APISIX_ADMIN_URL || "http://localhost:9180";
-  const APISIX_API_KEY = process.env.APISIX_ADMIN_KEY || "edd1c9f034335f136f87ad84b625c8f1";
+  // Fail-fast: no default admin key — an unset key means the gateway is not
+  // provisioned and route sync must surface that loudly.
+  const APISIX_API_KEY = process.env.APISIX_ADMIN_KEY;
+  if (!APISIX_API_KEY) {
+    throw new Error("APISIX_ADMIN_KEY is not set — refusing to sync routes without credentials");
+  }
+  // Upstream is env-driven — never hardcoded loopback.
+  const upstreamHost = process.env.APISIX_API_UPSTREAM_HOST || process.env.API_NODE_HOST || "remitflow-api:3000";
+
+  // Optional OIDC protection via Keycloak discovery (only when configured)
+  const oidcDiscovery = process.env.KEYCLOAK_DISCOVERY_URL
+    || (process.env.KEYCLOAK_ISSUER ? `${process.env.KEYCLOAK_ISSUER}/.well-known/openid-configuration` : "");
+  const oidcPlugin = oidcDiscovery
+    ? {
+        discovery: oidcDiscovery,
+        client_id: process.env.KEYCLOAK_CLIENT_ID || "remitflow-api",
+        bearer_only: (process.env.APISIX_OIDC_BEARER_ONLY ?? "true") === "true",
+        ssl_verify: (process.env.APISIX_OIDC_SSL_VERIFY ?? "true") === "true",
+      }
+    : undefined;
 
   for (let i = 0; i < APISIX_ROUTES.length; i++) {
     const route = APISIX_ROUTES[i];
+    const plugins: Record<string, unknown> = { ...route.plugins };
+    if (oidcPlugin) plugins["openid-connect"] = oidcPlugin;
     try {
-      await fetch(`${APISIX_ADMIN_URL}/apisix/admin/routes/${i + 1}`, {
+      const resp = await fetch(`${APISIX_ADMIN_URL}/apisix/admin/routes/${i + 1}`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
           "X-API-KEY": APISIX_API_KEY,
         },
         body: JSON.stringify({
+          id: String(i + 1),
           uri: route.uri,
           methods: route.methods,
-          plugins: route.plugins,
-          upstream: { type: "roundrobin", nodes: { "127.0.0.1:3000": 1 } },
+          plugins,
+          upstream: { type: "roundrobin", nodes: { [upstreamHost]: 1 } },
         }),
+        signal: AbortSignal.timeout(5000),
       });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        logger.warn({ status: resp.status, body, uri: route.uri }, "APISix route sync rejected");
+      }
     } catch (err) {
       logger.warn({ error: err, uri: route.uri }, "APISix route sync failed");
     }
   }
+}
+
+// Optional startup hook: set APISIX_SYNC_ON_STARTUP=true to sync routes at boot.
+// Failures are logged loudly but never crash the API process.
+if (process.env.APISIX_SYNC_ON_STARTUP === "true") {
+  syncAPISixRoutes().catch((err) => {
+    logger.error({ error: err }, "APISix startup route sync failed");
+  });
 }
 
 // ── TigerBeetle Double-Entry Reconciliation ─────────────────────────────────

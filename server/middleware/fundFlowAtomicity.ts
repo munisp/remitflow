@@ -17,7 +17,7 @@ import { sql } from "drizzle-orm";
 import { getDb } from "../db";
 import { logger } from "../_core/logger.js";
 import { publishEvent, KAFKA_TOPICS } from "./kafka";
-import { getRedisConnection, isRedisAvailable, isFundFlowStrictMode } from "./redisCluster";
+import { getRedisConnection, isRedisAvailable, isFundFlowStrictMode } from "./redisHardened";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -106,7 +106,7 @@ export async function acquireFundLock(op: AtomicOperation): Promise<{ acquired: 
   const lockToken = randomBytes(16).toString("hex");
   const now = Date.now();
 
-  // Try Redis (Sentinel/Cluster/Standalone via redisCluster module)
+  // Try Redis (Sentinel/Cluster/Standalone via consolidated redisHardened module)
   try {
     const redis = await getRedisConnection();
     const result = await redis.set(lockKey, lockToken, "PX", LOCK_TTL_MS, "NX");

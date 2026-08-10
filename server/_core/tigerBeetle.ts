@@ -381,17 +381,55 @@ export async function voidPendingTransfer(voidId: bigint, pendingId: bigint, cur
 
 // ─── Account Provisioning ─────────────────────────────────────────────────────
 /**
+ * Platform system user — owns the float/fee/settlement pool accounts in the
+ * tigerbeetle_accounts mapping table. Configurable because the row must
+ * satisfy the user_id FK to users.id.
+ */
+export const PLATFORM_SYSTEM_USER_ID = parseInt(process.env.TIGERBEETLE_PLATFORM_USER_ID || "0", 10);
+
+/** Deterministic 128-bit account id: userId (32) | kind (32) | ledger (32) | sequence (32). */
+export function compositeAccountId(userId: number, kind: number, ledger: number, sequence?: bigint): string {
+  const seq = sequence ?? BigInt(Date.now() % 0xffffffff);
+  const id = (BigInt(userId) << 96n) | (BigInt(kind) << 64n) | (BigInt(ledger) << 32n) | (seq & 0xffffffffn);
+  return id.toString();
+}
+
+/** Persist (or refresh) the tigerbeetle_accounts mapping row. */
+async function persistAccountMapping(row: {
+  userId: number;
+  currency: string;
+  tbAccountId: string;
+  ledger: number;
+  code: number;
+  flags: number;
+  userData128: string;
+}): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("[TigerBeetle] DB unavailable — cannot persist account mapping");
+  await (db as any).execute(sql`
+    INSERT INTO tigerbeetle_accounts (user_id, currency, tb_account_id, ledger, code, flags, user_data_128, status, created_at, updated_at)
+    VALUES (${row.userId}, ${row.currency}, ${row.tbAccountId}, ${row.ledger}, ${row.code}, ${row.flags}, ${row.userData128}, 'active', NOW(), NOW())
+    ON CONFLICT (user_id, currency) DO UPDATE
+      SET tb_account_id = EXCLUDED.tb_account_id,
+          ledger = EXCLUDED.ledger,
+          code = EXCLUDED.code,
+          flags = EXCLUDED.flags,
+          user_data_128 = EXCLUDED.user_data_128,
+          updated_at = NOW()
+  `);
+}
+
+/**
  * Provision TigerBeetle accounts for a new user across all supported currencies.
- * Called during user onboarding.
+ * Called during user onboarding. Fail-closed: throws when the bridge or the
+ * mapping write fails — a user without ledger accounts cannot transact.
  */
 export async function provisionUserAccounts(userId: number, currencies: string[] = ["USD", "NGN", "GBP", "EUR"]): Promise<void> {
   const accounts: CreateAccountRequest[] = currencies.map(currency => {
     const ledger = TB_LEDGERS[currency];
     if (!ledger) throw new Error(`[TigerBeetle] Unknown currency: ${currency}`);
-    // Account ID: userId (32-bit) | currency ISO code (32-bit) | timestamp (64-bit)
-    const accountId = (BigInt(userId) << 96n) | (BigInt(ledger) << 64n) | BigInt(Date.now());
     return {
-      id: accountId,
+      id: BigInt(compositeAccountId(userId, TB_ACCOUNT_CODES.USER_WALLET, ledger)),
       ledger,
       code: TB_ACCOUNT_CODES.USER_WALLET,
       flags: TB_FLAGS.DEBITS_MUST_NOT_EXCEED_CREDITS | TB_FLAGS.HISTORY,
@@ -399,18 +437,74 @@ export async function provisionUserAccounts(userId: number, currencies: string[]
     };
   });
   await createAccounts(accounts);
-  // Persist mapping to PostgreSQL
-  const db = await getDb();
-  if (db) {
-    for (let i = 0; i < currencies.length; i++) {
-      await (db as any).execute(sql`
-        INSERT INTO tigerbeetle_accounts (user_id, currency, account_id, account_code, ledger_id, status, created_at)
-        VALUES (${userId}, ${currencies[i]}, ${accounts[i].id.toString()}, ${TB_ACCOUNT_CODES.USER_WALLET}, ${TB_LEDGERS[currencies[i]]}, 'active', NOW())
-        ON CONFLICT (user_id, currency) DO UPDATE SET account_id = EXCLUDED.account_id, updated_at = NOW()
-      `);
-    }
+  // Persist mapping to PostgreSQL (tb_account_id is TEXT since migration 0082)
+  for (let i = 0; i < currencies.length; i++) {
+    await persistAccountMapping({
+      userId,
+      currency: currencies[i],
+      tbAccountId: accounts[i].id.toString(),
+      ledger: TB_LEDGERS[currencies[i]],
+      code: TB_ACCOUNT_CODES.USER_WALLET,
+      flags: TB_FLAGS.DEBITS_MUST_NOT_EXCEED_CREDITS | TB_FLAGS.HISTORY,
+      userData128: String(userId),
+    });
   }
   logger.info({ userId, currencies }, "[TigerBeetle] User accounts provisioned");
+}
+
+/**
+ * Provision the platform pool accounts (float, fee collection, settlement,
+ * suspense) for every supported currency under the platform system user.
+ * Idempotent: TigerBeetle account creation is deterministic by id, and the
+ * mapping upsert targets UNIQUE(user_id, currency) — one row per pool type is
+ * distinguished by composite account id kind bits, but the mapping table keeps
+ * one row per (system user, currency) per pool type via tb_account_id.
+ *
+ * NOTE: the mapping table keys on (user_id, currency), so each pool type uses
+ * its own synthetic system user id derived from systemUserId:
+ *   float = systemUserId, fee = systemUserId + 1, settlement = +2, suspense = +3.
+ */
+export async function provisionPlatformAccounts(
+  systemUserId: number = PLATFORM_SYSTEM_USER_ID,
+  currencies: string[] = Object.keys(TB_LEDGERS),
+): Promise<void> {
+  const pools = [
+    { offset: 0, code: TB_ACCOUNT_CODES.FLOAT_POOL, flags: TB_FLAGS.DEBITS_MUST_NOT_EXCEED_CREDITS },
+    { offset: 1, code: TB_ACCOUNT_CODES.FEE_COLLECTION, flags: TB_FLAGS.CREDITS_MUST_NOT_EXCEED_DEBITS },
+    { offset: 2, code: TB_ACCOUNT_CODES.SETTLEMENT, flags: TB_FLAGS.DEBITS_MUST_NOT_EXCEED_CREDITS },
+    { offset: 3, code: TB_ACCOUNT_CODES.SUSPENSE, flags: 0 },
+  ];
+  const accounts: CreateAccountRequest[] = [];
+  const mappings: Array<{ userId: number; currency: string; tbAccountId: string; ledger: number; code: number; flags: number; userData128: string }> = [];
+
+  for (const pool of pools) {
+    const poolUserId = systemUserId + pool.offset;
+    for (const currency of currencies) {
+      const ledger = TB_LEDGERS[currency];
+      if (!ledger) throw new Error(`[TigerBeetle] Unknown currency: ${currency}`);
+      const id = compositeAccountId(poolUserId, pool.code, ledger, 0n);
+      accounts.push({
+        id: BigInt(id),
+        ledger,
+        code: pool.code,
+        flags: pool.flags | TB_FLAGS.HISTORY,
+        userData128: BigInt(poolUserId),
+      });
+      mappings.push({
+        userId: poolUserId,
+        currency,
+        tbAccountId: id,
+        ledger,
+        code: pool.code,
+        flags: pool.flags | TB_FLAGS.HISTORY,
+        userData128: String(poolUserId),
+      });
+    }
+  }
+
+  await createAccounts(accounts);
+  for (const m of mappings) await persistAccountMapping(m);
+  logger.info({ systemUserId, pools: pools.length, currencies: currencies.length }, "[TigerBeetle] Platform pool accounts provisioned");
 }
 
 // ─── Reconciliation ───────────────────────────────────────────────────────────
@@ -424,10 +518,10 @@ export async function reconcileWithPostgres(userId: number, currency: string): P
   if (!db) throw new Error("[TigerBeetle] DB unavailable for reconciliation");
   // Get TigerBeetle account ID from mapping table
   const mapping = await (db as any).execute(sql`
-    SELECT account_id FROM tigerbeetle_accounts WHERE user_id = ${userId} AND currency = ${currency}
+    SELECT tb_account_id FROM tigerbeetle_accounts WHERE user_id = ${userId} AND currency = ${currency}
   `);
   if (!mapping.rows?.[0]) throw new Error(`[TigerBeetle] No account mapping for user ${userId} ${currency}`);
-  const accountId = BigInt(mapping.rows[0].account_id);
+  const accountId = BigInt(mapping.rows[0].tb_account_id);
   const tbBalance = await getAccountBalance(accountId);
   // Get PostgreSQL wallet balance
   const pgResult = await (db as any).execute(sql`
@@ -460,6 +554,7 @@ export const tigerBeetle = {
   postPendingTransfer,
   voidPendingTransfer,
   provisionUserAccounts,
+  provisionPlatformAccounts,
   reconcileWithPostgres,
   checkHealth: checkTigerBeetleHealth,
   LEDGERS: TB_LEDGERS,

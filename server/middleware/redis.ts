@@ -1,12 +1,28 @@
 /**
- * RemitFlow — Redis Client (Production v79)
- * Uses ioredis with graceful degradation when Redis unavailable.
+ * RemitFlow — Redis Cache Facade (signature-compatible shim)
+ *
+ * Consolidation note: this module NO LONGER owns a Redis connection. All
+ * connectivity lives in ./redisHardened (the single implementation:
+ * standalone | sentinel | cluster). This facade preserves the historical
+ * call signatures used by ~15 routers/middleware so importers keep working.
+ *
+ * Failure semantics (see redisHardened.ts for the full policy):
+ *   - cacheGet/cacheSet/cacheDel/cacheIncr — BEST-EFFORT cache operations.
+ *     On Redis outage they return null/false/0 and callers fall back to the
+ *     primary store. Documented trade-off: cache unavailability must not
+ *     take down reads.
+ *   - setIdempotencyKey/getIdempotencyKey — FINANCIAL ops: FAIL-CLOSED in
+ *     production via the hardened client's "idempotency-check" critical op.
  */
-import Redis from "ioredis";
+import type Redis from "ioredis";
 import { logger } from '../_core/logger';
+import {
+  getRedisClientSync,
+  redisGet,
+  redisSet,
+  disconnectRedis as disconnectHardened,
+} from "./redisHardened";
 
-const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
-const REDIS_PASSWORD = process.env.REDIS_PASSWORD || undefined;
 const DEFAULT_TTL = 300; // 5 minutes
 
 // ── Key Namespaces ────────────────────────────────────────────────────────────
@@ -26,37 +42,10 @@ export const REDIS_KEYS = {
   ACTIVE_SESSIONS: "sessions:active",
 } as const;
 
-// ── Redis Client ──────────────────────────────────────────────────────────────
-let _redis: Redis | null = null;
-let _connectionFailed = false;
+// ── Redis Client (delegates to the hardened singleton) ───────────────────────
 
 export function getRedisClient(): Redis | null {
-  if (_connectionFailed) return null;
-  if (_redis && _redis.status === "ready") return _redis;
-  try {
-    const opts: Record<string, unknown> = {
-      maxRetriesPerRequest: 2,
-      enableReadyCheck: true,
-      lazyConnect: true,
-      retryStrategy: (times: number) => times > 3 ? null : Math.min(times * 100, 2000),
-    };
-    if (REDIS_PASSWORD) opts.password = REDIS_PASSWORD;
-    _redis = new Redis(REDIS_URL, opts);
-    _redis.on("connect", () => logger.info({ data: REDIS_URL }, '[Redis] Connected to'));
-    _redis.on("error", (err) => {
-      if (!_connectionFailed) {
-        _connectionFailed = true;
-        logger.warn({ data: err.message }, '[Redis] Connection failed — degraded mode:');
-      }
-    });
-    _redis.on("ready", () => { _connectionFailed = false; });
-    _redis.connect().catch(() => { _connectionFailed = true; });
-    return _redis;
-  } catch (err) {
-    _connectionFailed = true;
-    logger.warn("[Redis] Init failed:", (err as Error).message);
-    return null;
-  }
+  return getRedisClientSync() as Redis | null;
 }
 
 export function requireRedisClient(): Redis {
@@ -65,7 +54,7 @@ export function requireRedisClient(): Redis {
   return client;
 }
 
-// ── Cache Operations ──────────────────────────────────────────────────────────
+// ── Cache Operations (best-effort; see header for failure semantics) ─────────
 export async function cacheGet<T>(key: string): Promise<T | null> {
   const r = getRedisClient();
   if (!r) return null;
@@ -124,7 +113,10 @@ export async function getLockRate(lockId: string): Promise<{
   return cacheGet(REDIS_KEYS.LOCKED_RATE(lockId));
 }
 
-// ── Rate Limiting ─────────────────────────────────────────────────────────────
+// ── Rate Limiting (fixed-window counter, best-effort) ────────────────────────
+// NOTE: When Redis is unavailable this fails OPEN (allowed=true) because
+// cacheIncr degrades to 0. Route-level abuse protection must therefore also
+// rely on the go-rate-limiter sidecar; this is a secondary guard only.
 export async function checkRateLimit(key: string, limit: number, windowSeconds: number): Promise<{
   allowed: boolean; remaining: number; resetAt: number;
 }> {
@@ -136,15 +128,20 @@ export async function checkRateLimit(key: string, limit: number, windowSeconds: 
   };
 }
 
-// ── Idempotency ───────────────────────────────────────────────────────────────
+// ── Idempotency (financial op — fail-closed in production) ────────────────────
 export async function setIdempotencyKey(key: string, result: unknown, ttlSeconds = 86400): Promise<void> {
-  await cacheSet(REDIS_KEYS.IDEMPOTENCY(key), result, ttlSeconds);
+  const ok = await redisSet(REDIS_KEYS.IDEMPOTENCY(key), JSON.stringify(result), ttlSeconds, "idempotency-check");
+  if (!ok) {
+    logger.warn({ key }, "[Redis] Idempotency result NOT persisted (dev best-effort; would fail-closed in production)");
+  }
 }
 
 export async function getIdempotencyKey(key: string): Promise<unknown | null> {
-  return cacheGet(REDIS_KEYS.IDEMPOTENCY(key));
+  const raw = await redisGet(REDIS_KEYS.IDEMPOTENCY(key), "idempotency-check");
+  if (raw === null) return null;
+  try { return JSON.parse(raw); } catch { return raw; }
 }
 
 export async function disconnectRedis(): Promise<void> {
-  if (_redis) { await _redis.quit(); _redis = null; }
+  await disconnectHardened();
 }

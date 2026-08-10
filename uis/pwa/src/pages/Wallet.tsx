@@ -19,16 +19,12 @@ const Wallet: React.FC = () => {
   const [selectedCurrency, setSelectedCurrency] = useState("NGN");
   const [wallets, setWallets] = useState<WalletData[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({
-    NGN: 1,
-    USD: 1550,
-    GBP: 1980,
-    EUR: 1700,
-    GHS: 125,
-    JPY: 0.01,
-    AUD: 1050,
-  });
+  const [exchangeRates, setExchangeRates] = useState<Record<string, number> | null>(
+    null,
+  );
+  const [ratesUnavailable, setRatesUnavailable] = useState(false);
 
   const fetchExchangeRates = useCallback(async () => {
     try {
@@ -40,13 +36,18 @@ const Wallet: React.FC = () => {
       });
 
       setExchangeRates(rateMap);
+      setRatesUnavailable(false);
     } catch {
-      // Use default rates if fetch fails
+      // No fabricated conversion rates: hide the NGN-equivalent total and
+      // tell the user why, rather than displaying wrong balances.
+      setExchangeRates(null);
+      setRatesUnavailable(true);
     }
   }, []);
 
   const fetchWalletData = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
 
     try {
       // First, try to get primary account by keycloak ID
@@ -95,8 +96,13 @@ const Wallet: React.FC = () => {
       }
     } catch (error) {
       console.error("Failed to fetch accounts:", error);
-      // Show empty state instead of fallback data
+      // Show an explicit error state instead of fallback data.
       setWallets([]);
+      setLoadError(
+        error instanceof Error && error.message
+          ? `Unable to load your wallets: ${error.message}`
+          : "Unable to load your wallets. Please try again.",
+      );
     } finally {
       setLoading(false);
     }
@@ -107,10 +113,15 @@ const Wallet: React.FC = () => {
     fetchWalletData();
   }, [fetchExchangeRates, fetchWalletData]);
 
-  const totalInNGN = wallets.reduce((acc, w) => {
-    const rate = exchangeRates[w.currency] || 1;
-    return acc + w.balance * rate;
-  }, 0);
+  const totalInNGN =
+    exchangeRates === null
+      ? null
+      : wallets.reduce((acc, w) => {
+          const rate = exchangeRates[w.currency];
+          // Skip currencies with no known rate instead of treating them as 1:1.
+          if (rate === undefined) return acc;
+          return acc + w.balance * rate;
+        }, 0);
 
   const handleAccountCreated = () => {
     // Refresh wallet data after creating new account
@@ -126,6 +137,19 @@ const Wallet: React.FC = () => {
         </p>
       </div>
 
+      {loadError && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          <span>{loadError}</span>
+          <button
+            type="button"
+            onClick={() => void fetchWalletData()}
+            className="shrink-0 rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       <div className="bg-gradient-to-br from-indigo-600 via-indigo-700 to-violet-700 rounded-2xl p-6 text-white relative overflow-hidden">
         <div className="absolute top-0 right-0 w-40 h-40 bg-white/10 rounded-full -translate-y-1/2 translate-x-1/2" />
         <div className="absolute bottom-0 left-0 w-32 h-32 bg-white/5 rounded-full translate-y-1/2 -translate-x-1/2" />
@@ -136,10 +160,20 @@ const Wallet: React.FC = () => {
           <h2 className="text-3xl font-bold mt-1 tracking-tight">
             {loading ? (
               <span className="animate-pulse bg-white/20 rounded h-8 w-48 inline-block" />
-            ) : (
+            ) : totalInNGN !== null ? (
               `₦${totalInNGN.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            ) : (
+              <span className="text-lg font-medium text-indigo-100">
+                Conversion rates unavailable
+              </span>
             )}
           </h2>
+          {ratesUnavailable && !loading && (
+            <p className="text-xs text-indigo-200 mt-1">
+              Live exchange rates could not be loaded, so a total cannot be
+              computed. Individual wallet balances below are unaffected.
+            </p>
+          )}
           <div className="mt-5 flex gap-3">
             <Link
               to="/send"

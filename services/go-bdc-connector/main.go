@@ -23,6 +23,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -46,6 +47,10 @@ var (
 	redisClient *redis.Client
 	kafkaWriter *kafka.Writer
 	ctx         = context.Background()
+
+	// Kafka delivery metrics (surfaced in /health and /api/bdc/stats)
+	kafkaPublished     atomic.Int64
+	kafkaPublishErrors atomic.Int64
 )
 
 // ─── Models ───────────────────────────────────────────────────────────────────
@@ -191,11 +196,12 @@ func initKafka() {
 		kafkaBroker = "kafka:9092"
 	}
 	kafkaWriter = &kafka.Writer{
-		Addr:     kafka.TCP(kafkaBroker),
-		Topic:    "bdc-transfer-events",
-		Balancer: &kafka.LeastBytes{},
+		Addr:         kafka.TCP(kafkaBroker),
+		Topic:        "bdc-transfer-events",
+		Balancer:     &kafka.LeastBytes{},
+		RequiredAcks: kafka.RequireAll, // financial events must be durably replicated
 	}
-	log.Printf("[BDCConnector] Kafka writer configured for broker %s", kafkaBroker)
+	log.Printf("[BDCConnector] Kafka writer configured for broker %s (acks=all)", kafkaBroker)
 }
 
 func publishKafkaEvent(eventType string, payload interface{}) {
@@ -208,7 +214,14 @@ func publishKafkaEvent(eventType string, payload interface{}) {
 		"timestamp":  time.Now().UTC().Format(time.RFC3339),
 		"payload":    payload,
 	})
-	_ = kafkaWriter.WriteMessages(ctx, kafka.Message{Value: data})
+	writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := kafkaWriter.WriteMessages(writeCtx, kafka.Message{Value: data}); err != nil {
+		kafkaPublishErrors.Add(1)
+		log.Printf("[BDCConnector] Kafka publish FAILED topic=bdc-transfer-events event=%s: %v", eventType, err)
+		return
+	}
+	kafkaPublished.Add(1)
 }
 
 // ─── TigerBeetle Integration ──────────────────────────────────────────────────
@@ -326,6 +339,8 @@ func health(c *gin.Context) {
 		"db":       dbOK,
 		"redis":    redisOK,
 		"kafka":    kafkaWriter != nil,
+		"kafka_published": kafkaPublished.Load(),
+		"kafka_publish_errors": kafkaPublishErrors.Load(),
 	})
 }
 

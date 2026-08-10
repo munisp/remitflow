@@ -32,7 +32,7 @@ const SVC_URLS: Record<string, string> = {
   goTemporalWorker:     process.env.GO_TEMPORAL_WORKER_URL    || "http://localhost:8206",
   kafkaProcessor:       process.env.KAFKA_PROCESSOR_URL       || "http://localhost:8207",
   ledgerService:        process.env.LEDGER_SERVICE_URL        || "http://localhost:8208",
-  mojaloopConnector:    process.env.MOJALOOP_SERVICE_URL      || "http://localhost:8109",
+  mojaloopConnector:    process.env.MOJALOOP_SERVICE_URL      || "http://localhost:8113",
   pdfReceipt:           process.env.PDF_RECEIPT_URL           || "http://localhost:8106",
   pythonComplianceSvc:  process.env.PYTHON_COMPLIANCE_URL     || "http://localhost:8209",
   pythonKeycloak:       process.env.PYTHON_KEYCLOAK_URL       || "http://localhost:8100",
@@ -232,8 +232,8 @@ export const kafkaProcessorRouter = router({
     const db = await getDb();
     const [row] = await db.execute(sql`
       SELECT COUNT(*) AS total_events,
-             SUM(CASE WHEN status = 'processed' THEN 1 ELSE 0 END) AS processed,
-             SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+             SUM(CASE WHEN status = 'delivered' THEN 1 ELSE 0 END) AS processed,
+             SUM(CASE WHEN status IN ('failed','dead_letter') THEN 1 ELSE 0 END) AS failed,
              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending
       FROM outbox_events
     `);
@@ -242,13 +242,22 @@ export const kafkaProcessorRouter = router({
   getTopicLag: adminProcedure.query(async () => {
     const db = await getDb();
     const rows = await db.execute(sql`
-      SELECT topic, COUNT(*) AS pending_count, MIN(created_at) AS oldest_event
+      SELECT aggregate_type AS topic, COUNT(*) AS pending_count, MIN(created_at) AS oldest_event
       FROM outbox_events
       WHERE status = 'pending'
-      GROUP BY topic
+      GROUP BY aggregate_type
       ORDER BY pending_count DESC
     `);
     return rows;
+  }),
+  // Admin redrive: requeue dead-lettered outbox events after the Fluvio bridge
+  // (or another sink) recovers from an outage.
+  requeueDeadLetters: adminProcedure.input(z.object({
+    minAgeMs: z.number().min(0).default(60_000),
+  }).optional()).mutation(async ({ input }) => {
+    const { requeueDeadLetters } = await import("../workers/outbox.worker");
+    const count = await requeueDeadLetters(input?.minAgeMs ?? 60_000);
+    return { success: true, requeued: count };
   }),
 });
 
@@ -695,9 +704,9 @@ export const rustFluvioServiceRouter = router({
     } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const rows = await db.execute(sql`
-      SELECT topic, COUNT(*) AS event_count, MAX(created_at) AS last_event
+      SELECT aggregate_type AS topic, COUNT(*) AS event_count, MAX(created_at) AS last_event
       FROM outbox_events
-      GROUP BY topic
+      GROUP BY aggregate_type
       ORDER BY event_count DESC
     `);
     return rows;
@@ -718,11 +727,13 @@ export const rustFluvioServiceRouter = router({
       });
       if (resp.ok) return await resp.json();
     } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
-    // Fallback: persist to outbox_events for at-least-once delivery
+    // Fallback: persist to outbox_events for at-least-once delivery.
+    // Canonical outbox columns: aggregate_id/aggregate_type/event_type are
+    // NOT NULL — aggregate_type doubles as the stream topic the worker routes on.
     const db = await getDb();
     await db.execute(sql`
-      INSERT INTO outbox_events (topic, payload, status, created_at)
-      VALUES (${input.topic}, ${JSON.stringify(input.payload)}, 'pending', NOW())
+      INSERT INTO outbox_events (aggregate_id, aggregate_type, event_type, payload, status, created_at)
+      VALUES (${input.key ?? `user-${ctx.user.id}`}, ${input.topic}, 'fluvio.message', ${JSON.stringify(input.payload)}, 'pending', NOW())
     `);
     return { success: true, verified: true, mode: "outbox-fallback", topic: input.topic };
   }),
@@ -744,9 +755,9 @@ export const rustFluvioServiceRouter = router({
     } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const rows = await db.execute(sql`
-      SELECT id, topic, payload, status, created_at
+      SELECT id, aggregate_type AS topic, payload, status, created_at
       FROM outbox_events
-      WHERE topic = ${input.topic}
+      WHERE aggregate_type = ${input.topic}
       ORDER BY id ASC
       LIMIT ${input.limit} OFFSET ${input.fromOffset}
     `);
@@ -780,7 +791,7 @@ export const rustFluvioServiceRouter = router({
     } catch (e) { logger.debug({ err: e }, "Microservice fallback to DB"); }
     const db = await getDb();
     const [row] = await db.execute(sql`
-      SELECT COUNT(*) AS offset_count FROM outbox_events WHERE topic = ${input.topic}
+      SELECT COUNT(*) AS offset_count FROM outbox_events WHERE aggregate_type = ${input.topic}
     `);
     return { topic: input.topic, latest_offset: (row as any)?.offset_count ?? 0 };
   }),
@@ -895,9 +906,9 @@ export const goKafkaServiceRouter = router({
   getConsumerGroups: adminProcedure.query(async () => {
     const db = await getDb();
     const rows = await db.execute(sql`
-      SELECT topic, COUNT(*) AS pending, MIN(created_at) AS oldest
+      SELECT aggregate_type AS topic, COUNT(*) AS pending, MIN(created_at) AS oldest
       FROM outbox_events WHERE status = 'pending'
-      GROUP BY topic
+      GROUP BY aggregate_type
     `);
     return rows;
   }),
@@ -907,8 +918,8 @@ export const goKafkaServiceRouter = router({
   })).mutation(async ({ input }) => {
     const db = await getDb();
     const [result] = await db.execute(sql`
-      INSERT INTO outbox_events (topic, payload, status, created_at)
-      VALUES (${input.topic}, ${JSON.stringify(input.payload)}, 'pending', NOW())
+      INSERT INTO outbox_events (aggregate_id, aggregate_type, event_type, payload, status, created_at)
+      VALUES (${input.topic}, ${input.topic}, 'kafka.message', ${JSON.stringify(input.payload)}, 'pending', NOW())
       RETURNING *
     `);
     return result;

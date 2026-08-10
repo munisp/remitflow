@@ -22,11 +22,21 @@
  *   - kyc.liveness.result            → liveness audit logging
  */
 
-import { KAFKA_TOPICS } from "./kafka";
+import { KAFKA_TOPICS, sendToDLQ, publishEvent } from "./kafka";
 import { getDb, createAuditLog } from "../db";
 import { logger } from "../_core/logger";
+import { sql } from "drizzle-orm";
+import type { Consumer, KafkaMessage } from "kafkajs";
 
 const CONSUMER_GROUP = process.env.KAFKA_CONSUMER_GROUP || "remitflow-main-consumer";
+const DLQ_CONSUMER_GROUP = process.env.KAFKA_DLQ_CONSUMER_GROUP || "remitflow-dlq-persistence";
+
+// Failed-handler retry policy: exponential backoff in-process, then DLQ.
+const HANDLER_MAX_RETRIES = parseInt(process.env.KAFKA_HANDLER_MAX_RETRIES || "3", 10);
+const HANDLER_RETRY_BASE_MS = parseInt(process.env.KAFKA_HANDLER_RETRY_BASE_MS || "500", 10);
+
+// DLQ reprocess policy
+const DLQ_REPROCESS_MAX_ATTEMPTS = 7;
 
 interface ConsumerHandler {
   topic: string;
@@ -261,13 +271,200 @@ const handlers: ConsumerHandler[] = [
 // ─── Consumer Management ─────────────────────────────────────────────────────
 
 let _consumerRunning = false;
-let _consumer: { disconnect: () => Promise<void> } | null = null;
+let _consumer: Consumer | null = null;
+let _dlqConsumer: Consumer | null = null;
 const _stats = {
   messagesProcessed: 0,
   messagesErrored: 0,
+  messagesSentToDlq: 0,
+  dlqPersisted: 0,
+  dlqPersistErrors: 0,
   lastMessageAt: null as string | null,
   startedAt: null as string | null,
 };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Run a handler with exponential backoff retries (base * 2^attempt). */
+async function withHandlerRetry<T>(
+  fn: () => Promise<T>,
+  context: Record<string, unknown>,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= HANDLER_MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < HANDLER_MAX_RETRIES) {
+        const delayMs = HANDLER_RETRY_BASE_MS * 2 ** attempt;
+        logger.warn(
+          { ...context, attempt: attempt + 1, maxRetries: HANDLER_MAX_RETRIES, delayMs, err: (err as Error).message },
+          "[Kafka] Handler failed — retrying with backoff",
+        );
+        await sleep(delayMs);
+      }
+    }
+  }
+  throw lastErr;
+}
+
+/** Manually commit the offset for a processed message (autoCommit is disabled). */
+async function commitOffset(consumer: Consumer, topic: string, partition: number, offset: string): Promise<void> {
+  await consumer.commitOffsets([{ topic, partition, offset: (Number(offset) + 1).toString() }]);
+}
+
+// ─── DLQ Persistence ─────────────────────────────────────────────────────────
+// A dedicated consumer group drains remitflow.dlq into the dlq_messages table
+// (see drizzle/0081_dlq_messages.sql) so failed messages survive
+// restarts and can be reprocessed via reprocessDlqMessages().
+
+async function persistDlqMessage(topic: string, partition: number, message: KafkaMessage): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("[DLQ] Cannot persist — database unavailable");
+
+  const rawValue = message.value?.toString() ?? "";
+  const key = message.key?.toString() ?? null;
+  let envelope: Record<string, unknown> = {};
+  try {
+    envelope = JSON.parse(rawValue) as Record<string, unknown>;
+  } catch {
+    // Non-JSON DLQ payload — persist raw
+  }
+
+  await (db as any).execute(sql`
+    INSERT INTO dlq_messages (topic, partition, offset, key, original_topic, payload, error, status, failed_at)
+    VALUES (
+      ${topic},
+      ${partition},
+      ${message.offset},
+      ${key},
+      ${(envelope.originalTopic as string) ?? null},
+      ${rawValue},
+      ${(envelope.error as string) ?? null},
+      'pending',
+      ${(envelope.failedAt as string) ?? new Date().toISOString()}
+    )
+    ON CONFLICT (topic, partition, offset) DO NOTHING
+  `);
+}
+
+async function startDlqPersistenceConsumer(kafka: import("kafkajs").Kafka): Promise<void> {
+  const consumer = kafka.consumer({ groupId: DLQ_CONSUMER_GROUP });
+  await consumer.connect();
+  _dlqConsumer = consumer;
+
+  await consumer.subscribe({ topic: KAFKA_TOPICS.DLQ, fromBeginning: true });
+
+  await consumer.run({
+    autoCommit: false,
+    eachMessage: async ({ topic, partition, message }) => {
+      try {
+        await persistDlqMessage(topic, partition, message);
+        await commitOffset(consumer, topic, partition, message.offset);
+        _stats.dlqPersisted++;
+      } catch (err) {
+        // Do NOT commit — the message will be redelivered and persistence retried.
+        _stats.dlqPersistErrors++;
+        logger.error(
+          { topic, partition, offset: message.offset, err: (err as Error).message },
+          "[DLQ] Persistence failed — offset not committed, will retry",
+        );
+      }
+    },
+  });
+
+  logger.info(`[DLQ] Persistence consumer started (group=${DLQ_CONSUMER_GROUP}, topic=${KAFKA_TOPICS.DLQ})`);
+}
+
+// ─── DLQ Reprocessing ────────────────────────────────────────────────────────
+
+export interface DlqReprocessResult {
+  reprocessed: number;
+  failed: number;
+  skipped: number;
+}
+
+/**
+ * Reprocess persisted DLQ messages by republishing them to their original topic.
+ * Worker function — invoke from a scheduler or admin job. Rows that exhaust
+ * DLQ_REPROCESS_MAX_ATTEMPTS are marked 'failed' for manual intervention.
+ */
+export async function reprocessDlqMessages(limit = 50): Promise<DlqReprocessResult> {
+  const db = await getDb();
+  if (!db) throw new Error("[DLQ] Cannot reprocess — database unavailable");
+
+  const result: DlqReprocessResult = { reprocessed: 0, failed: 0, skipped: 0 };
+  const rows = (await (db as any).execute(sql`
+    SELECT id, key, original_topic, payload, reprocess_count
+    FROM dlq_messages
+    WHERE status = 'pending'
+      AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+    ORDER BY id ASC
+    LIMIT ${limit}
+  `)) as Array<{
+    id: number;
+    key: string | null;
+    original_topic: string | null;
+    payload: string;
+    reprocess_count: number;
+  }>;
+
+  for (const row of rows) {
+    let envelope: Record<string, unknown> = {};
+    try {
+      envelope = JSON.parse(row.payload) as Record<string, unknown>;
+    } catch { /* handled below */ }
+
+    const originalTopic = row.original_topic ?? (envelope.originalTopic as string | undefined);
+    const originalValue = (envelope.originalValue as string | undefined) ?? row.payload;
+    if (!originalTopic) {
+      // No route back — mark failed so it stops blocking the queue.
+      await (db as any).execute(sql`
+        UPDATE dlq_messages SET status = 'failed', error = COALESCE(error, '') || ' | no original topic'
+        WHERE id = ${row.id}
+      `);
+      result.skipped++;
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(originalValue) as Record<string, unknown>;
+      const published = await publishEvent(originalTopic, row.key ?? `dlq-${row.id}`, parsed);
+      if (!published) throw new Error("Kafka producer unavailable");
+
+      await (db as any).execute(sql`
+        UPDATE dlq_messages SET status = 'reprocessed', reprocessed_at = NOW() WHERE id = ${row.id}
+      `);
+      result.reprocessed++;
+      logger.info({ id: row.id, originalTopic }, "[DLQ] Message reprocessed");
+    } catch (err) {
+      const attempts = (row.reprocess_count ?? 0) + 1;
+      const exhausted = attempts >= DLQ_REPROCESS_MAX_ATTEMPTS;
+      // Exponential backoff: 2^attempts minutes before the next reprocess try.
+      const nextRetryAt = new Date(Date.now() + 2 ** attempts * 60_000).toISOString();
+      await (db as any).execute(sql`
+        UPDATE dlq_messages
+        SET reprocess_count = ${attempts},
+            status = ${exhausted ? "failed" : "pending"},
+            next_retry_at = ${exhausted ? null : nextRetryAt},
+            error = ${(err as Error).message}
+        WHERE id = ${row.id}
+      `);
+      result.failed++;
+      logger.error(
+        { id: row.id, originalTopic, attempts, exhausted, err: (err as Error).message },
+        "[DLQ] Reprocess failed",
+      );
+    }
+  }
+
+  return result;
+}
+
+// ─── Main Consumer Lifecycle ─────────────────────────────────────────────────
 
 export async function startKafkaConsumers(): Promise<void> {
   if (_consumerRunning) return;
@@ -290,52 +487,86 @@ export async function startKafkaConsumers(): Promise<void> {
     const handlerMap = new Map(handlers.map((h) => [h.topic, h.handler]));
 
     await consumer.run({
-      eachMessage: async ({ topic, message }: { topic: string; partition: number; message: any }) => {
+      // Manual offset management: an offset is only committed after the handler
+      // succeeds (with retries) or after the message is safely parked in the DLQ.
+      autoCommit: false,
+      eachMessage: async ({ topic, partition, message }) => {
         const handler = handlerMap.get(topic);
-        if (!handler || !message.value) return;
+        if (!handler || !message.value) {
+          await commitOffset(consumer, topic, partition, message.offset);
+          return;
+        }
 
+        const ctx = { topic, partition, offset: message.offset };
         try {
           const parsed = JSON.parse(message.value.toString());
-          await handler(parsed);
+          await withHandlerRetry(() => handler(parsed), ctx);
+          await commitOffset(consumer, topic, partition, message.offset);
           _stats.messagesProcessed++;
           _stats.lastMessageAt = new Date().toISOString();
         } catch (err) {
           _stats.messagesErrored++;
-          logger.error({ topic, err: err instanceof Error ? err.message : String(err) }, `Kafka consumer error [${topic}]`);
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logger.error({ ...ctx, err: errMsg }, `[Kafka] Handler exhausted retries [${topic}] — routing to DLQ`);
+          try {
+            await sendToDLQ(
+              topic,
+              message.key?.toString() ?? "unknown",
+              message.value.toString(),
+              errMsg,
+            );
+            // Message is durably parked in remitflow.dlq — safe to commit.
+            await commitOffset(consumer, topic, partition, message.offset);
+            _stats.messagesSentToDlq++;
+          } catch (dlqErr) {
+            // DLQ unavailable — do NOT commit; the message will be redelivered.
+            logger.error(
+              { ...ctx, err: (dlqErr as Error).message },
+              "[Kafka] DLQ routing failed — offset not committed, message will be redelivered",
+            );
+          }
         }
       },
     });
 
+    // Drain remitflow.dlq into Postgres for durability + reprocessing.
+    await startDlqPersistenceConsumer(kafka);
+
     _consumerRunning = true;
     _stats.startedAt = new Date().toISOString();
-    logger.info(`Kafka consumers started for ${handlers.length} topics`);
+    logger.info(`Kafka consumers started for ${handlers.length} topics (+ DLQ persistence)`);
   } catch (err) {
     logger.warn({ err: (err as Error).message }, "Kafka consumers not started (broker unavailable)");
-    // If subscribe/run failed after connect(), disconnect the orphaned consumer
-    // so it doesn't leak a broker connection / consumer-group slot.
-    if (_consumer) {
-      try {
-        await _consumer.disconnect();
-      } catch {
-        /* best-effort cleanup */
+    // If subscribe/run failed after connect(), disconnect the orphaned consumers
+    // so they don't leak broker connections / consumer-group slots.
+    for (const c of [_dlqConsumer, _consumer]) {
+      if (c) {
+        try {
+          await c.disconnect();
+        } catch {
+          /* best-effort cleanup */
+        }
       }
-      _consumer = null;
     }
+    _dlqConsumer = null;
+    _consumer = null;
     _consumerRunning = false;
   }
 }
 
 export async function stopKafkaConsumers(): Promise<void> {
-  if (!_consumer) return;
-  try {
-    await _consumer.disconnect();
-    logger.info("Kafka consumers disconnected");
-  } catch (err) {
-    logger.warn({ err: (err as Error).message }, "Kafka consumer disconnect warning");
-  } finally {
-    _consumer = null;
-    _consumerRunning = false;
+  for (const c of [_dlqConsumer, _consumer]) {
+    if (!c) continue;
+    try {
+      await c.disconnect();
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, "Kafka consumer disconnect warning");
+    }
   }
+  if (_consumer || _dlqConsumer) logger.info("Kafka consumers disconnected");
+  _consumer = null;
+  _dlqConsumer = null;
+  _consumerRunning = false;
 }
 
 export function getConsumerStats() {

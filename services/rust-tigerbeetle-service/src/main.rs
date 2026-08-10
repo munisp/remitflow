@@ -27,7 +27,7 @@
 //   2b. voidPendingTransfer() — cancels (pending decreases, no net effect)
 
 use axum::{
-    extract::{Json, Path, Query, State},
+    extract::{Json, Path, State},
     http::StatusCode,
     routing::{get, post},
     Router,
@@ -36,60 +36,13 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
-use tokio::sync::RwLock;
+use std::time::{Duration, Instant};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
-// ─── TigerBeetle Client Abstraction ──────────────────────────────────────────
-// Uses the tigerbeetle crate for real cluster communication.
-// Falls back to PostgreSQL-backed state ONLY in development (never in production).
-
-/// TigerBeetle account as returned by the cluster
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TbAccount {
-    pub id: u128,
-    pub user_data_128: u128,
-    pub user_data_64: u64,
-    pub user_data_32: u32,
-    pub ledger: u32,
-    pub code: u16,
-    pub flags: u16,
-    pub debits_pending: u128,
-    pub debits_posted: u128,
-    pub credits_pending: u128,
-    pub credits_posted: u128,
-    pub timestamp: u64,
-}
-
-impl TbAccount {
-    pub fn balance(&self) -> i128 {
-        self.credits_posted as i128 - self.debits_posted as i128
-    }
-    pub fn available_balance(&self) -> i128 {
-        self.credits_posted as i128 - self.debits_posted as i128 - self.debits_pending as i128
-    }
-}
-
-/// TigerBeetle transfer
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TbTransfer {
-    pub id: u128,
-    pub debit_account_id: u128,
-    pub credit_account_id: u128,
-    pub amount: u128,
-    pub pending_id: u128,
-    pub user_data_128: u128,
-    pub user_data_64: u64,
-    pub user_data_32: u32,
-    pub timeout: u32,
-    pub ledger: u32,
-    pub code: u16,
-    pub flags: u16,
-    pub timestamp: u64,
-}
+// ─── Transfer flags for the two-phase protocol ───────────────────────────────
 
 /// Transfer flags for TigerBeetle two-phase protocol
 pub mod transfer_flags {
@@ -97,16 +50,6 @@ pub mod transfer_flags {
     pub const PENDING: u16 = 1;
     pub const POST_PENDING: u16 = 2;
     pub const VOID_PENDING: u16 = 4;
-}
-
-/// Account type constants
-pub mod account_types {
-    pub const USER_WALLET: u16 = 1000;
-    pub const ESCROW_HOLD: u16 = 2000;
-    pub const FEE_REVENUE: u16 = 3000;
-    pub const PARTNER_EARNINGS: u16 = 4000;
-    pub const FX_GAIN_LOSS: u16 = 5000;
-    pub const SUSPENSE: u16 = 9000;
 }
 
 // ─── Service State ───────────────────────────────────────────────────────────
@@ -117,7 +60,8 @@ pub struct AppState {
     pub db_pool: sqlx::PgPool,
     pub tb_addresses: Vec<String>,
     pub tb_cluster_id: u128,
-    pub kafka_broker: String,
+    /// Some(broker) only when KAFKA_BROKER is explicitly configured.
+    pub kafka_broker: Option<String>,
     pub is_production: bool,
 }
 
@@ -155,45 +99,17 @@ pub struct VoidPendingRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct TransferResponse {
-    pub transfer_id: String,
-    pub status: String,
-    pub debit_account_id: String,
-    pub credit_account_id: String,
-    pub amount: f64,
-    pub currency: String,
-    pub flags: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AccountResponse {
-    pub account_id: String,
-    pub user_id: Option<i64>,
-    pub account_type: u16,
-    pub currency: String,
-    pub balance: f64,
-    pub available_balance: f64,
-    pub debits_pending: f64,
-    pub debits_posted: f64,
-    pub credits_pending: f64,
-    pub credits_posted: f64,
-    pub created_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BalanceQuery {
-    pub currency: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: String,
     pub service: String,
     pub version: String,
+    // Real dependency state — probed per request, never hardcoded.
+    pub tigerbeetle_configured: bool,
     pub tigerbeetle_connected: bool,
+    pub tigerbeetle_error: Option<String>,
     pub postgres_connected: bool,
-    pub kafka_connected: bool,
+    pub kafka_configured: bool,
+    pub kafka_outbox_backlog: i64,
     pub fail_closed: bool,
     pub timestamp: String,
 }
@@ -213,24 +129,26 @@ fn minor_to_amount_signed(minor: i128) -> f64 {
     minor as f64 / 1_000_000.0
 }
 
-fn parse_account_id(s: &str) -> u128 {
-    s.parse::<u128>().unwrap_or_else(|_| {
-        let hex = s.replace('-', "");
-        u128::from_str_radix(&hex[..hex.len().min(32)], 16).unwrap_or(0)
-    })
-}
-
 // ─── Database Layer ──────────────────────────────────────────────────────────
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
-static DB_POOL: tokio::sync::OnceCell<PgPool> = tokio::sync::OnceCell::const_new();
 static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 async fn init_db() -> PgPool {
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string());
+    let db_url = match std::env::var("DATABASE_URL") {
+        Ok(url) => url,
+        Err(_) => {
+            // Fail loudly in production — never fall back to embedded credentials.
+            let is_production = std::env::var("NODE_ENV").unwrap_or_default() == "production"
+                || std::env::var("RUST_ENV").unwrap_or_default() == "production";
+            if is_production {
+                panic!("DATABASE_URL must be set in production — refusing embedded-credential fallback");
+            }
+            "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string()
+        }
+    };
 
     let pool = PgPoolOptions::new()
         .max_connections(20)
@@ -332,22 +250,6 @@ async fn db_record_transfer(pool: &PgPool, id: &str, debit_id: &str, credit_id: 
     Ok(())
 }
 
-#[allow(dead_code)]
-async fn db_update_balances(pool: &PgPool, debit_id: &str, credit_id: &str, amount: u128, is_pending: bool) -> Result<(), sqlx::Error> {
-    if is_pending {
-        sqlx::query("UPDATE tb_accounts SET debits_pending = debits_pending + $1, updated_at = NOW() WHERE id = $2")
-            .bind(amount.to_string()).bind(debit_id).execute(pool).await?;
-        sqlx::query("UPDATE tb_accounts SET credits_pending = credits_pending + $1, updated_at = NOW() WHERE id = $2")
-            .bind(amount.to_string()).bind(credit_id).execute(pool).await?;
-    } else {
-        sqlx::query("UPDATE tb_accounts SET debits_posted = debits_posted + $1, updated_at = NOW() WHERE id = $2")
-            .bind(amount.to_string()).bind(debit_id).execute(pool).await?;
-        sqlx::query("UPDATE tb_accounts SET credits_posted = credits_posted + $1, updated_at = NOW() WHERE id = $2")
-            .bind(amount.to_string()).bind(credit_id).execute(pool).await?;
-    }
-    Ok(())
-}
-
 /// Records a transfer and updates both account balances atomically in a single
 /// DB transaction, so a failure between the insert and the balance updates can
 /// never leave the ledger in an inconsistent state.
@@ -388,29 +290,46 @@ async fn db_emit_event(pool: &PgPool, event_type: &str, transfer_id: &str, paylo
     Ok(())
 }
 
-// ─── Kafka Producer ──────────────────────────────────────────────────────────
-// Publishes all TigerBeetle operations for event sourcing + reconciliation
-
-async fn publish_kafka_event(broker: &str, topic: &str, key: &str, payload: &serde_json::Value) {
-    // In production, this uses rdkafka. For compilation safety, we log + DB persist.
-    info!(topic = topic, key = key, "[Kafka] Publishing event to {}", topic);
-    // The event is already persisted in tb_events; a background worker
-    // picks up unpublished events and sends to Kafka (outbox pattern)
-    let _ = broker; // Used by actual rdkafka producer
-}
-
 // ─── Handlers ────────────────────────────────────────────────────────────────
+
+/// Real TigerBeetle reachability probe: TCP connect to any configured replica.
+/// Returns (connected, error) — never assumed, never cached.
+async fn probe_tigerbeetle(addresses: &[String]) -> (bool, Option<String>) {
+    if addresses.is_empty() {
+        return (false, Some("TIGERBEETLE_ADDRESSES not configured".into()));
+    }
+    let mut last_err = String::new();
+    for addr in addresses {
+        let normalized = if addr.contains(':') { addr.clone() } else { format!("127.0.0.1:{}", addr) };
+        match tokio::time::timeout(Duration::from_millis(500), tokio::net::TcpStream::connect(&normalized)).await {
+            Ok(Ok(_)) => return (true, None),
+            Ok(Err(e)) => last_err = format!("{}: {}", normalized, e),
+            Err(_) => last_err = format!("{}: probe timed out", normalized),
+        }
+    }
+    (false, Some(last_err))
+}
 
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let pg_ok = sqlx::query("SELECT 1").execute(&state.db_pool).await.is_ok();
+    let (tb_connected, tb_error) = probe_tigerbeetle(&state.tb_addresses).await;
+    // Honest Kafka reporting: this service has no embedded producer — events
+    // are durably staged in the tb_events outbox table. Report whether a
+    // broker is configured and how deep the backlog is.
+    let outbox_backlog: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tb_events WHERE published_to_kafka = FALSE")
+        .fetch_one(&state.db_pool).await.unwrap_or(-1);
 
+    let healthy = pg_ok && tb_connected;
     Json(HealthResponse {
-        status: if pg_ok { "healthy".into() } else { "degraded".into() },
+        status: if healthy { "healthy".into() } else { "degraded".into() },
         service: "rust-tigerbeetle-service".into(),
-        version: "v2.0.0-production".into(),
-        tigerbeetle_connected: true, // Real TB client connected at startup
+        version: "v2.1.0-honest-health".into(),
+        tigerbeetle_configured: !state.tb_addresses.is_empty(),
+        tigerbeetle_connected: tb_connected,
+        tigerbeetle_error: tb_error,
         postgres_connected: pg_ok,
-        kafka_connected: true,
+        kafka_configured: state.kafka_broker.is_some(),
+        kafka_outbox_backlog: outbox_backlog,
         fail_closed: state.is_production,
         timestamp: Utc::now().to_rfc3339(),
     })
@@ -447,7 +366,8 @@ async fn create_account(
         "timestamp": Utc::now().to_rfc3339()
     });
     let _ = db_emit_event(&state.db_pool, "account_created", &account_id_str, &event).await;
-    publish_kafka_event(&state.kafka_broker, "TIGERBEETLE_OPERATIONS", &account_id_str, &event).await;
+    // Event staged in tb_events outbox (published_to_kafka=false) — an external
+    // drainer delivers it; /health reports the backlog. No fake producer here.
 
     info!(account_id = %account_id_str, account_type = req.account_type, "[TigerBeetle] Account created");
 
@@ -601,7 +521,8 @@ async fn initiate_transfer(
         "timestamp": Utc::now().to_rfc3339()
     });
     let _ = db_emit_event(&state.db_pool, status, &transfer_id_str, &event).await;
-    publish_kafka_event(&state.kafka_broker, "TIGERBEETLE_OPERATIONS", &transfer_id_str, &event).await;
+    // Event staged in tb_events outbox (published_to_kafka=false) — an external
+    // drainer delivers it; /health reports the backlog. No fake producer here.
 
     info!(
         transfer_id = %transfer_id_str,
@@ -688,7 +609,8 @@ async fn post_pending_transfer(
         "timestamp": Utc::now().to_rfc3339()
     });
     let _ = db_emit_event(&state.db_pool, "post_pending", &post_id, &event).await;
-    publish_kafka_event(&state.kafka_broker, "TIGERBEETLE_OPERATIONS", &post_id, &event).await;
+    // Event staged in tb_events outbox (published_to_kafka=false) — an external
+    // drainer delivers it; /health reports the backlog. No fake producer here.
 
     info!(post_id = %post_id, pending_id = %pending_id, "[TigerBeetle] Pending transfer posted");
 
@@ -750,7 +672,8 @@ async fn void_pending_transfer(
         "timestamp": Utc::now().to_rfc3339()
     });
     let _ = db_emit_event(&state.db_pool, "void_pending", &void_id, &event).await;
-    publish_kafka_event(&state.kafka_broker, "TIGERBEETLE_OPERATIONS", &void_id, &event).await;
+    // Event staged in tb_events outbox (published_to_kafka=false) — an external
+    // drainer delivers it; /health reports the backlog. No fake producer here.
 
     info!(void_id = %void_id, pending_id = %pending_id, "[TigerBeetle] Pending transfer voided");
 
@@ -857,8 +780,9 @@ async fn main() -> std::io::Result<()> {
     let tb_cluster_id: u128 = std::env::var("TIGERBEETLE_CLUSTER_ID")
         .unwrap_or_else(|_| "0".to_string())
         .parse().unwrap_or(0);
-    let kafka_broker = std::env::var("KAFKA_BROKER")
-        .unwrap_or_else(|_| "localhost:9092".to_string());
+    // Honest configuration: no implicit localhost default — the health endpoint
+    // reports Kafka as configured only when the operator actually set it.
+    let kafka_broker = std::env::var("KAFKA_BROKER").ok();
 
     let state = Arc::new(AppState {
         db_pool: pool,

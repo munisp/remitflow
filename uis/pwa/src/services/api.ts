@@ -349,6 +349,15 @@ export const authApiLegacy = {
 // Transaction Service
 export const transactionService = {
   transfer: (data: TransferRequest) => {
+    if (!data.sourceAccountId) {
+      // A transfer must always originate from a real core-banking account;
+      // never submit with a fabricated or default account identifier.
+      throw new ApiError(
+        400,
+        "SOURCE_ACCOUNT_REQUIRED",
+        "A source account is required to initiate a transfer.",
+      );
+    }
     const switchName = data.switchName || "mojaloop";
     const transferCurrency = normalizePaymentHubCurrency(
       data.currency,
@@ -387,7 +396,7 @@ export const transactionService = {
       },
       from: {
         idType: "ACCOUNT_ID",
-        idValue: data.sourceAccountId || "0805529423",
+        idValue: data.sourceAccountId,
         displayName: data.senderName || "Sender",
       },
       destination: data.destination,

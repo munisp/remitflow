@@ -26,8 +26,11 @@ import { publishEvent, KAFKA_TOPICS, type TransactionEvent } from "../middleware
 import { tigerBeetle } from "../middleware/middlewareIntegration";
 import { sendNotification } from "../notifications.service";
 import { broadcastUserEvent } from "../sse.service";
-import { createAuditLog } from "../db";
+import { createAuditLog, getDb } from "../db";
 import { checkFraud, checkVelocity } from "../fraud.service";
+import { and, eq } from "drizzle-orm";
+import { tigerbeetleAccounts } from "../../drizzle/schema.integrations";
+import { TB_LEDGERS, TB_ACCOUNT_CODES, PLATFORM_SYSTEM_USER_ID } from "./tigerBeetle";
 
 /**
  * Deterministic TigerBeetle transfer id derived from the transfer UUID.
@@ -40,6 +43,60 @@ function pendingTransferIdFor(transferId: string): bigint {
   const raw = transferId.replace(/-/g, "");
   const hex = raw.replace(/[^0-9a-fA-F]/g, "0").slice(0, 32).padEnd(32, "0");
   return BigInt(`0x${hex}`);
+}
+
+// ─── TigerBeetle Account Resolution (audit TB4) ──────────────────────────────
+// Ledger accounts are NEVER derived from raw user ids. They are provisioned
+// per (user, currency) by tigerBeetle.provisionUserAccounts /
+// provisionPlatformAccounts and recorded in the tigerbeetle_accounts mapping
+// table (tb_account_id is the decimal string form of the 128-bit TB id).
+// A transfer without provisioned accounts is a PRECONDITION_FAILED — the
+// caller must run provisioning (onboarding / platform bootstrap) first.
+
+export interface ResolvedTbAccounts {
+  /** User wallet account — debited. */
+  debitAccountId: bigint;
+  /** Platform float pool account for the currency — credited. */
+  creditAccountId: bigint;
+  /** Per-currency TigerBeetle ledger id. */
+  ledger: number;
+}
+
+export async function resolveTbTransferAccounts(userId: number, currency: string): Promise<ResolvedTbAccounts> {
+  const ledger = TB_LEDGERS[currency];
+  if (!ledger) {
+    throw new TRPCError({ code: "PRECONDITION_FAILED", message: `Currency ${currency} has no TigerBeetle ledger mapping` });
+  }
+  const db = await getDb();
+  if (!db) {
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Ledger account resolution unavailable (no database)" });
+  }
+  const rows = await db
+    .select()
+    .from(tigerbeetleAccounts)
+    .where(and(eq(tigerbeetleAccounts.currency, currency), eq(tigerbeetleAccounts.status, "active")));
+
+  const wallet = rows.find((r: typeof tigerbeetleAccounts.$inferSelect) =>
+    r.userId === userId && r.code === TB_ACCOUNT_CODES.USER_WALLET);
+  if (!wallet) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: `No provisioned TigerBeetle wallet for user ${userId} in ${currency} — complete account provisioning first`,
+    });
+  }
+  const floatPool = rows.find((r: typeof tigerbeetleAccounts.$inferSelect) =>
+    r.userId === PLATFORM_SYSTEM_USER_ID && r.code === TB_ACCOUNT_CODES.FLOAT_POOL);
+  if (!floatPool) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: `Platform float pool not provisioned for ${currency} — run provisionPlatformAccounts()`,
+    });
+  }
+  return {
+    debitAccountId: BigInt(wallet.tbAccountId),
+    creditAccountId: BigInt(floatPool.tbAccountId),
+    ledger,
+  };
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -210,21 +267,22 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
   // Skipped when the caller already recorded a ledger-backed hold (e.g. escrow).
   if (!input.skipLedger) {
     const transferBigId = pendingTransferIdFor(input.transferId);
-    const debitAccountId = BigInt(input.userId);
-    const creditAccountId = BigInt(input.userId + 1_000_000);
     const amountCents = BigInt(Math.round(input.amount * 100));
+    // Resolve real ledger accounts from the tigerbeetle_accounts mapping
+    // (per-currency ledger). Throws PRECONDITION_FAILED when unprovisioned.
+    const accounts = await resolveTbTransferAccounts(input.userId, input.fromCurrency);
 
     try {
       // Pre-check: validate sufficient balance
-      await tigerBeetle.validateBalance(debitAccountId, amountCents);
+      await tigerBeetle.validateBalance(accounts.debitAccountId, amountCents);
 
       // Create pending (two-phase) transfer — holds funds until settlement confirms
       await tigerBeetle.createPendingTransfer({
         id: transferBigId,
-        debitAccountId,
-        creditAccountId,
+        debitAccountId: accounts.debitAccountId,
+        creditAccountId: accounts.creditAccountId,
         amount: amountCents,
-        ledger: 1,
+        ledger: accounts.ledger,
         code: 1,
         timeoutSeconds: 3600, // Auto-void after 1 hour if not posted
         userData128: pendingTransferIdFor(input.transferId),
@@ -376,24 +434,32 @@ export async function compensateFailedTransfer(input: {
   logger.warn({ ...input, reversalId }, "[Pipeline] Compensating failed transfer");
 
   try {
+    // Resolve the same accounts the pipeline used (same mapping table,
+    // per-currency ledger) so compensation targets the real hold.
+    const accounts = await resolveTbTransferAccounts(input.userId, input.currency);
+    const pendingId = pendingTransferIdFor(input.transferId);
     // Void the pending TigerBeetle transfer (two-phase: void releases the hold)
     const voidId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
-    const pendingId = pendingTransferIdFor(input.transferId);
     await tigerBeetle.voidPendingTransfer({
       id: voidId,
       pendingId,
-      ledger: 1,
+      ledger: accounts.ledger,
       code: 2,
     });
   } catch (voidErr) {
-    // If void fails, create a reversal transfer as fallback
+    // If void fails, create a reversal transfer as fallback — refund the user
+    // wallet from the platform float pool (reverse direction of the hold).
     try {
+      const accounts = await resolveTbTransferAccounts(input.userId, input.currency);
       const reversalTransferId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
-      const creditAccountId = BigInt(input.userId);
-      const debitAccountId = BigInt(input.userId + 1_000_000);
       const amountCents = BigInt(Math.round(input.amount * 100));
       await tigerBeetle.createTransfer({
-        id: reversalTransferId, debitAccountId, creditAccountId, amount: amountCents, ledger: 1, code: 2,
+        id: reversalTransferId,
+        debitAccountId: accounts.creditAccountId,  // float pool → user wallet
+        creditAccountId: accounts.debitAccountId,
+        amount: amountCents,
+        ledger: accounts.ledger,
+        code: 2,
       });
     } catch {
       logger.error({ reversalId, voidErr: voidErr instanceof Error ? voidErr.message : String(voidErr) },

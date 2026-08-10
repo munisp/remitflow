@@ -18,7 +18,9 @@
   "maxDeltaTimeSeconds": 43200,
   "failureFactor": 5,
   "accessTokenLifespan": 300,
-  "accessTokenLifespanForImplicitFlow": 900,
+  "accessTokenLifespanForImplicitFlow": 300,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
   "ssoSessionIdleTimeout": 1800,
   "ssoSessionMaxLifespan": 36000,
   "offlineSessionIdleTimeout": 2592000,
@@ -48,7 +50,7 @@
       "name": "RemitFlow Backend API",
       "enabled": true,
       "clientAuthenticatorType": "client-secret",
-      "secret": "${KEYCLOAK_CLIENT_SECRET:-remitflow-client-secret-change-in-production}",
+      "secret": "${KEYCLOAK_CLIENT_SECRET}",
       "bearerOnly": false,
       "publicClient": false,
       "standardFlowEnabled": true,
@@ -71,7 +73,21 @@
       "attributes": {
         "access.token.lifespan": "300",
         "client.session.idle.timeout": "1800"
-      }
+      },
+      "protocolMappers": [
+        {
+          "name": "remitflow-client-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "remitflow-client",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
     },
     {
       "clientId": "remitflow-pwa",
@@ -96,7 +112,7 @@
       "name": "Caddy Forward Auth Bridge",
       "enabled": true,
       "clientAuthenticatorType": "client-secret",
-      "secret": "${CADDY_BRIDGE_CLIENT_SECRET:-caddy-bridge-secret-change-in-production}",
+      "secret": "${CADDY_BRIDGE_CLIENT_SECRET}",
       "bearerOnly": false,
       "publicClient": false,
       "standardFlowEnabled": false,
@@ -105,12 +121,27 @@
       "description": "Used by caddy-keycloak-bridge for token introspection"
     },
     {
+      "clientId": "remitflow-admin-svc",
+      "name": "RemitFlow Admin API Service Account",
+      "description": "client_credentials service account for Admin API automation. Secret is env-substituted at import time (no committed fallback). After import, grant its service account the required realm-management client roles (e.g. realm-admin or a scoped subset) — role grants are intentionally not exported here.",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "${KEYCLOAK_ADMIN_SVC_CLIENT_SECRET}",
+      "bearerOnly": false,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "protocol": "openid-connect"
+    },
+    {
       "clientId": "grafana",
       "name": "Grafana",
       "enabled": true,
       "publicClient": false,
       "clientAuthenticatorType": "client-secret",
-      "secret": "${GRAFANA_KEYCLOAK_SECRET:-grafana-secret-change-in-production}",
+      "secret": "${GRAFANA_KEYCLOAK_SECRET}",
       "standardFlowEnabled": true,
       "protocol": "openid-connect",
       "redirectUris": ["https://grafana.remitflow.local/*"],

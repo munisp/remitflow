@@ -215,13 +215,6 @@ const DELIVERY_METHODS: Record<string, DeliveryEstimate[]> = {
   ],
 };
 
-const MOCK_RATES: Record<string, Record<string, number>> = {
-  GBP: { NGN: 1950.5, GHS: 15.2, KES: 165.3, ZAR: 23.45, USD: 1.27 },
-  USD: { NGN: 1535.0, GHS: 11.95, KES: 130.2, ZAR: 18.45, GBP: 0.79 },
-  EUR: { NGN: 1680.25, GHS: 13.1, KES: 142.5, ZAR: 20.15, GBP: 0.86 },
-  NGN: { GHS: 0.0078, KES: 0.085, ZAR: 0.012, USD: 0.00065, GBP: 0.00051 },
-};
-
 const BPMGD_BANK: Bank = {
   logo: "",
   tenant_id: "bpmgd",
@@ -395,6 +388,8 @@ const SendMoney: React.FC = () => {
   const receivedAmount = useMemo(() => {
     const amount = parseFloat(formData.amount) || 0;
     const rate = rateLock?.rate || exchangeRate?.rate || 0;
+    // Without a live or cached rate there is no honest estimate to show.
+    if (rate <= 0) return null;
     return (amount / rate).toFixed(2);
   }, [formData.amount, rateLock, exchangeRate]);
 
@@ -426,26 +421,20 @@ const SendMoney: React.FC = () => {
       const cached = getCachedData<ExchangeRate>(cacheKey);
       if (cached) {
         setExchangeRate(cached);
-        setRateWarning("Using cached rate. Live rates unavailable.");
+        setRateWarning(
+          isOnline
+            ? "Live rates are unavailable. Showing the most recent cached rate."
+            : "You are offline. Showing the most recent cached rate.",
+        );
       } else {
-        const rate =
-          MOCK_RATES[formData.currency]?.[formData.destinationCurrency] || 1;
-        const mockRate: ExchangeRate = {
-          from: formData.currency,
-          to: formData.destinationCurrency,
-          rate,
-          inverseRate: 1 / rate,
-          lastUpdated: new Date().toISOString(),
-          provider: "Offline Rate",
-          validUntil: new Date(Date.now() + 30000).toISOString(),
-        };
-        setExchangeRate(mockRate);
-        cacheData(cacheKey, mockRate, 5);
-        if (!isOnline) {
-          setRateWarning("You are offline. Using cached exchange rate.");
-        } else {
-          setRateWarning("Live rate not available. Using fallback rate.");
-        }
+        // No fabricated fallback rate: surface the real unavailability and
+        // let the UI block rate-dependent actions until a live quote loads.
+        setExchangeRate(null);
+        setRateWarning(
+          isOnline
+            ? "Live exchange rate unavailable. Please retry in a moment."
+            : "You are offline. No cached rate is available for this currency pair.",
+        );
       }
     } finally {
       setIsLoadingRate(false);
@@ -484,26 +473,22 @@ const SendMoney: React.FC = () => {
         parseFloat(formData.amount) || 0,
       );
       setRateLock(res.data as unknown as RateLock);
-    } catch {
-      const lockDuration = 600;
-      setRateLock({
-        id: `local_lock_${Date.now()}`,
-        from: formData.currency,
-        to: formData.destinationCurrency,
-        rate: exchangeRate.rate,
-        amount: parseFloat(formData.amount) || 0,
-        lockedAt: new Date().toISOString(),
-        expiresAt: new Date(Date.now() + lockDuration * 1000).toISOString(),
-      });
+    } catch (err) {
+      // A rate lock is a financial guarantee — never fabricate one locally.
+      setError(
+        err instanceof Error
+          ? `Unable to lock this rate: ${err.message}`
+          : "Unable to lock this rate. Please try again.",
+      );
     }
   };
 
   const handleUnlockRate = async () => {
-    if (rateLock && !rateLock.id.startsWith("local_")) {
+    if (rateLock) {
       try {
         await exchangeRateService.unlockRate(rateLock.id);
       } catch {
-        // Ignore errors
+        // Best-effort: server-side locks expire on their own.
       }
     }
     setRateLock(null);
@@ -610,8 +595,19 @@ const SendMoney: React.FC = () => {
           sourceAccountId = primaryAccount.account_number;
         }
       } catch {
-        // Fallback will be applied below if lookup fails
+        // Lookup failed — handled by the guard below.
       }
+    }
+
+    if (!sourceAccountId) {
+      // Never fall back to a hardcoded or unrelated account identifier for
+      // a money movement — require a real core-banking source account.
+      setError(
+        "No source account is available for this currency. Please add or activate an account before sending money.",
+      );
+      setIsSubmitting(false);
+      setFormData((prev) => ({ ...prev, pin: "" }));
+      return;
     }
 
     const transferData = {
@@ -624,8 +620,8 @@ const SendMoney: React.FC = () => {
       note: formData.note,
       deliveryMethod: formData.deliveryMethod,
       rateLockId: rateLock?.id,
-      // Use core banking account number when available, otherwise fallback
-      sourceAccountId: sourceAccountId || user?.phone || "0805529423",
+      // Guaranteed present by the guard above.
+      sourceAccountId,
       senderName,
       switchName: "mojaloop",
       destination: formData.destination,
@@ -1289,7 +1285,8 @@ const SendMoney: React.FC = () => {
                   </span>
                   <input
                     type="text"
-                    value={receivedAmount}
+                    value={receivedAmount ?? ""}
+                    placeholder={receivedAmount === null ? "Rate unavailable" : undefined}
                     readOnly
                     className="w-full pl-10 pr-20 py-4 text-xl font-semibold bg-slate-50 border border-slate-200 rounded-xl"
                   />
@@ -1559,8 +1556,14 @@ const SendMoney: React.FC = () => {
                   {formData.recipientName} receives
                 </div>
                 <div className="text-4xl font-bold">
-                  {CURRENCY_SYMBOLS[formData.destinationCurrency]}
-                  {parseFloat(receivedAmount).toLocaleString()}
+                  {receivedAmount !== null ? (
+                    <>
+                      {CURRENCY_SYMBOLS[formData.destinationCurrency]}
+                      {parseFloat(receivedAmount).toLocaleString()}
+                    </>
+                  ) : (
+                    <span className="text-lg font-medium">Rate unavailable</span>
+                  )}
                 </div>
                 <div className="text-sm opacity-80 mt-1">
                   {formData.destinationCurrency}
@@ -1590,9 +1593,15 @@ const SendMoney: React.FC = () => {
               <div className="flex justify-between py-2 border-b border-slate-200">
                 <span className="text-slate-600">Exchange Rate</span>
                 <span className="font-medium text-slate-900">
-                  1 {formData.destinationCurrency} ={" "}
-                  {(rateLock?.rate || exchangeRate?.rate || 0).toFixed(4)}{" "}
-                  {formData.currency}
+                  {(rateLock?.rate || exchangeRate?.rate) ? (
+                    <>
+                      1 {formData.destinationCurrency} ={" "}
+                      {(rateLock?.rate || exchangeRate?.rate || 0).toFixed(4)}{" "}
+                      {formData.currency}
+                    </>
+                  ) : (
+                    <span className="text-slate-400">—</span>
+                  )}
                   {rateLock && (
                     <span className="ml-1 text-emerald-600 text-xs">
                       (Locked)

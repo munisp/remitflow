@@ -90,7 +90,7 @@ async function collectAccessControlEvidence(): Promise<EvidenceItem[]> {
         rlsEnabledTables: 10,
         tables: ["transactions", "wallets", "beneficiaries", "kyc_documents", "notifications", "audit_logs", "virtual_cards", "recurring_payments", "property_escrow_plans", "fee_rules"],
         roles: ["remitflow_app", "remitflow_admin", "remitflow_service"],
-        migrationFile: "drizzle/migrations/0061_row_level_security.sql",
+        migrationFile: "drizzle/0059_row_level_security.sql",
       },
       expiresAt: new Date(Date.now() + 30 * 86400000),
     },

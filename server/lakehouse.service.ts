@@ -118,14 +118,6 @@ async function putToMinio(key: string, data: Buffer, contentType: string): Promi
   return null;
 }
 
-async function putViaETLService(key: string, data: Buffer | Uint8Array, contentType: string): Promise<StorageResult | null> {
-  try {
-    const res = await fetch(`${LAKEHOUSE_ETL_URL}/health`, { signal: AbortSignal.timeout(2000) });
-    if (!res.ok) return null;
-  } catch { return null; }
-  return null;
-}
-
 async function writeLocal(key: string, data: Buffer | Uint8Array): Promise<StorageResult> {
   const { mkdir, writeFile } = await import("node:fs/promises");
   const { join, dirname } = await import("node:path");
@@ -135,15 +127,18 @@ async function writeLocal(key: string, data: Buffer | Uint8Array): Promise<Stora
   return { key, url: `file://${fullPath}`, size: data.length, backend: "local" };
 }
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
 async function storagePutLakehouse(key: string, data: Buffer | Uint8Array | string, contentType: string): Promise<StorageResult> {
   const buf = typeof data === "string" ? Buffer.from(data, "utf-8") : Buffer.from(data);
 
   const s3Result = await putToMinio(key, buf, contentType);
   if (s3Result) return s3Result;
 
-  const etlResult = await putViaETLService(key, buf, contentType);
-  if (etlResult) return etlResult;
-
+  if (IS_PRODUCTION) {
+    // Fail-closed: never silently degrade to the container-local filesystem in production.
+    throw new Error(`[Lakehouse] FAIL-CLOSED: S3/MinIO unavailable — cannot persist '${key}'`);
+  }
   return writeLocal(key, buf);
 }
 
@@ -165,6 +160,7 @@ async function commitIcebergSnapshot(
   manifestFiles: string[],
   addedRows: number,
   addedBytes: number,
+  fileFormat: "PARQUET" | "NDJSON" = "PARQUET",
 ): Promise<IcebergSnapshot> {
   const snapshotId = Date.now();
   const seq = snapshotId;
@@ -182,7 +178,7 @@ async function commitIcebergSnapshot(
   const manifestData = JSON.stringify({
     entries: manifestFiles.map((f) => ({
       status: 1,
-      data_file: { file_path: f, file_format: "PARQUET", record_count: Math.ceil(addedRows / manifestFiles.length) },
+      data_file: { file_path: f, file_format: fileFormat, record_count: Math.ceil(addedRows / manifestFiles.length) },
     })),
     snapshot_id: snapshotId,
     sequence_number: seq,
@@ -205,35 +201,15 @@ async function commitIcebergSnapshot(
   return snapshot;
 }
 
-// ── Parquet Writer (pure TypeScript) ─────────────────────────────────────────
+// ── NDJSON Staging Writer (pure TypeScript fallback) ─────────────────────────
+//
+// Real Parquet encoding requires pyarrow and is delegated to the Python ETL
+// service. When that service is unavailable, we honestly write NDJSON staging
+// files (.jsonl) rather than fabricating Parquet containers. The lakehouse-etl
+// DuckDB query layer can read these via read_json_auto.
 
-function toParquetBuffer(rows: Record<string, unknown>[]): Buffer {
-  // Apache Parquet format: magic + row group + footer + magic
-  // For production correctness, we delegate to the ETL service for Parquet.
-  // This creates a minimal valid Parquet file with Thrift-encoded metadata.
-  // For full columnar compression, the Python ETL service (pyarrow) is used.
-
-  if (rows.length === 0) return Buffer.from("PAR1PAR1");
-
-  const columns = Object.keys(rows[0]);
-  const ndjson = rows.map((r) => JSON.stringify(r)).join("\n");
-  const dataBytes = Buffer.from(ndjson, "utf-8");
-
-  // Write as Parquet-compatible container: magic + data + footer
-  // DuckDB can read this with read_json_auto as fallback
-  const magic = Buffer.from("PAR1");
-  const footer = Buffer.from(JSON.stringify({
-    version: 2,
-    schema: columns.map((c) => ({ name: c, type: "BYTE_ARRAY" })),
-    num_rows: rows.length,
-    row_groups: [{ columns: columns.length, total_byte_size: dataBytes.length, num_rows: rows.length }],
-    created_by: "remitflow-lakehouse-ts",
-    format: "ndjson-in-parquet-container",
-  }));
-  const footerLen = Buffer.alloc(4);
-  footerLen.writeInt32LE(footer.length);
-
-  return Buffer.concat([magic, dataBytes, footer, footerLen, magic]);
+function toNdjsonBuffer(rows: Record<string, unknown>[]): Buffer {
+  return Buffer.from(rows.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf-8");
 }
 
 async function writeParquetViaETL(
@@ -294,12 +270,12 @@ export async function ingestToBronze(
     return { key: etlResult.key, url: etlResult.url, rowCount: etlResult.rowCount };
   }
 
-  // Fallback: write Parquet container locally
-  const parquetData = toParquetBuffer(enrichedRows);
-  const key = `${LAYERS.BRONZE}/${table}/date=${date}/part-${timestamp}.parquet`;
-  const result = await storagePutLakehouse(key, parquetData, "application/x-parquet");
+  // Fallback: honest NDJSON staging file (readable via DuckDB read_json_auto)
+  const ndjsonData = toNdjsonBuffer(enrichedRows);
+  const key = `${LAYERS.BRONZE}/${table}/date=${date}/part-${timestamp}.jsonl`;
+  const result = await storagePutLakehouse(key, ndjsonData, "application/x-ndjson");
 
-  await commitIcebergSnapshot(LAYERS.BRONZE, table, [key], rows.length, parquetData.length);
+  await commitIcebergSnapshot(LAYERS.BRONZE, table, [key], rows.length, ndjsonData.length, "NDJSON");
 
   return { key: result.key, url: result.url, rowCount: rows.length };
 }
@@ -331,11 +307,11 @@ export async function transformToSilver(
     };
   });
 
-  const parquetData = toParquetBuffer(silverRows);
-  const key = `${LAYERS.SILVER}/${table}/date=${date}/part-${timestamp}.parquet`;
-  const result = await storagePutLakehouse(key, parquetData, "application/x-parquet");
+  const silverData = toNdjsonBuffer(silverRows);
+  const key = `${LAYERS.SILVER}/${table}/date=${date}/part-${timestamp}.jsonl`;
+  const result = await storagePutLakehouse(key, silverData, "application/x-ndjson");
 
-  await commitIcebergSnapshot(LAYERS.SILVER, table, [key], silverRows.length, parquetData.length);
+  await commitIcebergSnapshot(LAYERS.SILVER, table, [key], silverRows.length, silverData.length, "NDJSON");
 
   return { key: result.key, url: result.url, rowCount: silverRows.length };
 }
@@ -409,24 +385,24 @@ export async function buildGoldAggregates(
     };
   });
 
-  const dvParquet = toParquetBuffer(Object.values(dailyVolumeMap));
-  const caParquet = toParquetBuffer(Object.values(corridorMap));
-  const mlParquet = toParquetBuffer(mlFeatures);
+  const dvData = toNdjsonBuffer(Object.values(dailyVolumeMap));
+  const caData = toNdjsonBuffer(Object.values(corridorMap));
+  const mlData = toNdjsonBuffer(mlFeatures);
 
-  const dvKey = `${LAYERS.GOLD}/daily_volume/date=${date}/part-${timestamp}.parquet`;
-  const caKey = `${LAYERS.GOLD}/corridor_analytics/date=${date}/part-${timestamp}.parquet`;
-  const mlKey = `${LAYERS.GOLD}/ml_features/date=${date}/part-${timestamp}.parquet`;
+  const dvKey = `${LAYERS.GOLD}/daily_volume/date=${date}/part-${timestamp}.jsonl`;
+  const caKey = `${LAYERS.GOLD}/corridor_analytics/date=${date}/part-${timestamp}.jsonl`;
+  const mlKey = `${LAYERS.GOLD}/ml_features/date=${date}/part-${timestamp}.jsonl`;
 
   const [dvResult, caResult, mlResult] = await Promise.all([
-    storagePutLakehouse(dvKey, dvParquet, "application/x-parquet"),
-    storagePutLakehouse(caKey, caParquet, "application/x-parquet"),
-    storagePutLakehouse(mlKey, mlParquet, "application/x-parquet"),
+    storagePutLakehouse(dvKey, dvData, "application/x-ndjson"),
+    storagePutLakehouse(caKey, caData, "application/x-ndjson"),
+    storagePutLakehouse(mlKey, mlData, "application/x-ndjson"),
   ]);
 
   await Promise.all([
-    commitIcebergSnapshot("daily_volume", LAYERS.GOLD, [dvKey], Object.values(dailyVolumeMap).length, dvParquet.length),
-    commitIcebergSnapshot("corridor_analytics", LAYERS.GOLD, [caKey], Object.values(corridorMap).length, caParquet.length),
-    commitIcebergSnapshot("ml_features", LAYERS.GOLD, [mlKey], mlFeatures.length, mlParquet.length),
+    commitIcebergSnapshot(LAYERS.GOLD, "daily_volume", [dvKey], Object.values(dailyVolumeMap).length, dvData.length, "NDJSON"),
+    commitIcebergSnapshot(LAYERS.GOLD, "corridor_analytics", [caKey], Object.values(corridorMap).length, caData.length, "NDJSON"),
+    commitIcebergSnapshot(LAYERS.GOLD, "ml_features", [mlKey], mlFeatures.length, mlData.length, "NDJSON"),
   ]);
 
   return {
@@ -486,8 +462,133 @@ export async function runLakehouseETL(transactions: Record<string, unknown>[]): 
     gold,
     totalRows: transactions.length,
     durationMs: Date.now() - start,
-    format: "parquet-ts",
+    format: "ndjson-staging",
   };
+}
+
+// ── Router-Facing Lakehouse Operations (real HTTP to python-lakehouse) ───────
+//
+// These replace the deleted in-memory lakehouseHardened.ts fake. All writes and
+// reads go to the python-lakehouse sync engine (LAKEHOUSE_URL), which persists
+// records as Snappy Parquet on S3/MinIO. Fail loudly when unavailable — the
+// lakehouse is a compliance data sink, so fabricated success is not acceptable.
+
+const LAKEHOUSE_URL = process.env.LAKEHOUSE_URL || "http://localhost:8102";
+
+export interface LakehouseWriteResult {
+  path: string;
+  table: string;
+  rowsIngested: number;
+  country: string;
+  timestamp: string;
+}
+
+export interface LakehouseReadResult {
+  table: string;
+  rows: Record<string, unknown>[];
+  totalRows: number;
+  filesRead: number;
+}
+
+export async function lakehouseWrite(
+  table: string,
+  data: unknown,
+  options: { country: string },
+): Promise<LakehouseWriteResult> {
+  const record = {
+    ...(typeof data === "object" && data !== null ? data as Record<string, unknown> : { value: data }),
+    _country: options.country,
+    _written_at: new Date().toISOString(),
+  };
+
+  let res: Response;
+  try {
+    res = await fetch(`${LAKEHOUSE_URL}/ingest/${encodeURIComponent(table)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ records: [record] }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (err) {
+    throw new Error(`[Lakehouse] FAIL-CLOSED: write to table '${table}' failed — lakehouse service unreachable at ${LAKEHOUSE_URL}: ${(err as Error).message}`);
+  }
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`[Lakehouse] FAIL-CLOSED: ingest rejected for table '${table}' — HTTP ${res.status}: ${detail.slice(0, 300)}`);
+  }
+
+  const body = await res.json() as { s3_key: string; path: string; rows_ingested: number; timestamp: string };
+  return {
+    path: body.path,
+    table,
+    rowsIngested: body.rows_ingested,
+    country: options.country,
+    timestamp: body.timestamp,
+  };
+}
+
+export async function lakehouseRead(
+  table: string,
+  options: { country?: string; limit?: number } = {},
+): Promise<LakehouseReadResult> {
+  const params = new URLSearchParams();
+  if (options.limit) params.set("limit", String(options.limit));
+  if (options.country) params.set("country", options.country);
+
+  let res: Response;
+  try {
+    res = await fetch(`${LAKEHOUSE_URL}/read/${encodeURIComponent(table)}?${params.toString()}`, {
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch (err) {
+    throw new Error(`[Lakehouse] FAIL-CLOSED: read from table '${table}' failed — lakehouse service unreachable at ${LAKEHOUSE_URL}: ${(err as Error).message}`);
+  }
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`[Lakehouse] FAIL-CLOSED: read rejected for table '${table}' — HTTP ${res.status}: ${detail.slice(0, 300)}`);
+  }
+
+  const body = await res.json() as { rows: Record<string, unknown>[]; total_rows: number; files_read: number };
+  return { table, rows: body.rows, totalRows: body.total_rows, filesRead: body.files_read };
+}
+
+export async function getLakehouseHealth(): Promise<{
+  connected: boolean;
+  service: string;
+  syncEngineUrl: string;
+  dbOk: boolean;
+  s3Ok: boolean;
+  syncedTables: number;
+  failClosed: boolean;
+  error?: string;
+}> {
+  const base = { service: "python-lakehouse", syncEngineUrl: LAKEHOUSE_URL, failClosed: true };
+  try {
+    const healthRes = await fetch(`${LAKEHOUSE_URL}/health`, { signal: AbortSignal.timeout(3000) });
+    const health = await healthRes.json().catch(() => ({})) as { db_ok?: boolean; s3_ok?: boolean; status?: string };
+
+    let syncedTables = 0;
+    try {
+      const statusRes = await fetch(`${LAKEHOUSE_URL}/sync/status`, { signal: AbortSignal.timeout(5000) });
+      if (statusRes.ok) {
+        const status = await statusRes.json() as { synced_tables?: number };
+        syncedTables = status.synced_tables ?? 0;
+      }
+    } catch { /* status endpoint optional */ }
+
+    return {
+      ...base,
+      connected: healthRes.ok,
+      dbOk: health.db_ok ?? false,
+      s3Ok: health.s3_ok ?? false,
+      syncedTables,
+      ...(healthRes.ok ? {} : { error: `health endpoint returned HTTP ${healthRes.status}` }),
+    };
+  } catch (err) {
+    return { ...base, connected: false, dbOk: false, s3Ok: false, syncedTables: 0, error: (err as Error).message };
+  }
 }
 
 // ── Status ────────────────────────────────────────────────────────────────────

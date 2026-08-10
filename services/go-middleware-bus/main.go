@@ -74,7 +74,7 @@ func loadConfig() Config {
 		TemporalHostPort:     getEnv("TEMPORAL_HOST_PORT", "temporal:7233"),
 		MojaloopConnURL:      getEnv("MOJALOOP_CONNECTOR_URL", "http://mojaloop-connector:8100"),
 		APISIXAdminURL:       getEnv("APISIX_ADMIN_URL", "http://apisix:9180"),
-		APISIXAdminKey:       getEnv("APISIX_ADMIN_KEY", "edd1c9f034335f136f87ad84b625c8f1"),
+		APISIXAdminKey:       getEnv("APISIX_ADMIN_KEY", ""), // no default: the published APISIX default key is forbidden
 		KeycloakURL:          getEnv("KEYCLOAK_URL", "http://keycloak:8080"),
 		KeycloakRealm:        getEnv("KEYCLOAK_REALM", "remitflow"),
 		PermifyURL:           getEnv("PERMIFY_URL", "http://permify:3476"),

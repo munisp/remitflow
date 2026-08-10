@@ -7,11 +7,12 @@
 set -euo pipefail
 
 APISIX_ADMIN="${1:-http://localhost:9180}"
-ADMIN_KEY="${APISIX_ADMIN_KEY:-remitflow-apisix-admin-key}"
+# Fail closed: no default admin key — provision APISIX_ADMIN_KEY explicitly.
+ADMIN_KEY="${APISIX_ADMIN_KEY:?APISIX_ADMIN_KEY must be set — refusing to configure APISIX without credentials}"
 APP_UPSTREAM="${APP_UPSTREAM:-http://host.docker.internal:3000}"
 FX_UPSTREAM="${FX_UPSTREAM:-http://fx-engine:8080}"
 RISK_UPSTREAM="${RISK_UPSTREAM:-http://risk-engine:8083}"
-MOJALOOP_UPSTREAM="${MOJALOOP_UPSTREAM:-http://mojaloop-connector:8081}"
+MOJALOOP_UPSTREAM="${MOJALOOP_UPSTREAM:-http://mojaloop-connector:8113}"
 LEDGER_UPSTREAM="${LEDGER_UPSTREAM:-http://ledger-service:8082}"
 FRAUD_UPSTREAM="${FRAUD_UPSTREAM:-http://fraud-ml:8087}"
 
@@ -176,6 +177,30 @@ curl -sf -X PUT "$APISIX_ADMIN/apisix/admin/routes/7" \
     },
     "priority": 20
   }' && echo "  ✓ health-check route"
+
+# ── Stablecoin routes (infra/apisix/stablecoin-routes.yaml) ──────────────────
+echo ""
+echo "🪙 Applying stablecoin routes (infra/apisix/stablecoin-routes.yaml)..."
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STABLECOIN_YAML="${STABLECOIN_ROUTES_FILE:-$SCRIPT_DIR/../../infra/apisix/stablecoin-routes.yaml}"
+
+if [ -f "$STABLECOIN_YAML" ]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "  ✗ python3 is required to apply $STABLECOIN_YAML" >&2
+    exit 1
+  fi
+  if ! python3 -c 'import yaml' >/dev/null 2>&1; then
+    echo "  ✗ python3-yaml (PyYAML) is required to apply $STABLECOIN_YAML" >&2
+    exit 1
+  fi
+  # The loader fails closed when APISIX_ADMIN_KEY is unset and strips any
+  # plugin not present in the stock apache/apisix:3.9 image.
+  python3 "$SCRIPT_DIR/apply-stablecoin-routes.py" "$APISIX_ADMIN" "$STABLECOIN_YAML"
+else
+  echo "  ✗ stablecoin route file not found at $STABLECOIN_YAML" >&2
+  exit 1
+fi
 
 # ── Global Plugins ─────────────────────────────────────────────────────────────
 echo ""

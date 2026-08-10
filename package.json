@@ -150,7 +150,7 @@
     "superjson": "^2.2.6",
     "tailwind-merge": "^3.3.1",
     "tailwindcss-animate": "^1.0.7",
-    "tigerbeetle-node": "0.17.9",
+    "tigerbeetle-node": "0.16.63",
     "uuid": "^14.0.0",
     "validator": "^13.15.35",
     "vaul": "^1.1.2",

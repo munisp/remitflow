@@ -17,8 +17,8 @@ FROM alpine:3.19
 RUN apk add --no-cache ca-certificates wget
 WORKDIR /app
 COPY --from=builder /app/mojaloop-connector .
-EXPOSE 8085
+EXPOSE 8113
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
-  CMD wget -qO- http://localhost:8085/health || exit 1
+  CMD wget -qO- http://localhost:8113/health || exit 1
 USER nobody
 CMD ["./mojaloop-connector"]

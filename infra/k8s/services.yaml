@@ -630,26 +630,60 @@ spec:
 
 ---
 # ─── Secrets Template ─────────────────────────────────────────────────────────
-# IMPORTANT: Replace all values with real secrets before applying to production.
-# Use Sealed Secrets or External Secrets Operator in production.
+# DO NOT APPLY WITH THESE VALUES. Every value below is a placeholder; the
+# canonical source of truth is a secrets manager synced via the External
+# Secrets Operator (or Sealed Secrets). Sketch:
+#
+#   apiVersion: external-secrets.io/v1beta1
+#   kind: ExternalSecret
+#   metadata:
+#     name: remitflow-secrets
+#     namespace: remitflow
+#   spec:
+#     refreshInterval: 1h
+#     secretStoreRef: { name: <your-cluster-secret-store>, kind: ClusterSecretStore }
+#     target: { name: remitflow-secrets }
+#     data:
+#       - { secretKey: database-url,            remoteRef: { key: remitflow/postgres,  property: url } }
+#       - { secretKey: redis-url,               remoteRef: { key: remitflow/redis,     property: url } }
+#       - { secretKey: crypto-master-key,       remoteRef: { key: remitflow/crypto,    property: master_key } }
+#       - { secretKey: crypto-hmac-key,         remoteRef: { key: remitflow/crypto,    property: hmac_key } }
+#       - { secretKey: apisix-admin-key,        remoteRef: { key: remitflow/apisix,    property: admin_key } }
+#       - { secretKey: s3-access-key,           remoteRef: { key: remitflow/minio,     property: root_user } }
+#       - { secretKey: s3-secret-key,           remoteRef: { key: remitflow/minio,     property: root_password } }
+#       - { secretKey: jwt-secret,              remoteRef: { key: remitflow/api,       property: jwt_secret } }
+#       - { secretKey: session-secret,          remoteRef: { key: remitflow/api,       property: session_secret } }
+#       - { secretKey: keycloak-client-secret,  remoteRef: { key: remitflow/keycloak,  property: client_secret } }
+#       - { secretKey: keycloak-admin-password, remoteRef: { key: remitflow/keycloak,  property: admin_password } }
 apiVersion: v1
 kind: Secret
 metadata:
   name: remitflow-secrets
   namespace: remitflow
+  annotations:
+    # Marker for reviewers/tooling: values are placeholders, not credentials.
+    remitflow.io/secret-source: "external-secrets-operator-required"
 type: Opaque
 stringData:
-  database-url: "postgres://remitflow:CHANGE_ME@postgres:5432/remitflow"
-  redis-url: "redis://:CHANGE_ME@redis:6379"
-  crypto-master-key: "CHANGE_ME_64_HEX_CHARS_0000000000000000000000000000000000000000"
-  crypto-hmac-key: "CHANGE_ME_64_HEX_CHARS_0000000000000000000000000000000000000000"
-  apisix-admin-key: "CHANGE_ME"
-  s3-access-key: "CHANGE_ME"
-  s3-secret-key: "CHANGE_ME"
-  jwt-secret: "CHANGE_ME_MIN_32_CHARS"
-  session-secret: "CHANGE_ME_MIN_32_CHARS"
-  keycloak-client-secret: "CHANGE_ME"
-  keycloak-admin-password: "CHANGE_ME"
+  # REPLACE_VIA_EXTERNAL_SECRET — postgres password property
+  database-url: "postgres://remitflow:REPLACE_VIA_EXTERNAL_SECRET@postgres:5432/remitflow"
+  # ACL user remitflow_app — the password segment is REDIS_APP_PASSWORD,
+  # supplied by the secrets manager (see redis/users.acl).
+  redis-url: "redis://remitflow_app:REPLACE_VIA_EXTERNAL_SECRET@redis:6379"
+  # REPLACE_VIA_EXTERNAL_SECRET — 64 hex chars
+  crypto-master-key: "REPLACE_VIA_EXTERNAL_SECRET_64_HEX"
+  # REPLACE_VIA_EXTERNAL_SECRET — 64 hex chars
+  crypto-hmac-key: "REPLACE_VIA_EXTERNAL_SECRET_64_HEX"
+  # REPLACE_VIA_EXTERNAL_SECRET — must match the key rendered into APISIX config
+  apisix-admin-key: "REPLACE_VIA_EXTERNAL_SECRET"
+  # REPLACE_VIA_EXTERNAL_SECRET — MinIO root credentials
+  s3-access-key: "REPLACE_VIA_EXTERNAL_SECRET"
+  s3-secret-key: "REPLACE_VIA_EXTERNAL_SECRET"
+  # REPLACE_VIA_EXTERNAL_SECRET — min 32 chars each
+  jwt-secret: "REPLACE_VIA_EXTERNAL_SECRET_MIN_32_CHARS"
+  session-secret: "REPLACE_VIA_EXTERNAL_SECRET_MIN_32_CHARS"
+  keycloak-client-secret: "REPLACE_VIA_EXTERNAL_SECRET"
+  keycloak-admin-password: "REPLACE_VIA_EXTERNAL_SECRET"
 
 ---
 # ─── ConfigMap ────────────────────────────────────────────────────────────────
@@ -665,6 +699,8 @@ data:
   temporal-namespace: "remitflow"
   keycloak-url: "http://keycloak:8080"
   keycloak-realm: "remitflow"
+  # Canonical Permify tenant (consumed by permify-bootstrap Job + api).
+  permify-tenant-id: "remitflow"
   aml-threshold-critical: "81"
   feature-aml-scoring: "true"
   feature-tigerbeetle: "true"

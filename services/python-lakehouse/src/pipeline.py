@@ -1,26 +1,27 @@
 """
 RemitFlow — Lakehouse Data Pipeline
 ════════════════════════════════════════════════════════════════════════════════
-Ingests operational data from PostgreSQL into a Delta Lake lakehouse for
+Ingests operational data from PostgreSQL into the lakehouse for
 analytics, ML model training, and regulatory reporting.
 
 Architecture:
-    PostgreSQL (OLTP) → Kafka CDC → Python Pipeline → Delta Lake (S3/MinIO)
-                                                     → DuckDB (query layer)
-                                                     → Parquet exports (Airflow)
+    PostgreSQL (OLTP) → Python Pipeline → Parquet files (LAKEHOUSE_PATH / S3-MinIO)
+                                        → Delta Lake tables (only if the optional
+                                          `deltalake` package is installed; otherwise
+                                          plain Parquet, logged explicitly)
+
+NOTE: There is NO Kafka CDC consumer mode in this pipeline. Streaming ingestion
+is handled by the main sync engine (main.py) plus Kafka consumers elsewhere in
+the platform. This CLI supports batch modes only.
 
 Tables ingested:
-    - transfers         → delta://lakehouse/transfers/
-    - users             → delta://lakehouse/users/ (PII-masked)
-    - kyc_events        → delta://lakehouse/kyc_events/
-    - fx_rates          → delta://lakehouse/fx_rates/
-    - aml_alerts        → delta://lakehouse/aml_alerts/
-    - reconciliation_runs → delta://lakehouse/reconciliation/
+    - transfers         → <lakehouse>/transfers/
+    - fx_rates          → <lakehouse>/fx_rates/
 
 Usage:
     python pipeline.py --mode=full_load --table=transfers
     python pipeline.py --mode=incremental --table=all
-    python pipeline.py --mode=stream  (Kafka CDC consumer)
+    python pipeline.py --mode=stats
 """
 
 import os
@@ -45,7 +46,6 @@ logger = logging.getLogger("lakehouse")
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
-KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:9092")
 LAKEHOUSE_PATH = os.getenv("LAKEHOUSE_PATH", "/data/lakehouse")
 S3_BUCKET = os.getenv("S3_BUCKET", "remitflow-lakehouse")
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
@@ -138,14 +138,22 @@ class PostgresExtractor:
         self._conn = None
 
     def connect(self):
+        """Connect to PostgreSQL. Fails loudly — no mock/fabricated data fallback."""
         try:
             import psycopg2
+        except ImportError as e:
+            raise RuntimeError(
+                "psycopg2 is required for the lakehouse pipeline but is not installed. "
+                "Install psycopg2-binary (see requirements.txt). Refusing to emit fabricated data."
+            ) from e
+        try:
             self._conn = psycopg2.connect(self.db_url)
             logger.info("Connected to PostgreSQL")
-        except ImportError:
-            logger.warning("psycopg2 not available — using mock extractor")
         except Exception as e:
-            logger.warning(f"PostgreSQL connection failed: {e} — using mock data")
+            raise RuntimeError(
+                f"PostgreSQL connection failed ({e}). Refusing to emit fabricated data — "
+                "fix the database connection and retry."
+            ) from e
 
     def extract_transfers(
         self,
@@ -154,8 +162,7 @@ class PostgresExtractor:
     ) -> Generator[list, None, None]:
         """Extract transfers in batches."""
         if self._conn is None:
-            yield from self._mock_transfers(since, limit)
-            return
+            raise RuntimeError("extract_transfers called before connect() — no database connection")
 
         cursor = self._conn.cursor()
         offset = 0
@@ -185,8 +192,7 @@ class PostgresExtractor:
     ) -> Generator[list, None, None]:
         """Extract FX rate snapshots."""
         if self._conn is None:
-            yield from self._mock_fx_rates()
-            return
+            raise RuntimeError("extract_fx_rates called before connect() — no database connection")
 
         cursor = self._conn.cursor()
         where = f"WHERE timestamp >= '{since.isoformat()}'" if since else ""
@@ -201,48 +207,6 @@ class PostgresExtractor:
         if rows:
             yield rows
 
-    def _mock_transfers(self, since, limit):
-        """Generate mock transfer data for testing."""
-        corridors = [("USD", "NGN"), ("USD", "GHS"), ("GBP", "NGN"), ("EUR", "NGN")]
-        statuses = ["completed", "completed", "completed", "failed", "pending"]
-        providers = ["mojaloop", "stablecoin", "swift"]
-        now = datetime.now(timezone.utc)
-
-        batch = []
-        for i in range(min(limit, 100)):
-            corridor = corridors[i % len(corridors)]
-            amount = 50.0 + (i * 17.3) % 950
-            rate = 1580.0 if corridor[1] == "NGN" else 15.2
-            batch.append((
-                f"TXN-MOCK-{i:06d}",
-                1000 + (i % 100),
-                amount,
-                corridor[0],
-                corridor[1],
-                statuses[i % len(statuses)],
-                providers[i % len(providers)],
-                amount * 0.012,
-                rate,
-                amount * rate * 0.988,
-                now - timedelta(hours=i),
-                now - timedelta(hours=i) + timedelta(minutes=5),
-                f"TB-{i:016X}",
-            ))
-        yield batch
-
-    def _mock_fx_rates(self):
-        """Generate mock FX rate data."""
-        pairs = [("USD", "NGN", 1580.0), ("USD", "GHS", 15.2), ("GBP", "NGN", 2010.0)]
-        now = datetime.now(timezone.utc)
-        batch = []
-        for i, (base, quote, rate) in enumerate(pairs):
-            batch.append((
-                f"FX-{base}-{quote}-{int(now.timestamp())}",
-                base, quote, rate,
-                rate * 0.999, rate * 1.001,
-                "remitflow-fx", now,
-            ))
-        yield batch
 
 # ── Data Transformers ─────────────────────────────────────────────────────────
 

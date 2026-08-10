@@ -26,7 +26,7 @@
  *   8098  pdf-receipt (Python)
  *   8099  rust-pdf-receipt
  *   8100  search-indexer (Python)
- *   8101  mojaloop-connector (Go)
+ *   8101  rust-sme-bulk-processor
  *   8102  go-cips-adapter
  *   8103  python-pix-adapter
  *   8104  rust-upi-adapter
@@ -38,7 +38,7 @@
  *   8110  python-keycloak-service
  *   8111  go-apisix-service
  *   8112  go-apisix-config
- *   8113  go-dapr-service
+ *   8113  mojaloop-connector (Go)
  *   8114  rust-fluvio-service
  *   8115  rust-pg-service
  *   8116  rust-redis-service
@@ -89,7 +89,7 @@ export const SERVICE_URLS = {
   // Search
   searchIndexer:       process.env.SEARCH_INDEXER_URL        ?? "http://localhost:8100",
   // Payment rails
-  mojaloopConnector:   process.env.MOJALOOP_URL              ?? "http://localhost:8101",
+  mojaloopConnector:   process.env.MOJALOOP_URL              ?? "http://localhost:8113",
   goCipsAdapter:       process.env.GO_CIPS_URL               ?? "http://localhost:8102",
   pythonPixAdapter:    process.env.PYTHON_PIX_URL            ?? "http://localhost:8103",
   rustUpiAdapter:      process.env.RUST_UPI_URL              ?? "http://localhost:8104",
@@ -415,22 +415,83 @@ export async function generateReceipt(transfer: {
 }
 
 // ── Mojaloop Connector (Go) ───────────────────────────────────────────────────
+// Connector serves the FSPIOP route set under /v1 (see services/mojaloop-connector).
+// Fail-closed: connector errors propagate as MojaloopConnectorError — callers
+// must handle failure, no fabricated transfer IDs are returned.
 export interface MojaloopTransferResult {
   transferId: string;
-  state: "RECEIVED" | "RESERVED" | "COMMITTED" | "ABORTED";
+  transferState: "RECEIVED" | "RESERVED" | "COMMITTED" | "ABORTED";
   fulfilment?: string;
+  completedTimestamp?: string;
 }
+
+export class MojaloopConnectorError extends Error {
+  readonly statusCode?: number;
+  constructor(message: string, statusCode?: number) {
+    super(message);
+    this.name = "MojaloopConnectorError";
+    this.statusCode = statusCode;
+  }
+}
+
 export async function mojaloopTransfer(payload: {
+  transferId?: string;
   payerFsp: string;
   payeeFsp: string;
-  amount: number;
+  amount: number | string;
   currency: string;
   ilpPacket: string;
+  condition?: string;
 }): Promise<MojaloopTransferResult> {
-  return fetchSvc<MojaloopTransferResult>(
-    SERVICE_URLS.mojaloopConnector, "/transfer", "POST", payload,
-    { transferId: `moja-${Date.now()}`, state: "RECEIVED" }
-  );
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(`${SERVICE_URLS.mojaloopConnector}/v1/transfers`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, amount: String(payload.amount) }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new MojaloopConnectorError(
+        `mojaloop-connector /v1/transfers failed: HTTP ${res.status} ${body}`,
+        res.status
+      );
+    }
+    return (await res.json()) as MojaloopTransferResult;
+  } catch (err) {
+    if (err instanceof MojaloopConnectorError) throw err;
+    throw new MojaloopConnectorError(
+      `mojaloop-connector unreachable: ${err instanceof Error ? err.message : String(err)}`
+    );
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+export async function mojaloopGetTransfer(transferId: string): Promise<MojaloopTransferResult> {
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(`${SERVICE_URLS.mojaloopConnector}/v1/transfers/${encodeURIComponent(transferId)}`, {
+      signal: controller.signal,
+    });
+    if (res.status === 404) {
+      throw new MojaloopConnectorError(`Transfer not found: ${transferId}`, 404);
+    }
+    if (!res.ok) {
+      throw new MojaloopConnectorError(`mojaloop-connector GET transfer failed: HTTP ${res.status}`, res.status);
+    }
+    return (await res.json()) as MojaloopTransferResult;
+  } catch (err) {
+    if (err instanceof MojaloopConnectorError) throw err;
+    throw new MojaloopConnectorError(
+      `mojaloop-connector unreachable: ${err instanceof Error ? err.message : String(err)}`
+    );
+  } finally {
+    clearTimeout(tid);
+  }
 }
 
 // ── PIX Adapter (Python) ──────────────────────────────────────────────────────

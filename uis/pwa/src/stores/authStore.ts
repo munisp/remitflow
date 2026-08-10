@@ -28,9 +28,11 @@ interface AuthState {
   isLoading: boolean;
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
+  completeSsoLogin: () => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
   logout: () => void;
   clearError: () => void;
+  setError: (message: string) => void;
   refreshAuth: () => Promise<void>;
   fetchUserDetails: () => Promise<void>;
 }
@@ -95,6 +97,27 @@ export const useAuthStore = create<AuthState>()(
         }
       },
 
+      completeSsoLogin: async () => {
+        set({ isLoading: true, error: null });
+        try {
+          const user = await authService.completeKeycloakLogin();
+          // SSO sessions are cookie-based on the platform server; there is
+          // no bearer token to store. Authenticated state reflects the
+          // verified server session returned by auth.me.
+          set({ user, token: null, isAuthenticated: true, isLoading: false });
+        } catch (error) {
+          set({
+            error:
+              error instanceof Error
+                ? error.message
+                : "SSO sign-in failed. Please try again.",
+            isLoading: false,
+            isAuthenticated: false,
+          });
+          throw error;
+        }
+      },
+
       register: async (data: RegisterData) => {
         set({ isLoading: true, error: null });
         try {
@@ -133,9 +156,31 @@ export const useAuthStore = create<AuthState>()(
         set({ error: null });
       },
 
+      setError: (message: string) => {
+        set({ error: message });
+      },
+
       refreshAuth: async () => {
         const currentToken = get().token;
         if (!currentToken) {
+          // Cookie-based SSO session (no bearer token): re-verify against
+          // the platform server. A definitively invalid session logs the
+          // user out; an indeterminate result (network error) keeps the
+          // current state — protected API calls will surface real errors.
+          if (get().isAuthenticated) {
+            try {
+              const ssoUser = await authService.fetchSsoSessionUser();
+              if (ssoUser) {
+                set({ user: ssoUser, isAuthenticated: true });
+              } else {
+                get().logout();
+              }
+            } catch {
+              // Server unreachable — keep current state; protected API
+              // calls will surface real errors to the user.
+            }
+            return;
+          }
           set({ isAuthenticated: false });
           return;
         }

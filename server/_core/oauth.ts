@@ -14,12 +14,55 @@ import crypto from "crypto";
 import * as db from "../db";
 import { getSessionCookieOptions } from "./cookies";
 import {
+  buildKeycloakAuthUrl,
   exchangeKeycloakCode,
+  generatePkce,
   getKeycloakUserInfo,
   isKeycloakConfigured,
 } from "./keycloak";
-import { sdk } from "./sdk";
+import { keycloakSessionTtlMs, sdk } from "./sdk";
 import { logger } from "./logger";
+
+/** httpOnly cookie holding the PKCE verifier between login initiation and callback. */
+const PKCE_VERIFIER_COOKIE = "kc_pkce_verifier";
+/** httpOnly cookie holding the Keycloak refresh token for session rotation. */
+const REFRESH_TOKEN_COOKIE = "kc_refresh_token";
+const PKCE_COOKIE_MAX_AGE_MS = 10 * 60 * 1000;
+
+function getCookie(req: Request, name: string): string | undefined {
+  const header = req.headers.cookie;
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const sep = part.indexOf("=");
+    if (sep <= 0) continue;
+    if (part.slice(0, sep).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(sep + 1).trim());
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the OIDC redirect_uri for login initiation. Absolute URIs are only
+ * accepted on this server's own origin — anything else is rejected loudly to
+ * prevent the endpoint from being used as an open-redirect oracle.
+ */
+function resolveRedirectUri(req: Request): string {
+  const origin = `${req.protocol}://${req.get("host")}`;
+  const raw = getQueryParam(req, "redirect_uri");
+  if (!raw) return `${origin}/api/oauth/callback`;
+  if (raw.startsWith("/") && !raw.startsWith("//")) return `${origin}${raw}`;
+  try {
+    const parsed = new URL(raw);
+    if ((parsed.protocol === "https:" || parsed.protocol === "http:") && parsed.host === req.get("host")) {
+      return parsed.toString();
+    }
+  } catch { /* fall through to error */ }
+  throw new Error("redirect_uri must be a relative path or an absolute URL on this server's origin");
+}
 
 function getQueryParam(req: Request, key: string): string | undefined {
   const value = req.query[key];
@@ -48,6 +91,118 @@ export function registerOAuthRoutes(app: Express) {
     res.json({ csrfToken: token });
   });
 
+  // ─── Keycloak login initiation (KC3) ───────────────────────────────────────
+  // GET /api/auth/keycloak/login?redirect_uri=<optional>&redirect=1
+  //
+  // Starts the OIDC authorization-code + PKCE flow. Generates the PKCE
+  // verifier/challenge server-side, stores the verifier in a short-lived
+  // httpOnly cookie (bound to the callback), and returns the Keycloak
+  // authorization URL for the frontend to navigate to.
+  //
+  // Response contract (200):
+  //   {
+  //     authorizationUrl: string  // navigate the browser here
+  //     state: string             // base64(redirect_uri), echoed back by Keycloak
+  //     pkceMethod: "S256"
+  //     expiresIn: 600            // seconds the PKCE verifier cookie remains valid
+  //   }
+  // Errors: 503 when Keycloak is not configured, 400 for an invalid redirect_uri.
+  // With ?redirect=1 the endpoint responds 302 to authorizationUrl instead of JSON.
+  app.get("/api/auth/keycloak/login", (req: Request, res: Response) => {
+    if (!isKeycloakConfigured()) {
+      res.status(503).json({ error: "Keycloak login is not configured on this server" });
+      return;
+    }
+    try {
+      const redirectUri = resolveRedirectUri(req);
+      // state encodes the redirect_uri (base64) — the callback's standing convention
+      const state = Buffer.from(redirectUri, "utf8").toString("base64");
+      const pkce = generatePkce();
+
+      const baseOpts = getSessionCookieOptions(req);
+      res.cookie(PKCE_VERIFIER_COOKIE, pkce.verifier, {
+        ...baseOpts,
+        httpOnly: true,
+        maxAge: PKCE_COOKIE_MAX_AGE_MS,
+        sameSite: (baseOpts.sameSite as any) ?? "lax",
+      });
+
+      const authorizationUrl = buildKeycloakAuthUrl(redirectUri, state, {
+        challenge: pkce.challenge,
+        method: "S256",
+      });
+
+      if (getQueryParam(req, "redirect") === "1") {
+        res.redirect(302, authorizationUrl);
+        return;
+      }
+      res.json({
+        authorizationUrl,
+        state,
+        pkceMethod: "S256",
+        expiresIn: PKCE_COOKIE_MAX_AGE_MS / 1000,
+      });
+    } catch (error) {
+      logger.warn({ err: error instanceof Error ? error.message : String(error) }, "[Auth] Keycloak login initiation rejected");
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  // ─── Session refresh via Keycloak refresh-token rotation (KC1) ─────────────
+  // POST /api/auth/refresh — exchanges the httpOnly refresh-token cookie for a
+  // new access token, re-mints the short-lived session cookie, and rotates the
+  // refresh cookie (Keycloak revokeRefreshToken=true issues a fresh refresh
+  // token on every use). 401 + cleared cookies when rotation fails.
+  app.post("/api/auth/refresh", async (req: Request, res: Response) => {
+    if (!isKeycloakConfigured()) {
+      res.status(400).json({ error: "Keycloak is not configured on this server" });
+      return;
+    }
+    const refreshToken = getCookie(req, REFRESH_TOKEN_COOKIE);
+    if (!refreshToken) {
+      res.status(401).json({ error: "No refresh token present" });
+      return;
+    }
+    try {
+      const { refreshAccessToken } = await import("../integrations/keycloak/enhanced");
+      const tokens = await refreshAccessToken(refreshToken);
+      const userInfo = await getKeycloakUserInfo(tokens.accessToken);
+
+      await db.upsertUser({
+        openId: userInfo.sub,
+        name: userInfo.name ?? userInfo.preferred_username ?? null,
+        email: userInfo.email ?? null,
+        loginMethod: "keycloak",
+        lastSignedIn: new Date(),
+      });
+
+      const sessionTtlMs = Math.max(30_000, Math.min(tokens.expiresIn * 1000, keycloakSessionTtlMs()));
+      const sessionToken = await sdk.createSessionToken(userInfo.sub, {
+        name: userInfo.name ?? userInfo.preferred_username ?? "",
+        expiresInMs: sessionTtlMs,
+      });
+
+      const cookieOptions = getSessionCookieOptions(req);
+      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: sessionTtlMs });
+      if (tokens.refreshToken) {
+        // Rotate the refresh token cookie — the old one has been revoked by Keycloak.
+        const refreshMaxAgeMs = (tokens.refreshExpiresIn ?? 1800) * 1000;
+        res.cookie(REFRESH_TOKEN_COOKIE, tokens.refreshToken, {
+          ...cookieOptions,
+          httpOnly: true,
+          maxAge: refreshMaxAgeMs,
+        });
+      }
+      res.json({ success: true, expiresIn: sessionTtlMs / 1000 });
+    } catch (error) {
+      logger.warn({ err: error instanceof Error ? error.message : String(error) }, "[Auth] Session refresh failed — clearing auth cookies");
+      const cookieOptions = getSessionCookieOptions(req);
+      res.clearCookie(COOKIE_NAME, cookieOptions);
+      res.clearCookie(REFRESH_TOKEN_COOKIE, cookieOptions);
+      res.status(401).json({ error: "Session refresh failed — please log in again" });
+    }
+  });
+
   // ─── Keycloak OIDC callback ────────────────────────────────────────────────
   app.get("/api/oauth/callback", async (req: Request, res: Response) => {
     const code = getQueryParam(req, "code");
@@ -63,18 +218,33 @@ export function registerOAuthRoutes(app: Express) {
       let name: string | null = null;
       let email: string | null = null;
       let loginMethod: string | null = null;
+      let sessionTtlMs = ONE_YEAR_MS;
+      let keycloakRefresh: { token: string; maxAgeMs: number } | null = null;
 
       if (isKeycloakConfigured()) {
         // ── Keycloak OIDC flow ──────────────────────────────────────────────
         // state encodes the redirect_uri (base64) — same convention as before
         const redirectUri = atob(state);
-        const tokens = await exchangeKeycloakCode(code, redirectUri);
+        // PKCE: the verifier was stored in an httpOnly cookie at login initiation.
+        const codeVerifier = getCookie(req, PKCE_VERIFIER_COOKIE);
+        const tokens = await exchangeKeycloakCode(code, redirectUri, codeVerifier);
+        // The verifier is single-use — clear it immediately after the exchange.
+        res.clearCookie(PKCE_VERIFIER_COOKIE, getSessionCookieOptions(req));
         const userInfo = await getKeycloakUserInfo(tokens.access_token);
 
         openId = userInfo.sub;
         name = userInfo.name ?? userInfo.preferred_username ?? null;
         email = userInfo.email ?? null;
         loginMethod = "keycloak";
+        // KC1: the app session mirrors the realm access-token lifetime instead
+        // of a 1-year cookie; continuity comes from refresh-token rotation.
+        sessionTtlMs = Math.max(30_000, tokens.expires_in * 1000);
+        if (tokens.refresh_token) {
+          keycloakRefresh = {
+            token: tokens.refresh_token,
+            maxAgeMs: (tokens.refresh_expires_in ?? 1800) * 1000,
+          };
+        }
       } else {
         // ── Legacy Manus OAuth flow (fallback when Keycloak not configured) ──
         const tokenResponse = await sdk.exchangeCodeForToken(code, state);
@@ -112,11 +282,18 @@ export function registerOAuthRoutes(app: Express) {
 
       const sessionToken = await sdk.createSessionToken(openId, {
         name: name ?? "",
-        expiresInMs: ONE_YEAR_MS,
+        expiresInMs: sessionTtlMs,
       });
 
       const cookieOptions = getSessionCookieOptions(req);
-      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: sessionTtlMs });
+      if (keycloakRefresh) {
+        res.cookie(REFRESH_TOKEN_COOKIE, keycloakRefresh.token, {
+          ...cookieOptions,
+          httpOnly: true,
+          maxAge: keycloakRefresh.maxAgeMs,
+        });
+      }
       // Set CSRF double-submit cookie so the frontend can read it
       setCsrfCookie(req, res);
       res.redirect(302, "/");
@@ -139,11 +316,20 @@ export function registerOAuthRoutes(app: Express) {
     }
   });
 
-  // ─── Dev-login bypass (sandbox / demo only) ────────────────────────────────
+  // ─── Dev-login bypass (local sandbox / demo only) ──────────────────────────
   // Creates a session for a test user without requiring a running Keycloak.
-  // Disabled automatically when NODE_ENV=production.
-  if (process.env.NODE_ENV !== "production") {
+  // KC2: registered ONLY when ALLOW_DEV_LOGIN=true is set explicitly AND the
+  // process is not running in production. NODE_ENV alone is not sufficient —
+  // a misconfigured deployment must never silently expose this endpoint.
+  const devLoginAllowed = process.env.ALLOW_DEV_LOGIN === "true" && process.env.NODE_ENV !== "production";
+  if (devLoginAllowed) {
     app.get("/api/dev-login", async (req: Request, res: Response) => {
+      // Defense in depth: refuse at request time as well, even if the process
+      // env was mutated after route registration.
+      if (process.env.NODE_ENV === "production" || process.env.ALLOW_DEV_LOGIN !== "true") {
+        res.status(403).json({ error: "Dev login is disabled" });
+        return;
+      }
       try {
         const testOpenId = "dev-user-001";
         const testName = "Demo User";
@@ -177,6 +363,8 @@ export function registerOAuthRoutes(app: Express) {
       }
     });
 
-    logger.info("[Auth] Dev-login endpoint enabled at /api/dev-login (non-production only)");
+    logger.info("[Auth] Dev-login endpoint enabled at /api/dev-login (ALLOW_DEV_LOGIN=true, non-production)");
+  } else if (process.env.ALLOW_DEV_LOGIN === "true" && process.env.NODE_ENV === "production") {
+    logger.error("[Auth] ALLOW_DEV_LOGIN=true was set in production — /api/dev-login REFUSED and not registered");
   }
 }

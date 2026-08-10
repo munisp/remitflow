@@ -54,7 +54,7 @@ dapr:
 # (a gitignored, per-environment file).
 secrets:
   DAPR_HTTP_PORT: "3500"
-  DAPR_PUBSUB_NAME: "pubsub"
+  DAPR_PUBSUB: "pubsub"
   DAPR_TOPIC_SANCTIONS: "CHANGE_ME"
   DATABASE_URL: "CHANGE_ME"
   OPENSEARCH_INDEX: "CHANGE_ME"

@@ -75,7 +75,7 @@ const EXT_SERVICES = {
   cipsAdapter:       process.env.CIPS_SERVICE_URL       || "http://localhost:8090",
   upiAdapter:        process.env.UPI_SERVICE_URL         || "http://localhost:8091",
   pixAdapter:        process.env.PIX_SERVICE_URL         || "http://localhost:8092",
-  mojaloopConnector: process.env.MOJALOOP_SERVICE_URL    || "http://localhost:8109",
+  mojaloopConnector: process.env.MOJALOOP_SERVICE_URL    || "http://localhost:8113",
   // Messaging / Streaming
   kafkaService:      process.env.KAFKA_SERVICE_URL       || "http://localhost:8093",
   fluvioService:     process.env.FLUVIO_SERVICE_URL      || "http://localhost:8097",
@@ -546,11 +546,23 @@ export const mojaloopConnectorRouter = router({
     .input(z.object({ payerFspId: z.string(), payeeFspId: z.string(), amount: z.string(), currency: z.string(), transferId: z.string().optional() }))
     .mutation(async ({ input }) => {
       try {
-        return await callExtService(`${EXT_SERVICES.mojaloopConnector}/transfers`, {
-          ...input,
-          transferId: input.transferId || `ML-${Date.now()}`,
-          ilpPacket: "AQAAAAAAAADIEHByaXZhdGUucGF5ZWVmc3A",
-          condition: "f5sqb7tBTWPd5Y8BDFdMm9BJR_MNI4isf8p8n9Kj6eY",
+        // Build a real ILPv4 packet + SHA-256 condition/fulfillment pair
+        const { buildIlpPacket } = await import("../mojaloop.service.js");
+        const transferId = input.transferId || `ML-${Date.now()}`;
+        const ilp = buildIlpPacket({
+          amount: input.amount,
+          currency: input.currency,
+          destinationFspId: input.payeeFspId,
+          destinationAccount: transferId,
+        });
+        return await callExtService(`${EXT_SERVICES.mojaloopConnector}/v1/transfers`, {
+          payerFsp: input.payerFspId,
+          payeeFsp: input.payeeFspId,
+          amount: input.amount,
+          currency: input.currency,
+          transferId,
+          ilpPacket: ilp.ilpPacket,
+          condition: ilp.condition,
         });
       } catch (err) {
         throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Mojaloop transfer failed: ${err instanceof Error ? err.message : String(err)}` });
@@ -558,7 +570,7 @@ export const mojaloopConnectorRouter = router({
     }),
   getFsps: publicProcedure.query(async () => {
     try {
-      return await callExtService(`${EXT_SERVICES.mojaloopConnector}/participants`);
+      return await callExtService(`${EXT_SERVICES.mojaloopConnector}/v1/participants`);
     } catch (err) {
       throw err instanceof TRPCError ? err : new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Mojaloop FSPs fetch failed: ${err instanceof Error ? err.message : String(err)}` });
     }

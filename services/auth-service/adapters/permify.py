@@ -9,20 +9,71 @@ logger = create_logger(__name__)
 config = get_config()
 
 
+def _repo_root() -> Path:
+    # adapters/permify.py -> adapters -> auth-service -> services -> <repo root>
+    return Path(__file__).resolve().parents[3]
+
+
+def _load_canonical_schema() -> str:
+    """Read the canonical RemitFlow Permify schema.
+
+    Preference order:
+      1. infrastructure/integration/permify_policies/remitflow_schema.perm (canonical)
+      2. services/auth-service/schemas/permify/v2.perm (legacy fallback)
+
+    Raises FileNotFoundError when neither exists — schema deployment must fail
+    loudly rather than silently run without an authorization model.
+    """
+    canonical = _repo_root() / "infrastructure" / "integration" / "permify_policies" / "remitflow_schema.perm"
+    legacy = Path(__file__).parent.parent / "schemas" / "permify" / "v2.perm"
+    if canonical.is_file():
+        return canonical.read_text()
+    if legacy.is_file():
+        logger.warning(f"Canonical Permify schema not found at {canonical}; falling back to legacy {legacy}")
+        return legacy.read_text()
+    raise FileNotFoundError(
+        f"No Permify schema found (looked at {canonical} and {legacy})"
+    )
+
+
+def ensure_tenant(tenant_id: str) -> bool:
+    """Create the Permify tenant if it does not exist (idempotent)."""
+    try:
+        response = requests.post(
+            f"{config.PERMIFY_URL}/v1/tenants/create",
+            json={"id": tenant_id, "name": tenant_id},
+            timeout=10,
+        )
+        if response.status_code == 200:
+            logger.info(f"Permify tenant '{tenant_id}' created")
+            return True
+        if response.status_code == 409 or "already exist" in response.text.lower():
+            logger.info(f"Permify tenant '{tenant_id}' already exists")
+            return True
+        logger.error(f"Permify tenant creation failed: HTTP {response.status_code}: {response.text[:300]}")
+        return False
+    except Exception as e:
+        logger.error(f"Permify tenant creation failed: {e}")
+        return False
+
+
 def load_schema():
-    """Load the Permify v2.perm schema from file and deploy it to all pods.
+    """Load the canonical Permify schema and deploy it to all pods.
     Permify uses in-memory storage across replicas, so the schema is written
     multiple times (via the load balancer) to maximize the odds every
     replica receives it."""
     try:
-        schema_path = Path(__file__).parent.parent / "schemas" / "permify" / "v2.perm"
-        with open(schema_path, "r") as f:
-            schema = f.read()
+        schema = _load_canonical_schema()
 
         tenant_id = config.PERMIFY_DEFAULT_TENANT
         write_attempts = config.PERMIFY_WRITE_ATTEMPTS
         successful_writes = 0
         schema_version = "unknown"
+
+        # Ensure the tenant exists before writing the schema (idempotent).
+        if not ensure_tenant(tenant_id):
+            logger.error(f"Failed to load Permify schema: tenant '{tenant_id}' could not be ensured")
+            return
 
         for attempt in range(write_attempts):
             try:

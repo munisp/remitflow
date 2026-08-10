@@ -1,5 +1,7 @@
 import crypto from "crypto";
 import { logger } from '../_core/logger';
+import { getDaprSubscriptionConfig, handleDaprDomainEvent } from "../integrations/dapr/pubsub";
+import type { Express, Request, Response } from "express";
 /**
  * RemitFlow — Dapr Client (Production v2)
  *
@@ -15,10 +17,12 @@ import { logger } from '../_core/logger';
 
 const DAPR_HTTP_PORT = process.env.DAPR_HTTP_PORT || "3500";
 const DAPR_BASE_URL = `http://localhost:${DAPR_HTTP_PORT}`;
-const PUBSUB_NAME = process.env.DAPR_PUBSUB_NAME || "remitflow-pubsub";
-const STATE_STORE_NAME = process.env.DAPR_STATESTORE_NAME || "remitflow-statestore";
+// Component names match the Dapr Component manifests
+// (infrastructure/manifests/dapr/pubsub.yaml, infrastructure/runtime/dapr/components/statestore.yaml)
+const PUBSUB_NAME = process.env.DAPR_PUBSUB || "pubsub";
+const STATE_STORE_NAME = process.env.DAPR_STATE_STORE || "statestore";
 const SECRET_STORE_NAME = process.env.DAPR_SECRET_STORE || "kubernetes";
-const LOCK_STORE_NAME = process.env.DAPR_LOCK_STORE || "remitflow-statestore";
+const LOCK_STORE_NAME = process.env.DAPR_LOCK_STORE || STATE_STORE_NAME;
 
 // ── Dapr Client ───────────────────────────────────────────────────────────────
 
@@ -78,16 +82,10 @@ class DaprClient {
     }
   }
 
-  /** Build subscription config for Express/Hono endpoint registration */
+  /** Build subscription config for Express/Hono endpoint registration.
+   *  Single source of truth: server/integrations/dapr/pubsub.ts (9 domain topics). */
   getSubscriptions(): Array<{ pubsubname: string; topic: string; route: string }> {
-    return [
-      { pubsubname: PUBSUB_NAME, topic: "remitflow.transactions", route: "/dapr/sub/transactions" },
-      { pubsubname: PUBSUB_NAME, topic: "remitflow.kyc.events", route: "/dapr/sub/kyc-events" },
-      { pubsubname: PUBSUB_NAME, topic: "remitflow.fx.rates", route: "/dapr/sub/fx-rates" },
-      { pubsubname: PUBSUB_NAME, topic: "remitflow.notifications.stream", route: "/dapr/sub/notifications" },
-      { pubsubname: PUBSUB_NAME, topic: "remitflow.audit.stream", route: "/dapr/sub/audit" },
-      { pubsubname: PUBSUB_NAME, topic: "remitflow.compliance.alert", route: "/dapr/sub/compliance" },
-    ];
+    return getDaprSubscriptionConfig();
   }
 
   // ── State Store ──────────────────────────────────────────────────────────────
@@ -412,4 +410,42 @@ export async function withTransferLock<T>(transferId: string, fn: () => Promise<
 /** Distributed lock for wallet balance updates */
 export async function withWalletLock<T>(walletId: number, fn: () => Promise<T>): Promise<T | null> {
   return getDaprClient().withLock(`wallet:${walletId}`, fn, 15);
+}
+
+// ── Pub/Sub Subscription Routes (Dapr sidecar → this app) ────────────────────
+
+/**
+ * Registers the Dapr pub/sub inbound endpoints on the Express app:
+ *   GET  /dapr/subscribe  — subscription discovery for the 9 domain topics
+ *   POST /events/<topic>  — event delivery; persists to the audit trail and
+ *                           dispatches to the same handlers the Kafka
+ *                           consumer uses (see integrations/dapr/pubsub.ts).
+ *
+ * Delivery semantics: handlers return 200 {status:"SUCCESS"} on success and
+ * 500 {status:"RETRY"} on failure so Dapr redelivers instead of dropping.
+ */
+export function registerDaprSubscriptionRoutes(app: Express): void {
+  const subscriptions = getDaprSubscriptionConfig();
+
+  app.get("/dapr/subscribe", (_req: Request, res: Response) => {
+    res.json(subscriptions);
+  });
+
+  for (const sub of subscriptions) {
+    app.post(sub.route, async (req: Request, res: Response) => {
+      // Dapr delivers a CloudEvent envelope — the payload lives in `data`.
+      const data = (req.body && typeof req.body === "object" && "data" in req.body
+        ? req.body.data
+        : req.body) as Record<string, unknown>;
+      try {
+        await handleDaprDomainEvent(sub.topic, data ?? {});
+        res.status(200).json({ status: "SUCCESS" });
+      } catch (err) {
+        logger.error({ topic: sub.topic, err: (err as Error).message }, "[Dapr] Event handler failed — requesting redelivery");
+        res.status(500).json({ status: "RETRY" });
+      }
+    });
+  }
+
+  logger.info(`[DAPR] Registered ${subscriptions.length} subscription routes (GET /dapr/subscribe)`);
 }

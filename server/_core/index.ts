@@ -18,6 +18,7 @@ import { startScheduler } from "../scheduler";
 import { startMicroservices } from "./microservices";
 import { ensureTopicsExist, disconnectKafka } from "../middleware/kafka";
 import { startKafkaConsumers, stopKafkaConsumers } from "../middleware/kafkaConsumer";
+import { registerDaprSubscriptionRoutes } from "../middleware/dapr";
 import { metricsHandler } from "../metrics";
 import { registerMojaloopWebhooks } from "../mojaloop.webhook";
 import { registerPaymentRailWebhooks } from "../payment-rail-webhooks";
@@ -79,6 +80,12 @@ async function startServer() {
   // payment and KYC webhook routes were registered above this point.
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ limit: "1mb", extended: true }));
+
+  // Dapr pub/sub inbound: GET /dapr/subscribe (discovery) + POST /events/<topic>
+  // (delivery). Sidecar traffic — registered before auth/KYC gates. Handlers
+  // persist to the audit trail and dispatch to the Kafka consumer handlers;
+  // failures answer {status:"RETRY"} so Dapr redelivers.
+  registerDaprSubscriptionRoutes(app);
 
   // Security middleware: helmet, CORS, rate limiting, AML screening, idempotency
   registerSecurityMiddleware(app);
@@ -310,7 +317,7 @@ async function startServer() {
         { control: "CSP report-uri", status: "pass", detail: "CSP violations reported to /api/csp-report for monitoring" },
         { control: "Beneficiaries Edit", status: "pass", detail: "Real trpc.beneficiaries.update mutation wired (was stub)" },
         { control: "Dependency Audit", status: "pass", detail: "0 known CVEs across 847 packages (pnpm audit)" },
-        { control: "OpenAppSec WAF", status: process.env.OPENAPPSEC_AGENT_URL ? "pass" : "warn", detail: process.env.OPENAPPSEC_AGENT_URL ? "OpenAppSec ML-powered WAF active" : "OpenAppSec WAF headers active; agent not configured" },
+        { control: "OpenAppSec WAF", status: (process.env.OPENAPPSEC_SIDECAR_URL || process.env.OPENAPPSEC_AGENT_URL) ? "pass" : "warn", detail: (process.env.OPENAPPSEC_SIDECAR_URL || process.env.OPENAPPSEC_AGENT_URL) ? "OpenAppSec ML-powered WAF sidecar configured" : "OpenAppSec WAF inspection disabled (no OPENAPPSEC_SIDECAR_URL)" },
         { control: "PBAC (48 policies)", status: "pass", detail: "48 PBAC policies covering all 13 tier features + core platform" },
         { control: "Tier Rate Limiting (14 limiters)", status: "pass", detail: "14 tier-specific rate limiters for DDoS mitigation" },
       ],
@@ -1316,6 +1323,12 @@ async function startServer() {
     ensureTopicsExist()
       .then(() => startKafkaConsumers())
       .catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic/consumer init failed (non-blocking):"));
+    // Bootstrap OpenSearch indices + stablecoin index templates/ILM (non-blocking; loud failure logging)
+    import("../middleware/opensearch").then(({ bootstrapOpenSearch }) =>
+      bootstrapOpenSearch()
+        .then(() => logger.info("[OpenSearch] Bootstrap complete (indices + templates verified)"))
+        .catch(err => logger.error({ errMsg: err?.message }, "[OpenSearch] BOOTSTRAP FAILED — search/SIEM indices or templates not provisioned:"))
+    ).catch(err => logger.error({ errMsg: err?.message }, "[OpenSearch] Bootstrap module load failed:"));
     // Publish platform startup event to all 13 middleware systems (non-blocking)
     publishPlatformEvent({
       type: "platform.startup",

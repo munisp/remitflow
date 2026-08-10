@@ -3,72 +3,63 @@
  *
  * OpenAppSec is an open-source, ML-powered WAF that learns normal behaviour
  * and blocks anomalies without signature updates. This module:
- *   1. Adds OpenAppSec-compatible response headers (X-OpenAppSec-*)
- *   2. Provides a middleware that forwards request metadata to the OpenAppSec
- *      agent sidecar (when OPENAPPSEC_AGENT_URL is set) for real-time scoring
+ *   1. Adds honest OpenAppSec-compatible response headers (X-OpenAppSec-*)
+ *      — X-OpenAppSec-Protected is set ONLY after a real sidecar inspection.
+ *   2. Provides a middleware that forwards request metadata to a WAF sidecar
+ *      for real-time scoring — but ONLY when OPENAPPSEC_SIDECAR_URL is set.
+ *      Without an explicit sidecar URL the middleware is a strict no-op;
+ *      it never POSTs to a fabricated endpoint, never defaults to localhost,
+ *      and fails OPEN in every environment (a missing WAF must never 503
+ *      the API — see audit OA1).
  *   3. Exports a `getSecurityVulnerabilityScore()` function that audits the
  *      current security posture and returns a numeric score (0–100) with a
  *      detailed breakdown.
  *
+ * Sidecar contract (defined here, version 1):
+ *   POST {OPENAPPSEC_SIDECAR_URL}/v1/inspect
+ *   Request:  { method, path, query, headers{user-agent,content-type,
+ *               x-forwarded-for,origin,referer}, body_size, body_snippet,
+ *               source_ip, protocol }
+ *   Response: { action: "allow" | "block" | "detect", score: number, reason?: string }
+ *   Timeout:  OPENAPPSEC_INSPECTION_TIMEOUT_MS (default 250ms — the previous
+ *             5ms default guaranteed an abort on every request).
+ *
  * Deployment note:
- *   Run the OpenAppSec agent as a sidecar container:
- *     docker run -d --name openappsec-agent \
- *       -e OPENAPPSEC_TOKEN=<token> \
- *       -p 8765:8765 \
- *       openappsec/agent:latest
- *   Set OPENAPPSEC_AGENT_URL=http://localhost:8765 in your environment.
+ *   Run a WAF sidecar implementing the contract above and set
+ *   OPENAPPSEC_SIDECAR_URL=http://localhost:8765 in your environment.
+ *   (OPENAPPSEC_AGENT_URL is accepted as a deprecated alias.)
  */
 import type { Request, Response, NextFunction } from "express";
 import { logger } from './_core/logger';
 
-// ── PostgreSQL Write-Through ─────────────────────────────────────────────────
-let _wtDb_securityopenappsects: any = null;
-async function _getWtDb_securityopenappsects() {
-  if (_wtDb_securityopenappsects) return _wtDb_securityopenappsects;
-  try {
-    const { getDb } = await import("./db.js");
-    _wtDb_securityopenappsects = await getDb();
-    return _wtDb_securityopenappsects;
-  } catch { return null; }
-}
-async function _writeThrough(table: string, key: string, value: unknown): Promise<void> {
-  const db = await _getWtDb_securityopenappsects();
-  if (!db) return;
-  try {
-    const { sql } = await import("drizzle-orm");
-    await (db as any).execute(sql`
-      INSERT INTO ${sql.raw(table)} (key, data, updated_at)
-      VALUES (${key}, ${JSON.stringify(value)}::jsonb, NOW())
-      ON CONFLICT (key) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
-    `);
-  } catch { /* hot cache still works */ }
-}
-async function _deleteFromDb(table: string, key: string): Promise<void> {
-  const db = await _getWtDb_securityopenappsects();
-  if (!db) return;
-  try {
-    const { sql } = await import("drizzle-orm");
-    await (db as any).execute(sql`DELETE FROM ${sql.raw(table)} WHERE key = ${key}`);
-  } catch {}
-}
+const OPENAPPSEC_SIDECAR_URL =
+  process.env.OPENAPPSEC_SIDECAR_URL?.trim() ||
+  process.env.OPENAPPSEC_AGENT_URL?.trim() || // deprecated alias
+  "";
 
+const WAF_INSPECTION_ENABLED = Boolean(OPENAPPSEC_SIDECAR_URL);
 
-const OPENAPPSEC_AGENT_URL =
-  process.env.OPENAPPSEC_AGENT_URL || "http://localhost:8765";
+if (process.env.OPENAPPSEC_AGENT_URL && !process.env.OPENAPPSEC_SIDECAR_URL) {
+  logger.warn("[OpenAppSec] OPENAPPSEC_AGENT_URL is deprecated — rename to OPENAPPSEC_SIDECAR_URL");
+}
+if (!WAF_INSPECTION_ENABLED) {
+  logger.info("[OpenAppSec] No OPENAPPSEC_SIDECAR_URL configured — WAF inspection disabled (no-op middleware)");
+}
 
 // ── 1. OpenAppSec response headers ───────────────────────────────────────────
 /**
- * Adds X-OpenAppSec-* headers to every response so downstream proxies and
- * monitoring tools can correlate WAF decisions with application logs.
+ * Adds X-OpenAppSec-* mode headers to every response so downstream proxies and
+ * monitoring tools can see whether WAF inspection is actually active.
+ * X-OpenAppSec-Protected is deliberately NOT set here — it is only set by the
+ * WAF middleware after a real inspection round-trip occurred.
  */
 export function openAppSecHeadersMiddleware(
   _req: Request,
   res: Response,
   next: NextFunction
 ): void {
-  res.setHeader("X-OpenAppSec-Mode", process.env.OPENAPPSEC_MODE || "prevent");
+  res.setHeader("X-OpenAppSec-Mode", WAF_INSPECTION_ENABLED ? (process.env.OPENAPPSEC_MODE || "detect") : "disabled");
   res.setHeader("X-OpenAppSec-Version", "1.2");
-  res.setHeader("X-OpenAppSec-Protected", "true");
   next();
 }
 
@@ -79,11 +70,6 @@ interface WafDecision {
   reason?: string;
 }
 
-/**
- * Forwards request metadata to the OpenAppSec agent sidecar for ML-based
- * anomaly scoring. Blocks the request if the agent returns action="block".
- * Falls through gracefully if the agent is unavailable (fail-open with logging).
- */
 /**
  * IP Blocklist — managed dynamically via admin API or loaded from env.
  * In production: synced from OpenAppSec management portal.
@@ -118,11 +104,23 @@ function getRequestBodySnippet(req: Request): string | undefined {
   }
 }
 
+/**
+ * Forwards request metadata to the WAF sidecar for ML-based anomaly scoring.
+ * Blocks the request only on an explicit action="block" verdict from a real
+ * sidecar response. Disabled (strict no-op) unless OPENAPPSEC_SIDECAR_URL is
+ * set, and fails OPEN in ALL environments when the sidecar is unreachable —
+ * a WAF outage must never take down the API.
+ */
 export async function openAppSecWafMiddleware(
   req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> {
+  // Disabled unless a real sidecar is explicitly configured.
+  if (!WAF_INSPECTION_ENABLED) {
+    return next();
+  }
+
   // Only inspect API routes — skip static assets and health checks
   if (!req.path.startsWith("/api/") || req.path === "/api/health") {
     return next();
@@ -141,13 +139,13 @@ export async function openAppSecWafMiddleware(
 
   try {
     const controller = new AbortController();
-    const inspectionTimeoutMs = parseInt(process.env.OPENAPPSEC_INSPECTION_TIMEOUT_MS || "5", 10);
+    const inspectionTimeoutMs = parseInt(process.env.OPENAPPSEC_INSPECTION_TIMEOUT_MS || "250", 10);
     const timeout = setTimeout(() => controller.abort(), inspectionTimeoutMs);
 
     // Include request body snippet for full inspection (SQL injection, XSS in POST bodies)
     const bodySnippet = getRequestBodySnippet(req);
 
-    const resp = await fetch(`${OPENAPPSEC_AGENT_URL}/v1/check`, {
+    const resp = await fetch(`${OPENAPPSEC_SIDECAR_URL}/v1/inspect`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -171,6 +169,8 @@ export async function openAppSecWafMiddleware(
     clearTimeout(timeout);
     if (resp.ok) {
       const decision: WafDecision = await resp.json();
+      // A real inspection round-trip occurred — only now is the request "protected".
+      res.setHeader("X-OpenAppSec-Protected", "true");
       res.setHeader("X-OpenAppSec-Score", String(decision.score));
       res.setHeader("X-OpenAppSec-Action", decision.action);
       if (decision.action === "block") {
@@ -194,15 +194,12 @@ export async function openAppSecWafMiddleware(
         });
         return;
       }
+    } else {
+      logger.warn(`[OpenAppSec] Sidecar returned HTTP ${resp.status} — failing open`);
     }
-  } catch {
-    const failClosed = process.env.OPENAPPSEC_FAIL_CLOSED === "true" ||
-      (process.env.NODE_ENV === "production" && process.env.OPENAPPSEC_FAIL_CLOSED !== "false");
-    if (failClosed) {
-      logger.error("[OpenAppSec] Agent unavailable — fail-closed (production default)");
-      res.status(503).json({ error: "Security agent unavailable" });
-      return;
-    }
+  } catch (err) {
+    // Fail open in ALL environments: a WAF outage must never 503 the API.
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[OpenAppSec] Sidecar unreachable — failing open (all environments)");
   }
   next();
 }
@@ -455,19 +452,19 @@ export function getSecurityVulnerabilityScore(): SecurityVulnerabilityReport {
   });
 
   // ── WAF & Intrusion Detection (5 pts) ─────────────────────────────────────
-  const hasWaf = !!process.env.OPENAPPSEC_AGENT_URL;
+  const hasWaf = WAF_INSPECTION_ENABLED;
   controls.push({
     control: "OpenAppSec WAF",
     category: "WAF",
     status: hasWaf ? "pass" : "warn",
     score: hasWaf ? 3 : 1,
     detail: hasWaf
-      ? "OpenAppSec agent active at " + process.env.OPENAPPSEC_AGENT_URL
-      : "OpenAppSec agent not configured — set OPENAPPSEC_AGENT_URL to enable ML-powered WAF",
+      ? "OpenAppSec sidecar configured at " + OPENAPPSEC_SIDECAR_URL
+      : "OpenAppSec sidecar not configured — set OPENAPPSEC_SIDECAR_URL to enable ML-powered WAF",
   });
   if (!hasWaf) {
     recommendations.push(
-      "Deploy OpenAppSec agent sidecar and set OPENAPPSEC_AGENT_URL for ML-powered WAF protection"
+      "Deploy a WAF sidecar and set OPENAPPSEC_SIDECAR_URL for ML-powered WAF protection"
     );
   }
 

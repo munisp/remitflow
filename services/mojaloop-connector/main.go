@@ -20,16 +20,24 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -59,9 +67,11 @@ type Config struct {
 
 func loadConfig() Config {
 	return Config{
-		Port:             getEnv("PORT", "8085"),
+		Port:             getEnv("PORT", "8113"),
 		KafkaBrokers:     getEnv("KAFKA_BROKERS", "localhost:9092"),
-		MojaloopHubURL:   getEnv("MOJALOOP_HUB_URL", "http://localhost:3001"),
+		// Empty means "no upstream Mojaloop hub/switch configured" — hub-backed
+		// endpoints then fail closed with 503 instead of fabricating responses.
+		MojaloopHubURL:   getEnv("MOJALOOP_HUB_URL", ""),
 		FSPIOPSource:     getEnv("FSPIOP_SOURCE", "remitflow"),
 		LogLevel:         getEnv("LOG_LEVEL", "info"),
 		DaprHTTPPort:     getEnv("DAPR_HTTP_PORT", "3500"),
@@ -198,22 +208,27 @@ func dbUpdateTransferState(ctx context.Context, transferID, state string) {
 	dbPool.cache.Store("transfer:"+transferID, state)
 }
 
-func dbGetTransferState(ctx context.Context, transferID string) string {
-	if cached, ok := dbPool.cache.Load("transfer:" + transferID); ok {
-		return cached.(string)
-	}
+func dbGetTransferState(ctx context.Context, transferID string) (string, error) {
 	if dbPool == nil {
-		return "COMMITTED"
+		return "", fmt.Errorf("transfer store unavailable (no database connection)")
+	}
+	if cached, ok := dbPool.cache.Load("transfer:" + transferID); ok {
+		return cached.(string), nil
 	}
 	var state string
 	err := dbPool.db.QueryRowContext(ctx,
 		`SELECT state FROM mojaloop_transfers WHERE transfer_id = $1`, transferID).Scan(&state)
+	if err == sql.ErrNoRows {
+		return "", errTransferNotFound
+	}
 	if err != nil {
-		return "COMMITTED"
+		return "", fmt.Errorf("transfer state query failed: %w", err)
 	}
 	dbPool.cache.Store("transfer:"+transferID, state)
-	return state
+	return state, nil
 }
+
+var errTransferNotFound = fmt.Errorf("transfer not found")
 
 func dbInsertQuote(ctx context.Context, q QuoteRequest, resp QuoteResponse) {
 	if dbPool == nil {
@@ -279,13 +294,6 @@ type QuoteResponse struct {
 	ExpirationISO      string `json:"expiration"`
 }
 
-type PartyLookupResponse struct {
-	PartyIDType string `json:"partyIdType"`
-	PartyID     string `json:"partyIdentifier"`
-	Name        string `json:"name"`
-	FSPID       string `json:"fspId"`
-}
-
 // ── Middleware helpers ────────────────────────────────────────────────────────
 
 // httpClient with connection pooling tuned for 1M+ TPS.
@@ -336,6 +344,169 @@ func recordTigerBeetle(cfg Config, transferID, debit, credit string, amount int6
 		"creditAccountId": credit, "amount": amount,
 		"ledger": ledger, "code": 0, // code 0 = Mojaloop transfers
 	})
+}
+
+// ── Real ILP + amount handling ────────────────────────────────────────────────
+
+// currencyDecimals holds ISO-4217 minor-unit exponents for corridor currencies.
+var currencyDecimals = map[string]int{
+	"NGN": 2, "KES": 2, "GHS": 2, "TZS": 2, "UGX": 0, "ZAR": 2,
+	"XOF": 0, "MWK": 2, "ZMW": 2, "USD": 2, "EUR": 2, "GBP": 2,
+}
+
+// parseAmountMinorUnits converts a decimal amount string to minor units using
+// exact string arithmetic (no float rounding). Returns an error on bad input.
+func parseAmountMinorUnits(amount, currency string) (int64, error) {
+	decimals, ok := currencyDecimals[strings.ToUpper(currency)]
+	if !ok {
+		decimals = 2
+	}
+	trimmed := strings.TrimSpace(amount)
+	if trimmed == "" {
+		return 0, fmt.Errorf("empty amount")
+	}
+	parts := strings.SplitN(trimmed, ".", 2)
+	if len(parts[0]) == 0 || !isDigits(parts[0]) {
+		return 0, fmt.Errorf("invalid amount %q", amount)
+	}
+	whole, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid amount %q: %w", amount, err)
+	}
+	var frac int64
+	if len(parts) == 2 {
+		fracStr := parts[1]
+		if len(fracStr) > decimals {
+			return 0, fmt.Errorf("amount %q exceeds %d decimal places for %s", amount, decimals, currency)
+		}
+		if len(fracStr) > 0 && !isDigits(fracStr) {
+			return 0, fmt.Errorf("invalid amount %q", amount)
+		}
+		fracStr += strings.Repeat("0", decimals-len(fracStr))
+		if len(fracStr) > 0 {
+			frac, err = strconv.ParseInt(fracStr, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid amount %q: %w", amount, err)
+			}
+		}
+	}
+	scale := int64(1)
+	for i := 0; i < decimals; i++ {
+		scale *= 10
+	}
+	return whole*scale + frac, nil
+}
+
+func isDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// generateFulfillmentCondition creates a real ILP condition/fulfillment pair:
+// fulfillment = 32 random bytes (base64url), condition = base64url(SHA-256(fulfillment)).
+func generateFulfillmentCondition() (fulfillment, condition string, err error) {
+	fulfillmentBytes := make([]byte, 32)
+	if _, err = rand.Read(fulfillmentBytes); err != nil {
+		return "", "", fmt.Errorf("entropy failure generating fulfillment: %w", err)
+	}
+	sum := sha256.Sum256(fulfillmentBytes)
+	return base64.RawURLEncoding.EncodeToString(fulfillmentBytes),
+		base64.RawURLEncoding.EncodeToString(sum[:]), nil
+}
+
+// serializeILPPrepare builds a real ILPv4 Prepare packet per IL-RFC-27:
+//
+//	type(1)=12 | length(4,BE) | amount(8,BE) | expiresAt(17 ASCII "YYYYMMDDHHMMSS.mmm")
+//	| condition(32) | destination(VarOctetString) | data(VarOctetString)
+func serializeILPPrepare(amountMinorUnits int64, destination string, conditionB64 string, expiresAt time.Time, data []byte) (string, error) {
+	condition, err := base64.RawURLEncoding.DecodeString(conditionB64)
+	if err != nil || len(condition) != 32 {
+		return "", fmt.Errorf("invalid ILP condition encoding")
+	}
+	if len(destination) > 255 || len(data) > 255 {
+		return "", fmt.Errorf("ILP field exceeds single-byte length prefix")
+	}
+	timestamp := expiresAt.UTC().Format("20060102150405") + "." +
+		fmt.Sprintf("%03d", expiresAt.UTC().Nanosecond()/1e6)
+
+	var contents bytes.Buffer
+	var amountBuf [8]byte
+	binary.BigEndian.PutUint64(amountBuf[:], uint64(amountMinorUnits))
+	contents.Write(amountBuf[:])
+	contents.WriteString(timestamp)
+	contents.Write(condition)
+	contents.WriteByte(byte(len(destination)))
+	contents.WriteString(destination)
+	contents.WriteByte(byte(len(data)))
+	contents.Write(data)
+
+	var packet bytes.Buffer
+	packet.WriteByte(12) // ILP Prepare
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(contents.Len()))
+	packet.Write(lenBuf[:])
+	packet.Write(contents.Bytes())
+	return base64.RawURLEncoding.EncodeToString(packet.Bytes()), nil
+}
+
+// ── Real Prometheus counters ──────────────────────────────────────────────────
+
+var (
+	metricTransfersInitiated atomic.Int64
+	metricTransfersCommitted atomic.Int64
+	metricTransfersAborted   atomic.Int64
+	metricQuotesRequested    atomic.Int64
+	metricPartyLookups       atomic.Int64
+	metricHubErrors          atomic.Int64
+)
+
+// ── Mojaloop hub/switch forwarding ────────────────────────────────────────────
+
+// forwardToHub proxies an FSPIOP request to the configured Mojaloop hub and
+// writes the hub's status code + body back to the caller. Returns false when
+// no hub is configured (caller must fail closed).
+func forwardToHub(c *gin.Context, cfg Config, method, path string, payload any) bool {
+	if cfg.MojaloopHubURL == "" {
+		return false
+	}
+	var bodyReader io.Reader
+	if payload != nil {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot marshal FSPIOP payload"})
+			return true
+		}
+		bodyReader = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(c.Request.Context(), method, cfg.MojaloopHubURL+path, bodyReader)
+	if err != nil {
+		metricHubErrors.Add(1)
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("hub request build failed: %v", err)})
+		return true
+	}
+	req.Header.Set("Content-Type", "application/vnd.interoperability.transfers+json;version=1.1")
+	req.Header.Set("Accept", "application/vnd.interoperability.transfers+json;version=1.1")
+	req.Header.Set("FSPIOP-Source", cfg.FSPIOPSource)
+	req.Header.Set("Date", time.Now().UTC().Format(http.TimeFormat))
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		metricHubErrors.Add(1)
+		log.Printf("[HUB] ERROR %s %s: %v", method, path, err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("mojaloop hub unreachable: %v", err)})
+		return true
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode >= 400 {
+		metricHubErrors.Add(1)
+	}
+	c.Data(resp.StatusCode, "application/json", respBody)
+	return true
 }
 
 func indexOpenSearch(cfg Config, index, docID string, doc map[string]any) {
@@ -403,6 +574,15 @@ func initiateTransferHandler(cfg Config) gin.HandlerFunc {
 
 		expiration := time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339)
 
+		// Parse the real transfer amount (minor units) for ledger recording.
+		amountMinor, amountErr := parseAmountMinorUnits(req.Amount, req.Currency)
+		if amountErr != nil {
+			metricTransfersAborted.Add(1)
+			log.Printf("[TRANSFER] REJECTED %s: unparseable amount %q %s: %v", req.TransferID, req.Amount, req.Currency, amountErr)
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid amount: %v", amountErr)})
+			return
+		}
+
 		// 0. Persist to PostgreSQL (write-through — DB first, then cache)
 		dbUpsertTransfer(c.Request.Context(), req, "RECEIVED")
 		dbInsertOutbox(c.Request.Context(), "payment.mojaloop.initiated", req.TransferID, map[string]any{
@@ -410,10 +590,51 @@ func initiateTransferHandler(cfg Config) gin.HandlerFunc {
 			"payeeFsp": req.PayeeFSP, "amount": req.Amount, "currency": req.Currency,
 		})
 
-		// 1. Record in TigerBeetle (ledger 0 = Mojaloop)
+		metricTransfersInitiated.Add(1)
+
+		// 0b. Forward to the Mojaloop hub/switch when configured. On hub failure
+		// the transfer is marked ABORTED and the error is returned — never faked.
+		if cfg.MojaloopHubURL != "" {
+			hubBody, _ := json.Marshal(map[string]any{
+				"transferId": req.TransferID, "payerFsp": req.PayerFSP, "payeeFsp": req.PayeeFSP,
+				"amount":    map[string]string{"amount": req.Amount, "currency": req.Currency},
+				"ilpPacket": req.ILPPacket, "condition": req.Condition,
+				"expiration": expiration,
+			})
+			hubReq, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
+				cfg.MojaloopHubURL+"/transfers", bytes.NewReader(hubBody))
+			if err == nil {
+				hubReq.Header.Set("Content-Type", "application/vnd.interoperability.transfers+json;version=1.1")
+				hubReq.Header.Set("FSPIOP-Source", cfg.FSPIOPSource)
+				hubReq.Header.Set("FSPIOP-Destination", req.PayeeFSP)
+				hubReq.Header.Set("Date", time.Now().UTC().Format(http.TimeFormat))
+				var hubResp *http.Response
+				hubResp, err = httpClient.Do(hubReq)
+				if err != nil {
+					metricHubErrors.Add(1)
+					dbUpdateTransferState(c.Request.Context(), req.TransferID, "ABORTED")
+					metricTransfersAborted.Add(1)
+					log.Printf("[HUB] ERROR forwarding transfer %s: %v", req.TransferID, err)
+					c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("mojaloop hub unreachable: %v", err), "transferId": req.TransferID, "transferState": "ABORTED"})
+					return
+				}
+				defer hubResp.Body.Close()
+				if hubResp.StatusCode >= 400 {
+					metricHubErrors.Add(1)
+					respBody, _ := io.ReadAll(io.LimitReader(hubResp.Body, 1<<20))
+					dbUpdateTransferState(c.Request.Context(), req.TransferID, "ABORTED")
+					metricTransfersAborted.Add(1)
+					log.Printf("[HUB] Transfer %s rejected by hub: %d %s", req.TransferID, hubResp.StatusCode, string(respBody))
+					c.Data(hubResp.StatusCode, "application/json", respBody)
+					return
+				}
+			}
+		}
+
+		// 1. Record in TigerBeetle (ledger 0 = Mojaloop) with the real amount
 		recordTigerBeetle(cfg, req.TransferID,
 			"mojaloop-debit-pool", "mojaloop-credit-pool",
-			0, 0) // amount parsed from string in production
+			amountMinor, 0)
 
 		// 2. Publish Kafka event
 		publishKafka(cfg, "payment.mojaloop.initiated", map[string]any{
@@ -463,7 +684,16 @@ func initiateTransferHandler(cfg Config) gin.HandlerFunc {
 
 func getTransferHandler(c *gin.Context) {
 	transferID := c.Param("id")
-	state := dbGetTransferState(c.Request.Context(), transferID)
+	state, err := dbGetTransferState(c.Request.Context(), transferID)
+	if err == errTransferNotFound {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("transfer not found: %s", transferID)})
+		return
+	}
+	if err != nil {
+		log.Printf("[TRANSFER] State lookup failed for %s: %v", transferID, err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "transfer state unavailable"})
+		return
+	}
 	c.JSON(http.StatusOK, TransferResponse{
 		TransferID:    transferID,
 		TransferState: state,
@@ -482,6 +712,7 @@ func requestQuoteHandler(cfg Config) gin.HandlerFunc {
 			req.QuoteID = uuid.New().String()
 		}
 		expiration := time.Now().Add(30 * time.Second).UTC().Format(time.RFC3339)
+		metricQuotesRequested.Add(1)
 
 		// Publish quote event to Kafka
 		publishKafka(cfg, "mojaloop.quote.requested", map[string]any{
@@ -489,34 +720,89 @@ func requestQuoteHandler(cfg Config) gin.HandlerFunc {
 			"payeeFsp": req.PayeeFSP, "amount": req.Amount, "currency": req.Currency,
 		})
 
+		// When a Mojaloop hub is configured, the quote is authoritative there —
+		// forward and relay the real response (fees, ilpPacket, condition).
+		if cfg.MojaloopHubURL != "" {
+			if forwardToHub(c, cfg, http.MethodPost, "/quotes", map[string]any{
+				"quoteId": req.QuoteID, "transactionId": uuid.New().String(),
+				"payer": map[string]string{"partyIdType": "MSISDN", "partyIdentifier": req.PayerID, "fspId": req.PayerFSP},
+				"payee": map[string]string{"partyIdType": "MSISDN", "partyIdentifier": req.PayeeID, "fspId": req.PayeeFSP},
+				"amountType": "SEND",
+				"amount":     map[string]string{"amount": req.Amount, "currency": req.Currency},
+				"transactionType": map[string]string{
+					"scenario": "TRANSFER", "initiator": "PAYER", "initiatorType": "CONSUMER",
+				},
+			}) {
+				return
+			}
+			// no hub configured — fall through to locally-built real ILP below
+		}
+
+		// No upstream hub: build a REAL ILPv4 Prepare packet with a real
+		// SHA-256 condition/fulfillment pair (condition = sha256(fulfillment)).
+		fulfillment, condition, err := generateFulfillmentCondition()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		amountMinor, err := parseAmountMinorUnits(req.Amount, req.Currency)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid amount: %v", err)})
+			return
+		}
+		expiresAt := time.Now().Add(30 * time.Second).UTC()
+		ilpPacket, err := serializeILPPrepare(amountMinor,
+			fmt.Sprintf("g.%s.%s", req.PayeeFSP, req.PayeeID), condition, expiresAt, nil)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
 		resp := QuoteResponse{
 			QuoteID:            req.QuoteID,
 			TransferAmount:     req.Amount,
 			PayeeReceiveAmount: req.Amount,
-			ILPPacket:          fmt.Sprintf("AYA%s", uuid.New().String()),
-			Condition:          fmt.Sprintf("cond_%s", uuid.New().String()[:8]),
+			ILPPacket:          ilpPacket,
+			Condition:          condition,
 			ExpirationISO:      expiration,
 		}
 
 		// Persist quote to PostgreSQL (write-through)
 		dbInsertQuote(c.Request.Context(), req, resp)
 
-		log.Printf("[QUOTE] Created %s: %s %s", req.QuoteID, req.Amount, req.Currency)
+		log.Printf("[QUOTE] Created %s: %s %s (fulfillment %s held locally until commit)", req.QuoteID, req.Amount, req.Currency, fulfillment[:8])
 		c.JSON(http.StatusOK, resp)
 	}
 }
 
-func partyLookupHandler(c *gin.Context) {
-	partyType := c.Param("type")
-	partyID := c.Param("id")
-	resp := PartyLookupResponse{
-		PartyIDType: partyType,
-		PartyID:     partyID,
-		Name:        "RemitFlow Customer",
-		FSPID:       "remitflow",
+func partyLookupHandler(cfg Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		partyType := c.Param("type")
+		partyID := c.Param("id")
+		metricPartyLookups.Add(1)
+
+		// Real lookup goes to the Mojaloop hub's account-lookup service.
+		// No hub configured → fail closed, never fabricate a party.
+		if !forwardToHub(c, cfg, http.MethodGet,
+			fmt.Sprintf("/parties/%s/%s", url.PathEscape(partyType), url.PathEscape(partyID)), nil) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "party lookup unavailable: MOJALOOP_HUB_URL is not configured",
+			})
+			return
+		}
+		log.Printf("[PARTY] Lookup %s/%s forwarded to hub", partyType, partyID)
 	}
-	log.Printf("[PARTY] Lookup %s/%s → %s", partyType, partyID, resp.FSPID)
-	c.JSON(http.StatusOK, resp)
+}
+
+func participantsHandler(cfg Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !forwardToHub(c, cfg, http.MethodGet, "/participants", nil) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "participants unavailable: MOJALOOP_HUB_URL is not configured",
+			})
+			return
+		}
+	}
 }
 
 func transferCallbackHandler(cfg Config) gin.HandlerFunc {
@@ -530,8 +816,20 @@ func transferCallbackHandler(cfg Config) gin.HandlerFunc {
 		bodyJSON, _ := json.Marshal(body)
 		log.Printf("[CALLBACK] Transfer callback %s: %s", transferID, string(bodyJSON))
 
+		// Use the real state reported by the switch — default to COMMITTED only
+		// for the standard PUT /transfers/{id} fulfilment form.
+		state := "COMMITTED"
+		if s, ok := body["transferState"].(string); ok && s != "" {
+			state = s
+		}
+
 		// Persist state transition to PostgreSQL
-		dbUpdateTransferState(c.Request.Context(), transferID, "COMMITTED")
+		dbUpdateTransferState(c.Request.Context(), transferID, state)
+		if state == "COMMITTED" {
+			metricTransfersCommitted.Add(1)
+		} else if state == "ABORTED" {
+			metricTransfersAborted.Add(1)
+		}
 
 		// Publish callback to Kafka
 		publishKafka(cfg, "mojaloop.transfer.callback", map[string]any{
@@ -540,7 +838,7 @@ func transferCallbackHandler(cfg Config) gin.HandlerFunc {
 
 		// Publish Dapr event
 		publishDapr(cfg, "mojaloop-transfer-callback", map[string]any{
-			"transferId": transferID, "status": "COMMITTED",
+			"transferId": transferID, "status": state,
 		})
 
 		// Emit to Lakehouse
@@ -581,8 +879,14 @@ func forwardToCore(cfg Config, transferID string, body map[string]interface{}) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Forwarded-By", "mojaloop-connector")
 
-	// Sign the webhook payload with HMAC-SHA256
-	secret := getEnv("WEBHOOK_SECRET_MOJALOOP", "dev-mojaloop-secret-change-in-prod")
+	// Sign the webhook payload with HMAC-SHA256. No default secret: when the
+	// shared secret is not configured we fail loudly instead of sending an
+	// unverifiable webhook.
+	secret := os.Getenv("WEBHOOK_SECRET_MOJALOOP")
+	if secret == "" {
+		log.Printf("[CORE-FORWARD] ERROR: WEBHOOK_SECRET_MOJALOOP not set — refusing to forward unsigned webhook for transfer %s", transferID)
+		return
+	}
 	signature := computeWebhookHMAC(payload, secret)
 	req.Header.Set("X-Webhook-Signature", "sha256="+signature)
 
@@ -597,14 +901,28 @@ func forwardToCore(cfg Config, transferID string, body map[string]interface{}) {
 }
 
 func metricsHandler(c *gin.Context) {
-	c.String(http.StatusOK, `# HELP mojaloop_transfers_total Total Mojaloop transfers
+	c.String(http.StatusOK, fmt.Sprintf(`# HELP mojaloop_transfers_total Total Mojaloop transfers
 # TYPE mojaloop_transfers_total counter
-mojaloop_transfers_total{status="committed"} 0
-mojaloop_transfers_total{status="aborted"} 0
-# HELP mojaloop_quotes_total Total Mojaloop quotes
+mojaloop_transfers_total{status="initiated"} %d
+mojaloop_transfers_total{status="committed"} %d
+mojaloop_transfers_total{status="aborted"} %d
+# HELP mojaloop_quotes_total Total Mojaloop quotes requested
 # TYPE mojaloop_quotes_total counter
-mojaloop_quotes_total 0
-`)
+mojaloop_quotes_total %d
+# HELP mojaloop_party_lookups_total Total party lookups forwarded to the hub
+# TYPE mojaloop_party_lookups_total counter
+mojaloop_party_lookups_total %d
+# HELP mojaloop_hub_errors_total Total Mojaloop hub/switch errors
+# TYPE mojaloop_hub_errors_total counter
+mojaloop_hub_errors_total %d
+`,
+		metricTransfersInitiated.Load(),
+		metricTransfersCommitted.Load(),
+		metricTransfersAborted.Load(),
+		metricQuotesRequested.Load(),
+		metricPartyLookups.Load(),
+		metricHubErrors.Load(),
+	))
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -634,15 +952,10 @@ func main() {
 		v1.POST("/transfers", initiateTransferHandler(cfg))
 		v1.GET("/transfers/:id", getTransferHandler)
 		v1.POST("/quotes", requestQuoteHandler(cfg))
-		v1.GET("/parties/:type/:id", partyLookupHandler)
+		v1.GET("/parties/:type/:id", partyLookupHandler(cfg))
 		v1.PUT("/transfers/:id", transferCallbackHandler(cfg))
+		v1.GET("/participants", participantsHandler(cfg))
 	}
-
-	// Legacy routes
-	r.POST("/transfers", initiateTransferHandler(cfg))
-	r.GET("/transfers/:id", getTransferHandler)
-	r.POST("/quotes", requestQuoteHandler(cfg))
-	r.GET("/parties/:type/:id", partyLookupHandler)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

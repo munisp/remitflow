@@ -7,10 +7,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -116,6 +118,10 @@ var (
 // ─────────────────────────────────────────────────────────────────────────────
 // EventBus
 // ─────────────────────────────────────────────────────────────────────────────
+// Kafka delivery metrics (surfaced in /health)
+var kafkaPublished atomic.Int64
+var kafkaPublishErrors atomic.Int64
+
 type EventBus struct {
 	kafkaEndpoint string
 	client        *http.Client
@@ -143,10 +149,18 @@ func (eb *EventBus) Publish(topic string, data interface{}) {
 	req.Header.Set("Content-Type", "application/vnd.kafka.json.v2+json")
 	resp, err := eb.client.Do(req)
 	if err != nil {
+		kafkaPublishErrors.Add(1)
 		log.Printf("[direct-debit] Kafka error: %v", err)
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		kafkaPublishErrors.Add(1)
+		respBody, _ := io.ReadAll(resp.Body)
+		log.Printf("[direct-debit] Kafka publish rejected topic=%s status=%d body=%s", topic, resp.StatusCode, string(respBody))
+		return
+	}
+	kafkaPublished.Add(1)
 }
 
 var bus = newEventBus()
@@ -168,6 +182,8 @@ func healthCheck(c *gin.Context) {
 		"status":   "healthy",
 		"version":  "1.0.0",
 		"schemes":  []string{string(BACS), string(SEPA), string(ACH)},
+		"kafka_published": kafkaPublished.Load(),
+		"kafka_publish_errors": kafkaPublishErrors.Load(),
 	})
 }
 

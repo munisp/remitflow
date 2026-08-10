@@ -31,11 +31,28 @@ services:
       retries: 5
 
   redis:
-    image: redis:7.4.2-alpine  # CVE-2025-49844 patched version.4.2-alpine  # CVE-2025-49844 patched version
+    image: redis:7.4.2-alpine  # CVE-2025-49844 patched version
     ports:
       - "6379:6379"
+    # Hardened config + ACL users (Lua gated per-user). The ACL file carries
+    # password placeholders; the startup command renders remitflow_app's
+    # password from REDIS_APP_PASSWORD into a writable copy before boot.
+    # REDIS_APP_PASSWORD must match redis/users.acl (remitflow_app user).
+    command:
+      - sh
+      - -ec
+      - >-
+        sed "s|REMITFLOW_APP_PASSWORD_PLACEHOLDER|$${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}|g"
+        /etc/redis/users.acl > /tmp/users.acl &&
+        exec redis-server /etc/redis/redis.conf --aclfile /tmp/users.acl
+    environment:
+      REDIS_APP_PASSWORD: ${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}
+    volumes:
+      - ./redis/redis.conf:/etc/redis/redis.conf:ro
+      - ./redis/users.acl:/etc/redis/users.acl:ro
+      - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning --user remitflow_app --pass $$REDIS_APP_PASSWORD ping | grep PONG"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -48,9 +65,15 @@ services:
       - "3000:3000"
     environment:
       DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
-      REDIS_URL: redis://redis:6379
+      # ACL user remitflow_app (see redis/users.acl); anonymous access is disabled.
+      REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
       NODE_ENV: development
       JWT_SECRET: dev-secret-change-in-production
+      # Lakehouse pipelines (Python sync engine + ETL API)
+      LAKEHOUSE_ETL_URL: http://lakehouse-etl:8089
+      # compose service name is "lakehouse" (image: services/python-lakehouse)
+      LAKEHOUSE_URL: http://lakehouse:8102
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/trpc/system.health"]
       interval: 30s
@@ -109,8 +132,10 @@ services:
   health-aggregator:
     build: ./services/go-health-aggregator
     profiles: ["full", "monitoring"]
+    # Host port remapped to 8204: tb-bridge owns 8200 (8201/8202 are taken by
+    # synthetic-monitor and crypto-utils). Container still listens on 8200.
     ports:
-      - "8200:8200"
+      - "8204:8200"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8200/health"]
       interval: 30s
@@ -140,6 +165,30 @@ services:
       KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
       KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
       KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Dev single-broker: replication factor 1 is REQUIRED for topics to elect leaders.
+      # PRODUCTION: run >= 3 brokers and set KAFKA_CFG_DEFAULT_REPLICATION_FACTOR=3
+      # (plus KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR=3 and min.insync.replicas=2).
+      KAFKA_CFG_DEFAULT_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.0
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      kafka:
+        condition: service_healthy
 
   temporal:
     image: temporalio/auto-setup:1.22
@@ -229,6 +278,9 @@ services:
     profiles: ["full", "monitoring"]
     ports:
       - "8113:8113"
+    environment:
+      # Connector listens on 8113 (matches published port + MOJALOOP_URL).
+      PORT: "8113"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8113/health"]
       interval: 30s
@@ -258,10 +310,17 @@ services:
       retries: 3
 
   rate-limiter:
-    image: redis:7.4.2-alpine  # CVE-2025-49844 patched version.4.2-alpine  # CVE-2025-49844 patched version
+    image: redis:7.4.2-alpine  # CVE-2025-49844 patched version
     profiles: ["full", "monitoring"]
     ports:
       - "6380:6379"
+    # Dedicated rate-limit store: durable AOF + bounded memory with LFU eviction.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lfu"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   risk-engine:
     build: ./services/risk-engine
@@ -317,6 +376,64 @@ services:
 
   # ═══ NEW POLYGLOT SERVICES (profile: full) ══════════════════════════════════
 
+  # TigerBeetle: double-entry ledger database (single-replica dev topology)
+  tigerbeetle-init:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.16.63
+    profiles: ["full", "monitoring"]
+    entrypoint: ["/bin/sh", "-ec"]
+    # One-shot: format the data file once, then exit. Skips if already formatted.
+    command: >-
+      if [ ! -f /data/0_0.tigerbeetle ]; then
+        tigerbeetle format --cluster=$${TIGERBEETLE_CLUSTER_ID} --replica=0 --replica-count=1 /data/0_0.tigerbeetle;
+      fi
+    environment:
+      TIGERBEETLE_CLUSTER_ID: ${TIGERBEETLE_CLUSTER_ID:-0}
+    volumes:
+      - tigerbeetle-data:/data
+    restart: "no"
+
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.16.63
+    profiles: ["full", "monitoring"]
+    command: ["start", "--addresses=0.0.0.0:3000", "--cluster=${TIGERBEETLE_CLUSTER_ID:-0}", "--replica=0", "/data/0_0.tigerbeetle"]
+    # Host 3002 -> container 3000 (host 3000 = API, 3001 = Grafana). Matches
+    # TIGERBEETLE_ADDRESS=localhost:3002 in .env.example.
+    ports:
+      - "3002:3000"
+    volumes:
+      - tigerbeetle-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /data/0_0.tigerbeetle"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      tigerbeetle-init:
+        condition: service_completed_successfully
+
+  # Optional: TigerBeetle shadow-traffic verifier (own profile; NOT part of
+  # `full` — build context microservices/go-services/tigerbeetle-shadow).
+  tigerbeetle-shadow:
+    build: ./microservices/go-services/tigerbeetle-shadow
+    profiles: ["tigerbeetle-shadow"]
+    ports:
+      - "8086:8086"
+    environment:
+      PORT: "8086"
+      TIGERBEETLE_ADDRESSES: tigerbeetle:3000
+      TIGERBEETLE_CLUSTER_ID: ${TIGERBEETLE_CLUSTER_ID:-0}
+      TB_BRIDGE_URL: http://tb-bridge:8200
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      tigerbeetle:
+        condition: service_healthy
+      tb-bridge:
+        condition: service_started
+
   # Rust: TigerBeetle bridge — double-entry ledger HTTP gateway
   tb-bridge:
     build: ./services/rust-tigerbeetle-bridge
@@ -325,6 +442,8 @@ services:
       - "8200:8200"
     environment:
       TB_BRIDGE_PORT: "8200"
+      TIGERBEETLE_ADDRESSES: tigerbeetle:3000
+      TIGERBEETLE_CLUSTER_ID: ${TIGERBEETLE_CLUSTER_ID:-0}
       DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
       RUST_LOG: info
     healthcheck:
@@ -336,6 +455,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      tigerbeetle:
+        condition: service_healthy
 
   # Rust: Fluvio consumer — high-throughput event stream consumer
   fluvio-consumer:
@@ -346,7 +467,7 @@ services:
     environment:
       FLUVIO_HTTP_BRIDGE_PORT: "8300"
       DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
       RUST_LOG: info
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8300/health"]
@@ -387,7 +508,8 @@ services:
     environment:
       APISIX_MANAGER_PORT: "8100"
       APISIX_ADMIN_URL: http://apisix:9180
-      APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:-edd1c9f034335f136f87ad84b625c8f1}
+      # Required — must match the admin key rendered into services/gateway-config/apisix.yaml.
+      APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:?APISIX_ADMIN_KEY is required}
       DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8100/health"]
@@ -408,7 +530,7 @@ services:
     environment:
       HEALTH_PROBE_PORT: "8099"
       POSTGRES_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
       TB_BRIDGE_URL: http://tb-bridge:8200
       TEMPORAL_ADDRESS: temporal:7233
       AML_SCORER_URL: http://aml-scorer:8103
@@ -433,8 +555,9 @@ services:
     environment:
       DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
       S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
-      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      # Must match the MinIO root credentials (no minioadmin defaults).
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
       LAKEHOUSE_BUCKET: remitflow-lakehouse
       LAKEHOUSE_PORT: "8102"
     healthcheck:
@@ -445,6 +568,35 @@ services:
       start_period: 30s
     depends_on:
       postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Python: Lakehouse ETL API (DuckDB/Parquet → MinIO, /health on 8089)
+  lakehouse-etl:
+    build: ./services/lakehouse-etl
+    profiles: ["full", "monitoring"]
+    ports:
+      - "8089:8089"
+    environment:
+      PORT: "8089"
+      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
+      LAKEHOUSE_PATH: /data/lakehouse
+    volumes:
+      - lakehouse-data:/data/lakehouse
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8089/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
   # Python: AML/Fraud ML scorer
@@ -493,9 +645,12 @@ services:
     image: minio/minio:RELEASE.2024-10-02T17-50-41Z
     profiles: ["full", "monitoring"]
     command: server /data --console-address ":9001"
+    # Root credentials are REQUIRED via env — no minioadmin/minioadmin defaults.
+    # The same values must be supplied to the lakehouse services (S3_ACCESS_KEY/
+    # S3_SECRET_KEY are derived from these in this file).
     environment:
-      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
     volumes:
       - miniodata:/data
     ports:
@@ -545,7 +700,7 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_TASK_QUEUE: remitflow-main
       DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
       NODE_ENV: production
       WORKER_HEALTH_PORT: "8080"
     healthcheck:
@@ -589,8 +744,10 @@ services:
   vault:
     image: hashicorp/vault:1.15
     profiles: ["full", "monitoring"]
+    # Host port remapped to 8203: tb-bridge owns 8200; 8201/8202 are taken by
+    # synthetic-monitor and crypto-utils. Vault still listens on 8200 in-container.
     ports:
-      - "8200:8200"
+      - "8203:8200"
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: remitflow-dev-token
       VAULT_DEV_LISTEN_ADDRESS: "0.0.0.0:8200"
@@ -652,7 +809,7 @@ services:
       - "8092:8092"
     environment:
       DATABASE_URL: ${DATABASE_URL}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379/0
       PORT: "8092"
     depends_on:
       - postgres
@@ -679,7 +836,7 @@ services:
       - TEMPORAL_ADDR=temporal:7233
       - STABLECOIN_ENGINE_URL=http://go-stablecoin-engine:8108
       - SETTLEMENT_URL=http://go-stablecoin-settlement:8109
-      - TIGERBEETLE_BRIDGE_URL=http://rust-tigerbeetle-bridge:8112
+      - TIGERBEETLE_BRIDGE_URL=http://tb-bridge:8200
       - CORE_API_URL=http://server:5000
     depends_on:
       - go-stablecoin-engine
@@ -766,7 +923,7 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
     depends_on:
       - postgres
       - redis
@@ -791,7 +948,7 @@ services:
       - "8149:8149"
     environment:
       - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
     depends_on:
       - postgres
       - redis
@@ -842,14 +999,18 @@ services:
     environment:
       - discovery.type=single-node
       - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
-      - DISABLE_SECURITY_PLUGIN=true
+      # Security plugin ENABLED. The initial admin password must be strong
+      # (OpenSearch enforces password complexity on first boot).
+      - DISABLE_SECURITY_PLUGIN=false
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_PASSWORD:?OPENSEARCH_PASSWORD is required}
     ports:
       - "9200:9200"
       - "9600:9600"
     volumes:
       - opensearch-data:/usr/share/opensearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      # Security plugin on: HTTPS + admin auth (self-signed demo certs → -k).
+      test: ["CMD-SHELL", "curl -ksf -u admin:$${OPENSEARCH_PASSWORD} https://localhost:9200/_cluster/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -864,8 +1025,12 @@ services:
     ports:
       - "5601:5601"
     environment:
-      - OPENSEARCH_HOSTS=http://opensearch:9200
+      - OPENSEARCH_HOSTS=https://opensearch:9200
       - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+      - OPENSEARCH_USERNAME=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_PASSWORD:?OPENSEARCH_PASSWORD is required}
+      # Self-signed demo certificates on the single-node dev cluster.
+      - OPENSEARCH_SSL_VERIFICATIONMODE=none
     depends_on:
       - opensearch
     networks:
@@ -900,6 +1065,28 @@ services:
       - remitflow-internal
     profiles: [full, security]
 
+  # Go: Permify authorization facade (fail-closed /check proxy → Permify)
+  go-permify-service:
+    build: ./services/go-permify-service
+    profiles: ["full", "security"]
+    ports:
+      - "8109:8109"
+    environment:
+      PORT: "8109"
+      PERMIFY_URL: http://permify:3476
+      PERMIFY_TENANT_ID: ${PERMIFY_TENANT_ID:-remitflow}
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8109/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    depends_on:
+      permify:
+        condition: service_healthy
+    networks:
+      - remitflow-internal
+
   # ═══ ETCD (required by APISIX) ═════════════════════════════════════════════════════════════════════
   etcd:
     image: bitnami/etcd:3.5
@@ -927,8 +1114,12 @@ services:
     ports:
       - "9080:9080"
       - "9443:9443"
-      - "9180:9180"
+      # Admin API bound to loopback only — never expose 9180 publicly.
+      - "127.0.0.1:9180:9180"
       - "9091:9091"
+    # NOTE: apisix.yaml contains ${APISIX_ADMIN_KEY}/${APISIX_VIEWER_KEY}
+    # placeholders — render it first (envsubst) and mount the rendered file,
+    # e.g. envsubst < services/gateway-config/apisix.yaml > /tmp/apisix.config.yaml
     volumes:
       - ./services/gateway-config/apisix.yaml:/usr/local/apisix/conf/config.yaml:ro
     depends_on:
@@ -946,14 +1137,14 @@ services:
 
   # ═══ OPENAPPSEC WAF AGENT ═════════════════════════════════════════════════════════════════════
   openappsec-agent:
-    image: openappsec/agent:latest
+    image: ghcr.io/openappsec/agent:latest
     container_name: remitflow-openappsec-agent
-    privileged: true
+    # No privileged mode, no docker.sock — the nano-agent does not need either.
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - openappsec-data:/etc/cp/conf
     environment:
-      OPENAPPSEC_TOKEN: "${OPENAPPSEC_TOKEN:-dev-token}"
+      # Required: registration token from the open-appsec portal. No dev default.
+      OPENAPPSEC_TOKEN: "${OPENAPPSEC_TOKEN:?OPENAPPSEC_TOKEN is required}"
       OPENAPPSEC_FOG_ADDRESS: "${OPENAPPSEC_FOG_ADDRESS:-fog.checkpoint.com}"
     networks:
       - remitflow-internal
@@ -961,7 +1152,7 @@ services:
 
   # ═══ DAPR PLACEMENT + SCHEDULER ═══════════════════════════════════════════════════════════════
   dapr-placement:
-    image: daprio/dapr:1.13.0
+    image: daprio/dapr:1.14.4
     container_name: remitflow-dapr-placement
     command: ["./placement", "-port", "50006"]
     ports:
@@ -977,7 +1168,7 @@ services:
     profiles: [full, dapr]
 
   dapr-scheduler:
-    image: daprio/dapr:1.13.0
+    image: daprio/dapr:1.14.4
     container_name: remitflow-dapr-scheduler
     command: ["./scheduler", "--port", "50007"]
     ports:
@@ -995,6 +1186,8 @@ volumes:
   opensearch-data:
   etcd-data:
   openappsec-data:
+  tigerbeetle-data:
+  lakehouse-data:
 
 # ─── Docker Secrets (production: use Docker Swarm or K8s secrets) ─────────────
 secrets:

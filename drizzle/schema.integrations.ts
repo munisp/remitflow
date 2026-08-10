@@ -16,27 +16,32 @@ export const keycloakSessions = pgTable("keycloak_sessions", {
 ]);
 
 // ─── TigerBeetle ─────────────────────────────────────────────────────────────
+// TB ids are u128 — stored as TEXT (decimal string) since migration 0082.
 export const tigerbeetleAccounts = pgTable("tigerbeetle_accounts", {
   id: serial("id").primaryKey(),
   userId: integer("user_id").notNull().references(() => users.id),
-  tbAccountId: bigint("tb_account_id", { mode: "bigint" }).notNull().unique(),
+  tbAccountId: text("tb_account_id").notNull().unique(),
   ledger: integer("ledger").notNull(),
   code: integer("code").notNull(),
   currency: varchar("currency", { length: 8 }).notNull(),
+  flags: integer("flags").default(0).notNull(),
+  userData128: text("user_data_128"),
   status: varchar("status", { length: 30 }).default("active").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (t) => [
   index("tb_accounts_user_idx").on(t.userId),
   index("tb_accounts_ledger_idx").on(t.ledger),
+  uniqueIndex("tigerbeetle_accounts_user_currency_uidx").on(t.userId, t.currency),
 ]);
 
 export const tigerbeetleTransfers = pgTable("tigerbeetle_transfers", {
   id: serial("id").primaryKey(),
-  tbTransferId: bigint("tb_transfer_id", { mode: "bigint" }).notNull().unique(),
-  debitAccountId: bigint("debit_account_id", { mode: "bigint" }).notNull(),
-  creditAccountId: bigint("credit_account_id", { mode: "bigint" }).notNull(),
+  tbTransferId: text("tb_transfer_id").notNull().unique(),
+  debitAccountId: text("debit_account_id").notNull(),
+  creditAccountId: text("credit_account_id").notNull(),
   amount: bigint("amount", { mode: "bigint" }).notNull(),
+  pendingId: text("pending_id"),
   ledger: integer("ledger").notNull(),
   code: integer("code").notNull(),
   status: varchar("status", { length: 30 }).default("posted").notNull(),

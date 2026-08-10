@@ -546,6 +546,24 @@ export const mojaloopTransfers = pgTable("mojaloop_transfers", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
+// ─── Mojaloop Pending Callback State ──────────────────────────────────────────
+// Serializable correlation state for FSPIOP async callbacks (see
+// drizzle/0080_mojaloop_pending_state.sql). Never stores functions or timers.
+export const mojaloopPendingTransfers = pgTable("mojaloop_pending_transfers", {
+  transferId: varchar("transfer_id", { length: 100 }).primaryKey(),
+  condition: varchar("condition", { length: 200 }).notNull(),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const mojaloopPendingCallbacks = pgTable("mojaloop_pending_callbacks", {
+  correlationId: varchar("correlation_id", { length: 200 }).primaryKey(),
+  expiresAt: timestamp("expires_at").notNull(),
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
 // ─── POS Terminals ────────────────────────────────────────────────────────────
 export const posTerminals = pgTable("pos_terminals", {
   id: serial("id").primaryKey(),
@@ -646,6 +664,10 @@ export const outboxEvents = pgTable("outbox_events", {
   failedAt: timestamp("failed_at"),
   nextRetryAt: timestamp("next_retry_at"),
   errorMessage: text("error_message"),
+  // Worker lease (migration 0083): rows are claimed FOR UPDATE SKIP LOCKED and
+  // become visible again once locked_at ages past the visibility timeout.
+  lockedAt: timestamp("locked_at", { withTimezone: true }),
+  lockedBy: varchar("locked_by", { length: 128 }),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

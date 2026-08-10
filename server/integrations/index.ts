@@ -39,7 +39,10 @@ export { syncAllTables, syncComplianceReport } from "./lakehouse/sync";
 export type { SyncResult } from "./lakehouse/sync";
 
 // ─── OpenAppSec ──────────────────────────────────────────────────────────────
-export { openAppSecMiddleware, logWafEvent, isIpBlocked, getTopThreatIps } from "./openappsec/waf";
+// The fabricated OpenAppSec WAF proxy (openappsec/waf.ts) was removed (audit OA2).
+// The only honest WAF surface is server/security.openappsec.ts, which is a no-op
+// unless OPENAPPSEC_SIDECAR_URL points to a sidecar implementing the documented
+// /v1/inspect contract.
 
 // ─── Redis ───────────────────────────────────────────────────────────────────
 export { remitflowCache, cacheGet, cacheSet, cacheDel, cacheAside, incrementRateLimit, CACHE_KEYS, CACHE_TTL } from "./redis/cache";

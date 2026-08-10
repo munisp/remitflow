@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { authService } from "../services/authService";
 import { useAuthStore } from "../stores/authStore";
 
 const Login: React.FC = () => {
@@ -8,8 +9,66 @@ const Login: React.FC = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [showKycModal, setShowKycModal] = useState(false);
   const [kycUrl, setKycUrl] = useState<string | null>(null);
-  const { login, logout, isLoading, error, clearError } = useAuthStore();
+  const [ssoAvailable, setSsoAvailable] = useState<boolean | null>(null);
+  const [ssoLoading, setSsoLoading] = useState(false);
+  const ssoCompletionAttempted = useRef(false);
+  const { login, completeSsoLogin, logout, isLoading, error, clearError, setError } =
+    useAuthStore();
   const navigate = useNavigate();
+
+  // Handle the redirect back from the Keycloak SSO flow (the platform
+  // server completes the code exchange and lands the browser back here),
+  // then probe whether SSO is offered on this deployment. When it is not,
+  // the page silently falls back to credential login only.
+  useEffect(() => {
+    let cancelled = false;
+
+    const completePendingSso = async () => {
+      if (ssoCompletionAttempted.current) return;
+      if (!authService.hasPendingSso()) return;
+      ssoCompletionAttempted.current = true;
+      setSsoLoading(true);
+      try {
+        await completeSsoLogin();
+        if (!cancelled && useAuthStore.getState().isAuthenticated) {
+          navigate("/", { replace: true });
+        }
+      } catch {
+        // The store already carries the failure message; the credential
+        // form below remains fully usable as the fallback.
+      } finally {
+        if (!cancelled) setSsoLoading(false);
+      }
+    };
+
+    const probeSso = async () => {
+      const available = await authService.probeKeycloakSso();
+      if (!cancelled) setSsoAvailable(available);
+    };
+
+    void completePendingSso().then(probeSso, probeSso);
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleSsoSignIn = async () => {
+    clearError();
+    setSsoLoading(true);
+    try {
+      // Redirects the browser; code below only runs if initiation fails.
+      await authService.initiateKeycloakLogin("/");
+    } catch (err) {
+      setSsoLoading(false);
+      setSsoAvailable(false);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Single sign-on is unavailable. Sign in with email and password.",
+      );
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -216,6 +275,53 @@ const Login: React.FC = () => {
             </div>
           )}
 
+          {ssoAvailable === true && (
+            <>
+              <button
+                type="button"
+                onClick={handleSsoSignIn}
+                disabled={ssoLoading || isLoading}
+                className="w-full mb-6 flex items-center justify-center gap-3 py-3 px-6 bg-white border border-slate-200 text-slate-700 font-semibold rounded-xl shadow-sm hover:border-indigo-300 hover:text-indigo-700 hover:shadow transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {ssoLoading ? (
+                  <span className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <svg
+                    className="w-5 h-5 text-indigo-600"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    strokeWidth={1.75}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"
+                    />
+                  </svg>
+                )}
+                {ssoLoading ? "Redirecting to sign-in..." : "Sign in with SSO"}
+              </button>
+              <div className="relative mb-6">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-slate-200" />
+                </div>
+                <div className="relative flex justify-center text-xs">
+                  <span className="bg-slate-50 px-3 text-slate-400 uppercase tracking-wider">
+                    or continue with email
+                  </span>
+                </div>
+              </div>
+            </>
+          )}
+
+          {ssoLoading && ssoAvailable !== true && (
+            <div className="mb-6 flex items-center gap-3 p-4 bg-indigo-50 border border-indigo-100 rounded-xl text-sm text-indigo-700">
+              <span className="w-5 h-5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+              Completing single sign-on...
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
               <label
@@ -306,12 +412,9 @@ const Login: React.FC = () => {
                 />
                 <span className="text-sm text-slate-600">Remember me</span>
               </label>
-              <a
-                href="#"
-                className="text-sm font-medium text-indigo-600 hover:text-indigo-500"
-              >
-                Forgot password?
-              </a>
+              {/* Password recovery is handled through the SSO provider when
+                  Keycloak is configured; no self-service reset endpoint exists
+                  for credential accounts, so no dead link is shown. */}
             </div>
 
             <button

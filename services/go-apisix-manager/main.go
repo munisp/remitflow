@@ -41,19 +41,42 @@ import (
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 type Config struct {
-	Port          string
+	Port           string
 	ApisixAdminURL string
 	ApisixAdminKey string
-	LogLevel      string
+	LogLevel       string
+	// OIDC (Keycloak) settings for the bootstrap /api/* route
+	OIDCDiscoveryURL string
+	OIDCClientID     string
+	OIDCBearerOnly   bool
+	OIDCSslVerify    bool
 }
 
-func loadConfig() Config {
-	return Config{
-		Port:          getEnv("APISIX_MANAGER_PORT", "8100"),
+func loadConfig() (Config, error) {
+	cfg := Config{
+		Port:           getEnv("APISIX_MANAGER_PORT", "8100"),
 		ApisixAdminURL: getEnv("APISIX_ADMIN_URL", "http://apisix:9180"),
-		ApisixAdminKey: getEnv("APISIX_ADMIN_KEY", "edd1c9f034335f136f87ad84b625c8f1"),
-		LogLevel:      getEnv("LOG_LEVEL", "info"),
+		// Fail-fast: no default admin key. An unset key means the gateway was
+		// not provisioned and this service must refuse to start.
+		ApisixAdminKey: os.Getenv("APISIX_ADMIN_KEY"),
+		LogLevel:       getEnv("LOG_LEVEL", "info"),
+		OIDCClientID:   getEnv("KEYCLOAK_CLIENT_ID", "remitflow-api"),
+		OIDCBearerOnly: getEnv("APISIX_OIDC_BEARER_ONLY", "true") == "true",
+		// ssl_verify defaults to true; set APISIX_OIDC_SSL_VERIFY=false only for
+		// local Keycloak dev instances without valid certs.
+		OIDCSslVerify:  getEnv("APISIX_OIDC_SSL_VERIFY", "true") == "true",
 	}
+	if cfg.ApisixAdminKey == "" {
+		return cfg, fmt.Errorf("APISIX_ADMIN_KEY is not set — refusing to start without gateway credentials")
+	}
+	// Keycloak discovery URL from env (explicit URL or derived from issuer)
+	cfg.OIDCDiscoveryURL = os.Getenv("KEYCLOAK_DISCOVERY_URL")
+	if cfg.OIDCDiscoveryURL == "" {
+		if issuer := os.Getenv("KEYCLOAK_ISSUER"); issuer != "" {
+			cfg.OIDCDiscoveryURL = issuer + "/.well-known/openid-configuration"
+		}
+	}
+	return cfg, nil
 }
 
 func getEnv(key, fallback string) string {
@@ -228,6 +251,33 @@ func (c *ApisixClient) ListRoutes(ctx context.Context) ([]byte, error) {
 	return body, nil
 }
 
+// GetRoute fetches the full current route object (uri, upstream, plugins…).
+// Returns (nil, nil) when the route does not exist.
+func (c *ApisixClient) GetRoute(ctx context.Context, routeID string) (map[string]interface{}, error) {
+	body, statusCode, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/routes/%s", routeID), nil)
+	if err != nil {
+		return nil, err
+	}
+	if statusCode == 404 {
+		return nil, nil
+	}
+	if statusCode >= 400 {
+		return nil, fmt.Errorf("APISIX get route error %d: %s", statusCode, string(body))
+	}
+	// APISIX v3 Admin API wraps the object in {"value": {...}}
+	var envelope struct {
+		Value map[string]interface{} `json:"value"`
+	}
+	if err := json.Unmarshal(body, &envelope); err == nil && envelope.Value != nil {
+		return envelope.Value, nil
+	}
+	var direct map[string]interface{}
+	if err := json.Unmarshal(body, &direct); err != nil {
+		return nil, fmt.Errorf("decode route %s: %w", routeID, err)
+	}
+	return direct, nil
+}
+
 func (c *ApisixClient) UpsertUpstream(ctx context.Context, upstream Upstream) error {
 	path := fmt.Sprintf("/upstreams/%s", upstream.ID)
 	_, statusCode, err := c.do(ctx, http.MethodPut, path, upstream)
@@ -353,25 +403,53 @@ func (s *Server) handleConfigureRateLimit(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Fetch existing route and add rate-limit plugin
-	route := Route{
-		ID: cfg.RouteID,
-		Plugins: map[string]interface{}{
-			"limit-count": map[string]interface{}{
-				"count":         cfg.Count,
-				"time_window":   cfg.TimeWindow,
-				"policy":        cfg.Policy,
-				"rejected_code": cfg.Rejected,
-				"key":           "consumer_name",
-			},
-		},
-		Status: 1,
+	if cfg.RouteID == "" {
+		http.Error(w, `{"error":"route_id is required"}`, http.StatusBadRequest)
+		return
 	}
 
-	if err := s.client.UpsertRoute(r.Context(), route); err != nil {
+	// GET the existing route and MERGE the rate-limit plugin — a bare PUT with
+	// only plugins would clobber the route's uri/upstream.
+	existing, err := s.client.GetRoute(r.Context(), cfg.RouteID)
+	if err != nil {
+		s.logger.Error("rate-limit: fetch route failed", "error", err, "route_id", cfg.RouteID)
 		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadGateway)
 		return
 	}
+	if existing == nil {
+		http.Error(w, `{"error":"route not found"}`, http.StatusNotFound)
+		return
+	}
+
+	plugins, _ := existing["plugins"].(map[string]interface{})
+	if plugins == nil {
+		plugins = map[string]interface{}{}
+	}
+	plugins["limit-count"] = map[string]interface{}{
+		"count":         cfg.Count,
+		"time_window":   cfg.TimeWindow,
+		"policy":        cfg.Policy,
+		"rejected_code": cfg.Rejected,
+		"key":           "consumer_name",
+	}
+	existing["plugins"] = plugins
+	existing["id"] = cfg.RouteID
+	// Strip read-only fields the Admin API echoes back
+	delete(existing, "create_time")
+	delete(existing, "update_time")
+
+	body, statusCode, err := s.client.do(r.Context(), http.MethodPut,
+		fmt.Sprintf("/routes/%s", cfg.RouteID), existing)
+	if err != nil || statusCode >= 400 {
+		routeOpsTotal.WithLabelValues("upsert", "error").Inc()
+		errMsg := fmt.Sprintf("APISIX error %d: %s", statusCode, string(body))
+		if err != nil {
+			errMsg = err.Error()
+		}
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, errMsg), http.StatusBadGateway)
+		return
+	}
+	routeOpsTotal.WithLabelValues("upsert", "success").Inc()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -443,6 +521,41 @@ func (s *Server) bootstrapDefaultRoutes(ctx context.Context) {
 	}
 
 	// Register core API routes
+	apiPlugins := map[string]interface{}{
+		"cors": map[string]interface{}{
+			"allow_origins": getEnv("CORS_ORIGINS", "https://app.remitflow.com"),
+			"allow_methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+			"allow_headers": "Authorization,Content-Type,X-Request-ID",
+			"max_age":       3600,
+		},
+		"limit-req": map[string]interface{}{
+			"rate":         100,
+			"burst":        50,
+			"key":          "remote_addr",
+			"rejected_code": 429,
+		},
+		"response-rewrite": map[string]interface{}{
+			"headers": map[string]interface{}{
+				"X-Frame-Options":        "DENY",
+				"X-Content-Type-Options": "nosniff",
+				"Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+			},
+		},
+	}
+	// OIDC protection via Keycloak discovery — only when discovery is configured.
+	// bearer_only is enabled for machine-to-machine endpoints (no browser redirect);
+	// ssl_verify defaults to true and is configurable via APISIX_OIDC_SSL_VERIFY.
+	if s.cfg.OIDCDiscoveryURL != "" {
+		apiPlugins["openid-connect"] = map[string]interface{}{
+			"discovery":   s.cfg.OIDCDiscoveryURL,
+			"client_id":   s.cfg.OIDCClientID,
+			"bearer_only": s.cfg.OIDCBearerOnly,
+			"ssl_verify":  s.cfg.OIDCSslVerify,
+		}
+	} else {
+		s.logger.Warn("KEYCLOAK_DISCOVERY_URL/KEYCLOAK_ISSUER not set — /api/* route registered WITHOUT openid-connect")
+	}
+
 	routes := []Route{
 		{
 			ID:         "remitflow-api-all",
@@ -450,28 +563,8 @@ func (s *Server) bootstrapDefaultRoutes(ctx context.Context) {
 			URI:        "/api/*",
 			Methods:    []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 			UpstreamID: "remitflow-api",
-			Plugins: map[string]interface{}{
-				"cors": map[string]interface{}{
-					"allow_origins": getEnv("CORS_ORIGINS", "https://app.remitflow.com"),
-					"allow_methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
-					"allow_headers": "Authorization,Content-Type,X-Request-ID",
-					"max_age":       3600,
-				},
-				"limit-req": map[string]interface{}{
-					"rate":         100,
-					"burst":        50,
-					"key":          "remote_addr",
-					"rejected_code": 429,
-				},
-				"response-rewrite": map[string]interface{}{
-					"headers": map[string]interface{}{
-						"X-Frame-Options":        "DENY",
-						"X-Content-Type-Options": "nosniff",
-						"Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-					},
-				},
-			},
-			Status: 1,
+			Plugins:    apiPlugins,
+			Status:     1,
 		},
 		{
 			ID:         "remitflow-health",
@@ -495,7 +588,11 @@ func (s *Server) bootstrapDefaultRoutes(ctx context.Context) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 func main() {
-	cfg := loadConfig()
+	cfg, err := loadConfig()
+	if err != nil {
+		slog.Error("configuration error", "error", err)
+		os.Exit(1)
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,

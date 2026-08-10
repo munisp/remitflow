@@ -760,15 +760,47 @@ export async function initiateRailTransfer(req: RailTransferRequest): Promise<Ra
     case "pix":
       return pixInitiateTransfer(req);
     case "mojaloop": {
-      const { initiateTransfer } = await import("./mojaloop.service.js");
+      const { initiateTransfer, buildIlpPacket, lookupParty } = await import("./mojaloop.service.js");
       try {
-        const result = await initiateTransfer({
-          payerFspId: "REMITFLOW",
-          payeeFspId: req.recipientBank ?? "FSP_NIGERIA",
+        // Real party lookup — fail closed when the recipient cannot be resolved
+        const party = await lookupParty("ACCOUNT_ID", req.recipientId);
+        if (!party.found) {
+          return {
+            success: false,
+            externalRef: `MOJA${Date.now()}`,
+            status: "FAILED",
+            estimatedSettlement: "",
+            fees: { amount: 0, currency: req.fromCurrency },
+            message: `Mojaloop recipient lookup failed: ${party.error ?? "party not found"}`,
+          };
+        }
+        const payeeFspId = party.fspId && party.fspId !== "pending-callback"
+          ? party.fspId
+          : req.recipientBank ?? "";
+        if (!payeeFspId) {
+          return {
+            success: false,
+            externalRef: `MOJA${Date.now()}`,
+            status: "FAILED",
+            estimatedSettlement: "",
+            fees: { amount: 0, currency: req.fromCurrency },
+            message: "Mojaloop transfer failed: payee FSP could not be determined",
+          };
+        }
+        // Real ILPv4 packet + SHA-256 condition/fulfillment pair
+        const ilp = buildIlpPacket({
           amount: String(req.amount),
           currency: req.fromCurrency,
-          ilpPacket: "",
-          condition: "",
+          destinationFspId: payeeFspId,
+          destinationAccount: req.recipientId,
+        });
+        const result = await initiateTransfer({
+          payerFspId: "REMITFLOW",
+          payeeFspId,
+          amount: String(req.amount),
+          currency: req.fromCurrency,
+          ilpPacket: ilp.ilpPacket,
+          condition: ilp.condition,
         });
         return {
           success: result.transferState === "COMMITTED",
@@ -776,17 +808,17 @@ export async function initiateRailTransfer(req: RailTransferRequest): Promise<Ra
           status: result.transferState === "COMMITTED" ? "COMPLETED" : "PROCESSING",
           estimatedSettlement: new Date(Date.now() + 60 * 1000).toISOString(),
           fees: { amount: req.amount * 0.005, currency: req.fromCurrency },
-          message: `Mojaloop transfer: ${result.transferState}`,
+          message: result.errorInformation?.errorDescription ?? `Mojaloop transfer: ${result.transferState}`,
           rawResponse: result,
         };
-      } catch {
+      } catch (err) {
         return {
           success: false,
           externalRef: `MOJA${Date.now()}`,
           status: "FAILED",
           estimatedSettlement: "",
           fees: { amount: 0, currency: req.fromCurrency },
-          message: "Mojaloop unavailable",
+          message: `Mojaloop unavailable: ${err instanceof Error ? err.message : String(err)}`,
         };
       }
     }
@@ -829,8 +861,27 @@ export async function lookupRailRecipient(rail: PaymentRail, recipientId: string
       return mpesaLookupMsisdn(recipientId);
     case "wise":
       return wiseLookupAccount(recipientId);
-    case "mojaloop":
-      return { found: true, name: "Mojaloop Account", bank: "FSPIOP Network", accountType: "Mobile Money", verified: true };
+    case "mojaloop": {
+      // Real FSPIOP party lookup — fail closed, never fabricate a recipient.
+      const { lookupParty } = await import("./mojaloop.service.js");
+      const result = await lookupParty("ACCOUNT_ID", recipientId);
+      if (!result.found) {
+        return { found: false, name: "", bank: "FSPIOP Network", verified: false, metadata: { error: result.error ?? "party not found" } };
+      }
+      const complexName = result.party?.personalInfo?.complexName;
+      const displayName =
+        [complexName?.firstName, complexName?.lastName].filter(Boolean).join(" ") ||
+        result.party?.name ||
+        "";
+      return {
+        found: true,
+        name: displayName,
+        bank: result.fspId ?? "FSPIOP Network",
+        accountType: "Mobile Money",
+        verified: Boolean(displayName) && result.fspId !== "pending-callback",
+        metadata: { fspId: result.fspId ?? "", partyIdType: result.party?.partyIdType ?? "" },
+      };
+    }
     default:
       return { found: true, name: "Recipient", verified: false };
   }

@@ -16,7 +16,7 @@
  */
 
 import { logger } from "../_core/logger.js";
-import { getRedisHealth, isFundFlowStrictMode } from "./redisCluster";
+import { getRedisHealth, isFundFlowStrictMode } from "./redisHardened";
 import { getTemporalHealth, isTemporalStrictMode } from "../temporal/temporalClient";
 
 const GO_ORCHESTRATOR_URL = process.env.GO_ORCHESTRATOR_URL ?? "http://localhost:8150";

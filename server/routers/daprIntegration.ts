@@ -8,16 +8,16 @@
  *  - Health/sidecar status
  *
  * Dapr sidecar HTTP API: http://localhost:3500
- * Default pubsub component: remitflow-pubsub
- * Default state store: remitflow-statestore
+ * Default pubsub component: pubsub (env DAPR_PUBSUB)
+ * Default state store: statestore (env DAPR_STATE_STORE)
  */
 import { z } from "zod";
 import { protectedProcedure, router } from "../_core/trpc";
 import { createAuditLog } from "../audit.service";
 
 const DAPR_SIDECAR_URL = process.env.DAPR_HTTP_ENDPOINT || "http://localhost:3500";
-const DEFAULT_PUBSUB = "remitflow-pubsub";
-const DEFAULT_STATESTORE = "remitflow-statestore";
+const DEFAULT_PUBSUB = process.env.DAPR_PUBSUB || "pubsub";
+const DEFAULT_STATESTORE = process.env.DAPR_STATE_STORE || "statestore";
 
 async function daprFetch(path: string, options?: RequestInit): Promise<{ ok: boolean; data?: any; error?: string }> {
   try {

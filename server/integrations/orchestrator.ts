@@ -100,6 +100,17 @@ export async function orchestrateKycVerification(input: KYCWorkflowInput): Promi
     throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "Fluvio rejected the KYC event." });
   }
   await keycloak.updateUserAttributes(String(input.userId), { kyc_status: "verification_in_progress" });
+
+  // Owner tuple for the KYC record so kyc_record permission checks (view/submit/
+  // update) have data. Retried inline; deferred to the Permify outbox on failure.
+  const { writeRelationshipWithRetry } = await import("../middleware/permify");
+  await writeRelationshipWithRetry({
+    entityType: "kyc_record",
+    entityId: String(input.kycDocId),
+    relation: "owner",
+    subjectType: "user",
+    subjectId: String(input.userId),
+  });
   return { workflowId: temporal.workflowId, success: true };
 }
 
@@ -111,14 +122,33 @@ export async function provisionNewUser(userId: number, currencies: string[]): Pr
   await provisionTigerBeetleAccounts(userId, currencies);
 
   const { permify, keycloak, dapr } = await import("../middleware/middlewareIntegration");
-  const relationshipWritten = await permify.writeRelationship({
-    entity: "user",
-    entityId: String(userId),
-    relation: "owner",
-    subject: "user",
-    subjectId: String(userId),
-  });
-  if (!relationshipWritten) throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "Permify rejected user provisioning." });
+  // Owner tuples: user self-ownership plus wallet ownership (wallet:<userId> is
+  // the entity the transfer orchestration checks `transfer` against). Throws on
+  // rejection — provisioning must not silently succeed without authz data.
+  let userTuple = false;
+  let walletTuple = false;
+  try {
+    userTuple = await permify.writeRelationship({
+      entity: "user",
+      entityId: String(userId),
+      relation: "owner",
+      subject: "user",
+      subjectId: String(userId),
+    });
+    walletTuple = await permify.writeRelationship({
+      entity: "wallet",
+      entityId: String(userId),
+      relation: "owner",
+      subject: "user",
+      subjectId: String(userId),
+    });
+  } catch (err) {
+    logger.error({ err: err instanceof Error ? err.message : String(err), userId }, "[Orchestrator] Permify relationship write failed during provisioning");
+    throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "Permify rejected user provisioning." });
+  }
+  if (!userTuple || !walletTuple) {
+    throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "Permify rejected user provisioning." });
+  }
   await keycloak.updateUserAttributes(String(userId), {
     tigerbeetle_provisioned: "true",
     provisioned_at: new Date().toISOString(),

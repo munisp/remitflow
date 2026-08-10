@@ -12,7 +12,7 @@
 
 import { z } from "zod";
 import { router, protectedProcedure } from "../_core/trpc";
-import { getDb, createAuditLog } from "../db";
+import { getDb, createAuditLog, withTransactionOutbox } from "../db";
 import {
   bricspayTransfers,
   mbridgeTransfers,
@@ -153,22 +153,42 @@ export const newRailsRouter = router({
     initiate: protectedProcedure
       .input(bricspayInitiateSchema)
       .mutation(async ({ ctx, input }) => {
-        const db = await getDb();
-        if (!db) throw new Error("DB unavailable");
-        const [record] = await db.insert(bricspayTransfers).values({
-          userId: ctx.user.id,
-          transferId: input.transferId,
-          senderCountry: input.senderCountry,
-          receiverCountry: input.receiverCountry,
-          sendAmount: String(input.sendAmount),
-          sendCurrency: input.sendCurrency,
-          receiveCurrency: input.receiveCurrency,
-          receiverVpa: input.receiverVpa,
-          senderName: input.senderName,
-          receiverName: input.receiverName,
-          purpose: input.purpose,
-          status: "pending",
-        }).returning();
+        // Domain insert + outbox event commit atomically (transactional outbox)
+        // — the transfer row and its integration event can never diverge.
+        const record = await withTransactionOutbox(async (tx, emit) => {
+          const [row] = await tx.insert(bricspayTransfers).values({
+            userId: ctx.user.id,
+            transferId: input.transferId,
+            senderCountry: input.senderCountry,
+            receiverCountry: input.receiverCountry,
+            sendAmount: String(input.sendAmount),
+            sendCurrency: input.sendCurrency,
+            receiveCurrency: input.receiveCurrency,
+            receiverVpa: input.receiverVpa,
+            senderName: input.senderName,
+            receiverName: input.receiverName,
+            purpose: input.purpose,
+            status: "pending",
+          }).returning();
+
+          await emit({
+            aggregateId: input.transferId,
+            aggregateType: "transfer-events",
+            eventType: "bricspay.transfer.initiated",
+            payload: {
+              event: "bricspay.transfer.initiated",
+              transferId: input.transferId,
+              userId: ctx.user.id,
+              sendAmount: String(input.sendAmount),
+              sendCurrency: input.sendCurrency,
+              receiveCurrency: input.receiveCurrency,
+              corridor: `${input.senderCountry}-${input.receiverCountry}`,
+              rail: "bricspay",
+              timestamp: new Date().toISOString(),
+            },
+          });
+          return row;
+        });
 
         const serviceResp = await callRailService(
           MICROSERVICE_URLS.bricspay,
@@ -177,6 +197,8 @@ export const newRailsRouter = router({
         );
 
         if (!serviceResp.queued) {
+          const db = await getDb();
+          if (!db) throw new Error("DB unavailable");
           await db.update(bricspayTransfers)
             .set({ status: "submitted", updatedAt: new Date() })
             .where(eq(bricspayTransfers.transferId, input.transferId)).returning();

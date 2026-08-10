@@ -6,6 +6,8 @@ import { SignJWT, jwtVerify } from "jose";
 import type { User } from "../../drizzle/schema";
 import * as db from "../db";
 import { ENV } from "./env";
+import { isKeycloakConfigured } from "./keycloak";
+import { verifyKeycloakAccessToken } from "../lib/keycloak-jwks";
 import { logger } from "./logger";
 import type {
   ExchangeTokenRequest,
@@ -27,6 +29,21 @@ export type SessionPayload = {
 const EXCHANGE_TOKEN_PATH = `/webdev.v1.WebDevAuthPublicService/ExchangeToken`;
 const GET_USER_INFO_PATH = `/webdev.v1.WebDevAuthPublicService/GetUserInfo`;
 const GET_USER_INFO_WITH_JWT_PATH = `/webdev.v1.WebDevAuthPublicService/GetUserInfoWithJwt`;
+
+/**
+ * When Keycloak is the IdP, app sessions must not outlive the realm's access
+ * token. The remitflow realm issues 300s access tokens (refresh-token rotation
+ * extends the session via /api/auth/refresh); KEYCLOAK_SESSION_TTL_MS overrides.
+ */
+export function keycloakSessionTtlMs(): number {
+  const override = Number(process.env.KEYCLOAK_SESSION_TTL_MS);
+  if (Number.isFinite(override) && override > 0) return override;
+  return 300_000; // matches realm accessTokenLifespan (300s)
+}
+
+function defaultSessionTtlMs(): number {
+  return isKeycloakConfigured() ? keycloakSessionTtlMs() : ONE_YEAR_MS;
+}
 
 class OAuthService {
   constructor(private client: ReturnType<typeof axios.create>) {
@@ -190,7 +207,7 @@ class SDKServer {
     options: { expiresInMs?: number } = {}
   ): Promise<string> {
     const issuedAt = Date.now();
-    const expiresInMs = options.expiresInMs ?? ONE_YEAR_MS;
+    const expiresInMs = options.expiresInMs ?? defaultSessionTtlMs();
     const expirationSeconds = Math.floor((issuedAt + expiresInMs) / 1000);
     const secretKey = this.getSessionSecret();
 
@@ -263,7 +280,77 @@ class SDKServer {
     } as GetUserInfoWithJwtResponse;
   }
 
+  /**
+   * KC1: Authenticate a Keycloak-issued RS256 access token presented as a
+   * bearer credential. The token is verified locally against the realm JWKS
+   * (signature + RS256 allowlist + issuer + audience + expiry) — no token is
+   * trusted on presentation alone, and any verification failure is a hard 403.
+   */
+  private async authenticateKeycloakBearer(token: string): Promise<User> {
+    let claims;
+    try {
+      claims = await verifyKeycloakAccessToken(token);
+    } catch (error) {
+      logger.warn({ err: error instanceof Error ? error.message : String(error) }, "[Auth] Keycloak bearer token verification failed");
+      throw ForbiddenError("Invalid Keycloak access token");
+    }
+
+    const signedInAt = new Date();
+    let user = await db.getUserByOpenId(claims.sub);
+    if (!user) {
+      try {
+        await db.upsertUser({
+          openId: claims.sub,
+          name: claims.name ?? claims.preferred_username ?? null,
+          email: claims.email ?? null,
+          loginMethod: "keycloak",
+          lastSignedIn: signedInAt,
+        });
+        user = await db.getUserByOpenId(claims.sub);
+      } catch (error) {
+        logger.error({ err: error instanceof Error ? error.message : String(error) }, "[Auth] Failed to sync Keycloak user");
+        throw ForbiddenError("Failed to sync user info");
+      }
+    }
+    if (!user) throw ForbiddenError("User not found");
+
+    await this.enforceAccountLockout(user);
+    await db.upsertUser({ openId: user.openId, lastSignedIn: signedInAt });
+    return user;
+  }
+
+  /** DB-persisted account lockout enforcement shared by all auth paths. */
+  private async enforceAccountLockout(user: User): Promise<void> {
+    try {
+      const lockStatus = await db.checkDbUserLockout(user.id);
+      if (lockStatus.locked) {
+        const { emitSecurityEvent } = await import("../security.attacks.js");
+        emitSecurityEvent({
+          type: "auth.lockout_enforced",
+          severity: "high",
+          userId: user.id,
+          detail: `Session rejected — account locked. Retry in ${lockStatus.retryAfterSec}s`,
+        });
+        throw ForbiddenError(`Account temporarily locked. Retry in ${lockStatus.retryAfterSec} seconds. Unlock: /unlock?userId=${user.id}`);
+      }
+    } catch (err: any) {
+      if (err?.message?.includes("Account temporarily locked")) throw err;
+      // Swallow import/DB errors — fail open to avoid blocking legitimate users
+    }
+  }
+
   async authenticateRequest(req: Request): Promise<User> {
+    // ── Keycloak bearer-token path (KC1) ─────────────────────────────────────
+    const authzHeader = req.headers.authorization;
+    if (typeof authzHeader === "string" && authzHeader.startsWith("Bearer ")) {
+      if (!isKeycloakConfigured()) {
+        // No trusted token issuer is configured — never silently ignore a bearer credential.
+        logger.warn("[Auth] Bearer token rejected: KEYCLOAK_URL is not configured");
+        throw ForbiddenError("Bearer authentication is not enabled on this server");
+      }
+      return this.authenticateKeycloakBearer(authzHeader.slice("Bearer ".length).trim());
+    }
+
     // Regular authentication flow
     const cookies = this.parseCookies(req.headers.cookie);
     const sessionCookie = cookies.get(COOKIE_NAME);
@@ -301,25 +388,7 @@ class SDKServer {
     }
 
     // ─── v148: Enforce user-ID-based account lockout (DB-persisted) ────────────
-    // Checks the user_lockouts table for an active lockout. Falls open on DB
-    // errors to avoid blocking legitimate users during outages.
-    try {
-      const lockStatus = await db.checkDbUserLockout(user.id);
-      if (lockStatus.locked) {
-        const { emitSecurityEvent } = await import("../security.attacks.js");
-        emitSecurityEvent({
-          type: "auth.lockout_enforced",
-          severity: "high",
-          userId: user.id,
-          detail: `Session rejected — account locked. Retry in ${lockStatus.retryAfterSec}s`,
-        });
-        // v153: Include unlock URL in error message so frontend can surface a direct link
-        throw ForbiddenError(`Account temporarily locked. Retry in ${lockStatus.retryAfterSec} seconds. Unlock: /unlock?userId=${user.id}`);
-      }
-    } catch (err: any) {
-      if (err?.message?.includes("Account temporarily locked")) throw err;
-      // Swallow import/DB errors — fail open to avoid blocking legitimate users
-    }
+    await this.enforceAccountLockout(user);
 
     await db.upsertUser({
       openId: user.openId,

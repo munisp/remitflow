@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -93,6 +94,10 @@ var db *sql.DB
 var rdb *redis.Client
 var kafkaWriter *kafka.Writer
 
+// Kafka delivery metrics (surfaced in /health)
+var kafkaPublished atomic.Int64
+var kafkaPublishErrors atomic.Int64
+
 func initDB() {
 	var err error
 	db, err = sql.Open("postgres", DB_URL)
@@ -142,11 +147,12 @@ func initTigerBeetle() {
 
 func initKafka() {
 	kafkaWriter = &kafka.Writer{
-		Addr:     kafka.TCP(KAFKA_BROKERS),
-		Topic:    "settlement-registry-events",
-		Balancer: &kafka.LeastBytes{},
+		Addr:         kafka.TCP(KAFKA_BROKERS),
+		Topic:        "settlement-registry-events",
+		Balancer:     &kafka.LeastBytes{},
+		RequiredAcks: kafka.RequireAll, // regulatory events must be durably replicated
 	}
-	log.Printf("[SettlementRegistry] Kafka writer ready → %s", KAFKA_BROKERS)
+	log.Printf("[SettlementRegistry] Kafka writer ready → %s (acks=all)", KAFKA_BROKERS)
 }
 
 func publishEvent(eventType string, payload interface{}) {
@@ -161,7 +167,12 @@ func publishEvent(eventType string, payload interface{}) {
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = kafkaWriter.WriteMessages(ctx, kafka.Message{Value: data})
+	if err := kafkaWriter.WriteMessages(ctx, kafka.Message{Value: data}); err != nil {
+		kafkaPublishErrors.Add(1)
+		log.Printf("[SettlementRegistry] Kafka publish FAILED topic=settlement-registry-events event=%s: %v", eventType, err)
+		return
+	}
+	kafkaPublished.Add(1)
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -407,6 +418,8 @@ func main() {
 			"service": "go-settlement-registry",
 			"version": "v187",
 			"db":      dbOK,
+			"kafka_published": kafkaPublished.Load(),
+			"kafka_publish_errors": kafkaPublishErrors.Load(),
 		})
 	})
 

@@ -1,5 +1,11 @@
 # APISIX Stablecoin Routes — RemitFlow
-# Configures rate limiting, circuit breakers, and OpenAppSec WAF for all stablecoin endpoints.
+# Configures rate limiting and circuit breakers for all stablecoin endpoints.
+# Only plugins shipped with apache/apisix:3.9 are used (limit-count, limit-req,
+# api-breaker, hmac-auth). WAF inspection is performed by the open-appsec agent
+# at the container/ingress layer — it is NOT an APISIX plugin and is configured
+# separately (see docker-compose.security.yml).
+# Applied idempotently by services/gateway-config/apply-stablecoin-routes.py
+# (invoked from setup-routes.sh).
 
 routes:
   # ─── ON-RAMP ───────────────────────────────────────────────────────────────
@@ -27,9 +33,6 @@ routes:
         healthy:
           http_statuses: [200]
           successes: 2
-      openappsec:
-        mode: prevent
-        threat_prevention: true
 
   # ─── OFF-RAMP ──────────────────────────────────────────────────────────────
   - id: stablecoin-offramp
@@ -56,9 +59,6 @@ routes:
         healthy:
           http_statuses: [200]
           successes: 2
-      openappsec:
-        mode: prevent
-        threat_prevention: true
 
   # ─── SWAP ──────────────────────────────────────────────────────────────────
   - id: stablecoin-swap
@@ -80,8 +80,6 @@ routes:
         healthy:
           http_statuses: [200]
           successes: 2
-      openappsec:
-        mode: prevent
 
   # ─── SEND ──────────────────────────────────────────────────────────────────
   - id: stablecoin-send
@@ -103,9 +101,6 @@ routes:
         healthy:
           http_statuses: [200]
           successes: 2
-      openappsec:
-        mode: prevent
-        threat_prevention: true
 
   # ─── YIELD / STAKING ───────────────────────────────────────────────────────
   - id: stablecoin-yield
@@ -155,9 +150,6 @@ routes:
     methods: [POST]
     upstream_id: remitflow-backend
     plugins:
-      openappsec:
-        mode: prevent
-        threat_prevention: true
       limit-req:
         rate: 100
         burst: 200
@@ -171,9 +163,6 @@ routes:
     methods: [POST]
     upstream_id: remitflow-backend
     plugins:
-      openappsec:
-        mode: prevent
-        threat_prevention: true
       limit-req:
         rate: 100
         burst: 200

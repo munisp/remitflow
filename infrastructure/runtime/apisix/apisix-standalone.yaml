@@ -23,7 +23,9 @@ routes:
         discovery: http://keycloak:8080/realms/remitflow/.well-known/openid-configuration
         bearer_only: true
         realm: remitflow
-        ssl_verify: false
+        # TLS verification to the IdP is REQUIRED. Do not disable outside
+        # throwaway local dev (never in any deployed environment).
+        ssl_verify: true
     upstream:
       type: roundrobin
       nodes:

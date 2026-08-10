@@ -53,7 +53,7 @@ dapr:
 secrets:
   DATABASE_URI: "CHANGE_ME"
   AUDIT_SVC_URL: "http://audit-service:8000"
-  DAPR_PUBSUB_NAME: "pubsub"
+  DAPR_PUBSUB: "pubsub"
   KAFKA_BOOTSTRAP_SERVERS: "kafka-service:9092"
   KAFKA_SECURITY_PROTOCOL: "PLAINTEXT"
   KAFKA_SASL_MECHANISM: ""

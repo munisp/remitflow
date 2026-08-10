@@ -6,3 +6,4 @@ boto3==1.43.49
 pydantic==2.13.4
 prometheus-client==0.25.0
 python-dotenv==1.2.2
+psycopg2-binary==2.9.10

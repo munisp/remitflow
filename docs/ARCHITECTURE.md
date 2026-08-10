@@ -4,7 +4,7 @@
 
 ```mermaid
 flowchart LR
-    PWA["uis/pwa\n(React PWA)"] --> APISIX["APISIX Gateway\n(infrastructure/apisix-resources)"]
+    PWA["uis/pwa\n(React PWA)"] --> APISIX["APISIX Gateway\n(services/gateway-config)"]
 
     APISIX --> BNPL["bnpl-service (Go)"]
     APISIX --> CBDC["cbdc-service (Go)"]
@@ -34,7 +34,7 @@ Each service under `services/` is independently deployable and (mostly) independ
 
 - **Kubernetes**: DigitalOcean-managed cluster, namespace `54remit`.
 - **Helm**: one chart per service under `infrastructure/charts/`, generated from `infrastructure/templates/template-chart` via `infrastructure/00_provision_chart.sh`. This differs deliberately from a single umbrella chart — it lets each service version and roll back independently.
-- **APISIX**: API gateway in front of all services (`infrastructure/apisix-resources/`), including a custom Lua plugin for JWT/tenant/Keycloak resolution (`apisix-resources/plugins/access.lua`).
+- **APISIX**: API gateway in front of all services. Routes are provisioned by `services/gateway-config/setup-routes.sh` (plus `infra/apisix/stablecoin-routes.yaml`) and managed at runtime by `services/go-apisix-manager/`, which bootstraps the `/api/*` route with an `openid-connect` (Keycloak) plugin.
 - **Dapr**: sidecar per service for pub/sub and state store access (`infrastructure/manifests/dapr/pubsub.yaml`).
 - **Permify**: relationship-based access control policies (`infrastructure/integration/permify_policies/`), with operational scripts for testing and rolling out policy changes across pods.
 

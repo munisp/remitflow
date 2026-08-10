@@ -10,7 +10,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local development and [docs/ARCHITECT
 |---|---|
 | Frontend | React 18, Vite, TypeScript, Tailwind CSS, Zustand, TanStack Query (`uis/pwa`) |
 | Backend services | Go (gin), Rust (axum), Python (FastAPI) — see `services/` |
-| API gateway | APISIX (`infrastructure/apisix-resources`) |
+| API gateway | APISIX (`infra/apisix/`, `services/gateway-config/`, `services/go-apisix-manager/`) |
 | Service mesh | Dapr sidecars (`infrastructure/manifests/dapr`) |
 | Authorization | Permify ReBAC (`infrastructure/integration/permify_policies`) |
 | Orchestration | Kubernetes (DigitalOcean), Helm — one chart per service (`infrastructure/charts`) |

@@ -1,8 +1,12 @@
 [package]
 name = "tigerbeetle-bridge"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
-description = "RemitFlow TigerBeetle ledger bridge — high-performance double-entry accounting"
+description = "RemitFlow TigerBeetle ledger bridge — HTTP gateway to the TigerBeetle cluster (real wire-protocol client)"
+
+[[bin]]
+name = "tigerbeetle-bridge"
+path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -11,18 +15,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-sqlx = { version = "0.9.0", features = ["postgres", "runtime-tokio", "bigdecimal", "uuid", "chrono"] }
-uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 thiserror = "2"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace", "timeout"] }
+tower-http = { version = "0.6", features = ["trace", "timeout"] }
 dotenvy = "0.15"
 prometheus = { version = "0.14", features = ["process"] }
-reqwest = { version = "0.13", features = ["json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-postgres = "0.7"
 deadpool-postgres = "0.12"
+# The only real Rust client for the TigerBeetle binary wire protocol.
+# Pinned to the line matching the deployed server image
+# ghcr.io/tigerbeetle/tigerbeetle:0.16.63.
+tigerbeetle-unofficial = "0.16"
 
 [profile.release]
 opt-level = 3

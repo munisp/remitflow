@@ -113,7 +113,8 @@ async function checkAPISIX(): Promise<IntegrationHealth> {
   const start = Date.now();
   try {
     const adminUrl = process.env.APISIX_ADMIN_URL || "http://localhost:9180";
-    const adminKey = process.env.APISIX_ADMIN_KEY || "edd1c9f034335f136f87ad84b625c8f1";
+    const adminKey = process.env.APISIX_ADMIN_KEY;
+    if (!adminKey) throw new Error("APISIX_ADMIN_KEY not configured");
     const res = await fetch(`${adminUrl}/apisix/admin/routes`, {
       headers: { "X-API-KEY": adminKey },
       signal: AbortSignal.timeout(3000),

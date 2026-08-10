@@ -15,13 +15,24 @@ apisix:
 deployment:
   admin:
     allow_admin:
-      - 0.0.0.0/0
+      # Loopback only — the Admin API port is published on 127.0.0.1 in compose.
+      - 127.0.0.1/32
+      # go-apisix-manager reaches the Admin API from the remitflow-internal
+      # docker network (172.20.0.0/16). Tighten to the manager's static IP in
+      # production; never use 0.0.0.0/0.
+      - 172.20.0.0/16
     admin_key:
+      # ROTATE IMMEDIATELY: the previous keys were committed in plaintext and
+      # must be considered compromised.
+      # These values are env-substitution placeholders — this file MUST be
+      # rendered at deploy time (e.g. `envsubst < apisix.yaml > conf/config.yaml`
+      # or your CD secret-rendering step) before APISIX starts, with
+      # APISIX_ADMIN_KEY matching the value supplied to go-apisix-manager.
       - name: "admin"
-        key: edd1c9f034335f136f87ad84b625c8f1
+        key: ${APISIX_ADMIN_KEY}
         role: admin
       - name: "viewer"
-        key: 4054f7cf07e344346cd3f287985e76a2
+        key: ${APISIX_VIEWER_KEY}
         role: viewer
     admin_listen:
       ip: 0.0.0.0
