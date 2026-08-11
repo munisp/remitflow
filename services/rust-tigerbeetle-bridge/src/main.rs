@@ -110,7 +110,9 @@ struct AppState {
 
 fn tb_error_response(err: TbClientError) -> (StatusCode, Json<serde_json::Value>) {
     let status = match err {
-        TbClientError::InvalidId(_) | TbClientError::InvalidAmount(_) => StatusCode::BAD_REQUEST,
+        TbClientError::InvalidId(_) | TbClientError::InvalidAmount(_) | TbClientError::InvalidField(_) => {
+            StatusCode::BAD_REQUEST
+        }
         TbClientError::Transport(_) => StatusCode::BAD_GATEWAY,
     };
     (status, Json(serde_json::json!({ "error": err.to_string() })))
@@ -355,7 +357,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
         .layer(TraceLayer::new_for_http())
-        .layer(TimeoutLayer::new(Duration::from_secs(30)))
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(30)))
         .with_state(state);
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));

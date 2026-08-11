@@ -230,11 +230,13 @@ export class TigerBeetleRepository {
       .where(eq(schema.tigerbeetleAccounts.userId, userId));
   }
 
-  async findByTbAccountId(tbAccountId: bigint) {
+  // TB ids are u128; the column stores them as decimal strings (see
+  // drizzle/schema.integrations.ts — migration 0082), so compare as text.
+  async findByTbAccountId(tbAccountId: bigint | string) {
     const [account] = await this.db
       .select()
       .from(schema.tigerbeetleAccounts)
-      .where(eq(schema.tigerbeetleAccounts.tbAccountId, tbAccountId))
+      .where(eq(schema.tigerbeetleAccounts.tbAccountId, tbAccountId.toString()))
       .limit(1);
     return account ?? null;
   }

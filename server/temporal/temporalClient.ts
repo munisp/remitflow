@@ -89,7 +89,7 @@ export async function getTemporalClient(): Promise<TemporalClientLike> {
       namespace: TEMPORAL_NAMESPACE,
     });
 
-    temporalClient = {
+    const created: TemporalClientLike = {
       async start(workflowFn: string, options: { taskQueue: string; workflowId: string; args: unknown[] }) {
         const handle = await client.workflow.start(workflowFn, {
           taskQueue: options.taskQueue,
@@ -101,8 +101,10 @@ export async function getTemporalClient(): Promise<TemporalClientLike> {
           result: () => handle.result(),
           query: (qt: string) => handle.query(qt),
           signal: (sn: string, ...args: unknown[]) => handle.signal(sn, ...args),
-          cancel: () => handle.cancel(),
-          terminate: (reason?: string) => handle.terminate(reason),
+          // cancel()/terminate() resolve with gRPC response protos in the real
+          // client; the local contract intentionally exposes Promise<void>.
+          cancel: async () => { await handle.cancel(); },
+          terminate: async (reason?: string) => { await handle.terminate(reason); },
         };
       },
       getHandle(workflowId: string) {
@@ -112,16 +114,17 @@ export async function getTemporalClient(): Promise<TemporalClientLike> {
           result: () => handle.result(),
           query: (qt: string) => handle.query(qt),
           signal: (sn: string, ...args: unknown[]) => handle.signal(sn, ...args),
-          cancel: () => handle.cancel(),
-          terminate: (reason?: string) => handle.terminate(reason),
+          cancel: async () => { await handle.cancel(); },
+          terminate: async (reason?: string) => { await handle.terminate(reason); },
         };
       },
     };
+    temporalClient = created;
 
     connectionFailed = false;
     lastConnectionError = null;
     logger.info({ host: TEMPORAL_HOST, namespace: TEMPORAL_NAMESPACE }, "[Temporal] Connected successfully");
-    return temporalClient;
+    return created;
   } catch (err) {
     connectionFailed = true;
     lastConnectionError = err instanceof Error ? err.message : String(err);

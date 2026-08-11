@@ -8,6 +8,18 @@
  *
  * The adapter converts between the wire types and the plain data structures
  * the HTTP layer serves, so crate API drift touches only this file.
+ *
+ * Crate API notes (tigerbeetle-unofficial 0.14.13+0.16.63):
+ *   - `Client::new(cluster_id: u128, address: impl AsRef<[u8]>)`
+ *   - `create_accounts` / `create_transfers` return `Result<(), …Error>` —
+ *     per-index failures arrive as `…Error::Api(…ApiError)`, transport
+ *     failures as `…Error::Send(SendError)`.
+ *   - `Account::new(id, ledger, code)` and `Transfer::new(id)` PANIC on
+ *     zero/`u128::MAX` ids and (for accounts) zero ledger/code — every value
+ *     is validated here first so bad input becomes a 400, never a panic.
+ *   - `Account::timestamp()` returns `SystemTime`; the raw wire value
+ *     (nanoseconds since epoch, u64) is exposed via `as_raw().timestamp`,
+ *     which is what the TypeScript caller consumes (`BigInt(a.timestamp)`).
  */
 
 use serde::{Deserialize, Serialize};
@@ -69,15 +81,19 @@ pub struct AccountView {
     pub ledger: u32,
     pub code: u16,
     pub flags: u16,
+    /// Nanoseconds since Unix epoch as decimal string (the raw wire value —
+    /// the TypeScript caller parses it with `BigInt(...)`).
     pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OpError {
     pub index: u32,
+    /// TigerBeetle result code name (e.g. "ExceedsDebits") when known.
     pub reason: String,
-    /// TigerBeetle result code name (e.g. "exceeds_debits") when known.
-    pub code: String,
+    /// Numeric TigerBeetle result code — the TypeScript caller consumes it
+    /// with `Number(err.code)`.
+    pub code: u32,
 }
 
 #[derive(Debug, Error)]
@@ -86,6 +102,8 @@ pub enum TbClientError {
     InvalidId(String),
     #[error("invalid amount `{0}`")]
     InvalidAmount(String),
+    #[error("invalid field: {0}")]
+    InvalidField(String),
     #[error("tigerbeetle transport error: {0}")]
     Transport(String),
 }
@@ -93,6 +111,28 @@ pub enum TbClientError {
 fn parse_u128(s: &str) -> Result<u128, TbClientError> {
     let s = s.trim();
     s.parse::<u128>().map_err(|_| TbClientError::InvalidId(s.to_string()))
+}
+
+/// TigerBeetle rejects (and the client library panics on) zero and
+/// `u128::MAX` object ids — validate up front so the caller gets a 400.
+fn parse_object_id(s: &str) -> Result<u128, TbClientError> {
+    let id = parse_u128(s)?;
+    if id == 0 || id == u128::MAX {
+        return Err(TbClientError::InvalidId(format!(
+            "{s} (id must be in 1..=2^128-2)"
+        )));
+    }
+    Ok(id)
+}
+
+fn parse_account_ledger_code(ledger: u32, code: u16) -> Result<(), TbClientError> {
+    if ledger == 0 {
+        return Err(TbClientError::InvalidField("ledger must not be zero".into()));
+    }
+    if code == 0 {
+        return Err(TbClientError::InvalidField("code must not be zero".into()));
+    }
+    Ok(())
 }
 
 // ─── Client ───────────────────────────────────────────────────────────────────
@@ -110,11 +150,15 @@ impl TbClient {
         Ok(Self { inner })
     }
 
+    /// Returns per-index errors for the accounts TigerBeetle rejected; an
+    /// empty vector means the entire batch was accepted.
     pub async fn create_accounts(&self, batch: &[NewAccount]) -> Result<Vec<OpError>, TbClientError> {
         let mut accounts = Vec::with_capacity(batch.len());
         for a in batch {
-            let id = parse_u128(&a.id)?;
-            let mut acc = tb::Account::new(id, a.ledger, a.code).with_flags(a.flags);
+            let id = parse_object_id(&a.id)?;
+            parse_account_ledger_code(a.ledger, a.code)?;
+            let mut acc = tb::Account::new(id, a.ledger, a.code)
+                .with_flags(tb::account::Flags::from_bits_retain(a.flags));
             if !a.user_data_128.is_empty() {
                 acc = acc.with_user_data_128(parse_u128(&a.user_data_128)?);
             }
@@ -126,37 +170,44 @@ impl TbClient {
             acc = acc.with_user_data_32(a.user_data_32);
             accounts.push(acc);
         }
-        let errors = self
-            .inner
-            .create_accounts(&accounts)
-            .await
-            .map_err(|e| TbClientError::Transport(e.to_string()))?;
-        Ok(errors
-            .into_iter()
-            .map(|e| OpError {
-                index: e.index as u32,
-                code: format!("{:?}", e.result),
-                reason: format!("{:?}", e.result),
-            })
-            .collect())
+        match self.inner.create_accounts(accounts).await {
+            Ok(()) => Ok(Vec::new()),
+            Err(tb::error::CreateAccountsError::Api(api)) => Ok(api
+                .as_slice()
+                .iter()
+                .map(|e| OpError {
+                    index: e.index(),
+                    reason: format!("{:?}", e.kind()),
+                    code: e.inner().code().get(),
+                })
+                .collect()),
+            Err(e) => Err(TbClientError::Transport(e.to_string())),
+        }
     }
 
+    /// Returns per-index errors for the transfers TigerBeetle rejected; an
+    /// empty vector means the entire batch was accepted.
     pub async fn create_transfers(&self, batch: &[NewTransfer]) -> Result<Vec<OpError>, TbClientError> {
         let mut transfers = Vec::with_capacity(batch.len());
         for t in batch {
-            let id = parse_u128(&t.id)?;
+            let id = parse_object_id(&t.id)?;
             let amount = t
                 .amount
                 .trim()
                 .parse::<u128>()
                 .map_err(|_| TbClientError::InvalidAmount(t.amount.clone()))?;
-            let debit = parse_u128(&t.debit_account_id)?;
-            let credit = parse_u128(&t.credit_account_id)?;
-            let mut tr = tb::Transfer::new(id, debit, credit, amount, t.ledger, t.code)
-                .with_flags(t.flags)
+            let debit = parse_object_id(&t.debit_account_id)?;
+            let credit = parse_object_id(&t.credit_account_id)?;
+            let mut tr = tb::Transfer::new(id)
+                .with_debit_account_id(debit)
+                .with_credit_account_id(credit)
+                .with_amount(amount)
+                .with_ledger(t.ledger)
+                .with_code(t.code)
+                .with_flags(tb::transfer::Flags::from_bits_retain(t.flags))
                 .with_timeout(t.timeout)
                 .with_user_data_32(t.user_data_32);
-            if !t.pending_id.is_empty() {
+            if !t.pending_id.is_empty() && t.pending_id.trim() != "0" {
                 tr = tr.with_pending_id(parse_u128(&t.pending_id)?);
             }
             if !t.user_data_128.is_empty() {
@@ -169,44 +220,47 @@ impl TbClient {
             }
             transfers.push(tr);
         }
-        let errors = self
-            .inner
-            .create_transfers(&transfers)
-            .await
-            .map_err(|e| TbClientError::Transport(e.to_string()))?;
-        Ok(errors
-            .into_iter()
-            .map(|e| OpError {
-                index: e.index as u32,
-                code: format!("{:?}", e.result),
-                reason: format!("{:?}", e.result),
-            })
-            .collect())
+        match self.inner.create_transfers(transfers).await {
+            Ok(()) => Ok(Vec::new()),
+            Err(tb::error::CreateTransfersError::Api(api)) => Ok(api
+                .as_slice()
+                .iter()
+                .map(|e| OpError {
+                    index: e.index(),
+                    reason: format!("{:?}", e.kind()),
+                    code: e.inner().code().get(),
+                })
+                .collect()),
+            Err(e) => Err(TbClientError::Transport(e.to_string())),
+        }
     }
 
     pub async fn lookup_accounts(&self, ids: &[String]) -> Result<Vec<AccountView>, TbClientError> {
         let parsed: Vec<u128> = ids.iter().map(|s| parse_u128(s)).collect::<Result<_, _>>()?;
         let accounts = self
             .inner
-            .lookup_accounts(&parsed)
+            .lookup_accounts(parsed)
             .await
             .map_err(|e| TbClientError::Transport(e.to_string()))?;
         Ok(accounts
             .into_iter()
-            .map(|a| AccountView {
-                id: a.id().to_string(),
-                debits_pending: a.debits_pending().to_string(),
-                debits_posted: a.debits_posted().to_string(),
-                credits_pending: a.credits_pending().to_string(),
-                credits_posted: a.credits_posted().to_string(),
-                user_data_128: a.user_data_128().to_string(),
-                user_data_64: a.user_data_64().to_string(),
-                user_data_32: a.user_data_32(),
-                reserved: 0,
-                ledger: a.ledger(),
-                code: a.code(),
-                flags: a.flags(),
-                timestamp: a.timestamp().to_string(),
+            .map(|a| {
+                let raw = a.as_raw();
+                AccountView {
+                    id: a.id().to_string(),
+                    debits_pending: a.debits_pending().to_string(),
+                    debits_posted: a.debits_posted().to_string(),
+                    credits_pending: a.credits_pending().to_string(),
+                    credits_posted: a.credits_posted().to_string(),
+                    user_data_128: a.user_data_128().to_string(),
+                    user_data_64: a.user_data_64().to_string(),
+                    user_data_32: a.user_data_32(),
+                    reserved: raw.reserved,
+                    ledger: a.ledger(),
+                    code: a.code(),
+                    flags: a.flags().bits(),
+                    timestamp: raw.timestamp.to_string(),
+                }
             })
             .collect())
     }

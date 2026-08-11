@@ -1,5 +1,9 @@
 import type { CreateExpressContextOptions } from "@trpc/server/adapters/express";
 import type { User } from "../../drizzle/schema";
+// Type-only edge: pulls in the Express.Request `remitflowUser` augmentation
+// declared by the trusted-principal middleware so this file type-checks in
+// program scopes (e.g. the PWA tsconfig) that never compile the middleware.
+import type {} from "../middleware/trustedPrincipal";
 import { sdk } from "./sdk";
 
 export type TrpcContext = {

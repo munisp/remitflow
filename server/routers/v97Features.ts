@@ -56,6 +56,7 @@ import {
 import { sendAuditLog, runComplianceCheck, getFraudScore } from "../_core/polyglotClient.js";
 import { auditCoreOperation } from "../middleware/coreAtomicity.js";
 import { KAFKA_TOPICS } from "../middleware/kafka.js";
+import { BACKOFF_DELAYS_SECONDS, processPendingWebhookRetries } from "../lib/webhookRetryQueue.js";
 
 // ─── In-memory system config cache (hot-reload) — bounded LRU ────────────────
 import { BoundedCache, registerCache } from "../lib/boundedCache";
@@ -728,7 +729,8 @@ export const systemConfigHotReloadRouter = router({
 });
 
 // ─── Webhook Retry with Exponential Backoff ───────────────────────────────────
-const BACKOFF_DELAYS_SECONDS = [30, 120, 600, 3600, 86400]; // 30s, 2m, 10m, 1h, 24h
+// Backoff schedule and delivery logic live in server/lib/webhookRetryQueue.ts
+// (shared with the background retry scheduler).
 
 export const webhookRetryRouter = router({
   // Queue a failed delivery for retry
@@ -753,93 +755,18 @@ export const webhookRetryRouter = router({
       return entry;
     }),
 
-  // Process pending retries (called by scheduler)
+  // Process pending retries on demand. The delivery logic is shared with the
+  // background scheduler (server/lib/webhookRetryQueue.ts) so both paths apply
+  // identical backoff/exhaustion semantics.
   processPending: adminProcedure.mutation(async () => {
-    const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const now = new Date();
-    const pending = await db.select().from(webhookRetryQueue)
-      .where(and(eq(webhookRetryQueue.status, "pending"), lte(webhookRetryQueue.nextAttemptAt, now)))
-      .limit(50);
-
-    let succeeded = 0;
-    let failed = 0;
-
-    for (const entry of pending) {
-      // Mark as processing
-      await db.update(webhookRetryQueue)
-        .set({ status: "processing", lastAttemptAt: now, updatedAt: now })
-        .where(eq(webhookRetryQueue.id, entry.id)).returning();
-
-      try {
-        // Get endpoint details
-        const [endpoint] = await db.select().from(webhookEndpoints)
-          .where(eq(webhookEndpoints.id, entry.endpointId)).limit(1);
-        if (!endpoint || !endpoint.isActive) {
-          await db.update(webhookRetryQueue)
-            .set({ status: "exhausted", lastError: "Endpoint inactive or deleted", updatedAt: new Date() })
-            .where(eq(webhookRetryQueue.id, entry.id)).returning();
-          failed++;
-          continue;
-        }
-
-        // Attempt delivery
-        const signature = createHash("sha256").update(`${JSON.stringify(entry.payload)}${endpoint.secret}`).digest("hex");
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
-        try {
-          const res = await fetch(endpoint.url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Webhook-Signature": `sha256=${signature}`, "X-Attempt-Number": String(entry.attemptNumber) },
-            body: JSON.stringify(entry.payload),
-            signal: controller.signal,
-          });
-          clearTimeout(timeout);
-
-          if (res.ok) {
-            await db.update(webhookRetryQueue)
-              .set({ status: "succeeded", updatedAt: new Date() })
-              .where(eq(webhookRetryQueue.id, entry.id)).returning();
-            await db.update(webhookDeliveries)
-              .set({ status: "delivered", responseStatus: res.status, deliveredAt: new Date() })
-              .where(eq(webhookDeliveries.id, entry.deliveryId)).returning();
-            succeeded++;
-          } else {
-            throw new Error(`HTTP ${res.status}`);
-          }
-        } catch (err: any) {
-          clearTimeout(timeout);
-          const nextAttempt = entry.attemptNumber;
-          if (nextAttempt >= entry.maxAttempts) {
-            await db.update(webhookRetryQueue)
-              .set({ status: "exhausted", lastError: err.message, updatedAt: new Date() })
-              .where(eq(webhookRetryQueue.id, entry.id)).returning();
-            await db.update(webhookDeliveries)
-              .set({ status: "failed" })
-              .where(eq(webhookDeliveries.id, entry.deliveryId)).returning();
-          } else {
-            const delaySeconds = BACKOFF_DELAYS_SECONDS[Math.min(nextAttempt, BACKOFF_DELAYS_SECONDS.length - 1)];
-            await db.update(webhookRetryQueue)
-              .set({
-                status: "pending",
-                attemptNumber: nextAttempt + 1,
-                nextAttemptAt: new Date(Date.now() + delaySeconds * 1000),
-                lastError: err.message,
-                updatedAt: new Date(),
-              })
-              .where(eq(webhookRetryQueue.id, entry.id)).returning();
-          }
-          failed++;
-        }
-      } catch (err: any) {
-        await db.update(webhookRetryQueue)
-          .set({ status: "exhausted", lastError: err.message, updatedAt: new Date() })
-          .where(eq(webhookRetryQueue.id, entry.id)).returning();
-        failed++;
-      }
+    try {
+      return await processPendingWebhookRetries(50);
+    } catch (err) {
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: err instanceof Error ? err.message : "Webhook retry processing failed",
+      });
     }
-
-    return { processed: pending.length, succeeded, failed };
   }),
 
   // List retry queue entries

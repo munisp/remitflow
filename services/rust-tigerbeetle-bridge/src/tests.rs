@@ -49,10 +49,12 @@ mod tests {
 
     #[test]
     fn op_error_serializes_to_ts_contract_shape() {
-        let err = OpError { index: 3, reason: "ExceedsDebits".into(), code: "ExceedsDebits".into() };
+        // TS consumes `Number(err.code)` — code must be the NUMERIC
+        // TigerBeetle result code, with the human name carried by `reason`.
+        let err = OpError { index: 3, reason: "ExceedsDebits".into(), code: 33 };
         let v = serde_json::to_value(&err).unwrap();
         assert_eq!(v["index"], 3);
-        assert!(v.get("reason").is_some());
-        assert!(v.get("code").is_some());
+        assert_eq!(v["reason"], "ExceedsDebits");
+        assert!(v["code"].is_number(), "code must serialize as a number for Number(err.code)");
     }
 }

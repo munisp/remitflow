@@ -24,9 +24,12 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-postgres = "0.7"
 deadpool-postgres = "0.12"
 # The only real Rust client for the TigerBeetle binary wire protocol.
-# Pinned to the line matching the deployed server image
-# ghcr.io/tigerbeetle/tigerbeetle:0.16.63.
-tigerbeetle-unofficial = "0.16"
+# The crate version format is <crate-version>+<tigerbeetle-version> where the
+# TB component MUST exactly match the deployed server image
+# ghcr.io/tigerbeetle/tigerbeetle:0.16.63 (clients are not backward compatible
+# with older clusters). 0.14.13 is published ONLY as 0.14.13+0.16.63, so this
+# exact pin selects it (Cargo ignores the +metadata in requirements).
+tigerbeetle-unofficial = "=0.14.13"
 
 [profile.release]
 opt-level = 3

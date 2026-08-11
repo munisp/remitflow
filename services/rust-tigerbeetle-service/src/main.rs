@@ -236,16 +236,30 @@ async fn db_create_account(pool: &PgPool, id: &str, user_id: Option<i64>, accoun
     Ok(())
 }
 
-async fn db_record_transfer(pool: &PgPool, id: &str, debit_id: &str, credit_id: &str, amount: u128, pending_id: Option<&str>, ledger: u32, code: u16, flags: u16, status: &str, idempotency_key: Option<&str>) -> Result<(), sqlx::Error> {
+/// Parameters for recording a transfer row in tb_transfers.
+struct TransferRecord<'a> {
+    id: &'a str,
+    debit_id: &'a str,
+    credit_id: &'a str,
+    amount: u128,
+    pending_id: Option<&'a str>,
+    ledger: u32,
+    code: u16,
+    flags: u16,
+    status: &'a str,
+    idempotency_key: Option<&'a str>,
+}
+
+async fn db_record_transfer(pool: &PgPool, rec: &TransferRecord<'_>) -> Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO tb_transfers (id, debit_account_id, credit_account_id, amount, pending_id, ledger, code, flags, status, idempotency_key)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (id) DO UPDATE SET status = $9"
     )
-    .bind(id).bind(debit_id).bind(credit_id)
-    .bind(amount.to_string()).bind(pending_id)
-    .bind(ledger as i32).bind(code as i16).bind(flags as i16)
-    .bind(status).bind(idempotency_key)
+    .bind(rec.id).bind(rec.debit_id).bind(rec.credit_id)
+    .bind(rec.amount.to_string()).bind(rec.pending_id)
+    .bind(rec.ledger as i32).bind(rec.code as i16).bind(rec.flags as i16)
+    .bind(rec.status).bind(rec.idempotency_key)
     .execute(pool).await?;
     Ok(())
 }
@@ -253,29 +267,29 @@ async fn db_record_transfer(pool: &PgPool, id: &str, debit_id: &str, credit_id: 
 /// Records a transfer and updates both account balances atomically in a single
 /// DB transaction, so a failure between the insert and the balance updates can
 /// never leave the ledger in an inconsistent state.
-async fn db_record_transfer_atomic(pool: &PgPool, id: &str, debit_id: &str, credit_id: &str, amount: u128, ledger: u32, code: u16, flags: u16, status: &str, idempotency_key: Option<&str>, is_pending: bool) -> Result<(), sqlx::Error> {
+async fn db_record_transfer_atomic(pool: &PgPool, rec: &TransferRecord<'_>, is_pending: bool) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO tb_transfers (id, debit_account_id, credit_account_id, amount, pending_id, ledger, code, flags, status, idempotency_key)
          VALUES ($1, $2, $3, $4, NULL, $5, $6, $7, $8, $9)
          ON CONFLICT (id) DO UPDATE SET status = $8"
     )
-    .bind(id).bind(debit_id).bind(credit_id)
-    .bind(amount.to_string())
-    .bind(ledger as i32).bind(code as i16).bind(flags as i16)
-    .bind(status).bind(idempotency_key)
+    .bind(rec.id).bind(rec.debit_id).bind(rec.credit_id)
+    .bind(rec.amount.to_string())
+    .bind(rec.ledger as i32).bind(rec.code as i16).bind(rec.flags as i16)
+    .bind(rec.status).bind(rec.idempotency_key)
     .execute(&mut *tx).await?;
 
     if is_pending {
         sqlx::query("UPDATE tb_accounts SET debits_pending = debits_pending + $1, updated_at = NOW() WHERE id = $2")
-            .bind(amount.to_string()).bind(debit_id).execute(&mut *tx).await?;
+            .bind(rec.amount.to_string()).bind(rec.debit_id).execute(&mut *tx).await?;
         sqlx::query("UPDATE tb_accounts SET credits_pending = credits_pending + $1, updated_at = NOW() WHERE id = $2")
-            .bind(amount.to_string()).bind(credit_id).execute(&mut *tx).await?;
+            .bind(rec.amount.to_string()).bind(rec.credit_id).execute(&mut *tx).await?;
     } else {
         sqlx::query("UPDATE tb_accounts SET debits_posted = debits_posted + $1, updated_at = NOW() WHERE id = $2")
-            .bind(amount.to_string()).bind(debit_id).execute(&mut *tx).await?;
+            .bind(rec.amount.to_string()).bind(rec.debit_id).execute(&mut *tx).await?;
         sqlx::query("UPDATE tb_accounts SET credits_posted = credits_posted + $1, updated_at = NOW() WHERE id = $2")
-            .bind(amount.to_string()).bind(credit_id).execute(&mut *tx).await?;
+            .bind(rec.amount.to_string()).bind(rec.credit_id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -387,7 +401,8 @@ async fn get_account(
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
     // Query from PostgreSQL (source of truth for balances — reconciled with TB)
-    let result: Option<(Option<i64>, i16, String, String, String, String, String)> = sqlx::query_as(
+    type AccountRow = (Option<i64>, i16, String, String, String, String, String);
+    let result: Option<AccountRow> = sqlx::query_as(
         "SELECT user_id, account_type, currency,
                 debits_pending::TEXT, debits_posted::TEXT,
                 credits_pending::TEXT, credits_posted::TEXT
@@ -494,11 +509,19 @@ async fn initiate_transfer(
     let status = if is_pending { "pending" } else { "posted" };
 
     // Record transfer and update balances atomically in PostgreSQL (FAIL-CLOSED)
-    if let Err(e) = db_record_transfer_atomic(
-        &state.db_pool, &transfer_id_str, &debit_id, &credit_id,
-        amount_minor, 1, transfer_code, flags, status,
-        req.idempotency_key.as_deref(), is_pending,
-    ).await {
+    let rec = TransferRecord {
+        id: &transfer_id_str,
+        debit_id: &debit_id,
+        credit_id: &credit_id,
+        amount: amount_minor,
+        pending_id: None,
+        ledger: 1,
+        code: transfer_code,
+        flags,
+        status,
+        idempotency_key: req.idempotency_key.as_deref(),
+    };
+    if let Err(e) = db_record_transfer_atomic(&state.db_pool, &rec, is_pending).await {
         error!(err = %e, "[TigerBeetle] FAIL-CLOSED: Transfer persistence failed");
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
             "error": "TRANSFER_FAILED",
@@ -570,7 +593,7 @@ async fn post_pending_transfer(
     };
 
     let original_amount: u128 = amount_str.parse().unwrap_or(0);
-    let post_amount = req.amount.map(|a| amount_to_minor(a)).unwrap_or(original_amount);
+    let post_amount = req.amount.map(amount_to_minor).unwrap_or(original_amount);
 
     if post_amount > original_amount {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
@@ -584,11 +607,19 @@ async fn post_pending_transfer(
     let post_id = Uuid::new_v4().as_u128().to_string();
 
     // Record the post-pending transfer
-    let _ = db_record_transfer(
-        &state.db_pool, &post_id, &debit_id, &credit_id,
-        post_amount, Some(pending_id), 1, code as u16, transfer_flags::POST_PENDING, "posted",
-        None,
-    ).await;
+    let rec = TransferRecord {
+        id: &post_id,
+        debit_id: &debit_id,
+        credit_id: &credit_id,
+        amount: post_amount,
+        pending_id: Some(pending_id),
+        ledger: 1,
+        code: code as u16,
+        flags: transfer_flags::POST_PENDING,
+        status: "posted",
+        idempotency_key: None,
+    };
+    let _ = db_record_transfer(&state.db_pool, &rec).await;
 
     // Move from pending to posted
     sqlx::query("UPDATE tb_accounts SET debits_pending = GREATEST(0, debits_pending - $1), debits_posted = debits_posted + $1, updated_at = NOW() WHERE id = $2")
@@ -647,11 +678,19 @@ async fn void_pending_transfer(
     let void_id = Uuid::new_v4().as_u128().to_string();
 
     // Record void transfer
-    let _ = db_record_transfer(
-        &state.db_pool, &void_id, &debit_id, &credit_id,
-        amount, Some(pending_id), 1, code as u16, transfer_flags::VOID_PENDING, "voided",
-        None,
-    ).await;
+    let rec = TransferRecord {
+        id: &void_id,
+        debit_id: &debit_id,
+        credit_id: &credit_id,
+        amount,
+        pending_id: Some(pending_id),
+        ledger: 1,
+        code: code as u16,
+        flags: transfer_flags::VOID_PENDING,
+        status: "voided",
+        idempotency_key: None,
+    };
+    let _ = db_record_transfer(&state.db_pool, &rec).await;
 
     // Release pending amounts
     sqlx::query("UPDATE tb_accounts SET debits_pending = GREATEST(0, debits_pending - $1), updated_at = NOW() WHERE id = $2")

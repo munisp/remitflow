@@ -7,15 +7,28 @@ LABEL org.opencontainers.image.vendor="RemitFlow" \
 
 WORKDIR /app
 
+# libclang-dev: required by bindgen (tigerbeetle-unofficial-sys build).
+# curl + xz-utils: required by the vendored zig download.sh which fetches and
+# extracts the zig toolchain used to build the tb_client C library.
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    libclang-dev \
+    curl \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Generate a lockfile inside the build so the dependency graph is pinned and
 # reproducible even though no Cargo.lock is checked into the repo.
 COPY Cargo.toml ./
-RUN cargo generate-lockfile
+RUN cargo generate-lockfile && cargo fetch
+
+# The tigerbeetle-unofficial-sys crate vendors TigerBeetle 0.16.63's zig
+# download.sh, which hardcodes the old pkg.machengine.org mirror. That mirror
+# now answers 307 redirects to pkg.hexops.org and the script's curl invocation
+# does not follow redirects — teach it to, or the tb_client C build fails.
+RUN find /usr/local/cargo/registry/src -path '*tigerbeetle-unofficial-sys*/tigerbeetle/zig/download.sh' \
+      -exec sed -i 's/curl --silent --output/curl --silent --location --output/' {} +
 
 # Cache dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs
