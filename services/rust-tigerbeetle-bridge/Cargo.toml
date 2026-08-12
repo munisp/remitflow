@@ -29,7 +29,7 @@ deadpool-postgres = "0.12"
 # ghcr.io/tigerbeetle/tigerbeetle:0.16.63 (clients are not backward compatible
 # with older clusters). 0.14.13 is published ONLY as 0.14.13+0.16.63, so this
 # exact pin selects it (Cargo ignores the +metadata in requirements).
-tigerbeetle-unofficial = "=0.14.13"
+tigerbeetle-unofficial = "=0.14.28"
 
 [profile.release]
 opt-level = 3
