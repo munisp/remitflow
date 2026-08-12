@@ -22,7 +22,7 @@ dotenvy = "0.15"
 prometheus = { version = "0.14", features = ["process"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-postgres = "0.7"
-deadpool-postgres = "0.12"
+deadpool-postgres = "0.14"
 # The only real Rust client for the TigerBeetle binary wire protocol.
 # The crate version format is <crate-version>+<tigerbeetle-version> where the
 # TB component MUST exactly match the deployed server image
