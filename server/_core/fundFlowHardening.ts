@@ -489,7 +489,7 @@ export function buildAtomicSwapSQL(
   return `
     WITH debit AS (
       UPDATE wallets
-      SET balance = CAST(CAST(balance AS DECIMAL(18,2)) - ${fromAmount} AS VARCHAR),
+      SET balance = CAST(balance AS DECIMAL(18,2)) - ${fromAmount},
           fencing_token = COALESCE('${fencingToken || ""}', fencing_token),
           updated_at = NOW()
       WHERE user_id = ${userId}
@@ -500,7 +500,7 @@ export function buildAtomicSwapSQL(
     ),
     credit AS (
       UPDATE wallets
-      SET balance = CAST(CAST(balance AS DECIMAL(18,2)) + ${toAmount} AS VARCHAR),
+      SET balance = CAST(balance AS DECIMAL(18,2)) + ${toAmount},
           fencing_token = COALESCE('${fencingToken || ""}', fencing_token),
           updated_at = NOW()
       WHERE user_id = ${userId}
@@ -535,7 +535,7 @@ export function buildFencedUpdateSQL(
 
   return `
     UPDATE wallets
-    SET balance = CAST(CAST(balance AS DECIMAL(18,2)) ${operator} ${amount} AS VARCHAR),
+    SET balance = CAST(balance AS DECIMAL(18,2)) ${operator} ${amount},
         fencing_token = '${fencingToken}',
         updated_at = NOW()
     WHERE user_id = ${userId}

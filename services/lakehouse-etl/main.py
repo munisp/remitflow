@@ -52,8 +52,18 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow@postg
 LAKEHOUSE_PATH = os.getenv("LAKEHOUSE_PATH", "/data/lakehouse")
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
 S3_BUCKET = os.getenv("S3_BUCKET", "remitflow-lakehouse")
-S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "minioadmin")
-S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "minioadmin")
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known defaults."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[lakehouse-etl] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure S3/MinIO credentials explicitly."
+        )
+    return value
+
+S3_ACCESS_KEY = _require_env("S3_ACCESS_KEY")
+S3_SECRET_KEY = _require_env("S3_SECRET_KEY")
 PIPELINE_INTERVAL_SECS = int(os.getenv("PIPELINE_INTERVAL_SECS", "3600"))
 CDC_SLOT_NAME = os.getenv("CDC_SLOT_NAME", "remitflow_lakehouse_cdc")
 CDC_ENABLED = os.getenv("CDC_ENABLED", "true").lower() == "true"

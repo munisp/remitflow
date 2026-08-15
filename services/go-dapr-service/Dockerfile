@@ -8,12 +8,9 @@ LABEL org.opencontainers.image.vendor="RemitFlow" \
       security.cve-2024-32650="mitigated"
 
 RUN apk add --no-cache git ca-certificates tzdata
-# Create the non-root user in the builder (scratch has no shell for adduser)
-RUN addgroup --system --gid 1001 appgroup && \
-    adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
 WORKDIR /app
-COPY go.mod ./
-RUN go mod download 2>/dev/null || true
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-w -s" \
@@ -22,11 +19,12 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
-COPY --from=builder /etc/passwd /etc/group /etc/
 COPY --from=builder /app/dapr-service /dapr-service
 EXPOSE 8097
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["/dapr-service", "-health"]
+RUN addgroup --system --gid 1001 appgroup && \
+    adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
 USER appuser
 
 ENTRYPOINT ["/dapr-service"]

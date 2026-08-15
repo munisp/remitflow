@@ -1,0 +1,21 @@
+{
+  "name": "remitflow-mobile-rn-feature-tree",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RemitFlow React Native feature tree (services + screens). Standalone typecheck scaffold; the shipping app lives in uis/react-native.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@trpc/server": "^11.16.0",
+    "@types/react": "^18.2.0",
+    "typescript": "^5.3.0",
+    "zod": "^3.22.0"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.8.0",
+    "@trpc/client": "^11.16.0",
+    "@trpc/react-query": "^11.16.0",
+    "superjson": "^2.2.6"
+  }
+}

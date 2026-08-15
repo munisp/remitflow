@@ -32,11 +32,21 @@ import httpx
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 BCB_API_URL = os.getenv("BCB_PIX_URL", "https://pix.bcb.gov.br/api/v2")
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known defaults."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[pix-adapter] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure PIX credentials explicitly."
+        )
+    return value
+
 PIX_CLIENT_ID = os.getenv("PIX_CLIENT_ID", "remitflow-pix-client")
-PIX_CLIENT_SECRET = os.getenv("PIX_CLIENT_SECRET", "pix-client-secret-001")
+PIX_CLIENT_SECRET = _require_env("PIX_CLIENT_SECRET")
 PIX_CERT_PATH = os.getenv("PIX_CERT_PATH", "/certs/pix-cert.pem")
 PIX_KEY_PATH = os.getenv("PIX_KEY_PATH", "/certs/pix-key.pem")
-INTERNAL_API_KEY = os.getenv("PIX_INTERNAL_API_KEY", "pix-internal-key-001")
+INTERNAL_API_KEY = _require_env("PIX_INTERNAL_API_KEY")
 
 logging.basicConfig(level=logging.INFO, format="[PIX] %(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

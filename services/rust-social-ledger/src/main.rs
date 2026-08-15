@@ -617,14 +617,42 @@ fn extract_array(body: &str, key: &str) -> Vec<String> {
         .collect()
 }
 
+/// CORS policy: origins come from ALLOWED_ORIGINS (comma-separated).
+/// "*" is only ever emitted outside production; in production an unset
+/// allowlist means no ACAO header at all (same-origin only).
+fn cors_allow_origin_header() -> Option<String> {
+    let is_prod = std::env::var("APP_ENV").map(|v| v == "production").unwrap_or(false)
+        || std::env::var("NODE_ENV").map(|v| v == "production").unwrap_or(false);
+    let allowed: Vec<String> = std::env::var("ALLOWED_ORIGINS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !allowed.is_empty() {
+        // Reflect the first configured origin; this service has no per-request
+        // Origin parsing, so only the configured allowlist is ever advertised.
+        return Some(allowed[0].clone());
+    }
+    if is_prod {
+        None
+    } else {
+        Some("*".to_string())
+    }
+}
+
 fn http_response(status: u16, body: &str) -> String {
     let status_text = match status {
         200 => "OK", 201 => "Created", 400 => "Bad Request",
         404 => "Not Found", 410 => "Gone", 500 => "Internal Server Error",
         _ => "Unknown",
     };
+    let cors_header = match cors_allow_origin_header() {
+        Some(origin) => format!("Access-Control-Allow-Origin: {}\r\n", origin),
+        None => String::new(),
+    };
     format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
-        status, status_text, body.len(), body
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}\r\n{}",
+        status, status_text, body.len(), cors_header, body
     )
 }

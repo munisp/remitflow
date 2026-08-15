@@ -13,6 +13,29 @@ const SMTP_USER = process.env.SMTP_USER ?? "";
 const SMTP_PASS = process.env.SMTP_PASS ?? "";
 const SMTP_FROM = process.env.SMTP_FROM ?? "RemitFlow <noreply@remitflow.io>";
 const SMTP_SECURE = process.env.SMTP_SECURE === "true";
+// SMTP_TLS_INSECURE=true disables SMTP TLS certificate verification.
+// Development-only escape hatch (e.g. MailHog/self-signed local certs);
+// it throws in production.
+const SMTP_TLS_INSECURE = process.env.SMTP_TLS_INSECURE === "true";
+
+function isProduction(): boolean {
+  return process.env.NODE_ENV === "production" || process.env.APP_ENV === "production";
+}
+
+function resolveTlsOptions(): { rejectUnauthorized: boolean } | undefined {
+  if (!SMTP_TLS_INSECURE) return undefined; // verify certificates by default
+  if (isProduction()) {
+    throw new Error(
+      "[email] SMTP_TLS_INSECURE=true is forbidden in production: SMTP TLS " +
+        "certificate verification cannot be disabled.",
+    );
+  }
+  logger.warn(
+    "[email] SMTP_TLS_INSECURE=true: SMTP TLS certificate verification is " +
+      "DISABLED. Never use this outside local development.",
+  );
+  return { rejectUnauthorized: false };
+}
 
 let _transporter: nodemailer.Transporter | null = null;
 
@@ -23,7 +46,7 @@ function getTransporter(): nodemailer.Transporter {
     port: SMTP_PORT,
     secure: SMTP_SECURE,
     auth: SMTP_USER ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
-    tls: { rejectUnauthorized: false },
+    tls: resolveTlsOptions(),
     pool: true,
     maxConnections: 5,
   });

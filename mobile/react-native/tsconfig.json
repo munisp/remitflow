@@ -1,0 +1,28 @@
+{
+  // Minimal, honest typecheck config for the mobile/react-native src/ tree.
+  // The tree has no bundler/app entry yet; this config exists so CI can check
+  // the internal consistency of OUR code (services + screens) with `npm run typecheck`.
+  //
+  // SHIM POLICY (explicit): the `react-native` package is not installed in this
+  // tree, so RN primitives (View/Text/StyleSheet/AppState/Linking/...) and RN
+  // runtime globals (fetch/AbortController/timers) are declared as TYPE-LEVEL
+  // shims under types/. These shims only describe the real react-native APIs
+  // our code consumes; they are not runtime code and never ship in a bundle.
+  "compilerOptions": {
+    "target": "ES2021",
+    "lib": ["ES2021"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-native",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "noUnusedLocals": false,
+    "types": ["react"]
+  },
+  "include": ["src", "types"]
+}

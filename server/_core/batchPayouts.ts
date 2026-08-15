@@ -163,40 +163,18 @@ export const batchPayoutsRouter = router({
         throw new Error(`Cannot execute batch in ${batch.status} state`);
       }
 
-      batch.status = "executing";
-      batch.executedAt = new Date().toISOString();
-      batch.dryRun = false;
-
-      // Simulate execution
-      let completed = 0;
-      let failed = 0;
-
-      for (const recipient of batch.recipients) {
-        if (Math.random() > 0.02) { // 98% success rate
-          recipient.status = "completed";
-          recipient.txHash = `0x${randomBytes(32).toString("hex")}`;
-          completed++;
-        } else {
-          recipient.status = "failed";
-          recipient.error = "Insufficient gas";
-          failed++;
-        }
-      }
-
-      // Determine final status:
-      // - All succeeded: 'completed'
-      // - All failed: 'failed'
-      // - Partial failures: 'executing' (async retry will be triggered)
-      batch.status = failed === 0 ? "completed" : failed === batch.recipients.length ? "failed" : "executing";
-      batch.completedAt = new Date().toISOString();
-
-      return {
-        batchId: batch.batchId,
-        status: batch.status,
-        completed,
-        failed,
-        total: batch.recipientCount,
-      };
+      // NO on-chain payout executor is wired to this router. Fabricating
+      // transaction hashes or simulated success rates for real money movement
+      // is unacceptable; fail loudly until a real executor (chain signer +
+      // broadcast + confirmation tracking) is integrated.
+      logger.error(
+        `[batchPayouts] execute called for batch ${batch.batchId} but no on-chain payout executor is configured`,
+      );
+      throw new Error(
+        "Batch payout execution is unavailable: no on-chain payout executor is " +
+          "configured. The batch was NOT executed and no funds moved; its state " +
+          "is unchanged.",
+      );
     }),
 
   // Retry failed recipients
@@ -209,18 +187,17 @@ export const batchPayoutsRouter = router({
       const failedRecipients = batch.recipients.filter(r => r.status === "failed");
       if (failedRecipients.length === 0) throw new Error("No failed recipients to retry");
 
-      let retried = 0;
-      for (const recipient of failedRecipients) {
-        recipient.status = "completed";
-        recipient.txHash = `0x${randomBytes(32).toString("hex")}`;
-        recipient.error = undefined;
-        retried++;
-      }
-
-      const stillFailed = batch.recipients.filter(r => r.status === "failed").length;
-      batch.status = stillFailed === 0 ? "completed" : "partially_failed";
-
-      return { retried, stillFailed };
+      // NO on-chain payout executor is wired to this router. Refuse to
+      // fabricate transaction hashes for retried recipients; fail loudly
+      // until a real executor is integrated (see execute above).
+      logger.error(
+        `[batchPayouts] retryFailed called for batch ${batch.batchId} but no on-chain payout executor is configured`,
+      );
+      throw new Error(
+        "Batch payout retry is unavailable: no on-chain payout executor is " +
+          "configured. No recipients were retried and no funds moved; the " +
+          "batch state is unchanged.",
+      );
     }),
 
   // Get batch details

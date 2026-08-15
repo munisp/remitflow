@@ -190,7 +190,7 @@ export default function ODLSettlementPage() {
   // Quote state
   const [quote, setQuote] = useState<ODLQuote | null>(null);
   const [quoteCountdown, setQuoteCountdown] = useState(0);
-  const countdownRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Settlement state
   const [settlement, setSettlement] = useState<ODLSettlement | null>(null);
@@ -199,7 +199,7 @@ export default function ODLSettlementPage() {
   const [isLoading, setIsLoading] = useState(false);
 
   // Polling ref
-  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ── Quote countdown ─────────────────────────────────────────────────────────
 

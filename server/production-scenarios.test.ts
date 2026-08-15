@@ -283,12 +283,29 @@ describe("S3: Employer — Stablecoin Payroll", () => {
     batchId = batch.batchId;
   });
 
-  it("Step 3: Execute batch payout", async () => {
-    const execution = await caller.batchPayouts.execute({
-      batchId,
-    });
-    expect(execution).toBeDefined();
-    expect(execution.status).toMatch(/executing|completed/);
+  it("Step 3: Execute batch payout — rejected, no executor wired, state unchanged", async () => {
+    // batchPayouts.execute must refuse loudly: no on-chain payout executor is
+    // wired, and fabricating txHashes/success for real money movement is a
+    // critical defect (audit S6). Assert rejection AND unchanged batch state.
+    await expect(
+      caller.batchPayouts.execute({ batchId }),
+    ).rejects.toThrow(/no on-chain payout executor/i);
+    await expect(
+      caller.batchPayouts.retryFailed({ batchId }),
+    ).rejects.toThrow(/no on-chain payout executor/i);
+
+    const batch = await caller.batchPayouts.get({ batchId });
+    expect(batch).toBeDefined();
+    // State must be exactly as created: still a draft dry-run batch, no
+    // fabricated txHashes, no fabricated recipient completions.
+    expect(batch.status).toBe("draft");
+    expect(batch.dryRun).toBe(true);
+    expect(batch.executedAt).toBeUndefined();
+    expect(batch.completedAt).toBeUndefined();
+    for (const recipient of batch.recipients) {
+      expect(recipient.txHash).toBeUndefined();
+      expect(recipient.status).not.toBe("completed");
+    }
   });
 
   it("Step 4: Execute payroll run", async () => {

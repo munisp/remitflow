@@ -63,11 +63,21 @@ logger = logging.getLogger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known defaults."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-lakehouse] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure S3/MinIO credentials explicitly."
+        )
+    return value
+
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/remitflow")
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
 S3_BUCKET = os.getenv("LAKEHOUSE_BUCKET", "remitflow-lakehouse")
-S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "minioadmin")
-S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "minioadmin")
+S3_ACCESS_KEY = _require_env("S3_ACCESS_KEY")
+S3_SECRET_KEY = _require_env("S3_SECRET_KEY")
 LAKEHOUSE_PREFIX = os.getenv("LAKEHOUSE_PREFIX", "tables")
 BATCH_SIZE = int(os.getenv("SYNC_BATCH_SIZE", "10000"))
 SYNC_INTERVAL_SECONDS = int(os.getenv("LAKEHOUSE_SYNC_INTERVAL_SECONDS", "900"))

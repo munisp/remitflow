@@ -38,6 +38,17 @@ _DB_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql://remitflow:remitflow123@localhost:5432/remitflow",
 )
+
+# CORS allowlist (comma-separated). Never fall back to "*": the ACAO header is
+# only emitted for origins explicitly on this list.
+ALLOWED_ORIGINS = {
+    o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()
+}
+if not ALLOWED_ORIGINS:
+    logging.getLogger(__name__).warning(
+        "[pboc-compliance] ALLOWED_ORIGINS is not set: cross-origin requests "
+        "will receive no CORS headers (same-origin only)."
+    )
 _db_pool = None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [PBoC] %(message)s")
@@ -247,10 +258,20 @@ class PBoCHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         logger.info(format % args)
 
+    def _cors_origin(self) -> Optional[str]:
+        """Echo the request Origin only if it is on the explicit allowlist."""
+        origin = self.headers.get("Origin")
+        if origin and origin in ALLOWED_ORIGINS:
+            return origin
+        return None
+
     def _send_json(self, status: int, data: Any):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self._cors_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.end_headers()
         self.wfile.write(json.dumps(data, default=str).encode())
 
@@ -262,7 +283,10 @@ class PBoCHandler(http.server.BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self._cors_origin()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.end_headers()

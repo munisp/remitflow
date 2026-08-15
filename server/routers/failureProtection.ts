@@ -168,7 +168,7 @@ export const bnplProtectionRouter = router({
 
         if (refundAmount > 0) {
           await db.execute(sql`
-            UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) + ${refundAmount} AS VARCHAR), "updatedAt" = NOW()
+            UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${refundAmount}, "updatedAt" = NOW()
             WHERE "userId" = ${dispute.user_id} AND currency = 'NGN'
           `);
         }
@@ -292,7 +292,7 @@ export const agentProtectionRouter = router({
       if (input.resolution === "refund_customer") {
         const amount = input.refundAmount ?? dispute.expected_amount;
         await db.execute(sql`
-          UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) + ${amount} AS VARCHAR), "updatedAt" = NOW()
+          UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${amount}, "updatedAt" = NOW()
           WHERE "userId" = ${dispute.customer_id} AND currency = 'NGN'
         `);
         await notify(db, dispute.customer_id, "agent_dispute_resolved",
@@ -402,7 +402,7 @@ export const transferProtectionRouter = router({
       if (amount <= 0) continue;
 
       await db.execute(sql`
-        UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) + ${amount} AS VARCHAR), "updatedAt" = NOW()
+        UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${amount}, "updatedAt" = NOW()
         WHERE "userId" = ${tx.userId} AND currency = ${tx.from_currency}
       `);
       await db.execute(sql`
@@ -532,7 +532,7 @@ export const payrollProtectionRouter = router({
         const amount = input.adjustmentAmount ?? (dispute.expected_amount - dispute.received_amount);
         if (amount > 0) {
           await db.execute(sql`
-            UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) + ${amount} AS VARCHAR), "updatedAt" = NOW()
+            UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${amount}, "updatedAt" = NOW()
             WHERE "userId" = ${dispute.employee_user_id} AND currency = 'USD'
           `);
           await notify(db, dispute.employee_user_id, "payroll_dispute_resolved",
@@ -616,7 +616,7 @@ export const investorProtectionRouter = router({
         const refundAmount = Number(inv.amount_invested_usd) * (input.refundPercentage / 100);
         if (refundAmount > 0) {
           await db.execute(sql`
-            UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) + ${refundAmount} AS VARCHAR), "updatedAt" = NOW()
+            UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${refundAmount}, "updatedAt" = NOW()
             WHERE "userId" = ${inv.user_id} AND currency = 'USD'
           `);
           totalRefunded += refundAmount;
@@ -722,7 +722,7 @@ export const bondProtectionRouter = router({
       for (const holder of holders) {
         const share = (Number(holder.principal_usd) / totalPrincipal) * input.totalRecoveryUsd;
         await db.execute(sql`
-          UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) + ${share} AS VARCHAR), "updatedAt" = NOW()
+          UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${share}, "updatedAt" = NOW()
           WHERE "userId" = ${holder.user_id} AND currency = 'USD'
         `);
         await notify(db, holder.user_id, "bond_recovery",
@@ -966,7 +966,7 @@ export const cardProtectionRouter = router({
       if (input.resolution === "refund_customer" || input.resolution === "partial_refund") {
         const refund = input.refundAmount ?? cb.amount;
         await db.execute(sql`
-          UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) + ${refund} AS VARCHAR), "updatedAt" = NOW()
+          UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${refund}, "updatedAt" = NOW()
           WHERE "userId" = ${cb.user_id} AND currency = 'USD'
         `);
         await notify(db, cb.user_id, "chargeback_resolved",
@@ -1000,7 +1000,7 @@ export const cardProtectionRouter = router({
       if (!cb) throw new TRPCError({ code: "NOT_FOUND", message: "Chargeback not found or credit already applied" });
 
       await db.execute(sql`
-        UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) + ${cb.amount} AS VARCHAR), "updatedAt" = NOW()
+        UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${cb.amount}, "updatedAt" = NOW()
         WHERE "userId" = ${cb.user_id} AND currency = 'USD'
       `);
       await db.execute(sql`

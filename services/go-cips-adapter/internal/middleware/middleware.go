@@ -54,7 +54,7 @@ func RequestID() gin.HandlerFunc {
 func APIKeyAuth() gin.HandlerFunc {
 	apiKey := os.Getenv("CIPS_INTERNAL_API_KEY")
 	if apiKey == "" {
-		apiKey = "cips-internal-dev-key-001"
+		panic("CIPS_INTERNAL_API_KEY is not set: refusing to fall back to a well-known default credential; configure the internal API key explicitly")
 	}
 	return func(c *gin.Context) {
 		key := c.GetHeader("X-API-Key")

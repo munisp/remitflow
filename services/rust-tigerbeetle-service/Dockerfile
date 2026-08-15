@@ -10,8 +10,6 @@ RUN apk add --no-cache musl-dev pkgconfig openssl-dev
 WORKDIR /app
 COPY Cargo.toml ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs
-RUN cargo build --release 2>/dev/null || true
-RUN rm -f target/release/deps/service*
 COPY src ./src
 RUN cargo build --release
 
@@ -19,8 +17,8 @@ FROM alpine:3.19
 RUN apk --no-cache add ca-certificates curl
 WORKDIR /app
 COPY --from=builder /app/target/release/service .
-EXPOSE 8080
-HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD curl -f http://localhost:${PORT:-8080}/health || exit 1
+EXPOSE 8096
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD curl -f http://localhost:${PORT:-8096}/health || exit 1
 RUN addgroup --system --gid 1001 appgroup && \
     adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
 USER appuser

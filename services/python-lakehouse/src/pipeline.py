@@ -45,18 +45,28 @@ logger = logging.getLogger("lakehouse")
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known defaults."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-lakehouse] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure S3/MinIO credentials explicitly."
+        )
+    return value
+
 DB_URL = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
 LAKEHOUSE_PATH = os.getenv("LAKEHOUSE_PATH", "/data/lakehouse")
 S3_BUCKET = os.getenv("S3_BUCKET", "remitflow-lakehouse")
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
-S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "minioadmin")
-S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "minioadmin")
+S3_ACCESS_KEY = _require_env("S3_ACCESS_KEY")
+S3_SECRET_KEY = _require_env("S3_SECRET_KEY")
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "10000"))
 INCREMENTAL_LOOKBACK_HOURS = int(os.getenv("INCREMENTAL_LOOKBACK_HOURS", "2"))
 
 # ── PII Masking ───────────────────────────────────────────────────────────────
 
-PII_SALT = os.getenv("PII_SALT", "remitflow-lakehouse-pii-salt")
+PII_SALT = _require_env("PII_SALT")
 
 def mask_pii(value: Optional[str], field_type: str = "generic") -> Optional[str]:
     """One-way pseudonymization of PII fields for analytics."""

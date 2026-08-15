@@ -42,6 +42,42 @@ function optionalEnv(name: string): string {
   return process.env[name]?.trim() ?? "";
 }
 
+/**
+ * Keycloak client redirect URIs / web origins must never be wildcard ("*").
+ * Configure KEYCLOAK_CLIENT_REDIRECT_URIS (comma-separated) and APP_URL.
+ * When unset we derive them from APP_URL and warn loudly; if APP_URL is also
+ * unset we provision the client with no redirect URIs (safe default) and warn.
+ */
+function resolveKeycloakRedirectUris(): string[] {
+  const configured = optionalEnv("KEYCLOAK_CLIENT_REDIRECT_URIS")
+    .split(",")
+    .map((u) => u.trim())
+    .filter((u) => u.length > 0 && u !== "*");
+  if (configured.length > 0) return configured;
+  const appUrl = optionalEnv("APP_URL").replace(/\/+$/, "");
+  if (appUrl) {
+    logger.warn(
+      "[Keycloak] KEYCLOAK_CLIENT_REDIRECT_URIS not set; deriving redirect URIs from APP_URL",
+    );
+    return [`${appUrl}/*`];
+  }
+  logger.warn(
+    "[Keycloak] KEYCLOAK_CLIENT_REDIRECT_URIS and APP_URL are both unset; " +
+      "provisioning client with NO redirect URIs (authentication redirects will fail until configured)",
+  );
+  return [];
+}
+
+function resolveKeycloakWebOrigins(): string[] {
+  const appUrl = optionalEnv("APP_URL").replace(/\/+$/, "");
+  if (appUrl) return [appUrl];
+  logger.warn(
+    "[Keycloak] APP_URL is unset; provisioning client with NO web origins " +
+      "(CORS from the browser will fail until APP_URL is configured)",
+  );
+  return [];
+}
+
 const CONFIG = {
   redis: {
     url: requiredEnv("REDIS_URL"),
@@ -669,8 +705,8 @@ export class KeycloakIntegration {
           secret: CONFIG.keycloak.clientSecret || randomUUID(),
           directAccessGrantsEnabled: true,
           standardFlowEnabled: true,
-          redirectUris: ["*"],
-          webOrigins: ["*"],
+          redirectUris: resolveKeycloakRedirectUris(),
+          webOrigins: resolveKeycloakWebOrigins(),
         }),
       });
 
@@ -1119,7 +1155,8 @@ export class TigerBeetleIntegration {
     }));
     const results = await this.client.createAccounts(tbAccounts);
     if (results && results.length > 0) {
-      const errors = results.filter((r: { result: number }) => r.result !== 0 && r.result !== 1);
+      // TB exists(21) = account re-created with identical fields — idempotent no-op, not a failure.
+      const errors = results.filter((r: { result: number }) => r.result !== 0 && r.result !== 1 && r.result !== 21);
       if (errors.length > 0) {
         logger.error({ errors }, "[TigerBeetle] Account creation errors");
         if (this.isProduction) throw new Error(`[TigerBeetle] Account creation failed: ${JSON.stringify(errors)}`);
@@ -1143,7 +1180,7 @@ export class TigerBeetleIntegration {
       logger.warn({ transferId: transfer.id.toString() }, "[TigerBeetle] Skipping transfer (dev mode)");
       return;
     }
-    const flags = transfer.pending ? 1 : 0;
+    const flags = transfer.pending ? 2 : 0; // TransferFlags.pending
     const results = await this.client.createTransfers([{
       id: transfer.id,
       debit_account_id: transfer.debitAccountId,
@@ -1160,7 +1197,8 @@ export class TigerBeetleIntegration {
       timestamp: BigInt(0),
     }]);
     if (results && results.length > 0) {
-      const errors = results.filter((r: { result: number }) => r.result !== 0);
+      // TB exists(46) = idempotent replay of an identical transfer — dedup success, not failure.
+      const errors = results.filter((r: { result: number }) => r.result !== 0 && r.result !== 46);
       if (errors.length > 0) {
         const msg = `[TigerBeetle] Transfer failed: ${JSON.stringify(errors)}`;
         logger.error({ errors, transferId: transfer.id.toString() }, msg);
@@ -1196,11 +1234,12 @@ export class TigerBeetleIntegration {
       timeout: transfer.timeoutSeconds,
       ledger: transfer.ledger,
       code: transfer.code,
-      flags: 1,
+      flags: 2, // TransferFlags.pending
       timestamp: BigInt(0),
     }]);
     if (results && results.length > 0) {
-      const errors = results.filter((r: { result: number }) => r.result !== 0);
+      // TB exists(46) = idempotent replay of an identical transfer — dedup success, not failure.
+      const errors = results.filter((r: { result: number }) => r.result !== 0 && r.result !== 46);
       if (errors.length > 0) {
         throw new Error(`[TigerBeetle] Pending transfer failed: ${JSON.stringify(errors)}`);
       }
@@ -1219,11 +1258,22 @@ export class TigerBeetleIntegration {
       logger.warn({ pendingId: params.pendingId.toString() }, "[TigerBeetle] Skipping post-pending (dev mode)");
       return;
     }
+    // TB 0.16 posts exactly `amount` and releases the remainder of the hold —
+    // amount=0 would post ZERO and drain the pending transfer (silent funds loss).
+    // Default to the pending transfer's full amount, looked up from the cluster.
+    let amount = params.amount;
+    if (amount === undefined) {
+      const pending = await this.client.lookupTransfers([params.pendingId]);
+      if (!pending || pending.length === 0) {
+        throw new Error(`[TigerBeetle] Post-pending failed: pending transfer ${params.pendingId} not found`);
+      }
+      amount = pending[0].amount;
+    }
     const results = await this.client.createTransfers([{
       id: params.id,
       debit_account_id: BigInt(0),
       credit_account_id: BigInt(0),
-      amount: params.amount ?? BigInt(0),
+      amount,
       pending_id: params.pendingId,
       user_data_128: BigInt(0),
       user_data_64: BigInt(0),
@@ -1231,7 +1281,7 @@ export class TigerBeetleIntegration {
       timeout: 0,
       ledger: params.ledger,
       code: params.code,
-      flags: 2,
+      flags: 4, // TransferFlags.post_pending_transfer
       timestamp: BigInt(0),
     }]);
     if (results && results.length > 0) {
@@ -1265,7 +1315,7 @@ export class TigerBeetleIntegration {
       timeout: 0,
       ledger: params.ledger,
       code: params.code,
-      flags: 4,
+      flags: 8, // TransferFlags.void_pending_transfer
       timestamp: BigInt(0),
     }]);
     if (results && results.length > 0) {

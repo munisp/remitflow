@@ -20,8 +20,17 @@ const LAKEHOUSE_ETL_URL = process.env.LAKEHOUSE_ETL_URL || "http://localhost:808
 const LAKEHOUSE_SERVICE_URL = process.env.LAKEHOUSE_SERVICE_URL || "http://localhost:8101";
 const MINIO_URL = process.env.MINIO_URL || "http://localhost:9000";
 const MINIO_BUCKET = process.env.S3_BUCKET || "remitflow-lakehouse";
-const MINIO_ACCESS_KEY = process.env.S3_ACCESS_KEY || "minioadmin";
-const MINIO_SECRET_KEY = process.env.S3_SECRET_KEY || "minioadmin";
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(
+      `[lakehouse] ${name} is not set. Refusing to fall back to well-known ` +
+        `default credentials; configure S3/MinIO credentials explicitly.`,
+    );
+  }
+  return value;
+}
+
 const LAKEHOUSE_LOCAL_PATH = process.env.LAKEHOUSE_PATH || "/data/lakehouse";
 
 // ── Layer Definitions ─────────────────────────────────────────────────────────
@@ -77,8 +86,9 @@ function signS3Request(method: string, url: string, headers: Record<string, stri
   const service = "s3";
   const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
 
-  const accessKey = MINIO_ACCESS_KEY;
-  const secretKey = MINIO_SECRET_KEY;
+  // Resolved lazily so the local-filesystem dev fallback never requires S3 creds.
+  const accessKey = requireEnv("S3_ACCESS_KEY");
+  const secretKey = requireEnv("S3_SECRET_KEY");
 
   headers["x-amz-date"] = amzDate;
   headers["x-amz-content-sha256"] = crypto.createHash("sha256").update(body).digest("hex");
