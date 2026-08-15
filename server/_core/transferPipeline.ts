@@ -289,6 +289,20 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
       });
       result.tigerBeetleRecorded = true;
     } catch (err) {
+      // Business-correct fail-closed: insufficient available balance — whether from
+      // the validateBalance pre-check or from TB exceeds_credits(54)/exceeds_debits(55)
+      // when a concurrent hold wins the race — is a CLIENT error (4xx), not a ledger
+      // outage (5xx). Mapping it correctly keeps monitoring/alerting honest while the
+      // transfer still fails closed with zero ledger effect.
+      const ledgerErrMsg = err instanceof Error ? err.message : String(err);
+      if (ledgerErrMsg.includes("Insufficient funds") || /\"result\":\s*(54|55)\b/.test(ledgerErrMsg)) {
+        logger.warn({ transferId: input.transferId, err: ledgerErrMsg },
+          "[Pipeline] FAIL-CLOSED: insufficient funds for hold — rejecting transfer");
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Insufficient funds: amount exceeds available balance (including concurrent pending holds).",
+        });
+      }
       // In production this is FATAL — do not proceed without ledger entry
       if (process.env.NODE_ENV === "production") {
         logger.error({ err: err instanceof Error ? err.message : String(err), transferId: input.transferId },
