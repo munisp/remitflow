@@ -1,7 +1,7 @@
 fastapi==0.139.0
 uvicorn[standard]==0.51.0
 asyncpg==0.31.0
-pyarrow==25.0.0
+pyarrow==25.0.1
 boto3==1.43.49
 pydantic==2.13.4
 prometheus-client==0.25.0
