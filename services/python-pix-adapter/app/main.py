@@ -185,7 +185,7 @@ import json
 import psycopg2
 import psycopg2.extras
 
-_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+_DB_URL = _require_env("DATABASE_URL")
 _pg_conn = None
 
 def _get_pg():

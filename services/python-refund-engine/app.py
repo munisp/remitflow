@@ -13,16 +13,18 @@ Supports all payment rails: Stripe, PayPal, Flutterwave, M-Pesa, Wise, Mojaloop
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
 import uuid
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
 # ── PostgreSQL persistence ──────────────────────────────────────────────
@@ -30,7 +32,18 @@ import psycopg2
 import psycopg2.extras
 from contextlib import contextmanager
 
-_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-refund-engine] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
+_DB_URL = _require_env("DATABASE_URL")
 _db_pool = None
 
 def _get_db():
@@ -100,6 +113,59 @@ logger = logging.getLogger("refund-engine")
 
 app = FastAPI(title="RemitFlow Refund Engine", version="1.0.0")
 
+# ── Internal auth (fail-closed) ───────────────────────────────────────────────
+# Refund initiation moves money across payment rails; it must never be callable
+# without authentication. No default token: if INTERNAL_API_TOKEN is unset these
+# endpoints return 503.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
+
+
+def _lookup_transfer(transfer_id: str) -> dict:
+    """Look up the original transfer in the ledger to validate the refund.
+
+    Fail-closed: a refund can only be initiated against a transfer that exists
+    in the ledger. Returns {"amount": Decimal, "currency": str, "status": str}.
+    """
+    conn = _get_db()
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(
+            "SELECT amount, currency, status FROM transactions WHERE id::text = %s",
+            (transfer_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(404, f"Transfer {transfer_id} not found; refund cannot be validated")
+    amount = row["amount"]
+    try:
+        row["amount"] = Decimal(str(amount))
+    except (InvalidOperation, TypeError, ValueError):
+        raise HTTPException(422, "Original transfer amount is unreadable; refund refused")
+    return row
+
+
+def _claim_refund_slot(transfer_id: str, refund_id: str, payload: dict) -> bool:
+    """Atomically claim the refund slot for a transfer (durable, race-safe).
+
+    Uses a unique state row keyed by transfer so duplicate refunds are rejected
+    even across replicas and restarts. Returns False if already claimed.
+    """
+    conn = _get_db()
+    with conn.cursor() as cur:
+        cur.execute(
+            """INSERT INTO refund_engine_state (id, data, updated_at)
+               VALUES (%s, %s, NOW())
+               ON CONFLICT (id) DO NOTHING""",
+            (f"refund-by-transfer:{transfer_id}", psycopg2.extras.Json(payload)),
+        )
+        return cur.rowcount == 1
+
 
 class RefundStatus(str, Enum):
     PENDING = "pending"
@@ -124,7 +190,7 @@ class RefundRecord:
     id: str
     transfer_id: str
     user_id: int
-    amount: float
+    amount: str  # Decimal rendered as string — never float for money
     currency: str
     reason: RefundReason
     status: RefundStatus
@@ -138,7 +204,7 @@ class RefundRecord:
 class RefundRequest(BaseModel):
     transfer_id: str
     user_id: int
-    amount: float
+    amount: Decimal  # exact decimal money; validated against the ledger server-side
     currency: str
     reason: str
     rail: str
@@ -212,8 +278,13 @@ RAIL_SLA = {
 
 
 @app.post("/refund", response_model=RefundResponse)
-async def create_refund(req: RefundRequest):
-    """Initiate a refund for a failed transfer"""
+async def create_refund(req: RefundRequest, _auth: None = Depends(require_internal_auth)):
+    """Initiate a refund for a failed transfer.
+
+    The refund amount is validated server-side against the original transfer in
+    the ledger (never trusted from the caller), and duplicate refunds are
+    rejected durably via a unique Postgres row per transfer.
+    """
 
     # Validate reason
     try:
@@ -221,17 +292,34 @@ async def create_refund(req: RefundRequest):
     except ValueError:
         raise HTTPException(400, f"Invalid reason. Must be one of: {[r.value for r in RefundReason]}")
 
-    # Check for duplicate refund
-    for r in refund_store.values():
-        if r.transfer_id == req.transfer_id and r.status not in (RefundStatus.FAILED, RefundStatus.REJECTED):
-            raise HTTPException(409, f"Refund already exists for transfer {req.transfer_id}: {r.id}")
+    if req.amount <= Decimal("0"):
+        raise HTTPException(400, "Refund amount must be positive")
+
+    # Server-side amount validation: cap the refund at the original transfer
+    # amount and require currency to match.
+    original = _lookup_transfer(req.transfer_id)
+    if req.currency.upper() != str(original["currency"]).upper():
+        raise HTTPException(422, f"Currency mismatch: transfer is {original['currency']}, refund requested in {req.currency}")
+    if req.amount > original["amount"]:
+        raise HTTPException(422, f"Refund amount {req.amount} exceeds original transfer amount {original['amount']}")
+
+    refund_id = f"ref_{uuid.uuid4().hex[:12]}"
+
+    # Durable, atomic duplicate check (survives restarts and multiple replicas)
+    if not _claim_refund_slot(req.transfer_id, refund_id, {
+        "refund_id": refund_id,
+        "transfer_id": req.transfer_id,
+        "amount": str(req.amount),
+        "currency": req.currency,
+    }):
+        raise HTTPException(409, f"Refund already exists for transfer {req.transfer_id}")
 
     # Create refund record
     refund = RefundRecord(
-        id=f"ref_{uuid.uuid4().hex[:12]}",
+        id=refund_id,
         transfer_id=req.transfer_id,
         user_id=req.user_id,
-        amount=req.amount,
+        amount=str(req.amount),
         currency=req.currency,
         reason=reason,
         status=RefundStatus.PROCESSING,
@@ -242,6 +330,10 @@ async def create_refund(req: RefundRequest):
         error=None,
     )
     refund_store[refund.id] = refund
+    try:
+        db_log_event("refund_initiated", asdict(refund) | {"amount": str(refund.amount)})
+    except Exception as e:
+        logger.error(f"Failed to persist refund event for {refund.id}: {e}")
 
     # Process refund via rail
     processor = RAIL_PROCESSORS.get(req.rail)
@@ -272,7 +364,7 @@ async def create_refund(req: RefundRequest):
 
 
 @app.get("/refund/{refund_id}")
-async def get_refund(refund_id: str):
+async def get_refund(refund_id: str, _auth: None = Depends(require_internal_auth)):
     """Get refund status"""
     refund = refund_store.get(refund_id)
     if not refund:
@@ -281,14 +373,14 @@ async def get_refund(refund_id: str):
 
 
 @app.get("/refunds/user/{user_id}")
-async def get_user_refunds(user_id: int):
+async def get_user_refunds(user_id: int, _auth: None = Depends(require_internal_auth)):
     """Get all refunds for a user"""
     user_refunds = [asdict(r) for r in refund_store.values() if r.user_id == user_id]
     return {"refunds": user_refunds, "count": len(user_refunds)}
 
 
 @app.get("/refunds/pending")
-async def get_pending_refunds():
+async def get_pending_refunds(_auth: None = Depends(require_internal_auth)):
     """Get all pending refunds (admin)"""
     pending = [asdict(r) for r in refund_store.values() if r.status in (RefundStatus.PENDING, RefundStatus.PROCESSING)]
     return {"refunds": pending, "count": len(pending)}
