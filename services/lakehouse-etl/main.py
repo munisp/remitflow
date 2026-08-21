@@ -212,7 +212,7 @@ class IcebergCatalog:
             "last-sequence-number": 0,
             "last-updated-ms": int(time.time() * 1000),
             "last-column-id": len(schema),
-            "current-schema-id": 0,
+            "current-schema-id": None,
             "schemas": [{"schema-id": 0, "type": "struct", "fields": [
                 {"id": i + 1, "name": name, "required": False, "type": dtype}
                 for i, (name, dtype) in enumerate(schema.items())
@@ -220,13 +220,12 @@ class IcebergCatalog:
             "current-snapshot-id": None,
             "snapshots": [],
             "snapshot-log": [],
-            "sort-orders": [{"order-id": 0, "fields": []}],
-            "default-sort-order-id": 0,
+            "sort-orders": [],
+            "properties": {"write.format.default": "parquet", "commit.retry.max-retries": "4"},
             "partition-specs": [{"spec-id": 0, "fields": [
                 {"source-id": 1, "field-id": 1000, "name": "date_partition", "transform": "day"}
             ]}],
             "default-spec-id": 0,
-            "properties": {"write.format.default": "parquet", "commit.retry.num-retries": "4"},
         }
         await self.storage.put_object(key, json.dumps(metadata, indent=2).encode(), "application/json")
         self._catalogs[f"{layer}/{table}"] = metadata
@@ -250,7 +249,7 @@ class IcebergCatalog:
                 "added-records": str(added_rows),
                 "added-files-size": str(added_bytes),
                 "total-records": str(added_rows + sum(
-                    int(s["summary"].get("total-records", "0"))
+                    int(s["summary"].get("total-records", 0))
                     for s in metadata.get("snapshots", [])
                 )),
             },
@@ -733,6 +732,32 @@ _cdc = CDCManager()
 # ── Pipeline Runner ───────────────────────────────────────────────────────────
 
 # _last_extract_times — persisted to PostgreSQL table "lakehouse_extract_times" (see _db__last_extract_times_* helpers)
+
+
+def _db_exec(sql: str, params: Optional[tuple] = None):
+    """Execute a statement synchronously via psycopg2; return all rows for queries.
+
+    Used by _DbLastExtractTimes and init_pg_tables (psycopg2 '%s' paramstyle).
+    """
+    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall() if cur.description else []
+            conn.commit()
+            return rows
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _db_one(sql: str, params: Optional[tuple] = None):
+    """Execute a query synchronously and return the first row (or None)."""
+    rows = _db_exec(sql, params)
+    return rows[0] if rows else None
+
 
 class _DbLastExtractTimes:
     """PostgreSQL-backed store replacing in-memory dict '_last_extract_times'."""
