@@ -5,7 +5,7 @@
 import { createTRPCReact } from '@trpc/react-query';
 import { httpBatchLink } from '@trpc/client';
 import superjson from 'superjson';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { secureGet } from './secureStorage';
 import type { AppRouter } from '../../../../server/routers';
 
 export const trpc = createTRPCReact<AppRouter>();
@@ -18,7 +18,8 @@ export const trpcClient = trpc.createClient({
       url: `${API_BASE_URL}/api/trpc`,
       transformer: superjson,
       async headers() {
-        const sessionId = await AsyncStorage.getItem('session_id');
+        // CLI-005: session token from keystore-backed storage.
+        const sessionId = await secureGet('session_id');
         return sessionId ? { Cookie: `app_session_id=${sessionId}` } : {};
       },
     }),

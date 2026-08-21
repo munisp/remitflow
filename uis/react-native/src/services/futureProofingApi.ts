@@ -2,12 +2,13 @@
  * Future-proofing API service for React Native
  * Wraps tRPC calls for all future-proofing endpoints
  */
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { secureGet } from './secureStorage';
 
 const API_BASE_URL = process.env.REMITFLOW_API_URL ?? 'https://remitflow.app';
 
 async function getHeaders(): Promise<Record<string, string>> {
-  const sessionId = await AsyncStorage.getItem('session_id');
+  // CLI-005: session token from keystore-backed storage.
+  const sessionId = await secureGet('session_id');
   return {
     'Content-Type': 'application/json',
     ...(sessionId ? { Cookie: `app_session_id=${sessionId}` } : {}),

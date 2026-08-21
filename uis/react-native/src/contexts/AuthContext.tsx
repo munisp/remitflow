@@ -2,8 +2,11 @@
  * Authentication context for RemitFlow React Native app
  */
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { trpc } from '../services/trpc';
+import { secureSet, secureGet, secureDelete } from '../services/secureStorage';
+
+/** Keystore-backed key for the session token (CLI-005). */
+const SESSION_ID_KEY = 'session_id';
 
 interface User {
   id: string;
@@ -43,21 +46,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logoutMutation = trpc.auth.logout.useMutation();
 
   useEffect(() => {
-    AsyncStorage.getItem('session_id').then((id) => {
+    // CLI-005: session token lives in keystore-backed storage; legacy
+    // plaintext AsyncStorage copies are migrated and purged by secureGet.
+    secureGet(SESSION_ID_KEY).then((id) => {
       if (id) setSessionId(id);
       setIsLoading(false);
     });
   }, []);
 
   const setSession = async (id: string) => {
-    await AsyncStorage.setItem('session_id', id);
+    await secureSet(SESSION_ID_KEY, id);
     setSessionId(id);
     await refetch();
   };
 
   const logout = async () => {
     await logoutMutation.mutateAsync();
-    await AsyncStorage.removeItem('session_id');
+    await secureDelete(SESSION_ID_KEY);
     setSessionId(null);
   };
 

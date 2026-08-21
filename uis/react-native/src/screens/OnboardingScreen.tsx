@@ -6,6 +6,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { BiometricService } from '../services/biometricService';
 import { PushNotificationService } from '../services/pushNotificationService';
+import { PinService, PIN_ENABLED_KEY } from '../services/pinService';
 
 const { width } = Dimensions.get('window');
 
@@ -41,8 +42,15 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({ onComplete }
   const handlePinSubmit = async () => {
     if (pin.length < 4) { setPinError('PIN must be at least 4 digits'); return; }
     if (pin !== confirmPin) { setPinError('PINs do not match'); return; }
-    await AsyncStorage.setItem('user_pin', pin);
-    await AsyncStorage.setItem('pin_enabled', 'true');
+    try {
+      // CLI-005: only a salted hash of the PIN is stored, in keystore-backed
+      // storage — the plaintext PIN is never persisted.
+      await PinService.setPin(pin);
+    } catch {
+      setPinError('Could not secure your PIN on this device. Please try again.');
+      return;
+    }
+    await AsyncStorage.setItem(PIN_ENABLED_KEY, 'true');
     setPinError('');
     animateNext('biometrics');
   };
