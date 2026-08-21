@@ -298,6 +298,9 @@ export const developerPortalRouter = router({
     }))
     .mutation(async ({ input, ctx }) => {
       const userId = ctx.user.id;
+      // SEC-09: reject URLs targeting internal networks before storing
+      const { assertPublicWebhookUrl } = await import("../lib/http-client");
+      await assertPublicWebhookUrl(input.url);
       const secret = `whsec_${crypto.randomBytes(32).toString("hex")}`;
 
       const [webhook] = await db.insert(webhooks).values({

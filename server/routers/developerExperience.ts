@@ -11,6 +11,7 @@
  */
 
 import { z } from "zod";
+import { assertPublicWebhookUrl } from "../lib/http-client";
 import { createTRPCRouter, protectedProcedure, publicProcedure } from "../trpc";
 import { db } from "../db-shim";
 import { eq, desc, and, gte, sql } from "drizzle-orm";
@@ -74,6 +75,20 @@ async function deliverWebhook(
   let statusCode: number | null = null;
   let error: string | null = null;
   let success = false;
+
+  // SEC-09: re-validate the URL at delivery time (DNS may have changed since
+  // registration) — blocks SSRF to loopback/RFC1918/link-local targets.
+  try {
+    await assertPublicWebhookUrl(webhook.url);
+  } catch (e: any) {
+    const log: WebhookDeliveryLog = {
+      id: crypto.randomUUID(), webhookId, event, payload,
+      statusCode: null, latencyMs: null, success: false, attempt: 1,
+      deliveredAt: new Date().toISOString(), error: "Webhook URL rejected by SSRF policy",
+    };
+    deliveryLogs.unshift(log);
+    return log;
+  }
 
   try {
     const res = await fetch(webhook.url, {
@@ -163,6 +178,8 @@ export const developerExperienceRouter = createTRPCRouter({
       description: z.string().max(255).optional().default(""),
     }))
     .mutation(async ({ input, ctx }) => {
+      // SEC-09: reject URLs targeting internal networks before storing
+      await assertPublicWebhookUrl(input.url);
       const id = crypto.randomUUID();
       const webhook = {
         id, userId: ctx.user.id, url: input.url,
@@ -206,7 +223,9 @@ export const developerExperienceRouter = createTRPCRouter({
         status: "completed", test: true,
       };
       const log = await deliverWebhook(input.webhookId, input.event, testPayload);
-      return log;
+      // SEC-09: blind response — do not return statusCode/latencyMs/error,
+      // which would give callers an SSRF oracle (e.g. probing 169.254.169.254).
+      return { delivered: log.success, attemptedAt: log.deliveredAt };
     }),
 
   getWebhookDeliveryLogs: protectedProcedure
@@ -219,7 +238,9 @@ export const developerExperienceRouter = createTRPCRouter({
       if (!webhook || webhook.userId !== ctx.user.id) throw new Error("Webhook not found");
       const logs = deliveryLogs
         .filter(l => l.webhookId === input.webhookId)
-        .slice(0, input.limit);
+        .slice(0, input.limit)
+        // SEC-09: strip statusCode/latencyMs/error (SSRF oracle) from caller-visible logs
+        .map(l => ({ id: l.id, event: l.event, success: l.success, attempt: l.attempt, deliveredAt: l.deliveredAt }));
       return { logs, total: logs.length };
     }),
 

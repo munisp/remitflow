@@ -126,15 +126,13 @@ const swiftRouter = router({
 
       // 2FA enforcement for high-value SWIFT transfers (> $1,000 equivalent)
       if (estimatedUsd > 1000) {
-        const db = await getDb();
-        if (db) {
-          const [userRow] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
-          if (userRow?.totpEnabled) {
-            if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: SWIFT transfers over $1,000 require TOTP verification." });
-            const { verifyTOTP } = await import("../totp");
-            const valid = await verifyTOTP(input.totpCode, userRow.totpSecret ?? "");
-            if (!valid) throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code" });
-          }
+        // SEC-25: read enrollment from mfa_settings (with users.twoFactor* fallback)
+        const { getTotpEnrollment, verifyTOTP } = await import("../totp");
+        const enrollment = await getTotpEnrollment(ctx.user.id);
+        if (enrollment.dbAvailable && enrollment.enabled) {
+          if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: SWIFT transfers over $1,000 require TOTP verification." });
+          const valid = await verifyTOTP(input.totpCode, enrollment.secret ?? "");
+          if (!valid) throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code" });
         }
       }
 

@@ -92,6 +92,24 @@ async function callObService<T>(
   }
 }
 
+// ── SEC-22: Consent ownership guard ──────────────────────────────────────────
+// Every consent-scoped AISP/PISP endpoint must verify the consent belongs to
+// the authenticated user before touching the upstream Open Banking service.
+async function assertConsentOwnership(consentId: string, userId: number): Promise<void> {
+  const [consent] = await db
+    .select({ id: openBankingConsents.id, userId: openBankingConsents.userId, status: openBankingConsents.status })
+    .from(openBankingConsents)
+    .where(eq(openBankingConsents.consentId, consentId))
+    .limit(1);
+  if (!consent) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Consent not found" });
+  }
+  if (consent.userId !== userId) {
+    logger.warn({ userId, consentId }, "[OpenBanking] IDOR attempt — consent ownership mismatch");
+    throw new TRPCError({ code: "FORBIDDEN", message: "Consent does not belong to the authenticated user" });
+  }
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 
 export const openBankingPsd2Router = router({
@@ -195,6 +213,9 @@ export const openBankingPsd2Router = router({
     .mutation(async ({ input, ctx }) => {
       const userId = ctx.user.id;
 
+      // SEC-22: verify ownership before issuing the upstream DELETE
+      await assertConsentOwnership(input.consentId, userId);
+
       await callObService(`/v1/aisp/consents/${input.consentId}`, "DELETE");
 
       // Update DB
@@ -225,6 +246,9 @@ export const openBankingPsd2Router = router({
   getAccounts: protectedProcedure
     .input(z.object({ consentId: z.string() }))
     .query(async ({ input, ctx }) => {
+      // SEC-22: consent ownership required before any account data access
+      await assertConsentOwnership(input.consentId, ctx.user.id);
+
       const cacheKey = `ob:accounts:${input.consentId}`;
       const cached = await redis.get(cacheKey);
       if (cached) return JSON.parse(cached);
@@ -280,7 +304,10 @@ export const openBankingPsd2Router = router({
       consentId: z.string(),
       accountId: z.string(),
     }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
+      // SEC-22: consent ownership required
+      await assertConsentOwnership(input.consentId, ctx.user.id);
+
       const result = await callObService<{
         balances: Array<{
           type: string;
@@ -314,7 +341,10 @@ export const openBankingPsd2Router = router({
       fromDate: z.string().datetime().optional(),
       toDate: z.string().datetime().optional(),
     }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
+      // SEC-22: consent ownership required
+      await assertConsentOwnership(input.consentId, ctx.user.id);
+
       const params = new URLSearchParams({ consentId: input.consentId });
       if (input.fromDate) params.set("fromBookingDateTime", input.fromDate);
       if (input.toDate) params.set("toBookingDateTime", input.toDate);
@@ -349,6 +379,9 @@ export const openBankingPsd2Router = router({
       currency: z.string().length(3),
     }))
     .mutation(async ({ input, ctx }) => {
+      // SEC-22: consent ownership required
+      await assertConsentOwnership(input.consentId, ctx.user.id);
+
       const result = await callObService<{
         eligible: boolean;
         maxAffordableAmount: number;
@@ -402,6 +435,9 @@ export const openBankingPsd2Router = router({
       endToEndId: z.string().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      // SEC-22: consent ownership required before initiating any payment
+      await assertConsentOwnership(input.consentId, ctx.user.id);
+
       const result = await callObService<{
         paymentId: string;
         status: string;
