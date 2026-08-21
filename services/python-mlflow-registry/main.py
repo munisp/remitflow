@@ -24,6 +24,7 @@ Endpoints:
   GET  /health             — liveness probe
 """
 
+import hmac
 import json
 import logging
 import os
@@ -35,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -46,7 +47,18 @@ from contextlib import contextmanager
 import signal
 import atexit
 
-_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-mlflow-registry] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
+_DB_URL = _require_env("DATABASE_URL")
 _db_pool = None
 
 def _get_db():
@@ -182,6 +194,19 @@ class CompareRequest(BaseModel):
 
 app = FastAPI(title="RemitFlow Model Registry", version="1.0.0")
 
+# ── Internal auth (fail-closed) ─────────────────────────────────────────
+# Model-registry writes (/register, /promote, /ab-test/*) are model
+# supply-chain operations and require this token. No default: if
+# INTERNAL_API_TOKEN is unset these endpoints return 503.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
+
 @app.get("/metrics")
 async def _prometheus_metrics():
     uptime = _time_mod.time() - _PROCESS_START_TIME
@@ -248,7 +273,7 @@ def health():
 
 
 @app.post("/register")
-def register_model(req: RegisterModelRequest):
+def register_model(req: RegisterModelRequest, _auth: None = Depends(require_internal_auth)):
     reg = _load_registry()
 
     if req.model_name not in reg["models"]:
@@ -307,7 +332,7 @@ def get_model(model_name: str):
 
 
 @app.post("/promote")
-def promote_model(req: PromoteRequest):
+def promote_model(req: PromoteRequest, _auth: None = Depends(require_internal_auth)):
     reg = _load_registry()
     if req.model_name not in reg["models"]:
         raise HTTPException(404, f"Model {req.model_name} not found")
@@ -332,7 +357,7 @@ def promote_model(req: PromoteRequest):
 
 
 @app.post("/ab-test/create")
-def create_ab_test(req: ABTestCreateRequest):
+def create_ab_test(req: ABTestCreateRequest, _auth: None = Depends(require_internal_auth)):
     reg = _load_registry()
 
     if req.model_name not in reg["models"]:
@@ -362,7 +387,7 @@ def create_ab_test(req: ABTestCreateRequest):
 
 
 @app.post("/ab-test/record")
-def record_ab_outcome(req: ABTestRecordRequest):
+def record_ab_outcome(req: ABTestRecordRequest, _auth: None = Depends(require_internal_auth)):
     reg = _load_registry()
 
     if req.test_id not in reg["ab_tests"]:

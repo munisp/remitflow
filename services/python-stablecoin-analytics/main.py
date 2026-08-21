@@ -32,10 +32,21 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-stablecoin-analytics] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
 # ─── Configuration ───────────────────────────────────────────────────────────
 
 PORT = int(os.getenv("STABLECOIN_ANALYTICS_PORT", "8115"))
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+DATABASE_URL = _require_env("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "localhost:9092")
 
