@@ -44,11 +44,22 @@ import psycopg2
 import psycopg2.pool
 import requests
 
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-tigerbeetle-reconciliation] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 RECONCILIATION_INTERVAL_SECONDS = int(os.environ.get("RECONCILIATION_INTERVAL", "3600"))
 DRIFT_THRESHOLD_MINOR = int(os.environ.get("DRIFT_THRESHOLD", "100"))  # 0.0001 USD
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+DATABASE_URL = _require_env("DATABASE_URL")
 TIGERBEETLE_SERVICE_URL = os.environ.get("TIGERBEETLE_SERVICE_URL", "http://localhost:8096")
 GO_LEDGER_SERVICE_URL = os.environ.get("GO_LEDGER_SERVICE_URL", "http://localhost:8097")
 KAFKA_BROKER = os.environ.get("KAFKA_BROKER", "localhost:9092")
