@@ -85,7 +85,20 @@ def _db_one(query: str, params: tuple = ()) -> dict | None:
 RATE_LOCK_TTL = int(os.environ.get("RATE_LOCK_TTL_SECONDS", "900"))  # 15 min
 SLIPPAGE_BPS = float(os.environ.get("SLIPPAGE_BPS", "50"))  # 0.5%
 RATE_CACHE_TTL = int(os.environ.get("RATE_CACHE_TTL_SECONDS", "300"))  # 5 min
-HMAC_SECRET = os.environ.get("RATE_LOCK_HMAC_SECRET", "remitflow-dev-secret")
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known defaults."""
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(
+            f"[universal-fx] {name} is not set. Refusing to start with a "
+            "well-known default secret; configure it explicitly."
+        )
+    return value
+
+
+# Fail-closed: a repo-public default HMAC secret would let anyone forge signed
+# FX rate locks (PY-012). No default — startup fails when unset.
+HMAC_SECRET = _require_env("RATE_LOCK_HMAC_SECRET")
 
 # CoinGecko API key — if set, uses Pro endpoint (500 req/min vs 30 req/min)
 COINGECKO_API_KEY = os.environ.get("COINGECKO_API_KEY", "")
