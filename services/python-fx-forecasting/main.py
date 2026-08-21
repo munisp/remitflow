@@ -43,7 +43,18 @@ import psycopg2
 import psycopg2.extras
 from contextlib import contextmanager
 
-_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-fx-forecasting] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
+_DB_URL = _require_env("DATABASE_URL")
 _db_pool = None
 
 def _get_db():
@@ -588,7 +599,7 @@ async def load_or_train():
 
     if MODEL_PATH.exists():
         logger.info("Loading existing FX forecast model...")
-        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
+        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)  # PY-014: state_dict-only checkpoints; pickle RCE guard
         config = checkpoint["model_config"]
         _model = FXForecastModel(
             input_dim=config["input_dim"],
@@ -608,7 +619,7 @@ async def load_or_train():
     else:
         logger.info("No existing model — training from scratch...")
         _metadata = train_model()
-        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
+        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)  # PY-014: state_dict-only checkpoints; pickle RCE guard
         config = checkpoint["model_config"]
         _model = FXForecastModel(
             input_dim=config["input_dim"],
@@ -887,7 +898,7 @@ import atexit
 def _get_db_conn():
     """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""
     try:
-        db_url = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+        db_url = _require_env("DATABASE_URL")
         conn = psycopg2.connect(db_url)
         conn.autocommit = True
         return conn
