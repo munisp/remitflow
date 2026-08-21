@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"math/rand"
 	"net/http"
 	"os"
 	"sync/atomic"
@@ -45,6 +44,9 @@ var (
 	tigerBeetleBridge = getEnv("TIGERBEETLE_BRIDGE_URL", "http://rust-tigerbeetle-bridge:8112")
 	coreAPIURL        = getEnv("CORE_API_URL", "http://server:5000")
 	port              = getEnv("PORT", "8120")
+	// amlScorerURL is the real AML/sanctions scoring service (python-aml-scorer).
+	// The sanctions saga step FAILS CLOSED when this is unset or unreachable.
+	amlScorerURL = getEnv("AML_SCORER_URL", "http://python-aml-scorer:8111")
 )
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
@@ -211,17 +213,41 @@ func stepKYCCheck(userID int64, amountUSD float64, kycTier string, txType string
 		DurationMs: time.Since(start).Milliseconds()}
 }
 
-func stepSanctionsScreen(userID int64) StepResult {
+// stepSanctionsScreen calls the real AML scorer (python-aml-scorer /score).
+// FAIL CLOSED: any error, non-allow action, or undecodable response fails the
+// step (aborting the saga) — no random simulation on the live path.
+func stepSanctionsScreen(userID int64, amount float64, currency string) StepResult {
 	start := time.Now()
-	// Production: call python-aml-scorer at http://python-aml-scorer:8111/screen
-	// Simulate: 99.9% pass rate
-	if rand.Float64() < 0.001 {
+	if amount <= 0 {
+		amount = 1 // scorer requires amount > 0; screening is amount-independent here
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+	result, err := postJSON(amlScorerURL+"/score", map[string]interface{}{
+		"user_id":           userID,
+		"amount":            amount,
+		"from_currency":     currency,
+		"to_currency":       currency,
+		"recipient_country": "NG",
+		"payment_rail":      "stablecoin",
+	})
+	if err != nil {
+		slog.Error("[Saga] sanctions screen unreachable — failing closed", "user", userID, "err", err)
 		return StepResult{StepName: "sanctions_screen", Status: "failed",
-			Error: "User flagged on OFAC/UN sanctions list",
+			Error: fmt.Sprintf("SANCTIONS_SCREEN_UNAVAILABLE: %v", err),
+			DurationMs: time.Since(start).Milliseconds()}
+	}
+	action, _ := result["action"].(string)
+	riskScore, _ := result["risk_score"].(float64)
+	if action != "allow" {
+		return StepResult{StepName: "sanctions_screen", Status: "failed",
+			Error: fmt.Sprintf("AML scorer action=%q risk_score=%v — transaction blocked", action, riskScore),
+			Data: map[string]interface{}{"action": action, "risk_score": riskScore},
 			DurationMs: time.Since(start).Milliseconds()}
 	}
 	return StepResult{StepName: "sanctions_screen", Status: "ok",
-		Data: map[string]interface{}{"screened": true, "lists": []string{"OFAC", "UN", "EU"}},
+		Data: map[string]interface{}{"screened": true, "action": action, "risk_score": riskScore},
 		DurationMs: time.Since(start).Milliseconds()}
 }
 
@@ -247,19 +273,42 @@ func stepFXQuote(fiatCurrency, stablecoin string, fiatAmount float64) (StepResul
 	}, stablecoinAmount, fee
 }
 
+// stepProviderCharge submits a REAL charge via the settlement service
+// (go-stablecoin-settlement /settlement/execute, action=initiate_onramp).
+// FAIL CLOSED: unreachable/rejected settlement fails the step and the saga
+// compensates — no random success/failure simulation.
 func stepProviderCharge(provider, txRef string, fiatAmount float64, fiatCurrency string) StepResult {
 	start := time.Now()
-	// Production: call Circle/MoonPay/Transak/YellowCard API
-	// Simulate: 98% success rate
-	if rand.Float64() < 0.02 {
+	result, err := postJSON(settlementSvc+"/settlement/execute", map[string]interface{}{
+		"operation_id": txRef,
+		"provider":     provider,
+		"action":       "initiate_onramp",
+		"payload": map[string]interface{}{
+			"amount":       fiatAmount,
+			"fiatCurrency": fiatCurrency,
+			"currency":     fiatCurrency,
+			"txRef":        txRef,
+		},
+	})
+	if err != nil {
+		slog.Error("[Saga] provider charge failed — failing closed", "provider", provider, "ref", txRef, "err", err)
 		return StepResult{StepName: "provider_charge", Status: "failed",
-			Error: fmt.Sprintf("Provider %s charge failed — card declined", provider),
+			Error: fmt.Sprintf("Provider %s charge failed: %v", provider, err),
 			DurationMs: time.Since(start).Milliseconds()}
 	}
-	providerRef := fmt.Sprintf("%s-%s", provider, uuid.New().String()[:8])
+	status, _ := result["status"].(string)
+	providerRef, _ := result["external_ref"].(string)
+	if providerRef == "" {
+		providerRef = txRef
+	}
+	if status == "failed" || status == "" {
+		return StepResult{StepName: "provider_charge", Status: "failed",
+			Error: fmt.Sprintf("Provider %s charge not accepted (status=%q)", provider, status),
+			DurationMs: time.Since(start).Milliseconds()}
+	}
 	return StepResult{StepName: "provider_charge", Status: "ok",
 		Data: map[string]interface{}{
-			"provider": provider, "provider_ref": providerRef,
+			"provider": provider, "provider_ref": providerRef, "settlement_status": status,
 			"amount": fiatAmount, "currency": fiatCurrency,
 		},
 		DurationMs: time.Since(start).Milliseconds()}
@@ -356,7 +405,7 @@ func executeOnRampSaga(input OnRampSagaInput) OnRampSagaResult {
 	}
 
 	// Step 2: Sanctions Screen
-	step2 := stepSanctionsScreen(input.UserID)
+	step2 := stepSanctionsScreen(input.UserID, input.FiatAmount, input.FiatCurrency)
 	result.Steps = append(result.Steps, step2)
 	if step2.Status != "ok" {
 		result.Status = "failed"
@@ -470,7 +519,7 @@ func executeOffRampSaga(input OffRampSagaInput) OffRampSagaResult {
 	})
 
 	// Step 3: Sanctions Screen
-	step3 := stepSanctionsScreen(input.UserID)
+	step3 := stepSanctionsScreen(input.UserID, netPayout, input.FiatCurrency)
 	result.Steps = append(result.Steps, step3)
 	if step3.Status != "ok" {
 		// Compensate: re-credit balance
