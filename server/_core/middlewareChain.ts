@@ -223,7 +223,15 @@ export const withPermify = (resource: string, permission: string) =>
       }
     } catch (err: any) {
       if (err instanceof TRPCError) throw err;
-      // Permify unavailable — fall back to role-based check
+      // SEC-13: fail-closed. Previously every non-admin permission was allowed
+      // through during a Permify outage. In production, deny all.
+      if (process.env.NODE_ENV === "production") {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Authorization service unavailable — request denied (fail-closed)",
+        });
+      }
+      // Non-production fallback: role check for admin* permissions only.
       if (permission.startsWith("admin") && ctx.user.role !== "admin") {
         throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
       }

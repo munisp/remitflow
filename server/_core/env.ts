@@ -31,7 +31,9 @@ function requireInProduction(name: string, fallback: string): string {
 
 export const ENV = {
   appId: process.env.VITE_APP_ID ?? "",
-  cookieSecret: requireInProduction("JWT_SECRET", "dev-only-insecure-secret"),
+  // SEC-01: no usable fallback in production — an unset JWT_SECRET aborts boot
+  // rather than signing session cookies with a publicly known secret.
+  cookieSecret: requireInProduction("JWT_SECRET", isProduction ? "" : "dev-only-insecure-secret"),
   databaseUrl: requireInProduction("DATABASE_URL", ""),
   oAuthServerUrl: requireInProduction("OAUTH_SERVER_URL", ""),
   ownerOpenId: process.env.OWNER_OPEN_ID ?? "",

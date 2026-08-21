@@ -39,6 +39,12 @@ export function requireValidEnv(): void {
     }
   }
 
+  // SEC-01: session cookies are signed with JWT_SECRET (env.ts cookieSecret).
+  // Require it in production so the insecure dev fallback can never be reached.
+  if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
+    missing.push("JWT_SECRET");
+  }
+
   if (missing.length > 0) {
     const msg = `[startup-validation] FATAL: Missing required environment variables: ${missing.join(", ")}`;
     logger.error(msg);
