@@ -23,9 +23,12 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"math"
@@ -46,6 +49,9 @@ var _processStartTime = time.Now()
 
 var db *sql.DB
 
+// appCfg is the process-wide configuration, set in main().
+var appCfg Config
+
 // ── Config ──────────────────────────────────────────────────────────────────
 
 type Config struct {
@@ -55,6 +61,12 @@ type Config struct {
 	RedisURL        string
 	TigerBeetleAddr string
 	MojaloopHubURL  string
+	// SanctionsServiceURL is the real sanctions-screening backend (e.g. the
+	// AML scorer). No default: if unset, screening fails closed (503).
+	SanctionsServiceURL string
+	// ChainSettlementURL is the on-chain settlement/minter service. No
+	// default: if unset, on-ramp fails closed instead of fabricating a tx hash.
+	ChainSettlementURL string
 }
 
 func loadConfig() Config {
@@ -65,6 +77,8 @@ func loadConfig() Config {
 		RedisURL:        getEnv("REDIS_URL", "localhost:6379"),
 		TigerBeetleAddr: getEnv("TIGERBEETLE_ADDR", "localhost:3000"),
 		MojaloopHubURL:  getEnv("MOJALOOP_HUB_URL", "http://localhost:4001"),
+		SanctionsServiceURL: os.Getenv("SANCTIONS_SERVICE_URL"),
+		ChainSettlementURL:  os.Getenv("CHAIN_SETTLEMENT_URL"),
 	}
 }
 
@@ -171,15 +185,63 @@ type SanctionsResult struct {
 	Action      string `json:"action"`
 }
 
-func screenSanctions(name string) SanctionsResult {
-	// OFAC/UN/EU sanctions list check (production: call real sanctions API)
-	sanctioned := strings.Contains(strings.ToLower(name), "sanctioned")
+// errScreeningUnavailable marks a fail-closed sanctions-screening outage.
+var errScreeningUnavailable = fmt.Errorf("SANCTIONS_SCREENING_UNAVAILABLE")
+
+// screeningHTTP is the client used to reach the sanctions backend; a package
+// var so tests can stub it.
+var screeningHTTP = &http.Client{Timeout: 8 * time.Second}
+
+// screenSanctions checks a name against the configured sanctions-screening
+// backend (OFAC/UN/EU lists). FAIL CLOSED: if no backend is configured or the
+// backend errors/does not answer 200, it returns an error — the caller must
+// refuse the transaction. It never pattern-matches the name locally.
+func screenSanctions(name string) (SanctionsResult, error) {
+	if appCfg.SanctionsServiceURL == "" {
+		return SanctionsResult{}, fmt.Errorf("%w: SANCTIONS_SERVICE_URL is not set", errScreeningUnavailable)
+	}
+	body, err := json.Marshal(map[string]string{"name": name})
+	if err != nil {
+		return SanctionsResult{}, err
+	}
+	req, err := http.NewRequest(http.MethodPost,
+		strings.TrimRight(appCfg.SanctionsServiceURL, "/")+"/screen", strings.NewReader(string(body)))
+	if err != nil {
+		return SanctionsResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := screeningHTTP.Do(req)
+	if err != nil {
+		return SanctionsResult{}, fmt.Errorf("%w: backend unreachable: %v", errScreeningUnavailable, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return SanctionsResult{}, fmt.Errorf("%w: backend returned status %d", errScreeningUnavailable, resp.StatusCode)
+	}
+	var out struct {
+		Sanctioned bool   `json:"isSanctioned"`
+		RiskLevel  string `json:"riskLevel"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&out); err != nil {
+		return SanctionsResult{}, fmt.Errorf("%w: undecodable backend response: %v", errScreeningUnavailable, err)
+	}
+	action := "allow"
+	risk := out.RiskLevel
+	if out.Sanctioned {
+		action = "block"
+		if risk == "" {
+			risk = "high"
+		}
+	} else if risk == "" {
+		risk = "low"
+	}
 	return SanctionsResult{
 		Name:       name,
-		Sanctioned: sanctioned,
-		RiskLevel:  "low",
-		Action:     "allow",
-	}
+		Sanctioned: out.Sanctioned,
+		RiskLevel:  risk,
+		Action:     action,
+	}, nil
 }
 
 // ── Settlement Engine ───────────────────────────────────────────────────────
@@ -200,6 +262,47 @@ func processOnRamp(req OnRampRequest) (*SettlementResult, error) {
 	orderID := fmt.Sprintf("ONRAMP-%s", uuid.New().String()[:8])
 	atomic.AddInt64(&settlementCounter, 1)
 
+	// FAIL CLOSED: an on-ramp order is only "settled" when the configured
+	// on-chain settlement service confirms a real transaction hash. Never
+	// fabricate a tx hash.
+	if appCfg.ChainSettlementURL == "" {
+		return nil, fmt.Errorf("NOT_CONFIGURED: CHAIN_SETTLEMENT_URL is not set; on-ramp order %s was NOT settled", orderID)
+	}
+	settleBody, err := json.Marshal(map[string]interface{}{
+		"order_id":         orderID,
+		"user_id":          req.UserID,
+		"stablecoin":       req.Stablecoin,
+		"stablecoin_amount": math.Round(stablecoinAmount*1e6) / 1e6,
+		"chain":            req.Chain,
+	})
+	if err != nil {
+		return nil, err
+	}
+	settleReq, err := http.NewRequest(http.MethodPost,
+		strings.TrimRight(appCfg.ChainSettlementURL, "/")+"/v1/mint", strings.NewReader(string(settleBody)))
+	if err != nil {
+		return nil, err
+	}
+	settleReq.Header.Set("Content-Type", "application/json")
+	resp, err := screeningHTTP.Do(settleReq)
+	if err != nil {
+		return nil, fmt.Errorf("chain settlement unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("chain settlement rejected on-ramp order %s (HTTP %d)", orderID, resp.StatusCode)
+	}
+	var settleOut struct {
+		TxHash string `json:"tx_hash"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&settleOut); err != nil {
+		return nil, fmt.Errorf("chain settlement: undecodable response: %w", err)
+	}
+	if !isRealTxHash(settleOut.TxHash) {
+		return nil, fmt.Errorf("chain settlement returned no valid transaction hash for order %s", orderID)
+	}
+
 	slog.Info("on-ramp settlement",
 		"orderId", orderID,
 		"userId", req.UserID,
@@ -207,6 +310,7 @@ func processOnRamp(req OnRampRequest) (*SettlementResult, error) {
 		"stablecoin", fmt.Sprintf("%.6f %s", stablecoinAmount, req.Stablecoin),
 		"chain", req.Chain,
 		"fee", fee,
+		"txHash", settleOut.TxHash,
 	)
 
 	return &SettlementResult{
@@ -217,8 +321,26 @@ func processOnRamp(req OnRampRequest) (*SettlementResult, error) {
 		Fee:              math.Round(fee*100) / 100,
 		FXRate:           math.Round(fxRate/stableRate*1e8) / 1e8,
 		EstimatedTime:    "instant",
-		TxHash:           fmt.Sprintf("0x%s", uuid.New().String()[:32]),
+		TxHash:           settleOut.TxHash,
 	}, nil
+}
+
+// isRealTxHash validates a 0x-prefixed 32-byte transaction hash and rejects
+// the all-zero value.
+func isRealTxHash(h string) bool {
+	if len(h) != 66 || h[:2] != "0x" {
+		return false
+	}
+	raw, err := hex.DecodeString(h[2:])
+	if err != nil || len(raw) != 32 {
+		return false
+	}
+	for _, b := range raw {
+		if b != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func processOffRamp(req OffRampRequest) (*SettlementResult, error) {
@@ -339,6 +461,7 @@ func panicRecoveryMiddleware() gin.HandlerFunc {
 
 func main() {
 	cfg := loadConfig()
+	appCfg = cfg
 
 	// DB connection
 	var err error
@@ -386,8 +509,21 @@ func main() {
 		))
 	})
 
+	// ── Auth: funds-moving endpoints require the internal service key ────
+	// Fail closed: when INTERNAL_SERVICE_KEY is unset, all guarded routes deny.
+	internalKey := os.Getenv("INTERNAL_SERVICE_KEY")
+	authRequired := func(c *gin.Context) {
+		key := c.GetHeader("X-API-Key")
+		if internalKey == "" || key == "" || !hmac.Equal([]byte(key), []byte(internalKey)) {
+			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized", "message": "valid X-API-Key required"})
+			return
+		}
+		c.Next()
+	}
+	guarded := r.Group("/stablecoin", authRequired)
+
 	// ── On-Ramp ─────────────────────────────────────────────────────────
-	r.POST("/stablecoin/onramp", func(c *gin.Context) {
+	guarded.POST("/onramp", func(c *gin.Context) {
 		var req OnRampRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(400, gin.H{"error": err.Error()})
@@ -396,7 +532,12 @@ func main() {
 		if req.Chain == "" {
 			req.Chain = "ethereum"
 		}
-		sanctions := screenSanctions(fmt.Sprintf("user-%d", req.UserID))
+		sanctions, sErr := screenSanctions(fmt.Sprintf("user-%d", req.UserID))
+		if sErr != nil {
+			slog.Error("sanctions screening unavailable — refusing on-ramp", "error", sErr)
+			c.JSON(503, gin.H{"error": "NOT_CONFIGURED", "message": "sanctions screening unavailable; transaction refused (fail-closed)"})
+			return
+		}
 		if sanctions.Sanctioned {
 			c.JSON(403, gin.H{"error": "sanctioned entity", "sanctions": sanctions})
 			return
@@ -410,13 +551,18 @@ func main() {
 	})
 
 	// ── Off-Ramp ────────────────────────────────────────────────────────
-	r.POST("/stablecoin/offramp", func(c *gin.Context) {
+	guarded.POST("/offramp", func(c *gin.Context) {
 		var req OffRampRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(400, gin.H{"error": err.Error()})
 			return
 		}
-		sanctions := screenSanctions(fmt.Sprintf("user-%d", req.UserID))
+		sanctions, sErr := screenSanctions(fmt.Sprintf("user-%d", req.UserID))
+		if sErr != nil {
+			slog.Error("sanctions screening unavailable — refusing off-ramp", "error", sErr)
+			c.JSON(503, gin.H{"error": "NOT_CONFIGURED", "message": "sanctions screening unavailable; transaction refused (fail-closed)"})
+			return
+		}
 		if sanctions.Sanctioned {
 			c.JSON(403, gin.H{"error": "sanctioned entity", "sanctions": sanctions})
 			return
@@ -459,7 +605,7 @@ func main() {
 	})
 
 	// ── Batch Screening ─────────────────────────────────────────────────
-	r.POST("/stablecoin/batch-screen", func(c *gin.Context) {
+	guarded.POST("/batch-screen", func(c *gin.Context) {
 		var body struct {
 			Names []string `json:"names" binding:"required"`
 		}
@@ -469,7 +615,12 @@ func main() {
 		}
 		results := make([]SanctionsResult, len(body.Names))
 		for i, name := range body.Names {
-			results[i] = screenSanctions(name)
+			res, sErr := screenSanctions(name)
+			if sErr != nil {
+				c.JSON(503, gin.H{"error": "NOT_CONFIGURED", "message": "sanctions screening unavailable (fail-closed)"})
+				return
+			}
+			results[i] = res
 		}
 		c.JSON(200, gin.H{"results": results})
 	})
