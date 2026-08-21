@@ -18,7 +18,7 @@ import {
 } from "../../drizzle/schema";
 import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { logger } from '../_core/logger';
-import { publishPayrollDisbursement } from "../_core/transferPipeline";
+import { publishPayrollDisbursement, pendingTransferIdFor, resolveTbTransferAccounts } from "../_core/transferPipeline";
 import { screenSanctions } from "../_core/polyglotClient";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { tigerBeetle } from "../middleware/middlewareIntegration";
@@ -497,11 +497,17 @@ export const globalPayrollRouter = router({
         .where(and(eq(payrollCompanies.id, run.companyId), eq(payrollCompanies.ownerId, ctx.user.id)));
       if (!company) throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 
-      // Update run status to processing
-      await db
+      // FF-005: single-winner status transition — two concurrent disburseRun
+      // calls must not both "pay". Only the caller whose UPDATE matches
+      // status='approved' proceeds; the loser gets 0 rows.
+      const claimed = await db
         .update(payrollRuns)
         .set({ status: "processing", updatedAt: new Date() })
-        .where(eq(payrollRuns.id, input.runId));
+        .where(and(eq(payrollRuns.id, input.runId), eq(payrollRuns.status, "approved")))
+        .returning({ id: payrollRuns.id });
+      if (claimed.length === 0) {
+        throw new TRPCError({ code: "CONFLICT", message: "Payroll run is already being disbursed" });
+      }
 
       // Get all pending items
       const items = await db
@@ -544,19 +550,28 @@ export const globalPayrollRouter = router({
         const batchRef = `DISB-${run.runReference}-${currency}`;
         const rail = currency === "NGN" ? "nip" : currency === "GBP" ? "fps" : "swift";
 
-        // TigerBeetle double-entry ledger
+        // TigerBeetle double-entry ledger — FF-005: REAL provisioned accounts
+        // (company owner's wallet → platform float pool), per-currency ledger,
+        // deterministic id derived from the batch reference (replay-safe via
+        // TB exists(46)), and FAIL-CLOSED: a ledger failure must never mark a
+        // payroll run as disbursed while no money moved.
+        const tbAccounts = await resolveTbTransferAccounts(ctx.user.id, currency);
         try {
-          const transferBigId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
           await tigerBeetle.createTransfer({
-            id: transferBigId,
-            debitAccountId: BigInt(ctx.user.id),
-            creditAccountId: BigInt(run.companyId + 2_000_000),
+            id: pendingTransferIdFor(batchRef),
+            debitAccountId: tbAccounts.debitAccountId,
+            creditAccountId: tbAccounts.creditAccountId,
             amount: BigInt(Math.round(totalAmount * 100)),
-            ledger: 1,
+            ledger: tbAccounts.ledger,
             code: 3, // payroll disbursement
           });
         } catch (err) {
-          logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Payroll] TigerBeetle degraded");
+          logger.error({ err: err instanceof Error ? err.message : String(err), batchRef, currency, totalAmount },
+            "[Payroll] FAIL-CLOSED: TigerBeetle disbursement failed — run NOT marked paid");
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: `Payroll disbursement failed at ledger for ${currency} batch — run left in processing state for retry/reconciliation`,
+          });
         }
 
         const [disb] = await db
