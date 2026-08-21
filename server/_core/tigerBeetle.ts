@@ -204,10 +204,14 @@ export async function createAccounts(accounts: CreateAccountRequest[]): Promise<
   }));
   const res = await getClient().post("/accounts/create", { accounts: payload });
   const errors = res.data?.errors ?? [];
-  if (errors.length > 0) {
-    throw new Error(`[TigerBeetle] Account creation errors: ${JSON.stringify(errors)}`);
+  // TB exists(21)/"Exists" = re-created with identical fields — idempotent
+  // no-op (required for FF-009-safe re-provisioning), not a failure.
+  const hardErrors = (errors as Array<{ index: number; reason?: string; code?: number }>)
+    .filter((e) => e.code !== 21 && e.reason !== "Exists" && e.reason !== "exists");
+  if (hardErrors.length > 0) {
+    throw new Error(`[TigerBeetle] Account creation errors: ${JSON.stringify(hardErrors)}`);
   }
-  logger.info({ count: accounts.length }, "[TigerBeetle] Accounts created");
+  logger.info({ count: accounts.length, idempotentReplays: (errors as unknown[]).length - hardErrors.length }, "[TigerBeetle] Accounts created");
 }
 
 export async function lookupAccounts(ids: bigint[]): Promise<TBAccount[]> {
@@ -387,10 +391,15 @@ export async function voidPendingTransfer(voidId: bigint, pendingId: bigint, cur
  */
 export const PLATFORM_SYSTEM_USER_ID = parseInt(process.env.TIGERBEETLE_PLATFORM_USER_ID || "0", 10);
 
-/** Deterministic 128-bit account id: userId (32) | kind (32) | ledger (32) | sequence (32). */
-export function compositeAccountId(userId: number, kind: number, ledger: number, sequence?: bigint): string {
-  const seq = sequence ?? BigInt(Date.now() % 0xffffffff);
-  const id = (BigInt(userId) << 96n) | (BigInt(kind) << 64n) | (BigInt(ledger) << 32n) | (seq & 0xffffffffn);
+/**
+ * Deterministic 128-bit account id: userId (32) | kind (32) | ledger (32) | sequence (32).
+ * FF-009: the default sequence is 0 — FULLY deterministic. The previous
+ * Date.now()-based default made every re-provisioning generate a NEW account
+ * id, repoint the (user_id, currency) mapping at a fresh EMPTY account, and
+ * orphan all funds in the previous one.
+ */
+export function compositeAccountId(userId: number, kind: number, ledger: number, sequence: bigint = 0n): string {
+  const id = (BigInt(userId) << 96n) | (BigInt(kind) << 64n) | (BigInt(ledger) << 32n) | (sequence & 0xffffffffn);
   return id.toString();
 }
 
@@ -420,16 +429,63 @@ async function persistAccountMapping(row: {
 }
 
 /**
+ * Persist the mapping row WITHOUT repointing an existing one (FF-009).
+ * If a row already exists for (user_id, currency) its tb_account_id is
+ * preserved — only status/updated_at are refreshed. A mismatch between the
+ * requested and stored tb_account_id is logged as an error (fund-orphan
+ * attempt) and the stored id wins.
+ */
+async function persistAccountMappingPreserve(row: {
+  userId: number;
+  currency: string;
+  tbAccountId: string;
+  ledger: number;
+  code: number;
+  flags: number;
+  userData128: string;
+}): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new Error("[TigerBeetle] DB unavailable — cannot persist account mapping");
+  await (db as any).execute(sql`
+    INSERT INTO tigerbeetle_accounts (user_id, currency, tb_account_id, ledger, code, flags, user_data_128, status, created_at, updated_at)
+    VALUES (${row.userId}, ${row.currency}, ${row.tbAccountId}, ${row.ledger}, ${row.code}, ${row.flags}, ${row.userData128}, 'active', NOW(), NOW())
+    ON CONFLICT (user_id, currency) DO UPDATE
+      SET status = 'active', updated_at = NOW()
+      WHERE tigerbeetle_accounts.tb_account_id = EXCLUDED.tb_account_id
+  `);
+  const check = (await (db as any).execute(sql`
+    SELECT tb_account_id FROM tigerbeetle_accounts WHERE user_id = ${row.userId} AND currency = ${row.currency}
+  `)) as unknown as Array<{ tb_account_id: string }>;
+  if (check[0] && check[0].tb_account_id !== row.tbAccountId) {
+    logger.error({ userId: row.userId, currency: row.currency, requested: row.tbAccountId, stored: check[0].tb_account_id },
+      "[TigerBeetle] Mapping preserved existing tb_account_id over a different requested id — funds protected from orphaning");
+  }
+}
+
+/**
  * Provision TigerBeetle accounts for a new user across all supported currencies.
  * Called during user onboarding. Fail-closed: throws when the bridge or the
  * mapping write fails — a user without ledger accounts cannot transact.
  */
 export async function provisionUserAccounts(userId: number, currencies: string[] = ["USD", "NGN", "GBP", "EUR"]): Promise<void> {
+  // FF-009: idempotent re-provisioning. If a mapping row already exists for
+  // (user_id, currency), KEEP the existing tb_account_id — never mint a new
+  // account and repoint the mapping (that orphaned all funds in the old
+  // account). The TB account is (re)created with the EXISTING id; account
+  // creation of an already-existing identical account is a tolerated no-op.
+  const db = await getDb();
+  if (!db) throw new Error("[TigerBeetle] DB unavailable — cannot resolve existing account mappings");
+  const existingRows = (await (db as any).execute(sql`
+    SELECT currency, tb_account_id FROM tigerbeetle_accounts WHERE user_id = ${userId}
+  `)) as unknown as Array<{ currency: string; tb_account_id: string }>;
+  const existingByCurrency = new Map(existingRows.map(r => [r.currency, r.tb_account_id]));
+
   const accounts: CreateAccountRequest[] = currencies.map(currency => {
     const ledger = TB_LEDGERS[currency];
     if (!ledger) throw new Error(`[TigerBeetle] Unknown currency: ${currency}`);
+    const existingId = existingByCurrency.get(currency);
     return {
-      id: BigInt(compositeAccountId(userId, TB_ACCOUNT_CODES.USER_WALLET, ledger)),
+      id: BigInt(existingId ?? compositeAccountId(userId, TB_ACCOUNT_CODES.USER_WALLET, ledger, 0n)),
       ledger,
       code: TB_ACCOUNT_CODES.USER_WALLET,
       flags: TB_FLAGS.DEBITS_MUST_NOT_EXCEED_CREDITS | TB_FLAGS.HISTORY,
@@ -437,9 +493,10 @@ export async function provisionUserAccounts(userId: number, currencies: string[]
     };
   });
   await createAccounts(accounts);
-  // Persist mapping to PostgreSQL (tb_account_id is TEXT since migration 0082)
+  // Persist mapping to PostgreSQL (tb_account_id is TEXT since migration 0082).
+  // DO NOT overwrite an existing mapping's tb_account_id (fund orphaning).
   for (let i = 0; i < currencies.length; i++) {
-    await persistAccountMapping({
+    await persistAccountMappingPreserve({
       userId,
       currency: currencies[i],
       tbAccountId: accounts[i].id.toString(),

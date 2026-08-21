@@ -32,8 +32,18 @@ const TB_ADDRESS = process.env.TIGERBEETLE_ADDRESS ?? "localhost:3000";
 const TB_CLUSTER_ID = parseInt(process.env.TIGERBEETLE_CLUSTER_ID ?? "0", 10);
 const TB_SERVICE_URL = process.env.TIGERBEETLE_SERVICE_URL ?? "http://tigerbeetle-service:8088";
 
-// Amount scale factor: TigerBeetle uses u128 integers, we scale by 10^6 for 6 decimal places
-const SCALE_FACTOR = 1_000_000;
+// Amount scale factor (FF-010): TB amounts are MINOR UNITS (cents, 10^2) —
+// this matches every actual writer into this cluster (transferPipeline,
+// middlewareIntegration: `BigInt(Math.round(amount * 100))`). The previous
+// 10^6 scale silently misread every balance by 10000x, and the reconciliation
+// pass then "repaired" PG wallets to those wrong values.
+const SCALE_FACTOR = 100;
+
+// FF-010: NEVER auto-overwrite PG wallet balances from TB values. Most money
+// paths (p2pInstant, refunds, payroll) do not dual-write to TB, so "repairing"
+// PG from TB wipes legitimate PG-only movements. Discrepancies are quarantined
+// (logged + audit row) for manual review unless explicitly enabled.
+const RECONCILE_AUTO_REPAIR = process.env.RECONCILE_AUTO_REPAIR === "true";
 
 interface TBTransferResult {
   success: boolean;
@@ -327,15 +337,29 @@ export async function reconcileBalances(options?: {
       );
 
       if (!dryRun) {
-        try {
-          await db.update(wallets)
-            .set({ balance: String(tbBal.toFixed(6)) })
-            .where(eq(wallets.id, w.id));
-          result.synced = true;
-          synced++;
-          logger.info({ walletId: w.id, oldBalance: pgBal, newBalance: tbBal }, "[Reconciliation] PG balance synced to TB");
-        } catch (err) {
-          logger.error({ err: (err as Error).message, walletId: w.id }, "[Reconciliation] Failed to sync PG balance");
+        if (RECONCILE_AUTO_REPAIR) {
+          try {
+            await db.update(wallets)
+              .set({ balance: String(tbBal.toFixed(6)) })
+              .where(eq(wallets.id, w.id));
+            result.synced = true;
+            synced++;
+            logger.info({ walletId: w.id, oldBalance: pgBal, newBalance: tbBal }, "[Reconciliation] PG balance synced to TB");
+          } catch (err) {
+            logger.error({ err: (err as Error).message, walletId: w.id }, "[Reconciliation] Failed to sync PG balance");
+          }
+        } else {
+          // FF-010: quarantine — alert + audit row, no automatic overwrite.
+          logger.error({ walletId: w.id, userId: w.userId, currency: w.currency, pgBalance: pgBal, tbBalance: tbBal, diff },
+            "[Reconciliation] DISCREPANCY QUARANTINED — manual review required (auto-repair disabled)");
+          try {
+            await db.execute(sql`
+              INSERT INTO reconciliation_discrepancies (wallet_id, user_id, currency, pg_balance, tb_balance, discrepancy, status, created_at)
+              VALUES (${w.id}, ${w.userId}, ${w.currency}, ${String(pgBal)}, ${String(tbBal)}, ${String(diff)}, 'open', NOW())
+            `);
+          } catch (err) {
+            logger.warn({ err: (err as Error).message, walletId: w.id }, "[Reconciliation] Failed to record discrepancy (table missing?)");
+          }
         }
       }
     }
