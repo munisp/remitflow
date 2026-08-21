@@ -14,9 +14,11 @@ Port: 8220 (HTTP API) + 8221 (metrics)
 """
 
 import asyncio
+import hmac
 import json
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -24,7 +26,7 @@ from typing import Any, Optional
 from uuid import uuid4
 
 import httpx
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -35,6 +37,17 @@ from prometheus_client import (
     start_http_server,
 )
 from pydantic import BaseModel, Field
+
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[src] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -52,9 +65,11 @@ class Config:
     KEYCLOAK_URL = os.getenv("KEYCLOAK_URL", "http://keycloak:8080")
     KEYCLOAK_REALM = os.getenv("KEYCLOAK_REALM", "remitflow")
     KEYCLOAK_ADMIN_USER = os.getenv("KEYCLOAK_ADMIN_USER", "admin")
-    KEYCLOAK_ADMIN_PASS = os.getenv("KEYCLOAK_ADMIN_PASS", "admin")
+    # Fail-closed: a default admin password for the platform IdP is an auth-bypass
+    # primitive. KEYCLOAK_ADMIN_PASS must be configured explicitly.
+    KEYCLOAK_ADMIN_PASS = _require_env("KEYCLOAK_ADMIN_PASS")
     PERMIFY_URL = os.getenv("PERMIFY_URL", "http://permify:3476")
-    POSTGRES_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@postgres:5432/remitflow")
+    POSTGRES_URL = _require_env("DATABASE_URL")
     MIDDLEWARE_BUS_URL = os.getenv("MIDDLEWARE_BUS_URL", "http://go-middleware-bus:8200")
     RUST_CONNECTOR_URL = os.getenv("RUST_CONNECTOR_URL", "http://rust-middleware-connector:8210")
     PORT = int(os.getenv("ANALYTICS_MIDDLEWARE_PORT", "8220"))
@@ -593,6 +608,35 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# ── Internal auth + index guard (PY-011 remediation) ──────────────────────────
+# Every /v1/* route proxies into security infrastructure (OpenSearch indices,
+# Keycloak admin API, Permify writes) and must require authentication.
+# No default token: if INTERNAL_API_TOKEN is unset these routes return 503.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
+
+
+_INDEX_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
+# Indices that must never be reachable through this generic proxy (they are
+# managed exclusively by their owning services).
+_BLOCKED_INDEX_PREFIXES = ("remitflow-sanctions", ".opensearch", ".kibana", ".security")
+
+
+def _validate_index_name(index: str) -> str:
+    """Reject path-traversal/URL-injection and privileged index names."""
+    if not _INDEX_NAME.match(index) or ".." in index:
+        raise HTTPException(status_code=400, detail=f"Invalid index name: {index!r}")
+    if index.startswith(_BLOCKED_INDEX_PREFIXES):
+        raise HTTPException(status_code=403, detail=f"Index '{index}' is not accessible via this proxy")
+    return index
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -609,15 +653,18 @@ async def metrics():
 
 # OpenSearch
 @app.post("/v1/opensearch/index")
-async def route_os_index(req: OSIndexRequest):
+async def route_os_index(req: OSIndexRequest, _auth: None = Depends(require_internal_auth)):
+    _validate_index_name(req.index)
     return await opensearch_index(req)
 
 @app.post("/v1/opensearch/bulk")
-async def route_os_bulk(req: OSBulkRequest):
+async def route_os_bulk(req: OSBulkRequest, _auth: None = Depends(require_internal_auth)):
+    _validate_index_name(req.index)
     return await opensearch_bulk(req)
 
 @app.post("/v1/opensearch/search")
-async def route_os_search(req: OSSearchRequest):
+async def route_os_search(req: OSSearchRequest, _auth: None = Depends(require_internal_auth)):
+    _validate_index_name(req.index)
     client = await get_http_client()
     body = {"query": req.query, "size": req.size, "from": req.from_}
     if req.sort:
@@ -630,42 +677,42 @@ async def route_os_search(req: OSSearchRequest):
 
 # Lakehouse
 @app.post("/v1/lakehouse/write")
-async def route_lakehouse_write(req: LakehouseWriteRequest):
+async def route_lakehouse_write(req: LakehouseWriteRequest, _auth: None = Depends(require_internal_auth)):
     return await lakehouse_write(req)
 
 @app.post("/v1/lakehouse/query")
-async def route_lakehouse_query(req: LakehouseQueryRequest):
+async def route_lakehouse_query(req: LakehouseQueryRequest, _auth: None = Depends(require_internal_auth)):
     return await lakehouse_query(req)
 
 # Keycloak
 @app.post("/v1/keycloak/sync")
-async def route_keycloak_sync(req: KeycloakSyncRequest):
+async def route_keycloak_sync(req: KeycloakSyncRequest, _auth: None = Depends(require_internal_auth)):
     return await keycloak_sync_user(req)
 
 @app.post("/v1/keycloak/introspect")
-async def route_keycloak_introspect(req: KeycloakTokenIntrospectRequest):
+async def route_keycloak_introspect(req: KeycloakTokenIntrospectRequest, _auth: None = Depends(require_internal_auth)):
     return await keycloak_introspect_token(req)
 
 @app.get("/v1/keycloak/events")
-async def route_keycloak_events(limit: int = 100):
+async def route_keycloak_events(limit: int = 100, _auth: None = Depends(require_internal_auth)):
     return await keycloak_get_realm_events(limit)
 
 # Permify
 @app.post("/v1/permify/check")
-async def route_permify_check(req: PermifyCheckRequest):
+async def route_permify_check(req: PermifyCheckRequest, _auth: None = Depends(require_internal_auth)):
     return await permify_check(req)
 
 @app.post("/v1/permify/relationships")
-async def route_permify_write(req: PermifyWriteRequest):
+async def route_permify_write(req: PermifyWriteRequest, _auth: None = Depends(require_internal_auth)):
     return await permify_write_relationships(req)
 
 @app.post("/v1/permify/schema")
-async def route_permify_schema(req: PermifySchemaRequest):
+async def route_permify_schema(req: PermifySchemaRequest, _auth: None = Depends(require_internal_auth)):
     return await permify_write_schema(req)
 
 # Unified event ingestion — fan-out to OpenSearch + Lakehouse
 @app.post("/v1/events/ingest")
-async def ingest_event(event: dict, background_tasks: BackgroundTasks):
+async def ingest_event(event: dict, background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
     """Unified event ingestion endpoint — indexes to OpenSearch and writes to Lakehouse."""
     event_type = event.get("type", "unknown")
     index = f"events-{event_type.replace('.', '-').replace('_', '-')}"
