@@ -47,7 +47,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import boto3
 from botocore.exceptions import ClientError
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+import hmac as _hmac_mod
+
+from fastapi import Depends, FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from pydantic import BaseModel
@@ -73,7 +75,7 @@ def _require_env(name: str) -> str:
         )
     return value
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/remitflow")
+DATABASE_URL = _require_env("DATABASE_URL")
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
 S3_BUCKET = os.getenv("LAKEHOUSE_BUCKET", "remitflow-lakehouse")
 S3_ACCESS_KEY = _require_env("S3_ACCESS_KEY")
@@ -117,14 +119,22 @@ PII_COLUMNS = {
     "transactions": ["recipient_name", "recipient_account"],
 }
 
+# Salted, keyed pseudonymization (PY-015 remediation): HMAC-SHA256 keyed with
+# PII_SALT (same scheme as pipeline.py) — unsalted truncated SHA-256 is
+# rainbow-table reversible.
+PII_SALT = _require_env("PII_SALT")
+
 def mask_pii(table_name: str, row: dict) -> dict:
-    """Hash PII fields using SHA-256 for pseudonymisation."""
+    """Pseudonymize PII fields using keyed HMAC-SHA256."""
     pii_fields = PII_COLUMNS.get(table_name, [])
     masked = dict(row)
     for field in pii_fields:
         if field in masked and masked[field] is not None:
             value = str(masked[field])
-            masked[field] = "sha256:" + hashlib.sha256(value.encode()).hexdigest()[:16]
+            digest = _hmac_mod.new(
+                PII_SALT.encode(), f"{field}:{value}".encode(), hashlib.sha256
+            ).hexdigest()
+            masked[field] = "hmac-sha256:" + digest[:16]
     return masked
 
 # ─── Table Registry ───────────────────────────────────────────────────────────
@@ -474,6 +484,25 @@ app = FastAPI(
 # Global connection pool
 _pool: Optional[asyncpg.Pool] = None
 
+# ─── Internal auth + table guard (PY-013 remediation) ─────────────────────────
+# Ingest/read/compact/sync operate on the lakehouse object store; they must
+# require authentication and only operate on registered tables.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not _hmac_mod.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
+
+
+def validate_table_name(table_name: str) -> str:
+    """Only registered SYNC_TABLES names are valid S3 key namespaces."""
+    if table_name not in {t["name"] for t in SYNC_TABLES}:
+        raise HTTPException(status_code=404, detail=f"Table '{table_name}' is not a registered lakehouse table")
+    return table_name
+
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
@@ -504,8 +533,9 @@ class SyncRequest(BaseModel):
     full_refresh: bool = False
 
 @app.post("/sync/{table_name}")
-async def sync_single_table(table_name: str, background_tasks: BackgroundTasks):
+async def sync_single_table(table_name: str, background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
     """Trigger incremental sync for a specific table."""
+    validate_table_name(table_name)
     table_config = next((t for t in SYNC_TABLES if t["name"] == table_name), None)
     if not table_config:
         raise HTTPException(status_code=404, detail=f"Table '{table_name}' not registered for sync")
@@ -515,7 +545,7 @@ async def sync_single_table(table_name: str, background_tasks: BackgroundTasks):
     return result
 
 @app.post("/sync/all")
-async def sync_all_tables(background_tasks: BackgroundTasks):
+async def sync_all_tables(background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
     """Sync all registered tables (runs concurrently)."""
     pool = await get_pool()
     
@@ -546,7 +576,7 @@ async def sync_all_tables(background_tasks: BackgroundTasks):
     }
 
 @app.get("/sync/status")
-async def sync_status():
+async def sync_status(_auth: None = Depends(require_internal_auth)):
     """Get sync status for all registered tables."""
     pool = await get_pool()
     
@@ -578,12 +608,14 @@ class IngestRequest(BaseModel):
     records: list[dict]
 
 @app.post("/ingest/{table_name}")
-async def ingest_records(table_name: str, req: IngestRequest):
+async def ingest_records(table_name: str, req: IngestRequest, _auth: None = Depends(require_internal_auth)):
     """
     Ingest records pushed by an upstream service (e.g. the TS API layer).
     Records are PII-masked, serialized to Snappy Parquet and written to S3.
     Fails loudly (500) if S3 is unavailable — never fabricates a write.
+    table_name must be a registered SYNC_TABLES entry (no arbitrary S3 keys).
     """
+    validate_table_name(table_name)
     if not req.records:
         raise HTTPException(status_code=400, detail="No records provided")
     if len(req.records) > BATCH_SIZE:
@@ -607,11 +639,13 @@ async def ingest_records(table_name: str, req: IngestRequest):
         raise HTTPException(status_code=500, detail=f"Ingest to lakehouse failed: {e}")
 
 @app.get("/read/{table_name}")
-async def read_records(table_name: str, limit: int = 100, country: Optional[str] = None):
+async def read_records(table_name: str, limit: int = 100, country: Optional[str] = None, _auth: None = Depends(require_internal_auth)):
     """
     Read recent records back from the lakehouse. Reads the newest Parquet
     files for the table from S3 via pyarrow. Fails loudly if S3 is unavailable.
+    table_name must be a registered SYNC_TABLES entry.
     """
+    validate_table_name(table_name)
     if limit < 1 or limit > 10000:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 10000")
 
@@ -652,11 +686,14 @@ class CompactRequest(BaseModel):
     table: Optional[str] = None
 
 @app.post("/compact")
-async def compact(req: CompactRequest):
+async def compact(req: CompactRequest, _auth: None = Depends(require_internal_auth)):
     """
     Run Parquet compaction (pyarrow) on one table or all registered tables.
     Merges small files into larger zstd-compressed files and deletes originals.
+    Destructive (deletes source objects) — internal auth + registered tables only.
     """
+    if req.table is not None:
+        validate_table_name(req.table)
     tables = [t["name"] for t in SYNC_TABLES] if req.table is None else [req.table]
 
     results = []
