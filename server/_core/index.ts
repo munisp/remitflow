@@ -198,7 +198,7 @@ async function startServer() {
       const openCircuits = circuits.filter(c => c.state === "open");
       subsystems.circuit_breakers = {
         status: openCircuits.length > 0 ? "degraded" : "ok",
-        error: openCircuits.length > 0 ? `${openCircuits.length} circuit(s) open: ${openCircuits.map(c => c.name.join(", "))}` : undefined,
+        error: openCircuits.length > 0 ? `${openCircuits.length} circuit(s) open: ${openCircuits.map(c => c.name).join(", ")}` : undefined,
       };
     } catch {
       subsystems.circuit_breakers = { status: "ok" };
