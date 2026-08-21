@@ -34,7 +34,7 @@ from contextlib import asynccontextmanager
 
 import asyncpg
 import httpx
-from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
@@ -63,7 +63,8 @@ OPENSEARCH_URL = os.getenv("OPENSEARCH_URL", "http://opensearch:9200")
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "kafka:9092")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
 DAPR_HTTP_PORT = os.getenv("DAPR_HTTP_PORT", "3500")
-INTERNAL_KEY = os.getenv("CBN_LAKEHOUSE_KEY", "cbn-lakehouse-key-001")
+# Fail-closed: no default key. Service refuses to start without it.
+INTERNAL_KEY = _require_env("CBN_LAKEHOUSE_KEY")
 PORT = int(os.getenv("PORT", "8099"))
 
 # ─── Models ───────────────────────────────────────────────────────────────────
