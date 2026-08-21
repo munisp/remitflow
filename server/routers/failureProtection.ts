@@ -401,19 +401,49 @@ export const transferProtectionRouter = router({
       const amount = Number(tx.amount);
       if (amount <= 0) continue;
 
-      await db.execute(sql`
-        UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${amount}, "updatedAt" = NOW()
-        WHERE "userId" = ${tx.userId} AND currency = ${tx.from_currency}
-      `);
-      await db.execute(sql`
-        UPDATE transactions SET status = 'refunded', "updatedAt" = NOW() WHERE id = ${tx.id}
-      `);
-      await db.execute(sql`
-        INSERT INTO transactions ("userId", type, status, amount, from_currency, to_currency, description, reference, "createdAt", "updatedAt")
-        VALUES (${tx.userId}, 'refund', 'completed', ${tx.amount}, ${tx.from_currency}, ${tx.from_currency},
-          ${'Auto-refund: transfer stuck beyond SLA (ref: ' + tx.reference + ')'},
-          ${'AUTOREFUND-' + tx.reference}, NOW(), NOW())
-      `);
+      // FF-007: single-winner status transition FIRST — the wallet is credited
+      // only by the caller whose UPDATE wins the stuck → refunded race, and
+      // the credit + audit insert happen in the same transaction. A 'stuck'
+      // transfer that later settles at the rail is caught by reconciliation
+      // (the refund row + journal make the double-outcome visible).
+      const won = await db.transaction(async (tx2: any) => {
+        const claimed = (await tx2.execute(sql`
+          UPDATE transactions SET status = 'refunded', "updatedAt" = NOW()
+          WHERE id = ${tx.id} AND status = 'stuck'
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (claimed.length === 0) return false; // already refunded/resolved concurrently
+        await tx2.execute(sql`
+          UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${amount}, "updatedAt" = NOW()
+          WHERE "userId" = ${tx.userId} AND currency = ${tx.from_currency}
+        `);
+        await tx2.execute(sql`
+          INSERT INTO transactions ("userId", type, status, amount, from_currency, to_currency, description, reference, "createdAt", "updatedAt")
+          VALUES (${tx.userId}, 'refund', 'completed', ${tx.amount}, ${tx.from_currency}, ${tx.from_currency},
+            ${'Auto-refund: transfer stuck beyond SLA (ref: ' + tx.reference + ')'},
+            ${'AUTOREFUND-' + tx.reference}, NOW(), NOW())
+        `);
+        return true;
+      });
+      if (!won) continue;
+
+      // Release any TigerBeetle hold created for this reference (state-aware;
+      // never blind-refunds — the PG refund above is the compensation).
+      try {
+        const { compensateFailedTransfer } = await import("../_core/transferPipeline");
+        await compensateFailedTransfer({
+          transferId: tx.reference,
+          userId: tx.userId,
+          amount,
+          currency: tx.from_currency,
+          reason: "Auto-refund: transfer stuck beyond SLA",
+          stage: "settlement",
+        });
+      } catch (err) {
+        logger.warn({ err: err instanceof Error ? err.message : String(err), reference: tx.reference },
+          "[FailureProtection] TB hold release after auto-refund failed — reaper will reconcile");
+      }
+
       await notify(db, tx.userId, "auto_refund",
         `Your stuck transfer (ref: ${tx.reference}) has been automatically refunded. ${tx.amount} ${tx.from_currency} has been returned to your wallet.`);
       refunded++;
@@ -927,6 +957,29 @@ export const cardProtectionRouter = router({
 
       const chargebackId = genId("CB");
 
+      // FF-008: NEVER trust the user-supplied amount. Verify transactionRef
+      // against a real card transaction owned by this user/card and take the
+      // disputed amount from that record.
+      const txRows = await db.execute(sql`
+        SELECT id, amount, currency, merchant_name FROM card_transactions
+        WHERE provider_reference = ${input.transactionRef}
+          AND card_id = ${input.cardId}
+          AND user_id = ${ctx.user.id}
+        LIMIT 1
+      `);
+      const cardTx = ((txRows as unknown as { rows?: unknown[] }).rows ?? txRows) as Array<{ id: string; amount: string; currency: string; merchant_name: string | null }>;
+      if (cardTx.length === 0) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "No card transaction found for this reference on your card" });
+      }
+      const disputedAmount = Number(cardTx[0].amount);
+      const disputedCurrency = cardTx[0].currency ?? "USD";
+      if (!(disputedAmount > 0)) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Card transaction has no disputable amount" });
+      }
+      if (input.amount > disputedAmount * 1.0001) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: `Disputed amount exceeds the transaction amount (${disputedAmount} ${disputedCurrency})` });
+      }
+
       // Auto-freeze card if unauthorized
       if (input.disputeReason === "unauthorized" || input.disputeReason === "counterfeit") {
         await db.execute(sql`
@@ -935,11 +988,11 @@ export const cardProtectionRouter = router({
       }
 
       await db.execute(sql`
-        INSERT INTO card_chargebacks (chargeback_id, card_id, user_id, transaction_ref, amount, currency, merchant_name, reason, description, status, created_at)
-        VALUES (${chargebackId}, ${input.cardId}, ${ctx.user.id}, ${input.transactionRef}, ${input.amount}, 'USD', ${input.merchantName}, ${input.disputeReason}, ${input.description}, 'open', NOW())
+        INSERT INTO card_chargebacks (chargeback_id, card_id, card_transaction_id, user_id, transaction_ref, amount, currency, merchant_name, reason, description, status, created_at)
+        VALUES (${chargebackId}, ${input.cardId}, ${cardTx[0].id}, ${ctx.user.id}, ${input.transactionRef}, ${disputedAmount}, ${disputedCurrency}, ${cardTx[0].merchant_name ?? input.merchantName}, ${input.disputeReason}, ${input.description}, 'open', NOW())
       `);
 
-      await createAuditLog({ userId: ctx.user.id, action: "CARD_CHARGEBACK_FILED", metadata: { chargebackId, cardId: input.cardId, amount: input.amount } });
+      await createAuditLog({ userId: ctx.user.id, action: "CARD_CHARGEBACK_FILED", metadata: { chargebackId, cardId: input.cardId, amount: disputedAmount } });
       return {
         chargebackId,
         status: "open",
@@ -959,32 +1012,63 @@ export const cardProtectionRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      const rows = await db.execute(sql`SELECT * FROM card_chargebacks WHERE chargeback_id = ${input.chargebackId}`);
-      const cb = (rows.rows as Array<{ user_id: number; amount: number; card_id: number }>)[0];
-      if (!cb) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      // FF-008: single-winner guarded transition (open/under_review → resolved),
+      // refund capped at the disputed amount, provisional credit NETTED OUT so
+      // it can never be paid twice, all in one transaction.
+      let notifyMsg: { userId: number; kind: string; message: string } | null = null;
+      const outcome = await db.transaction(async (tx: any) => {
+        const claimed = (await tx.execute(sql`
+          UPDATE card_chargebacks SET status = 'resolved', resolution = ${input.resolution}, resolved_at = NOW(), admin_notes = ${input.notes ?? ''}
+          WHERE chargeback_id = ${input.chargebackId} AND status IN ('open', 'under_review')
+          RETURNING user_id, amount, currency, card_id, provisional_credit_applied
+        `)) as unknown as Array<{ user_id: number; amount: string | number; currency: string; card_id: number; provisional_credit_applied: boolean }>;
+        if (claimed.length === 0) return null;
+        const cb = claimed[0];
+        const cbAmount = Number(cb.amount);
 
-      if (input.resolution === "refund_customer" || input.resolution === "partial_refund") {
-        const refund = input.refundAmount ?? cb.amount;
-        await db.execute(sql`
-          UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${refund}, "updatedAt" = NOW()
-          WHERE "userId" = ${cb.user_id} AND currency = 'USD'
+        if (input.resolution === "refund_customer" || input.resolution === "partial_refund") {
+          const requested = input.refundAmount ?? cbAmount;
+          const refund = Math.min(requested, cbAmount);
+          // Provisional credit was already paid — only the difference is due.
+          const due = cb.provisional_credit_applied ? Math.max(0, refund - cbAmount) : refund;
+          if (cb.provisional_credit_applied && refund < cbAmount) {
+            // Partial refund smaller than the provisional credit already paid:
+            // claw back the excess (guarded — never drives negative).
+            const excess = cbAmount - refund;
+            await tx.execute(sql`
+              UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) - ${excess}, "updatedAt" = NOW()
+              WHERE "userId" = ${cb.user_id} AND currency = ${cb.currency ?? 'USD'}
+                AND CAST(balance AS DECIMAL(18,4)) >= ${excess}
+            `);
+          }
+          if (due > 0) {
+            await tx.execute(sql`
+              UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${due}, "updatedAt" = NOW()
+              WHERE "userId" = ${cb.user_id} AND currency = ${cb.currency ?? 'USD'}
+            `);
+          }
+          notifyMsg = { userId: cb.user_id, kind: "chargeback_resolved", message: `Your chargeback has been resolved in your favor. $${refund.toFixed(2)} has been refunded to your wallet${cb.provisional_credit_applied ? " (including the provisional credit already applied)" : ""}.` };
+        } else {
+          // Denied: claw back any provisional credit (guarded — never drives
+          // the wallet negative).
+          if (cb.provisional_credit_applied) {
+            await tx.execute(sql`
+              UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) - ${cbAmount}, "updatedAt" = NOW()
+              WHERE "userId" = ${cb.user_id} AND currency = ${cb.currency ?? 'USD'}
+                AND CAST(balance AS DECIMAL(18,4)) >= ${cbAmount}
+            `);
+          }
+          notifyMsg = { userId: cb.user_id, kind: "chargeback_denied", message: "Your chargeback dispute has been reviewed and denied. Please contact support if you wish to appeal." };
+        }
+
+        // Unfreeze card if it was frozen for investigation
+        await tx.execute(sql`
+          UPDATE virtual_cards SET status = 'active', freeze_reason = NULL WHERE id = ${cb.card_id} AND freeze_reason = 'chargeback_investigation'
         `);
-        await notify(db, cb.user_id, "chargeback_resolved",
-          `Your chargeback has been resolved in your favor. $${refund.toFixed(2)} has been refunded to your wallet.`);
-      } else {
-        await notify(db, cb.user_id, "chargeback_denied",
-          "Your chargeback dispute has been reviewed and denied. Please contact support if you wish to appeal.");
-      }
-
-      // Unfreeze card if it was frozen for investigation
-      await db.execute(sql`
-        UPDATE virtual_cards SET status = 'active', freeze_reason = NULL WHERE id = ${cb.card_id} AND freeze_reason = 'chargeback_investigation'
-      `);
-
-      await db.execute(sql`
-        UPDATE card_chargebacks SET status = 'resolved', resolution = ${input.resolution}, resolved_at = NOW(), admin_notes = ${input.notes ?? ''}
-        WHERE chargeback_id = ${input.chargebackId}
-      `);
+        return cb;
+      });
+      if (!outcome) throw new TRPCError({ code: "CONFLICT", message: "Chargeback not found or already resolved" });
+      if (notifyMsg) await notify(db, (notifyMsg as { userId: number }).userId, (notifyMsg as { kind: string }).kind, (notifyMsg as { message: string }).message);
       return { chargebackId: input.chargebackId, resolution: input.resolution };
     }),
 
@@ -993,20 +1077,24 @@ export const cardProtectionRouter = router({
     .input(z.object({ chargebackId: z.string() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      const rows = await db.execute(sql`
-        SELECT * FROM card_chargebacks WHERE chargeback_id = ${input.chargebackId} AND status = 'open' AND provisional_credit_applied = false
-      `);
-      const cb = (rows.rows as Array<{ user_id: number; amount: number }>)[0];
-      if (!cb) throw new TRPCError({ code: "NOT_FOUND", message: "Chargeback not found or credit already applied" });
-
-      await db.execute(sql`
-        UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${cb.amount}, "updatedAt" = NOW()
-        WHERE "userId" = ${cb.user_id} AND currency = 'USD'
-      `);
-      await db.execute(sql`
-        UPDATE card_chargebacks SET provisional_credit_applied = true, provisional_credit_at = NOW()
-        WHERE chargeback_id = ${input.chargebackId}
-      `);
+      // FF-008: claim the chargeback atomically (status/flag guarded UPDATE),
+      // then credit in the SAME transaction. Double-apply is impossible.
+      const credited = await db.transaction(async (tx: any) => {
+        const claimed = (await tx.execute(sql`
+          UPDATE card_chargebacks SET provisional_credit_applied = true, provisional_credit_at = NOW()
+          WHERE chargeback_id = ${input.chargebackId} AND status = 'open' AND provisional_credit_applied = false
+          RETURNING user_id, amount, currency
+        `)) as unknown as Array<{ user_id: number; amount: string | number; currency: string }>;
+        if (claimed.length === 0) return null;
+        const cb = claimed[0];
+        await tx.execute(sql`
+          UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${Number(cb.amount)}, "updatedAt" = NOW()
+          WHERE "userId" = ${cb.user_id} AND currency = ${cb.currency ?? 'USD'}
+        `);
+        return cb;
+      });
+      if (!credited) throw new TRPCError({ code: "NOT_FOUND", message: "Chargeback not found or credit already applied" });
+      const cb = { user_id: credited.user_id, amount: Number(credited.amount) };
       await notify(db, cb.user_id, "provisional_credit",
         `A provisional credit of $${cb.amount.toFixed(2)} has been applied to your wallet while we investigate your chargeback.`);
 
