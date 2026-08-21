@@ -21,10 +21,12 @@ CDC:     PostgreSQL logical replication slot (wal2json) for incremental loads
 import asyncio
 import csv
 import hashlib
+import hmac
 import io
 import json
 import logging
 import os
+import re
 import struct
 import time
 from datetime import datetime, timezone, timedelta
@@ -34,7 +36,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import asyncpg
 import pyarrow as pa
 import pyarrow.parquet as pq
-from fastapi import FastAPI, Query, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Query, BackgroundTasks, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel
@@ -48,22 +50,24 @@ import psycopg2.extras
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 PORT = int(os.getenv("PORT", "8089"))
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow@postgres:5432/remitflow")
-LAKEHOUSE_PATH = os.getenv("LAKEHOUSE_PATH", "/data/lakehouse")
-S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
-S3_BUCKET = os.getenv("S3_BUCKET", "remitflow-lakehouse")
 def _require_env(name: str) -> str:
     """Return the env var or fail loudly; never fall back to well-known defaults."""
     value = os.getenv(name)
     if not value:
         raise RuntimeError(
             f"[lakehouse-etl] {name} is not set. Refusing to fall back to "
-            "well-known default credentials; configure S3/MinIO credentials explicitly."
+            "well-known default credentials; configure it explicitly."
         )
     return value
 
+DATABASE_URL = _require_env("DATABASE_URL")
+LAKEHOUSE_PATH = os.getenv("LAKEHOUSE_PATH", "/data/lakehouse")
+S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
+S3_BUCKET = os.getenv("S3_BUCKET", "remitflow-lakehouse")
 S3_ACCESS_KEY = _require_env("S3_ACCESS_KEY")
 S3_SECRET_KEY = _require_env("S3_SECRET_KEY")
+# Fail-closed: no default token. Every non-health endpoint requires this token.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
 PIPELINE_INTERVAL_SECS = int(os.getenv("PIPELINE_INTERVAL_SECS", "3600"))
 CDC_SLOT_NAME = os.getenv("CDC_SLOT_NAME", "remitflow_lakehouse_cdc")
 CDC_ENABLED = os.getenv("CDC_ENABLED", "true").lower() == "true"
@@ -1057,22 +1061,103 @@ class DuckDBEngine:
                         except Exception:
                             pass
 
+    def _registered_views(self) -> set:
+        """Return the set of DuckDB views registered by _register_parquet_views()."""
+        conn = self._get_conn()
+        if not conn:
+            return set()
+        try:
+            rows = conn.execute(
+                "SELECT table_name FROM information_schema.tables WHERE table_type = 'VIEW'"
+            ).fetchall()
+            return {r[0].lower() for r in rows}
+        except Exception:
+            return set()
+
     def query(self, sql: str, limit: int = 1000) -> Dict:
         conn = self._get_conn()
         if not conn:
             return {"error": "DuckDB not available", "rows": [], "columns": []}
         try:
+            _validate_analytical_sql(sql, self._registered_views())
             result = conn.execute(sql).fetchdf()
             return {
                 "rows": result.head(limit).to_dict(orient="records"),
                 "total_rows": len(result),
                 "columns": list(result.columns),
             }
+        except SQLValidationError:
+            raise
         except Exception as e:
             return {"error": str(e), "rows": [], "columns": []}
 
 
 _duckdb = DuckDBEngine(LAKEHOUSE_PATH)
+
+# ── Internal auth + SQL guard (PY-001/PY-004/PY-006 remediation) ──────────────
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    """Fail-closed internal-token guard for every non-health endpoint.
+
+    Refuses all requests when INTERNAL_API_TOKEN is not configured (503) so the
+    service can never run unauthenticated by accident.
+    """
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
+
+
+class SQLValidationError(ValueError):
+    """Raised when a /query payload is not a read-only query over registered views."""
+
+
+# DuckDB features that enable file/network reads, schema mutation, extension
+# loading, or writes. Blocked regardless of the SELECT-prefix check.
+_FORBIDDEN_SQL = re.compile(
+    r"\b(read_csv|read_csv_auto|read_parquet|read_json|read_json_auto|read_text|read_blob|"
+    r"glob|parquet_scan|csv_scan|json_scan|sqlite_scan|postgres_scan|mysql_scan|"
+    r"httpfs|attach|detach|copy|install|load|force_install|pragma|set|reset|"
+    r"export|import|create|drop|alter|insert|update|delete|truncate|grant|revoke|"
+    r"call|checkpoint|vacuum|analyze|use|begin|commit|rollback|transaction|"
+    r"prepare|execute\s+immediate)\b",
+    re.IGNORECASE,
+)
+
+_TABLE_REF = re.compile(r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_.]*)", re.IGNORECASE)
+_CTE_NAME = re.compile(r"\bwith\s+([A-Za-z_][A-Za-z0-9_]*)\s+as\b|,\s*([A-Za-z_][A-Za-z0-9_]*)\s+as\s*\(", re.IGNORECASE)
+
+
+def _validate_analytical_sql(sql: str, allowed_views: set) -> None:
+    """Allow only a single read-only SELECT/WITH over registered lakehouse views.
+
+    Blocks statement chaining, comments (which can smuggle payloads past prefix
+    checks), DuckDB file/network table functions, DDL/DML, and any FROM/JOIN
+    target that is not a registered analytical view or a locally defined CTE.
+    """
+    stripped = sql.strip()
+    if not stripped:
+        raise SQLValidationError("Empty SQL")
+    if ";" in stripped or "--" in stripped or "/*" in stripped:
+        raise SQLValidationError("Statement chaining and SQL comments are not allowed")
+    upper = stripped.upper()
+    if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+        raise SQLValidationError("Only SELECT queries are allowed")
+    m = _FORBIDDEN_SQL.search(stripped)
+    if m:
+        raise SQLValidationError(f"Forbidden SQL construct: {m.group(0).strip()}")
+    ctes = {n.lower() for tup in _CTE_NAME.findall(stripped) for n in tup if n}
+    for target in _TABLE_REF.findall(stripped):
+        t = target.lower()
+        if t in ctes:
+            continue
+        if t not in allowed_views:
+            raise SQLValidationError(
+                f"Table '{target}' is not a registered lakehouse view; "
+                "only pre-registered analytical views (bronze_*/silver_*/gold_*) may be queried"
+            )
+
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
@@ -1131,19 +1216,19 @@ class PipelineRunRequest(BaseModel):
 
 
 @app.post("/pipelines/run")
-async def trigger_pipeline(req: PipelineRunRequest, background_tasks: BackgroundTasks):
+async def trigger_pipeline(req: PipelineRunRequest, background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
     background_tasks.add_task(run_pipeline, req.pipeline, req.limit, req.incremental)
     return {"status": "triggered", "pipeline": req.pipeline or "all", "limit": req.limit, "incremental": req.incremental}
 
 
 @app.post("/pipelines/run-sync")
-async def trigger_pipeline_sync(req: PipelineRunRequest):
+async def trigger_pipeline_sync(req: PipelineRunRequest, _auth: None = Depends(require_internal_auth)):
     result = await run_pipeline(req.pipeline, req.limit, req.incremental)
     return result
 
 
 @app.get("/pipelines")
-async def list_pipelines():
+async def list_pipelines(_auth: None = Depends(require_internal_auth)):
     return {
         "pipelines": [
             {"name": "transactions", "description": "Transaction data ETL (Bronze + Silver + Gold)"},
@@ -1163,6 +1248,7 @@ async def get_report(
     format: str = Query(default="json", description="Output format: json or csv"),
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
+    _auth: None = Depends(require_internal_auth),
 ):
     valid_types = RegulatoryReportPipeline.REPORT_TYPES
     if report_type.upper() not in valid_types:
@@ -1213,15 +1299,15 @@ class QueryRequest(BaseModel):
 
 
 @app.post("/query")
-async def run_query(req: QueryRequest):
-    sql_upper = req.sql.strip().upper()
-    if not sql_upper.startswith("SELECT") and not sql_upper.startswith("WITH"):
-        raise HTTPException(400, "Only SELECT queries are allowed")
-    return _duckdb.query(req.sql, req.limit)
+async def run_query(req: QueryRequest, _auth: None = Depends(require_internal_auth)):
+    try:
+        return _duckdb.query(req.sql, req.limit)
+    except SQLValidationError as e:
+        raise HTTPException(400, f"Query rejected: {e}")
 
 
 @app.get("/catalog/{layer}/{table}")
-async def get_catalog(layer: str, table: str):
+async def get_catalog(layer: str, table: str, _auth: None = Depends(require_internal_auth)):
     key = f"iceberg/{layer}/{table}/metadata/v-current.metadata.json"
     data = await _s3.get_object(key)
     if not data:
@@ -1230,7 +1316,7 @@ async def get_catalog(layer: str, table: str):
 
 
 @app.get("/catalog")
-async def list_catalog():
+async def list_catalog(_auth: None = Depends(require_internal_auth)):
     tables = []
     for layer in ["bronze", "silver", "gold"]:
         layer_path = Path(LAKEHOUSE_PATH) / "iceberg" / layer
@@ -1242,7 +1328,7 @@ async def list_catalog():
 
 
 @app.get("/stats/storage")
-async def storage_stats():
+async def storage_stats(_auth: None = Depends(require_internal_auth)):
     total_files = 0
     total_bytes = 0
     by_layer: Dict[str, Dict] = {}
