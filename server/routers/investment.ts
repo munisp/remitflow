@@ -200,17 +200,24 @@ export const ngxStockRouter = router({
       if (input.orderType === "buy" || input.orderType === "limit_buy") {
         const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "NGN"))).limit(1);
         if (!wallet || Number(wallet.balance) < totalNgn) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient NGN wallet balance" });
-        await db.execute(sql`
+        // FF-013: verify the guarded debit actually applied — a concurrent loser
+        // updates 0 rows and must NOT receive a funded order.
+        const debitRows = (await db.execute(sql`
           UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) - ${totalNgn} AS VARCHAR)
           WHERE id = ${wallet.id} AND CAST(balance AS DECIMAL(18,4)) >= ${totalNgn}
-        `);
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (debitRows.length === 0) throw new TRPCError({ code: "CONFLICT", message: "Insufficient NGN wallet balance (concurrent debit)" });
       }
 
       // Pipeline: sanctions, fraud ML, TigerBeetle, Kafka, audit, notifications
       const orderRef = generateTxRef("NGX");
+      // FF-002: pass the NATIVE NGN amount — the pipeline converts to minor
+      // units for the NGN TB ledger (566). Passing the USD estimate with
+      // fromCurrency NGN under-held by ~1600x.
       const pipelineResult = await executeTransferPipeline({
         userId: ctx.user.id,
-        amount: approxUsd,
+        amount: totalNgn,
         fromCurrency: "NGN",
         toCurrency: "NGN",
         recipientName: stock.ticker ?? "NGX Stock",
@@ -280,16 +287,29 @@ export const ngxStockRouter = router({
     .input(z.object({ orderId: z.number().int().positive() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDbConn();
+      // FF-013: transition atomically — only the caller that wins the
+      // pending → cancelled UPDATE may refund. Concurrent losers get 0 rows.
       const [order] = await db
-        .select()
-        .from(ngxOrders)
-        .where(and(eq(ngxOrders.id, input.orderId), eq(ngxOrders.userId, ctx.user.id)));
-      if (!order) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
-      if (order.status !== "pending")
+        .update(ngxOrders)
+        .set({ status: "cancelled" })
+        .where(and(
+          eq(ngxOrders.id, input.orderId),
+          eq(ngxOrders.userId, ctx.user.id),
+          eq(ngxOrders.status, "pending"),
+        ))
+        .returning();
+      if (!order) {
+        const [existing] = await db
+          .select()
+          .from(ngxOrders)
+          .where(and(eq(ngxOrders.id, input.orderId), eq(ngxOrders.userId, ctx.user.id)));
+        if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
         throw new TRPCError({ code: "BAD_REQUEST", message: "Only pending orders can be cancelled" });
+      }
 
       // Refund wallet if this was a buy order (funds were debited at order time)
-      if (order.orderType === "buy" || order.orderType === "limit_buy") {
+      const refunded = order.orderType === "buy" || order.orderType === "limit_buy";
+      if (refunded) {
         const refundAmount = Number(order.totalAmountNgn);
         if (refundAmount > 0) {
           await db.execute(sql`
@@ -298,13 +318,7 @@ export const ngxStockRouter = router({
           `);
         }
       }
-
-      const [updated] = await db
-        .update(ngxOrders)
-        .set({ status: "cancelled" })
-        .where(eq(ngxOrders.id, input.orderId))
-        .returning();
-      return { ...updated, refunded: order.orderType === "buy" || order.orderType === "limit_buy" };
+      return { ...order, refunded };
     }),
 });
 
