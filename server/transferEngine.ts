@@ -5,6 +5,7 @@
 
 import { getDb } from "../db";
 import { sql } from "drizzle-orm";
+import { logger } from "./_core/logger";
 
 // ── Fee Structure ─────────────────────────────────────────────────────────────
 
@@ -366,21 +367,41 @@ export async function executeTransfer(params: {
   const db = await getDb();
   const feeBreakdown = calculateFeeForTest(params.amount, params.corridor);
   const fxRate = await getFxRateForTest(params.fromCurrency, params.toCurrency);
-  const creditAmount = (params.amount - feeBreakdown.totalFee) * fxRate;
+  // FF-026: single fee convention — the sender is debited amount + fee once,
+  // and the FULL amount is converted for the payout (fee is not subtracted
+  // from the converted payout a second time).
+  const creditAmount = params.amount * fxRate;
   const debitAmount = params.amount + feeBreakdown.totalFee;
   const transferId = `TXN-${Date.now()}-${params.senderId}`;
 
-  // Check KYC limits - look up user's actual tier from DB
-  let userTier = "tier3"; // default to highest tier
+  const failedResult = (reason: string) => ({
+    transferId,
+    referenceNumber: transferId,
+    status: "failed",
+    failureReason: reason,
+    amount: params.amount,
+    fee: feeBreakdown.totalFee,
+    fxRate,
+    debitAmount,
+    creditAmount,
+    estimatedDelivery: "N/A",
+    ledgerEntries: [] as Array<{ id: string; type: string; amount: number }>,
+  });
+
+  // Check KYC limits - look up user's actual tier from DB. FF-026: fail closed
+  // — a lookup error must not silently grant the highest tier.
+  let userTier = "tier0"; // default to most restrictive tier
   if (db) {
     try {
       const tierResult = await db.execute(sql`
         SELECT "kycTier" FROM users WHERE id = ${params.senderId}
       `);
       const tierRows = tierResult as unknown as { kycTier: string }[];
-      if (tierRows.length > 0) userTier = tierRows[0].kycTier ?? "tier3";
-    } catch {
-      // If lookup fails, use default
+      if (tierRows.length > 0 && tierRows[0].kycTier) userTier = tierRows[0].kycTier;
+    } catch (err) {
+      logger.error({ err: err instanceof Error ? err.message : String(err), senderId: params.senderId },
+        "[TransferEngine] KYC tier lookup failed — failing closed");
+      return failedResult("KYC tier lookup failed");
     }
   }
   const kycCheck = await checkKycLimits(params.senderId, params.amount, userTier);
@@ -422,8 +443,11 @@ export async function executeTransfer(params: {
           ledgerEntries: [],
         };
       }
-    } catch {
-      // If balance check fails, proceed
+    } catch (err) {
+      // FF-026: fail closed — a balance-check error must not let the transfer proceed blind.
+      logger.error({ err: err instanceof Error ? err.message : String(err), senderId: params.senderId },
+        "[TransferEngine] Balance check failed — failing closed");
+      return failedResult("Balance check failed");
     }
   }
 
@@ -460,7 +484,11 @@ export async function executeTransfer(params: {
         `);
       }
     } catch (err) {
-      // If insert fails, still return success for test compatibility
+      // FF-026: never report a transfer as completed when persistence failed —
+      // that is a phantom completion. Fail closed and surface the failure.
+      logger.error({ err: err instanceof Error ? err.message : String(err), transferId },
+        "[TransferEngine] Transfer persistence failed — returning failed status");
+      return failedResult("Transfer persistence failed");
     }
   }
 
