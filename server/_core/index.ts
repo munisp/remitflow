@@ -1,4 +1,4 @@
-import { randomBytes } from "crypto";
+import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
@@ -688,19 +688,43 @@ async function startServer() {
     res.status(200).json({ received: alerts.length });
   });
 
+
+// ─── Scheduled Task Auth (SEC-12) ─────────────────────────────────────────────
+// Financial batch endpoints under /api/scheduled/* must authenticate ONLY via a
+// Bearer token matching the env-required SCHEDULED_TASK_TOKEN, compared in
+// constant time. Cookie presence and forgeable headers (x-scheduled-task) are
+// NOT accepted. Fail-closed: when SCHEDULED_TASK_TOKEN is unset the endpoints
+// return 503 (never authorize); empty bearer tokens are always rejected.
+function requireScheduledTaskAuth(req: express.Request, res: express.Response): boolean {
+  const token = process.env.SCHEDULED_TASK_TOKEN;
+  if (!token || token.length === 0) {
+    logger.error("[ScheduledTask] SCHEDULED_TASK_TOKEN is not configured — refusing to authorize scheduled financial batch endpoint (fail-closed)");
+    res.status(503).json({ error: "Scheduled task authentication not configured" });
+    return false;
+  }
+  const authHeader = req.headers.authorization || "";
+  const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : "";
+  if (!bearer) {
+    res.status(401).json({ error: "Unauthorized" });
+    return false;
+  }
+  // Hash both sides so timingSafeEqual never leaks token length.
+  const expected = createHash("sha256").update(token).digest();
+  const actual = createHash("sha256").update(bearer).digest();
+  if (!timingSafeEqual(expected, actual)) {
+    res.status(401).json({ error: "Unauthorized" });
+    return false;
+  }
+  return true;
+}
+
   // ─── Scheduled Task Endpoints ────────────────────────────────────────────────
   // POST /api/scheduled/monthly-payouts — called by Manus scheduled task agent
   // Generates monthly revenue share reports and notifies partners
   app.post("/api/scheduled/monthly-payouts", async (req, res) => {
     try {
       // Auth: accept scheduled task cookie or admin bearer token
-      const cookie = req.cookies?.app_session_id;
-      const bearer = (req.headers.authorization || "").replace("Bearer ", "");
-      const adminToken = process.env.SCHEDULED_TASK_TOKEN || process.env.ALERTMANAGER_WEBHOOK_TOKEN || "";
-      const isAuthorized = !!cookie || (adminToken && bearer === adminToken);
-      if (!isAuthorized) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
+      if (!requireScheduledTaskAuth(req, res)) return;
 
       const now = new Date();
       const periodMonth = now.getMonth() === 0 ? 12 : now.getMonth(); // previous month
@@ -796,11 +820,7 @@ async function startServer() {
   // Called by Manus scheduled task agent every day at 02:00 UTC
   app.post("/api/scheduled/savings-interest", async (req, res) => {
     try {
-      const cookie = req.cookies?.app_session_id;
-      const bearer = (req.headers.authorization || "").replace("Bearer ", "");
-      const adminToken = process.env.SCHEDULED_TASK_TOKEN || process.env.ALERTMANAGER_WEBHOOK_TOKEN || "";
-      const isAuthorized = !!cookie || (adminToken && bearer === adminToken);
-      if (!isAuthorized) return res.status(401).json({ error: "Unauthorized" });
+      if (!requireScheduledTaskAuth(req, res)) return;
 
       const { getDb } = await import("../db.js");
       const db = await getDb();
@@ -862,10 +882,7 @@ async function startServer() {
   // POST /api/scheduled/fx-alerts — Check FX alert targets every 15 minutes
   app.post("/api/scheduled/fx-alerts", async (req, res) => {
     try {
-      const sessionCookie = req.cookies?.app_session_id;
-      if (!sessionCookie && req.headers["x-scheduled-task"] !== "true") {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
+      if (!requireScheduledTaskAuth(req, res)) return;
       const { getDb } = await import("../db.js");
       const db = await getDb();
       if (!db) return res.status(503).json({ error: "Database unavailable" });
@@ -944,11 +961,7 @@ async function startServer() {
   // POST /api/scheduled/community-disbursement — Process approved community fund disbursements
   app.post("/api/scheduled/community-disbursement", async (req, res) => {
     try {
-      const cookie = req.cookies?.app_session_id;
-      const bearer = (req.headers.authorization || "").replace("Bearer ", "");
-      const adminToken = process.env.SCHEDULED_TASK_TOKEN || process.env.ALERTMANAGER_WEBHOOK_TOKEN || "";
-      const isAuthorized = !!cookie || (adminToken && bearer === adminToken);
-      if (!isAuthorized) return res.status(401).json({ error: "Unauthorized" });
+      if (!requireScheduledTaskAuth(req, res)) return;
 
       const { getDb } = await import("../db.js");
       const db = await getDb();
@@ -1011,11 +1024,7 @@ async function startServer() {
   // The agent fetches the latest OFAC SDN country list and POSTs it here.
   app.post("/api/scheduled/geo-block-refresh", async (req, res) => {
     try {
-      const cookie = req.cookies?.app_session_id;
-      const bearer = (req.headers.authorization || "").replace("Bearer ", "");
-      const adminToken = process.env.SCHEDULED_TASK_TOKEN || process.env.ALERTMANAGER_WEBHOOK_TOKEN || "";
-      const isAuthorized = !!cookie || (adminToken && bearer === adminToken);
-      if (!isAuthorized) return res.status(401).json({ error: "Unauthorized" });
+      if (!requireScheduledTaskAuth(req, res)) return;
       const { countries, source } = req.body as {
         countries?: Array<{ code: string; name: string; reason: string }>;
         source?: string;
@@ -1049,13 +1058,7 @@ async function startServer() {
   // Auth: accepts session cookie (user role) from scheduled task platform OR admin bearer token
   app.post("/api/scheduled/papss-settlement", async (req, res) => {
     try {
-      const sessionCookie = (req as any).cookies?.app_session_id;
-      const adminToken = process.env.SCHEDULED_TASK_TOKEN || process.env.ALERTMANAGER_WEBHOOK_TOKEN || "";
-      const bearerToken = (req.headers.authorization || "").replace("Bearer ", "");
-      const isScheduledTask = req.headers["x-scheduled-task"] === "true";
-      if (!isScheduledTask && !sessionCookie && bearerToken !== adminToken) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
+      if (!requireScheduledTaskAuth(req, res)) return;
       // ── Idempotency: prevent duplicate batch runs on the same calendar day ────
       const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
       const idempotencyKey = req.headers["x-idempotency-key"] as string | undefined;
@@ -1254,14 +1257,7 @@ async function startServer() {
   // Register via: POST /api/scheduler/jobs { name: "purge-idempotency-keys", cron: "0 0 */6 * * *", path: "/api/scheduled/purge-expired-keys" }
   app.post("/api/scheduled/purge-expired-keys", async (req, res) => {
     try {
-      const isScheduledTask = req.headers["x-scheduled-task"] === "true";
-      const adminToken = process.env.SCHEDULED_TASK_TOKEN || "";
-      const bearerToken = (req.headers.authorization || "").replace("Bearer ", "");
-      // Require x-scheduled-task header OR a non-empty matching bearer token
-      const hasValidToken = adminToken.length > 0 && bearerToken === adminToken;
-      if (!isScheduledTask && !hasValidToken) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
+      if (!requireScheduledTaskAuth(req, res)) return;
       const { getDb } = await import("../db.js");
       const { idempotencyKeys } = await import("../../drizzle/schema.js");
       const { lte } = await import("drizzle-orm");
