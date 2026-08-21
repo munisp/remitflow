@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -26,6 +27,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"math"
@@ -45,6 +47,77 @@ var _processStartTime = time.Now()
 
 var db *sql.DB
 
+// appCfg is the process-wide configuration, set in main().
+var appCfg Config
+
+// outboundHTTP is used for internal provider calls (address provisioning,
+// settlement execution). It is a package var so tests can stub it.
+var outboundHTTP = &http.Client{Timeout: 10 * time.Second}
+
+// errNotConfigured marks fail-closed conditions where a required backend
+// integration is not configured.
+var errNotConfigured = fmt.Errorf("NOT_CONFIGURED")
+
+// provisionDepositAddress obtains a REAL on-chain deposit address from the
+// configured custody/wallet provider. It NEVER fabricates an address: if no
+// provider is configured or the provider does not return a valid non-zero
+// EVM address, it returns an error and the caller must fail closed.
+func provisionDepositAddress(ctx context.Context, intentID, coin string) (string, error) {
+	if appCfg.DepositAddressProviderURL == "" {
+		return "", fmt.Errorf("%w: DEPOSIT_ADDRESS_PROVIDER_URL is not set", errNotConfigured)
+	}
+	body, err := json.Marshal(map[string]string{
+		"intent_id": intentID,
+		"coin":      coin,
+	})
+	if err != nil {
+		return "", err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		appCfg.DepositAddressProviderURL+"/v1/addresses", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := outboundHTTP.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("address provider unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("address provider returned status %d", resp.StatusCode)
+	}
+	var out struct {
+		Address string `json:"address"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&out); err != nil {
+		return "", fmt.Errorf("address provider: undecodable response: %w", err)
+	}
+	if !isRealEVMAddress(out.Address) {
+		return "", fmt.Errorf("address provider returned invalid address")
+	}
+	return out.Address, nil
+}
+
+// isRealEVMAddress validates a 0x-prefixed 20-byte hex address and rejects the
+// all-zero (burn) address.
+func isRealEVMAddress(addr string) bool {
+	if len(addr) != 42 || addr[:2] != "0x" {
+		return false
+	}
+	raw, err := hex.DecodeString(addr[2:])
+	if err != nil || len(raw) != 20 {
+		return false
+	}
+	for _, b := range raw {
+		if b != 0 {
+			return true
+		}
+	}
+	return false // all-zero address: funds would be burned
+}
+
 // ── Config ──────────────────────────────────────────────────────────────────
 
 type Config struct {
@@ -56,6 +129,14 @@ type Config struct {
 	TemporalAddr    string
 	DaprPort        string
 	OpenSearchURL   string
+	// DepositAddressProviderURL is the internal custody/wallet service that
+	// provisions REAL on-chain deposit addresses. No default: if unset, the
+	// payment-intent endpoint fails closed (503 NOT_CONFIGURED) rather than
+	// ever fabricating an address.
+	DepositAddressProviderURL string
+	// SettlementExecutorURL is the internal settlement/chain executor used to
+	// execute batch payouts. No default: if unset, execution fails closed.
+	SettlementExecutorURL string
 }
 
 func loadConfig() Config {
@@ -68,6 +149,8 @@ func loadConfig() Config {
 		TemporalAddr:    getEnv("TEMPORAL_ADDR", "localhost:7233"),
 		DaprPort:        getEnv("DAPR_HTTP_PORT", "3500"),
 		OpenSearchURL:   getEnv("OPENSEARCH_URL", "http://localhost:9200"),
+		DepositAddressProviderURL: os.Getenv("DEPOSIT_ADDRESS_PROVIDER_URL"),
+		SettlementExecutorURL:     os.Getenv("SETTLEMENT_EXECUTOR_URL"),
 	}
 }
 
@@ -174,6 +257,35 @@ func requestID() gin.HandlerFunc {
 		c.Set("request_id", id)
 		c.Header("X-Request-ID", id)
 		c.Next()
+	}
+}
+
+// authMiddleware guards all /api/* routes. A caller authenticates with either
+//   - X-API-Key equal to the env-configured INTERNAL_SERVICE_KEY (service-to-service), or
+//   - X-API-Key matching an active merchant's api_key in the merchant store.
+// Fail closed: if neither credential source is available, everything is denied.
+func authMiddleware() gin.HandlerFunc {
+	internalKey := os.Getenv("INTERNAL_SERVICE_KEY")
+	return func(c *gin.Context) {
+		key := c.GetHeader("X-API-Key")
+		if key != "" && internalKey != "" &&
+			hmac.Equal([]byte(key), []byte(internalKey)) {
+			c.Next()
+			return
+		}
+		if key != "" && db != nil {
+			var n int
+			if err := db.QueryRowContext(c.Request.Context(),
+				`SELECT COUNT(1) FROM merchant_accounts WHERE api_key = $1 AND status = 'active'`,
+				key).Scan(&n); err == nil && n > 0 {
+				c.Next()
+				return
+			}
+		}
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+			"error":   "unauthorized",
+			"message": "valid X-API-Key required",
+		})
 	}
 }
 
@@ -322,7 +434,19 @@ func createPaymentIntent(c *gin.Context) {
 	}
 
 	intentID := generateID("pi")
-	depositAddr := fmt.Sprintf("0x%s", hex.EncodeToString(make([]byte, 20)))
+
+	// Fail closed: only a real, provider-provisioned deposit address may be
+	// returned to a customer. Never fabricate or zero-fill an address.
+	depositAddr, err := provisionDepositAddress(c.Request.Context(), intentID, req.Stablecoin)
+	if err != nil {
+		slog.Error("deposit address provisioning failed — refusing to create intent",
+			"intent", intentID, "error", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "NOT_CONFIGURED",
+			"message": "deposit address provisioning is unavailable; payment intent not created",
+		})
+		return
+	}
 
 	intent := PaymentIntent{
 		IntentID:       intentID,
@@ -410,16 +534,58 @@ func createBatchPayout(c *gin.Context) {
 func executeBatchPayout(c *gin.Context) {
 	batchID := c.Param("batchId")
 
-	// Simulate execution
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	txHash := fmt.Sprintf("0x%s", hex.EncodeToString(b))
+	// Fail closed: a payout is only reported executed when the configured
+	// settlement/chain executor confirms it with a real transaction hash.
+	// Never fabricate a tx hash or a "completed" status.
+	if appCfg.SettlementExecutorURL == "" {
+		slog.Error("batch payout execution refused — no settlement executor configured", "id", batchID)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"batch_id": batchID,
+			"status":   "not_configured",
+			"error":    "NOT_CONFIGURED",
+			"message":  "settlement executor is not configured; payout was NOT executed",
+		})
+		return
+	}
 
-	slog.Info("Batch payout executed", "id", batchID, "tx_hash", txHash)
+	body, err := json.Marshal(map[string]string{"batch_id": batchID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost,
+		appCfg.SettlementExecutorURL+"/v1/batch-payouts/execute", bytes.NewReader(body))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := outboundHTTP.Do(req)
+	if err != nil {
+		slog.Error("settlement executor unreachable", "id", batchID, "error", err)
+		c.JSON(http.StatusBadGateway, gin.H{"batch_id": batchID, "status": "failed", "error": "settlement executor unreachable"})
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		c.JSON(http.StatusBadGateway, gin.H{"batch_id": batchID, "status": "failed", "error": fmt.Sprintf("settlement executor returned %d", resp.StatusCode)})
+		return
+	}
+	var out struct {
+		TxHash string `json:"tx_hash"`
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&out); err != nil || out.TxHash == "" {
+		c.JSON(http.StatusBadGateway, gin.H{"batch_id": batchID, "status": "failed", "error": "settlement executor returned no transaction hash"})
+		return
+	}
+
+	slog.Info("Batch payout executed", "id", batchID, "tx_hash", out.TxHash)
 	respondJSON(c, http.StatusOK, gin.H{
 		"batch_id":  batchID,
-		"status":    "completed",
-		"tx_hash":   txHash,
+		"status":    out.Status,
+		"tx_hash":   out.TxHash,
 		"completed": time.Now().Format(time.RFC3339),
 	})
 }
@@ -438,8 +604,24 @@ func deliverWebhook(c *gin.Context) {
 		return
 	}
 
+	// Fail closed: sign ONLY with the merchant's own stored webhook secret.
+	// Never sign with a placeholder or shared constant.
+	if db == nil {
+		slog.Error("webhook delivery refused — merchant store unavailable", "merchant", req.MerchantID)
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "NOT_CONFIGURED", "message": "merchant store unavailable; cannot look up webhook secret"})
+		return
+	}
+	var secret string
+	if err := db.QueryRowContext(c.Request.Context(),
+		`SELECT webhook_secret FROM merchant_accounts WHERE merchant_id = $1 AND status = 'active'`,
+		req.MerchantID).Scan(&secret); err != nil || secret == "" {
+		slog.Warn("webhook delivery refused — unknown merchant or missing secret", "merchant", req.MerchantID)
+		c.JSON(http.StatusNotFound, gin.H{"error": "merchant not found or has no webhook secret"})
+		return
+	}
+
 	payload := string(req.Data)
-	signature := signPayload(payload, "webhook-secret-placeholder")
+	signature := signPayload(payload, secret)
 
 	slog.Info("Webhook delivered", "merchant", req.MerchantID, "event", req.Event, "signature", signature[:16])
 	respondJSON(c, http.StatusOK, gin.H{
@@ -454,6 +636,7 @@ func deliverWebhook(c *gin.Context) {
 
 func main() {
 	cfg := loadConfig()
+	appCfg = cfg
 	slog.Info("Starting Go Payment Engine", "port", cfg.Port)
 
 	// Connect to PostgreSQL
@@ -479,19 +662,29 @@ func main() {
 	r.GET("/health", healthCheck)
 	r.GET("/ready", healthCheck)
 
+	// All /api/* routes require authentication (service key or merchant API key).
+	api := r.Group("/api", authMiddleware())
+
 	// Programmable Payments
-	r.POST("/api/programmable-payments", createProgrammablePayment)
+	api.POST("/programmable-payments", createProgrammablePayment)
 
 	// Merchant Gateway
-	r.POST("/api/merchants", registerMerchant)
-	r.POST("/api/payment-intents", createPaymentIntent)
-	r.POST("/api/webhooks/deliver", deliverWebhook)
+	api.POST("/merchants", registerMerchant)
+	api.POST("/payment-intents", createPaymentIntent)
+	api.POST("/webhooks/deliver", deliverWebhook)
 
 	// Batch Payouts
-	r.POST("/api/batch-payouts", createBatchPayout)
-	r.POST("/api/batch-payouts/:batchId/execute", executeBatchPayout)
+	api.POST("/batch-payouts", createBatchPayout)
+	api.POST("/batch-payouts/:batchId/execute", executeBatchPayout)
 
-	srv := &http.Server{Addr: ":" + cfg.Port, Handler: r}
+	srv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
