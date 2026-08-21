@@ -27,6 +27,8 @@ Use Cases:
 import os
 import json
 import logging
+import re
+import secrets
 from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List, Dict, Any
 from fastapi import FastAPI, HTTPException, Depends, Header, Query, BackgroundTasks
@@ -35,11 +37,22 @@ from pydantic import BaseModel
 import duckdb
 
 # ─── Configuration ────────────────────────────────────────────────────────────
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known defaults."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[lakehouse-service] {name} is not set. Refusing to start with a "
+            "well-known default credential; configure it explicitly."
+        )
+    return value
+
 LAKEHOUSE_PATH = os.getenv("LAKEHOUSE_PATH", "/data/remitflow-lakehouse")
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
 S3_BUCKET = os.getenv("S3_BUCKET", "remitflow-lakehouse")
-INTERNAL_API_KEY = os.getenv("LAKEHOUSE_INTERNAL_API_KEY", "lakehouse-key-001")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow@postgres:5432/remitflow")
+# Fail-closed: no default key baked into the image (PY-002 remediation).
+INTERNAL_API_KEY = _require_env("LAKEHOUSE_INTERNAL_API_KEY")
+DATABASE_URL = _require_env("DATABASE_URL")
 
 logging.basicConfig(level=logging.INFO, format="[Lakehouse] %(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -174,8 +187,54 @@ class ReportRequest(BaseModel):
 
 # ─── API Key Auth ──────────────────────────────────────────────────────────────
 def verify_api_key(x_api_key: str = Header(None)):
-    if x_api_key != INTERNAL_API_KEY:
+    # Constant-time comparison; INTERNAL_API_KEY is guaranteed set at import time.
+    if not x_api_key or not secrets.compare_digest(x_api_key, INTERNAL_API_KEY):
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+# ─── Analytical SQL guard (PY-001/PY-002 remediation) ─────────────────────────
+# DuckDB features that enable file/network reads, schema mutation, extension
+# loading, or writes. Blocked regardless of the SELECT-prefix check.
+_FORBIDDEN_SQL = re.compile(
+    r"\b(read_csv|read_csv_auto|read_parquet|read_json|read_json_auto|read_text|read_blob|"
+    r"glob|parquet_scan|csv_scan|json_scan|sqlite_scan|postgres_scan|mysql_scan|"
+    r"httpfs|attach|detach|copy|install|load|force_install|pragma|set|reset|"
+    r"export|import|create|drop|alter|insert|update|delete|truncate|grant|revoke|"
+    r"call|checkpoint|vacuum|analyze|use|begin|commit|rollback|transaction|"
+    r"prepare|execute\s+immediate)\b",
+    re.IGNORECASE,
+)
+
+_TABLE_REF = re.compile(r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_.]*)", re.IGNORECASE)
+_CTE_NAME = re.compile(r"\bwith\s+([A-Za-z_][A-Za-z0-9_]*)\s+as\b|,\s*([A-Za-z_][A-Za-z0-9_]*)\s+as\s*\(", re.IGNORECASE)
+
+# Base tables created by init_lakehouse(); anything else is rejected.
+_ALLOWED_TABLES = {"transactions", "users_dim", "fx_rates_ts", "compliance_events", "partner_earnings"}
+
+
+def _validate_analytical_sql(sql: str) -> None:
+    """Allow only a single read-only SELECT/WITH over the known lakehouse tables."""
+    stripped = sql.strip()
+    if not stripped:
+        raise HTTPException(status_code=400, detail="Empty SQL")
+    if ";" in stripped or "--" in stripped or "/*" in stripped:
+        raise HTTPException(status_code=400, detail="Statement chaining and SQL comments are not allowed")
+    upper = stripped.upper()
+    if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+        raise HTTPException(status_code=400, detail="Only SELECT queries are allowed")
+    m = _FORBIDDEN_SQL.search(stripped)
+    if m:
+        raise HTTPException(status_code=400, detail=f"Forbidden SQL construct: {m.group(0).strip()}")
+    ctes = {n.lower() for tup in _CTE_NAME.findall(stripped) for n in tup if n}
+    for target in _TABLE_REF.findall(stripped):
+        t = target.lower()
+        if t in ctes:
+            continue
+        if t not in _ALLOWED_TABLES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Table '{target}' is not an allowed lakehouse table",
+            )
 
 # ─── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -337,10 +396,9 @@ async def ingest_transaction(req: IngestTransactionRequest, _=Depends(verify_api
 @app.post("/api/v1/query")
 async def run_query(req: QueryRequest, _=Depends(verify_api_key)):
     """Execute an analytical SQL query against the lakehouse"""
-    # Security: only allow SELECT statements
-    sql_upper = req.sql.strip().upper()
-    if not sql_upper.startswith("SELECT") and not sql_upper.startswith("WITH"):
-        raise HTTPException(status_code=400, detail="Only SELECT queries are allowed")
+    # Security: single-statement read-only SELECT/WITH over allowlisted tables;
+    # DuckDB file/network functions, DDL/DML and extension loading are blocked.
+    _validate_analytical_sql(req.sql)
 
     conn = get_db()
     try:
@@ -359,6 +417,7 @@ async def run_query(req: QueryRequest, _=Depends(verify_api_key)):
 async def monthly_revenue_report(
     year: int = Query(default=datetime.now().year),
     month: int = Query(default=datetime.now().month),
+    _=Depends(verify_api_key),
 ):
     """Generate monthly revenue report"""
     conn = get_db()
@@ -393,6 +452,7 @@ async def corridor_analysis(
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
     top_n: int = Query(default=10),
+    _=Depends(verify_api_key),
 ):
     """Analyze top remittance corridors"""
     date_from = date_from or (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
@@ -473,7 +533,7 @@ async def regulatory_report(
     }
 
 @app.get("/api/v1/stats/overview")
-async def overview_stats():
+async def overview_stats(_=Depends(verify_api_key)):
     """Get high-level platform statistics"""
     conn = get_db()
     stats = conn.execute("""

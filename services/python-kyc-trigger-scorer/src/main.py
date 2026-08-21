@@ -26,6 +26,17 @@ from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTEN
 from pydantic import BaseModel, Field
 from starlette.responses import Response
 
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[src] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
@@ -40,7 +51,7 @@ class Config:
     PORT: int = int(os.getenv("PORT", "8162"))
     TRIGGER_ENGINE_URL: str = os.getenv("TRIGGER_ENGINE_URL", "http://go-kyc-trigger-engine:8160")
     DAPR_HTTP_PORT: int = int(os.getenv("DAPR_HTTP_PORT", "3500"))
-    DB_URL: str = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow@postgres:5432/remitflow")
+    DB_URL: str = _require_env("DATABASE_URL")
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://redis:6379")
     REKYC_INTERVAL_DAYS: int = int(os.getenv("REKYC_INTERVAL_DAYS", "365"))
     HIGH_RISK_REKYC_DAYS: int = int(os.getenv("HIGH_RISK_REKYC_DAYS", "90"))
