@@ -666,53 +666,75 @@ async def _on_shutdown():
     logging.getLogger("python-deepfake-detector").info("FastAPI shutdown event — cleaning up resources")
 
 
-# Initialize PostgreSQL tables (middleware-ready)
-try:
-    _get_db()
-except Exception:
-    pass
+# Initialise the primary PostgreSQL persistence connection before serving requests.
+_get_db()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
 @app.post("/check", response_model=DeepfakeCheckResponse)
-async def check_deepfake(req: DeepfakeCheckRequest, _auth: None = Depends(require_internal_auth)):
-    """Analyse a single image for deepfake artifacts."""
-    user_key = req.user_id or req.session_id or "anonymous"
+async def check_deepfake(req: DeepfakeCheckRequest, request: Request, _auth: None = Depends(require_internal_auth)):
+    """Analyse a single face image for deepfake artifacts."""
     _metrics["total_requests"] += 1
+    user_key = req.user_id or request.client.host or "anonymous"
 
     if not _rate_limiter.check(user_key):
         _metrics["rate_limited"] += 1
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        logger.warning(f"Rate limit exceeded for user: {user_key}")
+        raise HTTPException(status_code=429, detail="Rate limit exceeded — max {RATE_LIMIT_RPM} requests/minute")
 
-    return await run_deepfake_check(req)
+    if not req.image_url and not req.image_base64:
+        raise HTTPException(status_code=422, detail="Either image_url or image_base64 is required")
+
+    result = await run_deepfake_check(req)
+    logger.info(
+        f"Deepfake check: user={user_key} is_deepfake={result.is_deepfake} "
+        f"confidence={result.confidence:.3f} method={result.method} "
+        f"latency={result.processing_time_ms:.0f}ms"
+    )
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = result if isinstance(result, dict) else {"result": str(result)}
+        _db_upsert("deepfake_detector", f"check:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("deepfake_detector", "check", _result_data)
+    except Exception:
+        pass
+    return result
 
 
 @app.post("/batch", response_model=BatchCheckResponse)
-async def check_batch(req: BatchCheckRequest, _auth: None = Depends(require_internal_auth)):
-    """Analyse up to MAX_BATCH_SIZE images in one request."""
-    if len(req.images) > MAX_BATCH_SIZE:
-        raise HTTPException(status_code=400, detail=f"Maximum {MAX_BATCH_SIZE} images per batch")
-
-    user_key = req.user_id or "anonymous"
+async def check_deepfake_batch(req: BatchCheckRequest, request: Request, _auth: None = Depends(require_internal_auth)):
+    """Analyse up to 8 face images in parallel."""
     _metrics["total_requests"] += 1
+    if len(req.images) > MAX_BATCH_SIZE:
+        raise HTTPException(status_code=422, detail=f"Batch size exceeds maximum of {MAX_BATCH_SIZE}")
 
+    user_key = req.user_id or request.client.host or "anonymous"
     if not _rate_limiter.check(user_key):
         _metrics["rate_limited"] += 1
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
     start = time.monotonic()
-    tasks = [run_deepfake_check(img) for img in req.images]
-    results = await asyncio.gather(*tasks, return_exceptions=False)
+    results = await asyncio.gather(*[run_deepfake_check(img) for img in req.images])
 
     any_deepfake = any(r.is_deepfake for r in results)
     max_confidence = max((r.confidence for r in results), default=0.0)
 
+    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
+    import time as _time
+    try:
+        _result_data = BatchCheckResponse if isinstance(BatchCheckResponse, dict) else {"result": str(BatchCheckResponse)}
+        _db_upsert("deepfake_detector", f"batch:{int(_time.time()*1000)}", _result_data)
+        _db_log_event("deepfake_detector", "batch", _result_data)
+    except Exception:
+        pass
     return BatchCheckResponse(
         results=list(results),
         any_deepfake=any_deepfake,
@@ -724,32 +746,156 @@ async def check_batch(req: BatchCheckRequest, _auth: None = Depends(require_inte
 @app.get("/health")
 async def health():
     return {
-        "status": "ok",
         "service": "python-deepfake-detector",
-        "model_available": _model_available,
+        "version": "1.0.0",
+        "status": "healthy",
+        "model_loaded": _model_available,
         "model_id": HF_MODEL_ID if _model_available else None,
-        "fallbacks": {
-            "frequency_domain": ENABLE_FREQUENCY_FALLBACK,
-            "landmark_consistency": ENABLE_LANDMARK_FALLBACK,
-        },
-        "confidence_threshold": DEEPFAKE_CONFIDENCE_THRESHOLD,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
 @app.get("/metrics")
 async def metrics():
     lines = [
-        f"deepfake_detector_total_requests {_metrics['total_requests']}",
-        f"deepfake_detector_deepfake_detected {_metrics['deepfake_detected']}",
-        f"deepfake_detector_real_detected {_metrics['real_detected']}",
-        f"deepfake_detector_model_errors {_metrics['model_errors']}",
-        f"deepfake_detector_fallback_used {_metrics['fallback_used']}",
-        f"deepfake_detector_rate_limited {_metrics['rate_limited']}",
+        "# HELP deepfake_requests_total Total deepfake check requests",
+        "# TYPE deepfake_requests_total counter",
+        f"deepfake_requests_total {_metrics['total_requests']}",
+        "# HELP deepfake_detected_total Images classified as deepfake",
+        "# TYPE deepfake_detected_total counter",
+        f"deepfake_detected_total {_metrics['deepfake_detected']}",
+        "# HELP deepfake_real_total Images classified as real",
+        "# TYPE deepfake_real_total counter",
+        f"deepfake_real_total {_metrics['real_detected']}",
+        "# HELP deepfake_model_errors_total Model inference errors",
+        "# TYPE deepfake_model_errors_total counter",
+        f"deepfake_model_errors_total {_metrics['model_errors']}",
+        "# HELP deepfake_fallback_used_total Times fallback detection was used",
+        "# TYPE deepfake_fallback_used_total counter",
+        f"deepfake_fallback_used_total {_metrics['fallback_used']}",
+        "# HELP deepfake_rate_limited_total Requests rejected by rate limiter",
+        "# TYPE deepfake_rate_limited_total counter",
+        f"deepfake_rate_limited_total {_metrics['rate_limited']}",
     ]
-    return Response(content="\n".join(lines), media_type="text/plain")
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+@app.on_event("startup")
+async def startup():
+    logger.info("Starting RemitFlow Deepfake Detection Service v1.0.0")
+    # Test mode exercises deterministic fail-closed fallbacks without fetching external model artifacts.
+    if os.getenv("REMITFLOW_TEST_MODE", "false").lower() != "true":
+        asyncio.create_task(_load_model())
 
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("DEEPFAKE_DETECTOR_PORT", "8097"))
+
+# ─── PostgreSQL Persistence (middleware-ready: swap to TigerBeetle/Kafka in production) ───
+import psycopg2
+import json as _json
+import signal
+import atexit
+
+def _get_db_conn():
+    """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""
+    try:
+        db_url = _require_env("DATABASE_URL")
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = True
+        return conn
+    except Exception:
+        return None
+
+def _db_ensure_tables(table_prefix):
+    """Create state and events tables if they don't exist."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_prefix}_state (
+                    id TEXT PRIMARY KEY,
+                    data JSONB NOT NULL DEFAULT '{{}}',
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {table_prefix}_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    payload JSONB DEFAULT '{{}}',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+def _db_upsert(table_prefix, record_id, data):
+    """Upsert a record to PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"INSERT INTO {table_prefix}_state (id, data, updated_at) VALUES (%s, %s, NOW()) "
+                f"ON CONFLICT (id) DO UPDATE SET data = %s, updated_at = NOW()",
+                (record_id, _json.dumps(data), _json.dumps(data))
+            )
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+def _db_get(table_prefix, record_id):
+    """Get a record from PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT data FROM {table_prefix}_state WHERE id = %s", (record_id,))
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if row:
+                return row[0]
+        except Exception:
+            pass
+    return None
+
+def _db_list(table_prefix, limit=200):
+    """List records from PostgreSQL state table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(f"SELECT data FROM {table_prefix}_state ORDER BY updated_at DESC LIMIT %s", (limit,))
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [r[0] for r in rows]
+        except Exception:
+            pass
+    return []
+
+def _db_log_event(table_prefix, event_type, payload):
+    """Log an event to PostgreSQL events table."""
+    conn = _get_db_conn()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                f"INSERT INTO {table_prefix}_events (event_type, payload) VALUES (%s, %s)",
+                (event_type, _json.dumps(payload))
+            )
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+
+    port = int(os.getenv("PORT", "8097"))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
