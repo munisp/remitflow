@@ -18,14 +18,32 @@ import { createAuditLog } from "./db";
 import { screenSanctions, runComplianceCheck } from "./_core/polyglotClient";
 import { logger } from './_core/logger';
 
-// ─── Provider Config (from env, with safe defaults for dev) ───────────────────
-const ONFIDO_WEBHOOK_SECRET = process.env.ONFIDO_WEBHOOK_SECRET ?? "onfido-dev-secret";
-const SUMSUB_WEBHOOK_SECRET = process.env.SUMSUB_WEBHOOK_SECRET ?? "sumsub-dev-secret";
-const VERIFF_WEBHOOK_SECRET = process.env.VERIFF_WEBHOOK_SECRET ?? "veriff-dev-secret";
+// ─── Provider Config (SEC-07: fail-closed, no default secrets) ───────────────
+// A missing provider secret must REJECT all webhooks for that provider. The
+// verification bypass is only available outside production behind the explicit
+// ALLOW_INSECURE_WEBHOOKS=1 opt-in; in production a missing secret aborts boot.
+const isProduction = process.env.NODE_ENV === "production";
+const ALLOW_INSECURE_WEBHOOKS = !isProduction && process.env.ALLOW_INSECURE_WEBHOOKS === "1";
+
+const ONFIDO_WEBHOOK_SECRET = process.env.ONFIDO_WEBHOOK_SECRET;
+const SUMSUB_WEBHOOK_SECRET = process.env.SUMSUB_WEBHOOK_SECRET;
+const VERIFF_WEBHOOK_SECRET = process.env.VERIFF_WEBHOOK_SECRET;
+
+if (isProduction) {
+  const missing = [
+    ["ONFIDO_WEBHOOK_SECRET", ONFIDO_WEBHOOK_SECRET],
+    ["SUMSUB_WEBHOOK_SECRET", SUMSUB_WEBHOOK_SECRET],
+    ["VERIFF_WEBHOOK_SECRET", VERIFF_WEBHOOK_SECRET],
+  ].filter(([, v]) => !v).map(([k]) => k as string);
+  if (missing.length > 0) {
+    throw new Error(`FATAL: KYC webhook secrets not configured in production (fail-closed): ${missing.join(", ")}`);
+  }
+}
 
 // ─── Signature Verification Helpers ──────────────────────────────────────────
 
 function verifyOnfidoSignature(rawBody: Buffer, signature: string): boolean {
+  if (!ONFIDO_WEBHOOK_SECRET) return false; // fail-closed
   const expected = crypto
     .createHmac("sha256", ONFIDO_WEBHOOK_SECRET)
     .update(rawBody)
@@ -38,6 +56,7 @@ function verifyOnfidoSignature(rawBody: Buffer, signature: string): boolean {
 }
 
 function verifySumsubSignature(rawBody: Buffer, signature: string): boolean {
+  if (!SUMSUB_WEBHOOK_SECRET) return false; // fail-closed
   const expected = crypto
     .createHmac("sha256", SUMSUB_WEBHOOK_SECRET)
     .update(rawBody)
@@ -50,6 +69,7 @@ function verifySumsubSignature(rawBody: Buffer, signature: string): boolean {
 }
 
 function verifyVeriffSignature(rawBody: Buffer, signature: string): boolean {
+  if (!VERIFF_WEBHOOK_SECRET) return false; // fail-closed
   const expected = crypto
     .createHmac("sha256", VERIFF_WEBHOOK_SECRET)
     .update(rawBody)
@@ -235,8 +255,8 @@ export function registerKycProviderWebhooks(app: Express): void {
     const signature = (req.headers["x-sha2-signature"] as string) ?? "";
     const rawBody = req.body as Buffer;
 
-    // In dev/test mode skip signature verification
-    if (ONFIDO_WEBHOOK_SECRET !== "onfido-dev-secret") {
+    // SEC-07: always verify; bypass only via explicit dev-only opt-in
+    if (!ALLOW_INSECURE_WEBHOOKS) {
       if (!verifyOnfidoSignature(rawBody, signature)) {
         logger.warn("[KYC Webhook] Onfido signature mismatch");
         return res.status(401).json({ error: "Invalid signature" });
@@ -261,7 +281,7 @@ export function registerKycProviderWebhooks(app: Express): void {
     const signature = (req.headers["x-payload-digest"] as string) ?? "";
     const rawBody = req.body as Buffer;
 
-    if (SUMSUB_WEBHOOK_SECRET !== "sumsub-dev-secret") {
+    if (!ALLOW_INSECURE_WEBHOOKS) {
       if (!verifySumsubSignature(rawBody, signature)) {
         logger.warn("[KYC Webhook] Sumsub signature mismatch");
         return res.status(401).json({ error: "Invalid signature" });
@@ -286,7 +306,7 @@ export function registerKycProviderWebhooks(app: Express): void {
     const signature = (req.headers["x-hmac-signature"] as string) ?? "";
     const rawBody = req.body as Buffer;
 
-    if (VERIFF_WEBHOOK_SECRET !== "veriff-dev-secret") {
+    if (!ALLOW_INSECURE_WEBHOOKS) {
       if (!verifyVeriffSignature(rawBody, signature)) {
         logger.warn("[KYC Webhook] Veriff signature mismatch");
         return res.status(401).json({ error: "Invalid signature" });

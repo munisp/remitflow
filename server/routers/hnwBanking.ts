@@ -133,8 +133,10 @@ export const hnwBankingRouter = router({
       const transferId = `HNW-${Date.now()}-${ctx.user.id}`;
 
       // 2FA enforcement — HNW transfers always require TOTP (high-value by definition)
-      const [userRow] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
-      if (userRow?.totpEnabled) {
+      // SEC-25: read enrollment from mfa_settings (with users.twoFactor* fallback)
+      const { getTotpEnrollment } = await import("../totp");
+      const enrollment = await getTotpEnrollment(ctx.user.id);
+      if (enrollment.enabled) {
         // For rate lock execution, 2FA was already verified at lock creation
         logger.info({ userId: ctx.user.id, rateLockId: input.rateLockId }, "[HNW] Rate lock transfer — 2FA verified at lock time");
       }
