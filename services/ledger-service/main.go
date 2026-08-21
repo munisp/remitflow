@@ -38,6 +38,8 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
+
+	mw "github.com/remitflow/shared-middleware"
 )
 
 // ─── Account Types ────────────────────────────────────────────────────────────
@@ -132,6 +134,10 @@ type VoidPendingReq struct {
 type LedgerService struct {
 	db           *sql.DB
 	isProduction bool
+	// allowDevMode permits operations against nonexistent accounts. It is only
+	// true when LEDGER_ALLOW_DEV_MODE=true is explicitly set AND the service is
+	// not in production. Default (unset) = fail closed.
+	allowDevMode bool
 	kafkaBroker  string
 	tbAddresses  []string
 	tbClusterID  uint64
@@ -415,40 +421,6 @@ func (s *LedgerService) handleCreateTransfer(w http.ResponseWriter, r *http.Requ
 
 	amountMinor := amountToMinor(req.Amount)
 
-	// Balance pre-check (FAIL-CLOSED in production)
-	var dp, dpo, cpo string
-	err := s.db.QueryRow(
-		"SELECT debits_pending::TEXT, debits_posted::TEXT, credits_posted::TEXT FROM ledger_accounts WHERE id = $1",
-		req.DebitAccountID,
-	).Scan(&dp, &dpo, &cpo)
-
-	if err == sql.ErrNoRows {
-		if s.isProduction {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{
-				"error":      "FAIL_CLOSED_ACCOUNT_NOT_FOUND",
-				"account_id": req.DebitAccountID,
-				"message":    "Debit account not found — cannot transfer without verified account",
-			})
-			return
-		}
-	} else if err == nil {
-		debitsPending, _ := strconv.ParseInt(dp, 10, 64)
-		debitsPosted, _ := strconv.ParseInt(dpo, 10, 64)
-		creditsPosted, _ := strconv.ParseInt(cpo, 10, 64)
-		available := creditsPosted - debitsPosted - debitsPending
-		if available < amountMinor {
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":             "INSUFFICIENT_FUNDS",
-				"available_balance": minorToAmount(available),
-				"requested_amount":  req.Amount,
-				"message":           "Transfer blocked: insufficient available balance",
-			})
-			return
-		}
-	}
-
 	transferID := uuid.New().String()
 	code := req.TransferCode
 	if code == 0 {
@@ -477,6 +449,52 @@ func (s *LedgerService) handleCreateTransfer(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	defer tx.Rollback()
+
+	// Balance check INSIDE the transaction with a row lock on the debit
+	// account (SELECT ... FOR UPDATE). This closes the TOCTOU double-spend:
+	// concurrent transfers serialize on the account row, so two of them cannot
+	// both pass the available-balance check.
+	var dp, dpo, cpo string
+	balErr0 := tx.QueryRow(
+		"SELECT debits_pending::TEXT, debits_posted::TEXT, credits_posted::TEXT FROM ledger_accounts WHERE id = $1 FOR UPDATE",
+		req.DebitAccountID,
+	).Scan(&dp, &dpo, &cpo)
+
+	if balErr0 == sql.ErrNoRows {
+		// Fail closed by default: transfers against nonexistent accounts are
+		// blocked unless LEDGER_ALLOW_DEV_MODE=true is explicitly set outside
+		// production.
+		if !s.allowDevMode {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error":      "FAIL_CLOSED_ACCOUNT_NOT_FOUND",
+				"account_id": req.DebitAccountID,
+				"message":    "Debit account not found — cannot transfer without verified account",
+			})
+			return
+		}
+		log.Printf("[ledger-service] DEV MODE (LEDGER_ALLOW_DEV_MODE=true): proceeding with nonexistent debit account %s", req.DebitAccountID)
+	} else if balErr0 != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: balance check failed: %v", balErr0)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "TRANSFER_FAILED", "message": "Failed to verify debit account — operation blocked"})
+		return
+	} else {
+		debitsPending, _ := strconv.ParseInt(dp, 10, 64)
+		debitsPosted, _ := strconv.ParseInt(dpo, 10, 64)
+		creditsPosted, _ := strconv.ParseInt(cpo, 10, 64)
+		available := creditsPosted - debitsPosted - debitsPending
+		if available < amountMinor {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":             "INSUFFICIENT_FUNDS",
+				"available_balance": minorToAmount(available),
+				"requested_amount":  req.Amount,
+				"message":           "Transfer blocked: insufficient available balance",
+			})
+			return
+		}
+	}
 
 	if _, err = tx.Exec(
 		`INSERT INTO ledger_transfers (id, debit_account_id, credit_account_id, amount, ledger, code, flags, timeout, status, idempotency_key)
@@ -563,11 +581,24 @@ func (s *LedgerService) handlePostPending(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Find pending transfer
+	// All steps (lookup, insert, balance moves, status update) run in ONE
+	// transaction with checked errors; the pending transfer row is locked
+	// FOR UPDATE so concurrent post/void requests serialize instead of
+	// double-posting.
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: post-pending begin tx failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "POST_FAILED", "message": "Failed to start transaction — operation blocked"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Find pending transfer (locked)
 	var debitID, creditID, amountStr string
 	var code int
-	err := s.db.QueryRow(
-		"SELECT debit_account_id, credit_account_id, amount::TEXT, code FROM ledger_transfers WHERE id = $1 AND status = 'pending'",
+	err = tx.QueryRow(
+		"SELECT debit_account_id, credit_account_id, amount::TEXT, code FROM ledger_transfers WHERE id = $1 AND status = 'pending' FOR UPDATE",
 		req.PendingTransferID,
 	).Scan(&debitID, &creditID, &amountStr, &code)
 
@@ -606,20 +637,47 @@ func (s *LedgerService) handlePostPending(w http.ResponseWriter, r *http.Request
 	postID := uuid.New().String()
 
 	// Record post-pending transfer
-	s.db.Exec(
+	if _, err = tx.Exec(
 		`INSERT INTO ledger_transfers (id, debit_account_id, credit_account_id, amount, pending_id, ledger, code, flags, status)
 		 VALUES ($1, $2, $3, $4, $5, 1, $6, $7, 'posted')`,
 		postID, debitID, creditID, fmt.Sprintf("%d", postAmount), req.PendingTransferID, code, FlagPostPending,
-	)
+	); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: post-pending insert failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "POST_FAILED", "message": "Failed to record post transfer — operation blocked"})
+		return
+	}
 
 	// Move from pending to posted
-	s.db.Exec("UPDATE ledger_accounts SET debits_pending = GREATEST(0, debits_pending - $1), debits_posted = debits_posted + $1, updated_at = NOW() WHERE id = $2",
-		fmt.Sprintf("%d", postAmount), debitID)
-	s.db.Exec("UPDATE ledger_accounts SET credits_pending = GREATEST(0, credits_pending - $1), credits_posted = credits_posted + $1, updated_at = NOW() WHERE id = $2",
-		fmt.Sprintf("%d", postAmount), creditID)
+	if _, err = tx.Exec("UPDATE ledger_accounts SET debits_pending = GREATEST(0, debits_pending - $1), debits_posted = debits_posted + $1, updated_at = NOW() WHERE id = $2",
+		fmt.Sprintf("%d", postAmount), debitID); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: debit balance move failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "POST_FAILED", "message": "Failed to update debit balance — operation blocked"})
+		return
+	}
+	if _, err = tx.Exec("UPDATE ledger_accounts SET credits_pending = GREATEST(0, credits_pending - $1), credits_posted = credits_posted + $1, updated_at = NOW() WHERE id = $2",
+		fmt.Sprintf("%d", postAmount), creditID); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: credit balance move failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "POST_FAILED", "message": "Failed to update credit balance — operation blocked"})
+		return
+	}
 
 	// Mark original as posted
-	s.db.Exec("UPDATE ledger_transfers SET status = 'posted' WHERE id = $1", req.PendingTransferID)
+	if _, err = tx.Exec("UPDATE ledger_transfers SET status = 'posted' WHERE id = $1", req.PendingTransferID); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: marking pending transfer posted failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "POST_FAILED", "message": "Failed to finalize pending transfer — operation blocked"})
+		return
+	}
+
+	if err = tx.Commit(); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: post-pending commit failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "POST_FAILED", "message": "Failed to commit post — operation blocked"})
+		return
+	}
 
 	// Emit event
 	s.publishEvent("post_pending", postID, map[string]interface{}{
@@ -649,10 +707,20 @@ func (s *LedgerService) handleVoidPending(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Single transaction + row lock, same fail-closed semantics as post-pending.
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: void-pending begin tx failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "VOID_FAILED", "message": "Failed to start transaction — operation blocked"})
+		return
+	}
+	defer tx.Rollback()
+
 	var debitID, creditID, amountStr string
 	var code int
-	err := s.db.QueryRow(
-		"SELECT debit_account_id, credit_account_id, amount::TEXT, code FROM ledger_transfers WHERE id = $1 AND status = 'pending'",
+	err = tx.QueryRow(
+		"SELECT debit_account_id, credit_account_id, amount::TEXT, code FROM ledger_transfers WHERE id = $1 AND status = 'pending' FOR UPDATE",
 		req.PendingTransferID,
 	).Scan(&debitID, &creditID, &amountStr, &code)
 
@@ -678,20 +746,47 @@ func (s *LedgerService) handleVoidPending(w http.ResponseWriter, r *http.Request
 	voidID := uuid.New().String()
 
 	// Record void transfer
-	s.db.Exec(
+	if _, err = tx.Exec(
 		`INSERT INTO ledger_transfers (id, debit_account_id, credit_account_id, amount, pending_id, ledger, code, flags, status)
 		 VALUES ($1, $2, $3, $4, $5, 1, $6, $7, 'voided')`,
 		voidID, debitID, creditID, fmt.Sprintf("%d", amount), req.PendingTransferID, code, FlagVoidPending,
-	)
+	); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: void insert failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "VOID_FAILED", "message": "Failed to record void transfer — operation blocked"})
+		return
+	}
 
 	// Release pending amounts
-	s.db.Exec("UPDATE ledger_accounts SET debits_pending = GREATEST(0, debits_pending - $1), updated_at = NOW() WHERE id = $2",
-		fmt.Sprintf("%d", amount), debitID)
-	s.db.Exec("UPDATE ledger_accounts SET credits_pending = GREATEST(0, credits_pending - $1), updated_at = NOW() WHERE id = $2",
-		fmt.Sprintf("%d", amount), creditID)
+	if _, err = tx.Exec("UPDATE ledger_accounts SET debits_pending = GREATEST(0, debits_pending - $1), updated_at = NOW() WHERE id = $2",
+		fmt.Sprintf("%d", amount), debitID); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: debit release failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "VOID_FAILED", "message": "Failed to release debit hold — operation blocked"})
+		return
+	}
+	if _, err = tx.Exec("UPDATE ledger_accounts SET credits_pending = GREATEST(0, credits_pending - $1), updated_at = NOW() WHERE id = $2",
+		fmt.Sprintf("%d", amount), creditID); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: credit release failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "VOID_FAILED", "message": "Failed to release credit hold — operation blocked"})
+		return
+	}
 
 	// Mark original as voided
-	s.db.Exec("UPDATE ledger_transfers SET status = 'voided' WHERE id = $1", req.PendingTransferID)
+	if _, err = tx.Exec("UPDATE ledger_transfers SET status = 'voided' WHERE id = $1", req.PendingTransferID); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: marking pending transfer voided failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "VOID_FAILED", "message": "Failed to finalize void — operation blocked"})
+		return
+	}
+
+	if err = tx.Commit(); err != nil {
+		log.Printf("[ledger-service] FAIL-CLOSED: void-pending commit failed: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "VOID_FAILED", "message": "Failed to commit void — operation blocked"})
+		return
+	}
 
 	// Emit event
 	s.publishEvent("void_pending", voidID, map[string]interface{}{
@@ -821,6 +916,15 @@ func main() {
 	defer db.Close()
 
 	isProduction := os.Getenv("NODE_ENV") == "production" || os.Getenv("GO_ENV") == "production"
+	// GO-H3: fail closed by default. Dev mode (transfers against nonexistent
+	// accounts) requires an explicit opt-in and is never allowed in production.
+	allowDevMode := os.Getenv("LEDGER_ALLOW_DEV_MODE") == "true" && !isProduction
+
+	// GO-C5: this is the system-of-record ledger — every funds route requires
+	// authentication via the shared middleware (post-GO-C3 fix). The service
+	// refuses to boot without INTERNAL_SERVICE_KEY so service-to-service auth
+	// can never be silently disabled.
+	mw.RequireInternalServiceKey()
 	kafkaBroker := os.Getenv("KAFKA_BROKER")
 	if kafkaBroker == "" {
 		kafkaBroker = "localhost:9092"
@@ -834,6 +938,7 @@ func main() {
 	svc := &LedgerService{
 		db:           db,
 		isProduction: isProduction,
+		allowDevMode: allowDevMode,
 		kafkaBroker:  kafkaBroker,
 		tbAddresses:  tbAddresses,
 		tbClusterID:  tbClusterID,
@@ -867,9 +972,14 @@ func main() {
 	mux.HandleFunc("/api/v1/stats", svc.handleStats)
 	mux.HandleFunc("/api/v1/reconciliation", svc.handleReconciliation)
 
+	// GO-C5: wrap ALL routes with shared-middleware auth. /health, /healthz,
+	// /ready and /metrics remain unauthenticated (bypass inside AuthMiddleware);
+	// everything else — accounts, transfers, post/void, stats, reconciliation —
+	// requires a valid internal service key or Keycloak Bearer JWT.
+	mwCfg := mw.LoadConfig("ledger-service")
 	server := &http.Server{
 		Addr:         ":" + port,
-		Handler:      mux,
+		Handler:      mw.AuthMiddleware(mwCfg, mux),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
