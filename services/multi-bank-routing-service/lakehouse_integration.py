@@ -16,6 +16,17 @@ from aiokafka import AIOKafkaProducer
 import redis.asyncio as redis
 import asyncpg
 
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[multi-bank-routing-service] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -126,7 +137,7 @@ class RoutingLakehousePublisher:
     ):
         self.kafka_brokers = kafka_brokers or os.getenv("KAFKA_BROKERS", "localhost:9092")
         self.redis_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        self.db_url = db_url or os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/multibank")
+        self.db_url = db_url or _require_env("DATABASE_URL")
         
         # Connections
         self.producer: Optional[AIOKafkaProducer] = None

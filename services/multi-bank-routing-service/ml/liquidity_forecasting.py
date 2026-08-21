@@ -551,7 +551,7 @@ class LSTMForecaster:
             
             if os.path.exists(model_path) and os.path.exists(scaler_path):
                 model = LSTMLiquidityModel()
-                model.load_state_dict(torch.load(model_path, map_location=self.device))
+                model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))  # PY-014: no pickle deserialization
                 self.models[model_key] = model.to(self.device)
                 self.scalers[model_key] = joblib.load(scaler_path)
             else:
