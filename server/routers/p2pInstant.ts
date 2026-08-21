@@ -439,10 +439,22 @@ export const p2pInstantRouter = router({
         if (!input.otpCode) {
           return { requiresOTP: true, message: `Transfers >= $${OTP_THRESHOLD_USD} require OTP confirmation`, transferId: null };
         }
-        // OTP verification would check against TOTP secret or SMS code
-        // For now, accept any 6-digit code (real impl uses Keycloak or SMS gateway)
-        if (!/^\d{6}$/.test(input.otpCode)) {
-          throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid OTP code — must be 6 digits" });
+        // FF-019: verify the TOTP against the user's enrolled secret (same
+        // mechanism as outbound SWIFT transfers). Any-6-digits acceptance was
+        // a decorative control — fail closed instead. GATE-V2-C3: enrollment
+        // columns live on mfa_settings (legacy: users.twoFactor*) — use the
+        // shared getTotpEnrollment helper, never users.totp* (nonexistent cols).
+        const { getTotpEnrollment, verifyTOTP } = await import("../totp");
+        const enrollment = await getTotpEnrollment(ctx.user.id);
+        if (!enrollment.dbAvailable) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — transfer blocked" });
+        }
+        if (!enrollment.enabled || !enrollment.secret) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: enroll TOTP before high-value transfers" });
+        }
+        const valid = await verifyTOTP(input.otpCode, enrollment.secret);
+        if (!valid) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "Invalid OTP code" });
         }
       }
 
@@ -570,78 +582,110 @@ export const p2pInstantRouter = router({
         }
       }
 
-      // ── Step 4: Debit sender wallet (atomic with optimistic locking) ──────
+      // GATE-V2-C4: senderAlias declaration restored (dropped by the FF-003
+      // rewrite — consumed by the p2pTransfers insert and receiver credit
+      // description below).
       const senderAlias = await db.select({ normalizedValue: paymentAliases.normalizedValue })
         .from(paymentAliases)
         .where(and(eq(paymentAliases.userId, ctx.user.id), eq(paymentAliases.isPrimary, true)))
         .then((rows: Array<{ normalizedValue: string }>) => rows[0]?.normalizedValue ?? ctx.user.email ?? `user:${ctx.user.id}`);
 
-      const debitResult = await db.execute(sql`
-        UPDATE wallets
-        SET balance = balance - ${totalDebit.toFixed(2)},
-            "updatedAt" = NOW(),
-            version = version + 1
-        WHERE "userId" = ${ctx.user.id}
-          AND currency = ${input.currency}
-          AND status = 'active'
-          AND CAST(balance AS numeric) >= ${totalDebit.toFixed(2)}
-        RETURNING id, balance
-      `);
+      // ── Steps 4–6: debit + transfer record + (internal) receiver credit in ONE
+      //    DB transaction (FF-003). A unique violation on idempotencyKey rolls
+      //    the debit back (no double-debit); a missing/inactive receiver wallet
+      //    rolls EVERYTHING back (funds never vanish).
+      const ilp = generateIlpConditionPair();
+      let transfer: typeof p2pTransfers.$inferSelect;
+      try {
+        transfer = await db.transaction(async (tx: any) => {
+          // Step 4: guarded debit (optimistic balance guard + row-count check)
+          const debitResult = (await tx.execute(sql`
+            UPDATE wallets
+            SET balance = balance - ${totalDebit.toFixed(2)},
+                "updatedAt" = NOW(),
+                version = version + 1
+            WHERE "userId" = ${ctx.user.id}
+              AND currency = ${input.currency}
+              AND status = 'active'
+              AND CAST(balance AS numeric) >= ${totalDebit.toFixed(2)}
+            RETURNING id, balance
+          `)) as unknown as Array<{ id: number; balance: string }>;
+          if (debitResult.length === 0) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance or wallet not found" });
+          }
 
-      if (!debitResult.length) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance or wallet not found" });
+          // Step 5: transfer record (idempotencyKey UNIQUE — race loser aborts
+          // the whole transaction, undoing its debit)
+          const [t] = await tx.insert(p2pTransfers).values({
+            senderId: ctx.user.id,
+            senderAlias,
+            receiverAlias: normalized,
+            receiverId: receiverId,
+            receiverFspId,
+            sendAmount: input.amount.toFixed(2),
+            sendCurrency: input.currency,
+            receiveAmount: receiveAmount.toFixed(2),
+            receiveCurrency: receiverCurrency,
+            fxRate: fxRate.toFixed(8),
+            fee: fee.toFixed(2),
+            rail: rail as any,
+            corridorCode,
+            status: "debited",
+            ilpCondition: ilp.condition,
+            ilpFulfillment: ilp.fulfillment,
+            note: input.note,
+            idempotencyKey: idemKey,
+          }).returning();
+
+          // Step 6 (internal): receiver credit — row-count CHECKED; 0 rows
+          // aborts the transaction so the sender debit is rolled back too.
+          if (receiverId && receiverFspId === REMITFLOW_FSP_ID) {
+            const creditRows = (await tx.execute(sql`
+              UPDATE wallets
+              SET balance = balance + ${receiveAmount.toFixed(2)},
+                  "updatedAt" = NOW(),
+                  version = version + 1
+              WHERE "userId" = ${receiverId}
+                AND currency = ${receiverCurrency}
+                AND status = 'active'
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (creditRows.length === 0) {
+              throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Receiver wallet unavailable — transfer aborted, no funds moved" });
+            }
+
+            await tx.update(p2pTransfers)
+              .set({ status: "completed", completedAt: new Date(), updatedAt: new Date() })
+              .where(eq(p2pTransfers.id, t.id));
+
+            // Record ledger entries for both sides
+            await tx.insert(transactions).values([
+              { userId: ctx.user.id, type: "send", amount: `-${totalDebit.toFixed(2)}`, currency: input.currency, status: "completed", description: `P2P send to ${normalized}`, metadata: { p2pTransferId: t.id, rail: "internal" } },
+              { userId: receiverId, type: "receive", amount: receiveAmount.toFixed(2), currency: receiverCurrency, status: "completed", description: `P2P received from ${senderAlias}`, metadata: { p2pTransferId: t.id, rail: "internal" } },
+            ]);
+
+            (t as { status: string }).status = "completed";
+            logger.info({ transferId: t.id, rail: "internal", amount: input.amount }, "[P2P] Internal transfer completed");
+          }
+          return t;
+        });
+      } catch (err) {
+        // FF-003(a): concurrent duplicate with the same idempotency key — the
+        // loser's transaction rolled back (no second debit). Return the
+        // winner's transfer as an idempotent replay.
+        if ((err as { code?: string })?.code === "23505") {
+          const [existingTransfer] = await db.select({ id: p2pTransfers.id, status: p2pTransfers.status })
+            .from(p2pTransfers)
+            .where(eq(p2pTransfers.idempotencyKey, idemKey));
+          if (existingTransfer) {
+            return { transferId: existingTransfer.id, status: existingTransfer.status, idempotent: true };
+          }
+        }
+        throw err;
       }
 
-      // ── Step 5: Create P2P transfer record ────────────────────────────────
-      const ilp = generateIlpConditionPair();
-
-      const [transfer] = await db.insert(p2pTransfers).values({
-        senderId: ctx.user.id,
-        senderAlias,
-        receiverAlias: normalized,
-        receiverId: receiverId,
-        receiverFspId,
-        sendAmount: input.amount.toFixed(2),
-        sendCurrency: input.currency,
-        receiveAmount: receiveAmount.toFixed(2),
-        receiveCurrency: receiverCurrency,
-        fxRate: fxRate.toFixed(8),
-        fee: fee.toFixed(2),
-        rail: rail as any,
-        corridorCode,
-        status: "debited",
-        ilpCondition: ilp.condition,
-        ilpFulfillment: ilp.fulfillment,
-        note: input.note,
-        idempotencyKey: idemKey,
-      }).returning();
-
-      // ── Step 6: Credit receiver (internal) or initiate settlement (external)
       if (receiverId && receiverFspId === REMITFLOW_FSP_ID) {
-        // Internal: direct wallet credit
-        await db.execute(sql`
-          UPDATE wallets
-          SET balance = balance + ${receiveAmount.toFixed(2)},
-              "updatedAt" = NOW(),
-              version = version + 1
-          WHERE "userId" = ${receiverId}
-            AND currency = ${receiverCurrency}
-            AND status = 'active'
-          RETURNING id
-        `);
-
-        await db.update(p2pTransfers)
-          .set({ status: "completed", completedAt: new Date(), updatedAt: new Date() })
-          .where(eq(p2pTransfers.id, transfer.id))
-          .returning({ id: p2pTransfers.id });
-
-        // Record ledger entries for both sides
-        await db.insert(transactions).values([
-          { userId: ctx.user.id, type: "send", amount: `-${totalDebit.toFixed(2)}`, currency: input.currency, status: "completed", description: `P2P send to ${normalized}`, metadata: { p2pTransferId: transfer.id, rail: "internal" } },
-          { userId: receiverId, type: "receive", amount: receiveAmount.toFixed(2), currency: receiverCurrency, status: "completed", description: `P2P received from ${senderAlias}`, metadata: { p2pTransferId: transfer.id, rail: "internal" } },
-        ]).returning();
-
-        logger.info({ transferId: transfer.id, rail: "internal", amount: input.amount }, "[P2P] Internal transfer completed");
+        // Internal transfer fully settled inside the transaction above.
       } else {
         // External: initiate Mojaloop/PAPSS settlement
         await db.update(p2pTransfers)
@@ -1251,23 +1295,67 @@ export const p2pInstantRouter = router({
       const [transfer] = await db.select().from(p2pTransfers).where(eq(p2pTransfers.id, input.transferId));
       if (!transfer) throw new TRPCError({ code: "NOT_FOUND", message: "Transfer not found" });
 
-      if (input.resolution === "refund" || input.resolution === "partial_refund") {
-        const refundAmt = input.refundAmount ?? parseFloat(transfer.sendAmount);
-        await db.execute(sql`
-          UPDATE wallets SET balance = balance + ${refundAmt.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
-          WHERE "userId" = ${transfer.senderId} AND currency = ${transfer.sendCurrency} AND status = 'active'
-          RETURNING id
-        `);
-        await db.update(p2pTransfers)
-          .set({ status: "compensated", updatedAt: new Date() })
-          .where(eq(p2pTransfers.id, input.transferId))
-          .returning({ id: p2pTransfers.id });
-      } else {
-        await db.update(p2pTransfers)
-          .set({ status: "completed", note: `dispute_rejected:${input.notes ?? ""}`, updatedAt: new Date() })
-          .where(eq(p2pTransfers.id, input.transferId))
-          .returning({ id: p2pTransfers.id });
+      // FF-025: only transfers in a disputable state can be resolved, and the
+      // status transition must WIN atomically — re-resolving a compensated /
+      // refunded transfer was a double-refund vector; "reject" must never
+      // resurrect compensated/failed transfers to completed.
+      if (!["disputed", "debited", "settling", "completed"].includes(transfer.status)) {
+        throw new TRPCError({ code: "CONFLICT", message: `Transfer in status '${transfer.status}' cannot be resolved via dispute` });
       }
+      // Cap any refund at the original debit (amount + fee) — a partial refund
+      // must never exceed what the sender actually paid.
+      const maxRefundable = parseFloat(transfer.sendAmount) + parseFloat(transfer.fee ?? "0");
+      const refundAmt = Math.min(input.refundAmount ?? maxRefundable, maxRefundable);
+
+      await db.transaction(async (tx: any) => {
+        if (input.resolution === "refund" || input.resolution === "partial_refund") {
+          // Refunding a COMPLETED internal transfer while the receiver keeps
+          // the credit creates money — only allow refund when the receiver
+          // credit can be clawed back (internal + completed) or funds are
+          // still with us (debited/settling).
+          const isInternalCompleted = transfer.status === "completed" && !!transfer.receiverId && transfer.receiverFspId === REMITFLOW_FSP_ID;
+          if (transfer.status === "completed" && !isInternalCompleted) {
+            // Completed via an external rail — the recipient was paid out.
+            // Refunding here creates money; requires rail recovery first.
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Transfer settled externally — refund requires rail recovery (manual process)" });
+          }
+          const won = await tx.update(p2pTransfers)
+            .set({ status: "compensated", updatedAt: new Date() })
+            .where(and(eq(p2pTransfers.id, input.transferId), eq(p2pTransfers.status, transfer.status)))
+            .returning({ id: p2pTransfers.id });
+          if (won.length === 0) {
+            throw new TRPCError({ code: "CONFLICT", message: "Transfer was already resolved concurrently" });
+          }
+          if (isInternalCompleted) {
+            // Claw back the receiver credit first (guarded — receiver must
+            // still hold the funds), then refund the sender.
+            const clawback = (await tx.execute(sql`
+              UPDATE wallets SET balance = balance - ${parseFloat(transfer.receiveAmount).toFixed(2)}, "updatedAt" = NOW(), version = version + 1
+              WHERE "userId" = ${transfer.receiverId} AND currency = ${transfer.receiveCurrency} AND status = 'active'
+                AND CAST(balance AS numeric) >= ${parseFloat(transfer.receiveAmount).toFixed(2)}
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (clawback.length === 0) {
+              throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Receiver no longer holds the funds — manual recovery required; sender NOT refunded" });
+            }
+          }
+          await tx.execute(sql`
+            UPDATE wallets SET balance = balance + ${refundAmt.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
+            WHERE "userId" = ${transfer.senderId} AND currency = ${transfer.sendCurrency} AND status = 'active'
+            RETURNING id
+          `);
+        } else {
+          // reject: restore to its pre-dispute state, never force "completed".
+          const restored = transfer.status === "disputed" ? "completed" : transfer.status;
+          const won = await tx.update(p2pTransfers)
+            .set({ status: restored === "disputed" ? "completed" : restored, note: `dispute_rejected:${input.notes ?? ""}`, updatedAt: new Date() })
+            .where(and(eq(p2pTransfers.id, input.transferId), eq(p2pTransfers.status, transfer.status)))
+            .returning({ id: p2pTransfers.id });
+          if (won.length === 0) {
+            throw new TRPCError({ code: "CONFLICT", message: "Transfer was already resolved concurrently" });
+          }
+        }
+      });
       return { resolved: true, resolution: input.resolution, transferId: input.transferId };
     }),
 
