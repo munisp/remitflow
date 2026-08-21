@@ -151,7 +151,7 @@ services:
     image: bitnami/kafka:3.6
     profiles: ["full", "monitoring"]
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
     healthcheck:
       test: ["CMD-SHELL", "kafka-broker-api-versions.sh --bootstrap-server localhost:9092 || exit 1"]
       interval: 30s
@@ -190,21 +190,6 @@ services:
       kafka:
         condition: service_healthy
 
-  temporal:
-    image: temporalio/auto-setup:1.22
-    profiles: ["full", "monitoring"]
-    ports:
-      - "7233:7233"
-    environment:
-      DB: postgresql
-      DB_PORT: 5432
-      POSTGRES_USER: remitflow
-      POSTGRES_PWD: remitflow_dev
-      POSTGRES_SEEDS: postgres
-    depends_on:
-      postgres:
-        condition: service_healthy
-
   # ═══ MONITORING (profile: monitoring) ══════════════════════════════════════
 
   prometheus:
@@ -219,9 +204,9 @@ services:
     image: grafana/grafana:10.2.3
     profiles: ["monitoring"]
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:?GF_SECURITY_ADMIN_PASSWORD is required}
     volumes:
       - grafanadata:/var/lib/grafana
 
@@ -399,7 +384,7 @@ services:
     # Host 3002 -> container 3000 (host 3000 = API, 3001 = Grafana). Matches
     # TIGERBEETLE_ADDRESS=localhost:3002 in .env.example.
     ports:
-      - "3002:3000"
+      - "127.0.0.1:3002:3000"
     volumes:
       - tigerbeetle-data:/data
     healthcheck:
@@ -511,6 +496,13 @@ services:
       # Required — must match the admin key rendered into services/gateway-config/apisix.yaml.
       APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:?APISIX_ADMIN_KEY is required}
       DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+    networks:
+      # default: reach postgres/redis; remitflow-internal: reach apisix:9180.
+      # Static IP is the ONLY workload IP allowed by APISIX allow_admin
+      # (see services/gateway-config/apisix.yaml).
+      default: {}
+      remitflow-internal:
+        ipv4_address: 172.20.0.10
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8100/health"]
       interval: 15s
@@ -1092,14 +1084,21 @@ services:
     image: bitnami/etcd:3.5
     container_name: remitflow-etcd
     environment:
-      ALLOW_NONE_AUTHENTICATION: "yes"
+      # Auth REQUIRED (INFRA-001): bitnami creates the root user from this
+      # password on first boot. APISIX authenticates with the same credentials
+      # (see deployment.etcd in services/gateway-config/apisix.yaml).
+      # NOTE: if the etcd-data volume was initialized with
+      # ALLOW_NONE_AUTHENTICATION=yes, recreate it once:
+      #   docker compose down -v etcd  (or)  docker volume rm <vol>
+      ETCD_ROOT_PASSWORD: ${ETCD_ROOT_PASSWORD:?ETCD_ROOT_PASSWORD is required}
       ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
     ports:
-      - "2379:2379"
+      # Loopback only — etcd holds all APISIX route state.
+      - "127.0.0.1:2379:2379"
     volumes:
       - etcd-data:/bitnami/etcd
     healthcheck:
-      test: ["CMD-SHELL", "etcdctl endpoint health"]
+      test: ["CMD-SHELL", "etcdctl --user root:$$ETCD_ROOT_PASSWORD endpoint health"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -1117,13 +1116,40 @@ services:
       # Admin API bound to loopback only — never expose 9180 publicly.
       - "127.0.0.1:9180:9180"
       - "9091:9091"
-    # NOTE: apisix.yaml contains ${APISIX_ADMIN_KEY}/${APISIX_VIEWER_KEY}
-    # placeholders — render it first (envsubst) and mount the rendered file,
-    # e.g. envsubst < services/gateway-config/apisix.yaml > /tmp/apisix.config.yaml
+    environment:
+      # Rendered into config.yaml at container start (entrypoint below). All
+      # REQUIRED via compose :? so the literal ${APISIX_ADMIN_KEY} placeholder
+      # can never become the live admin key (INFRA-002).
+      APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:?APISIX_ADMIN_KEY is required}
+      APISIX_VIEWER_KEY: ${APISIX_VIEWER_KEY:?APISIX_VIEWER_KEY is required}
+      ETCD_ROOT_PASSWORD: ${ETCD_ROOT_PASSWORD:?ETCD_ROOT_PASSWORD is required}
+    # The stock image ships no envsubst, so sed renders the mounted template
+    # into conf/config.yaml; a fail-closed assertion refuses to boot if any
+    # placeholder survives. Final exec mirrors the upstream image CMD
+    # (apache/apisix:3.9.0-debian: apisix init && apisix init_etcd && openresty).
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        esc() { printf '%s' "$$1" | sed -e 's/[&|\\]/\\&/g'; }
+        AK=$$(esc "$${APISIX_ADMIN_KEY}")
+        VK=$$(esc "$${APISIX_VIEWER_KEY}")
+        EP=$$(esc "$${ETCD_ROOT_PASSWORD}")
+        sed -e "s|[$$]{APISIX_ADMIN_KEY}|$${AK}|g" \
+            -e "s|[$$]{APISIX_VIEWER_KEY}|$${VK}|g" \
+            -e "s|[$$]{ETCD_ROOT_PASSWORD}|$${EP}|g" \
+            /usr/local/apisix/conf/config.yaml.template \
+            > /usr/local/apisix/conf/config.yaml
+        if grep -q '[$$]{APISIX_\|[$$]{ETCD_' /usr/local/apisix/conf/config.yaml; then
+          echo "FATAL: unrendered placeholder in APISIX config.yaml — refusing to start" >&2
+          exit 1
+        fi
+        exec /docker-entrypoint.sh sh -c "/usr/bin/apisix init && /usr/bin/apisix init_etcd && /usr/local/openresty/bin/openresty -p /usr/local/apisix -g 'daemon off;'"
     volumes:
-      - ./services/gateway-config/apisix.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - ./services/gateway-config/apisix.yaml:/usr/local/apisix/conf/config.yaml.template:ro
     depends_on:
-      - etcd
+      etcd:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:9080/apisix/status || exit 1"]
       interval: 15s
