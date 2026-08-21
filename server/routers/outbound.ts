@@ -23,7 +23,7 @@ import {
   getDb,
 } from "../db.js";
 import { safeParseAmount } from "../lib/safeDecimal";
-import { executeTransferPipeline } from "../_core/transferPipeline";
+import { executeTransferPipeline, settleTransferHold, compensateFailedTransfer } from "../_core/transferPipeline";
 import { logger } from "../_core/logger";
 import { users } from "../../drizzle/schema";
 import { eq } from "drizzle-orm";
@@ -121,7 +121,18 @@ const swiftRouter = router({
       totpCode: z.string().length(6).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      const estimatedUsd = input.amount_ngn / 1600;
+      // FF-037/FF-002: live FX for display/limit checks only — fail over to a
+      // conservative fallback rate. The pipeline itself must receive the
+      // NATIVE amount (amount_ngn) with fromCurrency NGN.
+      let ngnPerUsd = 1600;
+      try {
+        const fxRes = await fetch("https://open.er-api.com/v6/latest/USD", { signal: AbortSignal.timeout(3_000) });
+        if (fxRes.ok) {
+          const fxData = await fxRes.json() as { rates?: Record<string, number> };
+          if (fxData.rates?.NGN) ngnPerUsd = fxData.rates.NGN;
+        }
+      } catch { /* use fallback rate */ }
+      const estimatedUsd = input.amount_ngn / ngnPerUsd;
       const transferId = `SWIFT-${Date.now()}-${ctx.user.id}`;
 
       // 2FA enforcement for high-value SWIFT transfers (> $1,000 equivalent)
@@ -148,9 +159,12 @@ const swiftRouter = router({
       }
 
       // Execute unified transfer pipeline (sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications)
+      // FF-002: pass the NATIVE NGN amount with fromCurrency NGN. The pipeline
+      // converts to minor units for the NGN TB ledger (566). Previously the
+      // USD estimate was passed with fromCurrency NGN → a ~1600x under-hold.
       const pipelineResult = await executeTransferPipeline({
         userId: ctx.user.id,
-        amount: estimatedUsd,
+        amount: input.amount_ngn,
         fromCurrency: "NGN",
         toCurrency: input.destination_currency,
         recipientName: input.beneficiary_name,
@@ -181,10 +195,33 @@ const swiftRouter = router({
 
       if (!res.ok) {
         const err = await res.json() as Record<string, unknown>;
+        // FF-001: SWIFT rail rejected the transfer — void the TB hold
+        // (state-aware compensation; never blind-refunds).
+        if (pipelineResult.tigerBeetleRecorded) {
+          await compensateFailedTransfer({
+            transferId,
+            userId: ctx.user.id,
+            amount: input.amount_ngn,
+            currency: "NGN",
+            reason: `SWIFT service rejected submission: ${(err.error as string) ?? res.status}`,
+            stage: "settlement",
+          }).catch((cErr) => logger.warn({ err: cErr instanceof Error ? cErr.message : String(cErr), transferId }, "[Outbound] Hold release after SWIFT rejection failed — reaper will reconcile"));
+        }
         throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: (err.error as string) ?? `SWIFT service error ${res.status}` });
       }
 
       const result = await res.json() as Record<string, unknown>;
+
+      // FF-001: rail accepted — settle: post the TB hold in full AND debit the
+      // PG wallet atomically (journaled, replay-safe).
+      if (pipelineResult.tigerBeetleRecorded) {
+        await settleTransferHold({
+          transferId,
+          userId: ctx.user.id,
+          amount: input.amount_ngn,
+          currency: "NGN",
+        });
+      }
 
       // Increment annual usage in DB
       await incrementAnnualUsage(ctx.user.id, input.purpose_code, estimatedUsd);
