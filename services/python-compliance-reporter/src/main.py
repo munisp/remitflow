@@ -29,6 +29,7 @@ Endpoints:
 """
 
 import asyncio
+import hmac
 import io
 import json
 import logging
@@ -38,7 +39,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import asyncpg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
 from pydantic import BaseModel
@@ -62,7 +63,19 @@ logger = logging.getLogger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/remitflow")
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known defaults."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[compliance-reporter] {name} is not set. Refusing to start with a "
+            "well-known default credential; configure it explicitly."
+        )
+    return value
+
+DATABASE_URL = _require_env("DATABASE_URL")
+# Fail-closed: no default token. Every report endpoint requires this token.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
 INSTITUTION_NAME = os.getenv("INSTITUTION_NAME", "RemitFlow Financial Services")
 INSTITUTION_EIN = os.getenv("INSTITUTION_EIN", "XX-XXXXXXX")
 INSTITUTION_ADDRESS = os.getenv("INSTITUTION_ADDRESS", "123 Financial District, New York, NY 10004")
@@ -362,6 +375,53 @@ app = FastAPI(
 _pool: Optional[asyncpg.Pool] = None
 pdf_builder = CompliancePDFBuilder()
 
+# ─── Auth / authorization (PY-003 remediation) ────────────────────────────────
+
+# Roles allowed to generate reports for ANY user (SAR/AML filings, DSAR fulfilment
+# on behalf of a subject). Anything else may only export its own data.
+COMPLIANCE_ROLES = {"admin", "compliance_officer"}
+
+
+class CallerPrincipal:
+    """Identity of the internal caller, propagated by the API gateway."""
+
+    def __init__(self, user_id: Optional[int], role: str):
+        self.user_id = user_id
+        self.role = role
+
+
+def require_internal_auth(
+    x_internal_token: Optional[str] = Header(default=None),
+    x_caller_user_id: Optional[int] = Header(default=None),
+    x_caller_role: Optional[str] = Header(default=None),
+) -> CallerPrincipal:
+    """Fail-closed internal-token guard.
+
+    Refuses all requests when INTERNAL_API_TOKEN is not configured (503) so the
+    service can never serve PII reports unauthenticated by accident.
+    """
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
+    return CallerPrincipal(x_caller_user_id, (x_caller_role or "").strip().lower())
+
+
+def require_compliance_role(principal: CallerPrincipal = Depends(require_internal_auth)) -> CallerPrincipal:
+    """SAR/AML reports are compliance-officer actions."""
+    if principal.role not in COMPLIANCE_ROLES:
+        raise HTTPException(status_code=403, detail="A compliance role is required for this report type")
+    return principal
+
+
+def authorize_subject_access(principal: CallerPrincipal, user_id: int) -> None:
+    """GDPR DSAR exports: callers may only export their own data unless they
+    hold a compliance role."""
+    if principal.role in COMPLIANCE_ROLES:
+        return
+    if principal.user_id is None or principal.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Callers may only export their own data")
+
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
@@ -380,9 +440,10 @@ async def shutdown():
         await _pool.close()
 
 @app.post("/reports/sar")
-async def generate_sar(req: SARRequest):
-    """Generate a Suspicious Activity Report."""
+async def generate_sar(req: SARRequest, principal: CallerPrincipal = Depends(require_compliance_role)):
+    """Generate a Suspicious Activity Report. Compliance-officer action; access is audited."""
     pool = await get_pool()
+    logger.info(f"SAR requested for user_id={req.user_id} by role={principal.role} caller={principal.user_id}")
 
     user = await pool.fetchrow(
         "SELECT id, email, first_name, last_name, kyc_tier, account_status, created_at FROM users WHERE id = $1",
@@ -421,9 +482,10 @@ async def generate_sar(req: SARRequest):
     )
 
 @app.post("/reports/aml")
-async def generate_aml_report(req: AMLReportRequest):
-    """Generate an AML audit report."""
+async def generate_aml_report(req: AMLReportRequest, principal: CallerPrincipal = Depends(require_compliance_role)):
+    """Generate an AML audit report. Compliance-officer action; access is audited."""
     pool = await get_pool()
+    logger.info(f"AML report requested by role={principal.role} caller={principal.user_id}")
     since = datetime.now(timezone.utc) - timedelta(days=req.period_days)
 
     stats = await pool.fetchrow(
@@ -472,8 +534,14 @@ async def generate_aml_report(req: AMLReportRequest):
     )
 
 @app.post("/reports/gdpr")
-async def generate_gdpr_export(req: GDPRRequest):
-    """Generate a GDPR data subject access request export."""
+async def generate_gdpr_export(req: GDPRRequest, principal: CallerPrincipal = Depends(require_internal_auth)):
+    """Generate a GDPR data subject access request export.
+
+    Authenticated callers may only export their own data; admin/compliance
+    roles may fulfil a DSAR on behalf of the subject. All access is audited.
+    """
+    authorize_subject_access(principal, req.user_id)
+    logger.info(f"GDPR export for user_id={req.user_id} by role={principal.role} caller={principal.user_id}")
     pool = await get_pool()
 
     user = await pool.fetchrow(
