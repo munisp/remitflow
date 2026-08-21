@@ -5,8 +5,8 @@ and intelligent rail selection using XGBoost, LightGBM, and Multi-Armed Bandits.
 """
 
 import os
+import io
 import json
-import pickle
 import logging
 import asyncio
 from datetime import datetime, timedelta
@@ -970,28 +970,54 @@ class ContextualBandit:
         if update_count % 100 == 0:
             await self._save_state()
     
+    @staticmethod
+    def _serialize_array(arr: np.ndarray) -> bytes:
+        """Serialize a numpy array as .npy bytes — no pickle, so a poisoned
+        Redis value cannot execute code on load (PY-007 remediation)."""
+        buf = io.BytesIO()
+        np.save(buf, arr, allow_pickle=False)
+        return buf.getvalue()
+
+    @staticmethod
+    def _deserialize_array(data: bytes, expected_shape: tuple) -> Optional[np.ndarray]:
+        """Load a .npy payload from Redis. allow_pickle=False rejects any
+        pickle/object payload; malformed or wrong-shaped data is ignored."""
+        try:
+            arr = np.load(io.BytesIO(data), allow_pickle=False)
+        except Exception:
+            logger.warning("Ignoring malformed bandit state payload from Redis")
+            return None
+        if arr.shape != expected_shape:
+            logger.warning(f"Ignoring bandit state with unexpected shape {arr.shape} (expected {expected_shape})")
+            return None
+        return arr
+
     async def _save_state(self):
-        """Save bandit state to Redis"""
+        """Save bandit state to Redis (pickle-free serialization)"""
         for arm in self.arms:
             await self.redis.set(
                 f"linucb:A:{arm}",
-                pickle.dumps(self._A[arm])
+                self._serialize_array(self._A[arm])
             )
             await self.redis.set(
                 f"linucb:b:{arm}",
-                pickle.dumps(self._b[arm])
+                self._serialize_array(self._b[arm])
             )
-    
+
     async def load_state(self):
-        """Load bandit state from Redis"""
+        """Load bandit state from Redis (pickle-free, shape-validated)"""
         for arm in self.arms:
             A_data = await self.redis.get(f"linucb:A:{arm}")
             b_data = await self.redis.get(f"linucb:b:{arm}")
-            
+
             if A_data:
-                self._A[arm] = pickle.loads(A_data)
+                arr = self._deserialize_array(A_data, self._A[arm].shape)
+                if arr is not None:
+                    self._A[arm] = arr
             if b_data:
-                self._b[arm] = pickle.loads(b_data)
+                arr = self._deserialize_array(b_data, self._b[arm].shape)
+                if arr is not None:
+                    self._b[arm] = arr
 
 
 class MLRoutingEngine:
