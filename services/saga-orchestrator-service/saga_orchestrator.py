@@ -13,6 +13,17 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from uuid import uuid4
+
+
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[saga-orchestrator] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
 from abc import ABC, abstractmethod
 
 import asyncpg
@@ -414,10 +425,7 @@ class SagaStore:
     """Persistent storage for saga state"""
     
     def __init__(self, database_url: str = None):
-        self.database_url = database_url or os.getenv(
-            "SAGA_DATABASE_URL",
-            "postgresql://postgres:postgres@localhost:5432/sagas"
-        )
+        self.database_url = database_url or _require_env("SAGA_DATABASE_URL")
         self._pool: Optional[asyncpg.Pool] = None
     
     async def connect(self):
