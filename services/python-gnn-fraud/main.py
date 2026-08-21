@@ -38,7 +38,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from fastapi import FastAPI, HTTPException
+import hmac
+
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -49,7 +51,18 @@ from contextlib import contextmanager
 import signal
 import atexit
 
-_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-gnn-fraud] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
+_DB_URL = _require_env("DATABASE_URL")
 _db_pool = None
 
 def _get_db():
@@ -542,7 +555,7 @@ async def load_or_train():
 
     if MODEL_PATH.exists() and GRAPH_PATH.exists():
         logger.info("Loading GNN model and graph...")
-        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
+        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)  # PY-014: state_dict-only checkpoints; pickle RCE guard
         config = checkpoint["model_config"]
         _model = GNNFraudDetector(
             in_features=config["in_features"],
@@ -554,7 +567,7 @@ async def load_or_train():
         _model.load_state_dict(checkpoint["model_state_dict"])
         _model.eval()
 
-        graph_state = torch.load(GRAPH_PATH, map_location=DEVICE, weights_only=False)
+        graph_state = torch.load(GRAPH_PATH, map_location=DEVICE, weights_only=True)  # PY-014: state_dict-only checkpoints; pickle RCE guard
         _graph_x = torch.tensor(graph_state["features"], dtype=torch.float32).to(DEVICE)
         _graph_edge_index = torch.tensor(graph_state["edge_index"], dtype=torch.long).to(DEVICE)
 
@@ -566,7 +579,7 @@ async def load_or_train():
         logger.info("No existing GNN model — training from scratch...")
         _metadata = train_model()
         # Reload
-        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
+        checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)  # PY-014: state_dict-only checkpoints; pickle RCE guard
         config = checkpoint["model_config"]
         _model = GNNFraudDetector(
             in_features=config["in_features"],
@@ -577,7 +590,7 @@ async def load_or_train():
         ).to(DEVICE)
         _model.load_state_dict(checkpoint["model_state_dict"])
         _model.eval()
-        graph_state = torch.load(GRAPH_PATH, map_location=DEVICE, weights_only=False)
+        graph_state = torch.load(GRAPH_PATH, map_location=DEVICE, weights_only=True)  # PY-014: state_dict-only checkpoints; pickle RCE guard
         _graph_x = torch.tensor(graph_state["features"], dtype=torch.float32).to(DEVICE)
         _graph_edge_index = torch.tensor(graph_state["edge_index"], dtype=torch.long).to(DEVICE)
 
@@ -585,6 +598,18 @@ async def load_or_train():
 # ─── FastAPI ─────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="RemitFlow GNN Fraud Detection", version="1.0.0")
+
+# ── Internal auth (fail-closed) ───────────────────────────────────────────────
+# /train hot-swaps the production fraud model; it must require authentication.
+# No default token: if INTERNAL_API_TOKEN is unset these endpoints return 503.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
 
 @app.get("/metrics")
 async def _prometheus_metrics():
@@ -752,7 +777,7 @@ async def score_transaction(req: ScoreRequest):
 
 
 @app.post("/train")
-async def trigger_train():
+async def trigger_train(_auth: None = Depends(require_internal_auth)):
     """
     Retrain GNN on platform transaction graph if available, else synthetic.
     Continuous training: new transactions in DB → new graph → retrained GNN.
