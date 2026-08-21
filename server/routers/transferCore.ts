@@ -9,12 +9,13 @@
  * - Mesh: HTTP → Dapr (service discovery + retry)
  */
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { sql } from "drizzle-orm";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { createAuditLog } from "../db";
 import { executeTransfer, calculateFee, getFxRate, validateCompliance } from "../lib/transferEngine";
-import { executeTransferPipeline } from "../_core/transferPipeline";
+import { executeTransferPipeline, settleTransferHold, compensateFailedTransfer } from "../_core/transferPipeline";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { broadcastUserEvent } from "../sse.service";
 import { logger } from "../_core/logger";
@@ -100,6 +101,49 @@ export const transferCoreRouter = router({
         sourceOfFunds: input.sourceOfFunds,
       });
 
+      // FF-001 settlement wiring: the pipeline created a TB pending hold under
+      // transferRef. On success, settle it — post the TB hold in full AND debit
+      // the PG wallet atomically (journaled in settlement_journal, replay-safe).
+      // On failure, compensate — void the hold (state-aware, no blind refunds).
+      if (result.status === "completed") {
+        if (pipelineResult.tigerBeetleRecorded) {
+          await settleTransferHold({
+            transferId: transferRef,
+            userId: ctx.user.id,
+            amount: input.amount,
+            currency: input.fromCurrency,
+          });
+        } else {
+          // No TB hold (dev/no-ledger mode): PG-only guarded debit.
+          const db = await getDb();
+          if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+          const debitAmount = input.amount.toFixed(2);
+          const debitRows = (await db.execute(sql`
+            UPDATE wallets
+            SET balance = CAST(balance AS NUMERIC) - ${debitAmount}, "updatedAt" = NOW()
+            WHERE "userId" = ${ctx.user.id}
+              AND currency = ${input.fromCurrency}
+              AND CAST(balance AS NUMERIC) >= ${debitAmount}
+            RETURNING id
+          `)) as unknown as Array<{ id: number }>;
+          if (debitRows.length === 0) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient wallet balance" });
+          }
+        }
+      } else if (pipelineResult.tigerBeetleRecorded) {
+        const compensation = await compensateFailedTransfer({
+          transferId: transferRef,
+          userId: ctx.user.id,
+          amount: input.amount,
+          currency: input.fromCurrency,
+          reason: "Transfer engine rejected the transfer",
+          stage: "settlement",
+        });
+        if (!compensation.compensated) {
+          logger.error({ transferRef }, "[TransferCore] Compensation failed — manual reconciliation required");
+        }
+      }
+
       return { ...result, verified: true, fraudScore: pipelineResult.fraudScore };
     }),
 
@@ -140,10 +184,28 @@ export const transferCoreRouter = router({
         WHERE reference = ${input.referenceId} 
         AND "userId" = ${ctx.user.id} 
         AND status IN ('pending', 'processing')
-        RETURNING id
+        RETURNING id, amount, currency
       `);
-      const rows = result as unknown as { id: number }[];
+      const rows = result as unknown as { id: number; amount: string; currency: string }[];
       if (rows.length === 0) return { success: false, reason: "Transfer not found or not cancellable" };
+      // FF-001: release any TigerBeetle hold created for this reference.
+      // State-aware: no-op when no hold exists; never blind-refunds.
+      const txAmount = Number(rows[0].amount);
+      if (txAmount > 0 && rows[0].currency) {
+        try {
+          await compensateFailedTransfer({
+            transferId: input.referenceId,
+            userId: ctx.user.id,
+            amount: Math.abs(txAmount),
+            currency: rows[0].currency,
+            reason: input.reason ?? "Transfer cancelled by user",
+            stage: "settlement",
+          });
+        } catch (err) {
+          logger.warn({ err: err instanceof Error ? err.message : String(err), referenceId: input.referenceId },
+            "[TransferCore] Hold release on cancel failed — reaper/recon will reconcile");
+        }
+      }
       return { success: true, verified: true, referenceId: input.referenceId };
     }),
 
@@ -196,4 +258,27 @@ export const transferCoreRouter = router({
     };
     return { tier, limits: kycLimits[tier] || kycLimits.tier1, compliant: compliance.allowed };
   }),
+
+  /**
+   * Settlement callback (rail confirmation): posts the TigerBeetle pending
+   * hold in full and debits the sender's PG wallet atomically. Idempotent —
+   * replaying with the same referenceId returns the recorded settlement.
+   * Restricted: only the transfer owner can settle their own reference; rails
+   * call this from their confirmation webhooks.
+   */
+  settle: protectedProcedure
+    .input(z.object({
+      referenceId: z.string().min(1).max(128),
+      amount: z.number().positive().max(10_000_000),
+      currency: z.string().length(3),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const result = await settleTransferHold({
+        transferId: input.referenceId,
+        userId: ctx.user.id,
+        amount: input.amount,
+        currency: input.currency,
+      });
+      return { ...result, verified: true };
+    }),
 });

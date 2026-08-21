@@ -24,7 +24,9 @@ function generateEntryId(): string {
 }
 
 export const doubleEntryRouter = router({
-  recordTransaction: protectedProcedure
+  // FF-023: arbitrary double-entry writes are restricted to admin/system
+  // actors — user-written ledger_entries poison trial-balance/reconciliation.
+  recordTransaction: adminProcedure
     .input(z.object({
       transactionId: z.string(),
       entries: z.array(z.object({
