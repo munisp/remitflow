@@ -14,7 +14,7 @@ opencv-python-headless==4.10.0.84
 # ── Document OCR ─────────────────────────────────────────────────────────────
 pytesseract==0.3.13     # Tesseract OCR Python wrapper
 passporteye==2.2.1      # MRZ parser for travel documents
-Pillow==11.0.0
+Pillow==12.3.0
 
 # ── Utilities ────────────────────────────────────────────────────────────────
 numpy==1.26.4
