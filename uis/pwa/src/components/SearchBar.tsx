@@ -264,11 +264,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({
                       d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
                     />
                   </svg>
-                  <span
-                    dangerouslySetInnerHTML={{
-                      __html: highlightMatch(suggestion, query),
-                    }}
-                  />
+                  <HighlightedMatch text={suggestion} query={query} />
                 </button>
               ))}
             </div>
@@ -323,12 +319,35 @@ export const SearchBar: React.FC<SearchBarProps> = ({
   );
 };
 
-// Helper function to highlight matching text
-function highlightMatch(text: string, query: string): string {
-  if (!query) return text;
+// Helper to highlight matching text.
+// SECURITY (CLI-003): rendered as React nodes, NOT via
+// dangerouslySetInnerHTML. Suggestions can be server/API-supplied and the
+// query is user input; React escapes all string children, so neither can
+// inject markup into the DOM.
+const HighlightedMatch: React.FC<{ text: string; query: string }> = ({
+  text,
+  query,
+}) => {
+  if (!query) {
+    return <span>{text}</span>;
+  }
   const regex = new RegExp(`(${escapeRegExp(query)})`, "gi");
-  return text.replace(regex, '<strong class="text-blue-600">$1</strong>');
-}
+  // Split with a capture group: odd-indexed segments are the matches.
+  const segments = text.split(regex);
+  return (
+    <span>
+      {segments.map((segment, i) =>
+        i % 2 === 1 ? (
+          <strong key={i} className="text-blue-600">
+            {segment}
+          </strong>
+        ) : (
+          <React.Fragment key={i}>{segment}</React.Fragment>
+        ),
+      )}
+    </span>
+  );
+};
 
 function escapeRegExp(string: string): string {
   return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

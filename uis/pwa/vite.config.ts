@@ -36,19 +36,15 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/api\.remittance\.com\/.*/i,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'api-cache',
-              expiration: {
-                maxEntries: 100,
-                maxAgeSeconds: 60 * 60 * 24,
-              },
-            },
-          },
-        ],
+        // SECURITY (CLI-004): no runtimeCaching for API responses.
+        // The previous NetworkFirst rule cached ALL authenticated
+        // api.remittance.com responses (balances, transactions, PII, KYC
+        // status) in Cache Storage for 24h, readable after logout by any
+        // script on the origin or another user on a shared device. Only
+        // static build assets (globPatterns above) are precached; API
+        // traffic always goes to the network and honors the server's
+        // Cache-Control headers.
+        navigateFallbackDenylist: [/^\/api\//],
       },
     }),
   ],

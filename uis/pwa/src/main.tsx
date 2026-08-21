@@ -33,3 +33,10 @@ if ('serviceWorker' in navigator) {
     });
   });
 }
+
+// SECURITY (CLI-004): purge the legacy 'api-cache' runtime cache created by
+// older service-worker builds — it may still hold authenticated API
+// responses (balances, transactions, PII) on existing installs.
+if ('caches' in window) {
+  caches.delete('api-cache').catch(() => {});
+}

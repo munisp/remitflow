@@ -44,24 +44,62 @@ const KEYS = {
   postalCode: "onboarding_postal_code",
 } as const;
 
+/**
+ * SECURITY (CLI-001): The plaintext password and BVN collected during
+ * onboarding are NEVER written to localStorage/sessionStorage. They live
+ * only in these module-level variables for the lifetime of the tab.
+ *
+ * Residual risk: the values remain in JS heap memory until the onboarding
+ * flow completes (clearOnboarding) or the tab closes/reloads — an in-page
+ * XSS payload could still read them via the getters below. That window is
+ * reduced from "indefinite, on-disk, readable by any script/extension with
+ * storage access" to "in-memory, this tab only, cleared on success". This
+ * is inherent to any client-side form; full mitigation requires the
+ * credential to be submitted immediately rather than carried across the
+ * multi-step flow.
+ *
+ * Legacy purge: earlier builds persisted these keys in localStorage; we
+ * remove any stale copies at module load.
+ */
+let inMemoryOnboardingData: OnboardingData | null = null;
+let inMemoryBvn = "";
+
+function purgeLegacySensitiveKeys(): void {
+  try {
+    localStorage.removeItem(KEYS.onboardingData);
+    localStorage.removeItem(KEYS.bvn);
+  } catch {
+    // Storage unavailable (private mode) — nothing to purge.
+  }
+}
+
+// Best-effort cleanup when the tab/window is closed or navigated away.
+// In-memory state dies with the JS context anyway; this additionally
+// purges any legacy persisted copies.
+function installUnloadCleanup(): void {
+  if (typeof window === "undefined") return;
+  const cleanup = () => {
+    inMemoryOnboardingData = null;
+    inMemoryBvn = "";
+    purgeLegacySensitiveKeys();
+  };
+  window.addEventListener("pagehide", cleanup);
+  window.addEventListener("beforeunload", cleanup);
+}
+
+purgeLegacySensitiveKeys();
+installUnloadCleanup();
+
 export const onboardingService = {
   keys: KEYS,
 
   saveOnboardingData(data: OnboardingData): void {
-    localStorage.setItem(KEYS.onboardingData, JSON.stringify(data));
+    // In-memory only — never persisted (see security note above).
+    inMemoryOnboardingData = data;
   },
 
   getOnboardingData(): OnboardingData | null {
-    const raw = localStorage.getItem(KEYS.onboardingData);
-    if (!raw) {
-      return null;
-    }
-
-    try {
-      return JSON.parse(raw) as OnboardingData;
-    } catch {
-      return null;
-    }
+    return inMemoryOnboardingData;
   },
 
   setAccountType(accountType: string): void {
@@ -73,15 +111,12 @@ export const onboardingService = {
   },
 
   setBvn(bvn: string): void {
-    if (bvn.trim()) {
-      localStorage.setItem(KEYS.bvn, bvn.trim());
-      return;
-    }
-    localStorage.removeItem(KEYS.bvn);
+    // In-memory only — BVN is sensitive PII, never persisted (CLI-001).
+    inMemoryBvn = bvn.trim();
   },
 
   getBvn(): string {
-    return localStorage.getItem(KEYS.bvn) || "";
+    return inMemoryBvn;
   },
 
   setAddress(
@@ -101,6 +136,9 @@ export const onboardingService = {
   },
 
   clearOnboarding(): void {
+    // Clear in-memory sensitive data first (password + BVN).
+    inMemoryOnboardingData = null;
+    inMemoryBvn = "";
     localStorage.removeItem(KEYS.onboardingData);
     localStorage.removeItem(KEYS.accountType);
     localStorage.removeItem(KEYS.bvn);

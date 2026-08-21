@@ -163,11 +163,29 @@ export const useAuthStore = create<AuthState>()(
       refreshAuth: async () => {
         const currentToken = get().token;
         if (!currentToken) {
-          // Cookie-based SSO session (no bearer token): re-verify against
-          // the platform server. A definitively invalid session logs the
-          // user out; an indeterminate result (network error) keeps the
-          // current state — protected API calls will surface real errors.
+          // The access token is held in memory only (CLI-002), so it is
+          // gone after a page reload. If a credential-flow refresh token
+          // survived in sessionStorage, mint a fresh access token first.
+          try {
+            const refreshed = await authService.refreshToken();
+            if (refreshed?.access_token) {
+              setAuthToken(refreshed.access_token);
+              set({
+                token: refreshed.access_token,
+                isAuthenticated: true,
+              });
+              return;
+            }
+          } catch {
+            // Fall through to the cookie-based SSO session check below.
+          }
+
+          // Cookie-based SSO session (no bearer token): extend the session
+          // via the platform server's httpOnly refresh endpoint, then
+          // re-verify. A definitively invalid session logs the user out; an
+          // indeterminate result (network error) keeps the current state.
           if (get().isAuthenticated) {
+            await authService.refreshSsoSession().catch(() => false);
             try {
               const ssoUser = await authService.fetchSsoSessionUser();
               if (ssoUser) {
@@ -219,9 +237,10 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: "auth-storage",
+      // SECURITY (CLI-002): never persist the access token — it lives in
+      // memory only. Only non-secret session metadata is persisted.
       partialize: (state) => ({
         user: state.user,
-        token: state.token,
         isAuthenticated: state.isAuthenticated,
       }),
     },
