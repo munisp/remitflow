@@ -198,7 +198,7 @@ async function startServer() {
       const openCircuits = circuits.filter(c => c.state === "open");
       subsystems.circuit_breakers = {
         status: openCircuits.length > 0 ? "degraded" : "ok",
-        error: openCircuits.length > 0 ? `${openCircuits.length} circuit(s) open: ${openCircuits.map(c => c.name).join(", ")}` : undefined,
+        error: openCircuits.length > 0 ? `${openCircuits.length} circuit(s) open: ${openCircuits.map(c => c.name.join(", "))}` : undefined,
       };
     } catch {
       subsystems.circuit_breakers = { status: "ok" };
@@ -1315,6 +1315,10 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
     startMicroservices();
     // Start automated daily reconciliation scheduler
     import("../lib/reconciliationScheduler").then(({ startReconciliationScheduler }) => startReconciliationScheduler()).catch(err => logger.warn({ errMsg: err?.message }, "[Reconciliation] Scheduler init failed (non-blocking):"));
+    // FF-001: settlement reaper — retries failed TB posts, refunds PG when a
+    // hold expired unposted, and alerts. Holds must never silently expire
+    // unposted for completed transfers.
+    import("./transferPipeline").then(({ startSettlementReaper }) => startSettlementReaper()).catch(err => logger.warn({ errMsg: err?.message }, "[Settlement] Reaper init failed (non-blocking):"));
     // Initialize Kafka topics (non-blocking, graceful fallback if Kafka unavailable)
     ensureTopicsExist()
       .then(() => startKafkaConsumers())
