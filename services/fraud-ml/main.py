@@ -16,10 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import hmac
+
 import joblib
 import numpy as np
 import shap
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
@@ -44,6 +46,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ─── Internal auth (fail-closed) ──────────────────────────────────────────────
+# Admin/destructive endpoints (model retrain/swap) require this token. No default
+# is provided: if INTERNAL_API_TOKEN is unset the endpoints return 503.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
 
 # ─── Country risk scores (0=low, 1=high) ──────────────────────────────────────
 COUNTRY_RISK = {
@@ -351,8 +365,8 @@ def user_risk_profile(user_id: str):
 
 
 @app.post("/retrain")
-def retrain_model():
-    """Trigger model retraining (admin endpoint)."""
+def retrain_model(_auth: None = Depends(require_internal_auth)):
+    """Trigger model retraining (admin endpoint; requires internal auth)."""
     global model, explainer, _clf, _scaler
     model = train_model()
     _clf = model.named_steps["clf"]
