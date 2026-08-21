@@ -64,21 +64,25 @@ interface ApiResponse<T> {
 }
 
 // Auth token management
+// SECURITY (CLI-002): the access token is held in module memory ONLY.
+// It is never written to localStorage, so XSS payloads, extensions, and
+// shared-device storage inspection cannot recover it. After a page reload
+// the token is re-obtained via authService.refreshToken() (credential flow,
+// refresh token in sessionStorage) or the httpOnly-cookie SSO session.
 let authToken: string | null = null;
+
+// One-time purge of tokens persisted by older builds.
+try {
+  localStorage.removeItem("auth_token");
+} catch {
+  // Storage unavailable — nothing to purge.
+}
 
 export const setAuthToken = (token: string | null) => {
   authToken = token;
-  if (token) {
-    localStorage.setItem("auth_token", token);
-  } else {
-    localStorage.removeItem("auth_token");
-  }
 };
 
 export const getAuthToken = (): string | null => {
-  if (!authToken) {
-    authToken = localStorage.getItem("auth_token");
-  }
   return authToken;
 };
 
