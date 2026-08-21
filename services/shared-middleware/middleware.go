@@ -22,6 +22,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -307,22 +308,62 @@ func CheckPermission(ctx context.Context, cfg Config, req PermifyCheckRequest) (
 // ValidateKeycloakToken validates a JWT token via the python-keycloak-service.
 func ValidateKeycloakToken(ctx context.Context, cfg Config, token string) (map[string]any, error) {
 	url := "http://localhost:8100/keycloak/validate"
-	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("keycloak validation: bad request: %w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("keycloak validation failed: %w", err)
 	}
 	defer resp.Body.Close()
+	// Fail closed: only a 200 from the validator can authenticate a token.
+	// A 401/403/5xx error body must never be decoded into "claims".
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("keycloak validation returned status %d", resp.StatusCode)
+	}
 	var claims map[string]any
-	json.NewDecoder(resp.Body).Decode(&claims)
+	if err := json.NewDecoder(resp.Body).Decode(&claims); err != nil {
+		return nil, fmt.Errorf("keycloak validation: undecodable response: %w", err)
+	}
+	if len(claims) == 0 {
+		return nil, fmt.Errorf("keycloak validation: empty claims")
+	}
+	// If the validator reports an `active` flag (RFC 7662 style), it must be true.
+	if active, present := claims["active"]; present {
+		if b, ok := active.(bool); !ok || !b {
+			return nil, fmt.Errorf("keycloak validation: token not active")
+		}
+	}
+	// Require a subject claim so arbitrary JSON bodies cannot authenticate.
+	if sub, ok := claims["sub"].(string); !ok || sub == "" {
+		if _, hasActive := claims["active"]; !hasActive {
+			return nil, fmt.Errorf("keycloak validation: claims missing subject")
+		}
+	}
 	return claims, nil
 }
 
 // ── Auth Middleware (net/http) ────────────────────────────────────────────────
 
+// RequireInternalServiceKey returns the configured INTERNAL_SERVICE_KEY or
+// terminates the process. Any service that accepts service-to-service key
+// auth MUST call this at startup so a missing key fails the boot instead of
+// silently disabling (or, worse, defaulting) authentication.
+func RequireInternalServiceKey() string {
+	key := os.Getenv("INTERNAL_SERVICE_KEY")
+	if key == "" {
+		log.Fatal("FATAL: INTERNAL_SERVICE_KEY is not set; refusing to start (fail-closed service auth)")
+	}
+	return key
+}
+
 // AuthMiddleware validates the Authorization header (Bearer JWT or internal API key).
-// Fail-closed: returns 401 if no valid credential is presented.
+// Fail-closed: returns 401 if no valid credential is presented. There is NO
+// built-in fallback key: when INTERNAL_SERVICE_KEY is unset, key-based auth is
+// disabled entirely (only Keycloak-validated Bearer JWTs are accepted).
 func AuthMiddleware(cfg Config, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
@@ -331,22 +372,20 @@ func AuthMiddleware(cfg Config, next http.Handler) http.Handler {
 		}
 		auth := r.Header.Get("Authorization")
 		internalKey := os.Getenv("INTERNAL_SERVICE_KEY")
-		if internalKey == "" {
-			internalKey = "remitflow-internal-2026"
-		}
 		apiKey := r.Header.Get("X-API-Key")
-		if apiKey == internalKey {
+		if internalKey != "" && apiKey != "" &&
+			subtle.ConstantTimeCompare([]byte(apiKey), []byte(internalKey)) == 1 {
 			next.ServeHTTP(w, r)
 			return
 		}
 		if len(auth) > 7 && auth[:7] == "Bearer " {
 			token := auth[7:]
-			if token == internalKey {
+			if internalKey != "" &&
+				subtle.ConstantTimeCompare([]byte(token), []byte(internalKey)) == 1 {
 				next.ServeHTTP(w, r)
 				return
 			}
-			claims, err := ValidateKeycloakToken(r.Context(), cfg, token)
-			if err == nil && claims != nil {
+			if claims, err := ValidateKeycloakToken(r.Context(), cfg, token); err == nil && claims != nil {
 				next.ServeHTTP(w, r)
 				return
 			}
