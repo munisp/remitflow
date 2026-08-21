@@ -10,7 +10,9 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+import hmac
+
+from fastapi import Depends, FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
@@ -29,10 +31,21 @@ from routing_ml_models import (
 from liquidity_forecasting import LiquidityForecaster, ForecastPeriod
 from online_learning import OnlineLearningPipeline
 
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[ml] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
 logger = logging.getLogger(__name__)
 
 # Configuration - Production defaults for K8s deployment
-DB_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@postgres.remittance.svc.cluster.local:5432/multibank")
+DB_URL = _require_env("DATABASE_URL")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis.remittance.svc.cluster.local:6379/0")
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka.remittance.svc.cluster.local:9092")
 MODEL_DIR = os.getenv("MODEL_DIR", "/var/lib/ml-models")
@@ -206,14 +219,29 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware
+# Add CORS middleware. Never combine "*" with credentials (PY-017): the origin
+# allowlist is env-driven and credentials are disabled by default.
+_CORS_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_CORS_ORIGINS or ["https://app.remitflow.example"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization", "X-Internal-Token"],
 )
+
+# ── Internal auth (fail-closed) ───────────────────────────────────────────────
+# Training / outcome-recording endpoints mutate production models; they must
+# require authentication. No default token: if INTERNAL_API_TOKEN is unset
+# these endpoints return 503.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
 
 
 @app.get("/health")
@@ -335,7 +363,7 @@ async def predict_batch(request: BatchPredictionRequest):
 
 
 @app.post("/api/v1/outcome")
-async def record_outcome(request: OutcomeRequest, background_tasks: BackgroundTasks):
+async def record_outcome(request: OutcomeRequest, background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
     """Record routing outcome for online learning"""
     if not online_pipeline:
         raise HTTPException(status_code=503, detail="Online learning not available")
@@ -384,7 +412,7 @@ async def forecast_liquidity(request: ForecastRequest):
 
 
 @app.post("/api/v1/train")
-async def train_models(request: TrainRequest, background_tasks: BackgroundTasks):
+async def train_models(request: TrainRequest, background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
     """Trigger model training"""
     if not ml_engine:
         raise HTTPException(status_code=503, detail="ML engine not available")
