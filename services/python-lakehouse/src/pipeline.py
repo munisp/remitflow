@@ -55,7 +55,7 @@ def _require_env(name: str) -> str:
         )
     return value
 
-DB_URL = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+DB_URL = _require_env("DATABASE_URL")
 LAKEHOUSE_PATH = os.getenv("LAKEHOUSE_PATH", "/data/lakehouse")
 S3_BUCKET = os.getenv("S3_BUCKET", "remitflow-lakehouse")
 S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://minio:9000")
@@ -94,7 +94,9 @@ def mask_phone(phone: Optional[str]) -> Optional[str]:
 
 TRANSFER_SCHEMA = {
     "id": "string",
-    "user_id": "int64",
+    # Pseudonymized identifier (PII_SALT-keyed) — raw user_id is never exported
+    # to the analytics store (PY-016 remediation).
+    "user_id_hash": "string",
     "amount": "float64",
     "send_currency": "string",
     "receive_currency": "string",
@@ -229,7 +231,7 @@ def transform_transfer_row(row: tuple) -> dict:
 
     return {
         "id": str(id_),
-        "user_id": int(user_id),
+        "user_id_hash": mask_pii(str(user_id), "user_id"),
         "amount": float(amount or 0),
         "send_currency": str(send_ccy),
         "receive_currency": str(recv_ccy),
