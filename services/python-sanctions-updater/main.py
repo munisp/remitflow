@@ -19,8 +19,10 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from dataclasses import dataclass, field, asdict
 
+import hmac
+
 import httpx
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import Depends, FastAPI, BackgroundTasks, Header, HTTPException
 from pydantic import BaseModel
 
 # ── PostgreSQL persistence ──────────────────────────────────────────────
@@ -30,7 +32,19 @@ from contextlib import contextmanager
 import signal
 import atexit
 
-_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+
+
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-sanctions-updater] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+_DB_URL = _require_env("DATABASE_URL")
 _db_pool = None
 
 def _get_db():
@@ -99,6 +113,18 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("sanctions-updater")
 
 app = FastAPI(title="RemitFlow Sanctions Updater", version="1.0.0")
+
+# ── Internal auth (fail-closed) ───────────────────────────────────────────────
+# Triggering sanctions-list updates is an administrative operation. No default
+# token: if INTERNAL_API_TOKEN is unset these endpoints return 503.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
 
 @app.get("/metrics")
 async def _prometheus_metrics():
@@ -557,14 +583,14 @@ async def health():
 
 
 @app.post("/api/update", response_model=UpdateResponse)
-async def trigger_update(req: UpdateRequest, background_tasks: BackgroundTasks):
+async def trigger_update(req: UpdateRequest, background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
     """Trigger a sanctions list update. Runs in background for large lists."""
     result = await run_update(req.sources, req.dry_run)
     return result
 
 
 @app.post("/api/update/full")
-async def trigger_full_update(background_tasks: BackgroundTasks):
+async def trigger_full_update(background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
     """Trigger a full update of all sanctions sources."""
     all_sources = ["ofac_sdn", "un_consolidated"]
     result = await run_update(all_sources, dry_run=False)
