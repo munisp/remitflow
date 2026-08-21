@@ -1,18 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"log/slog"
 	_ "github.com/lib/pq"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +46,8 @@ type FedNowTransfer struct {
 	AccountNumber string    `json:"creditorAccountNumber"`
 	CreditorName  string    `json:"creditorName"`
 	ISO20022Msg   string    `json:"iso20022Message,omitempty"`
+	// Simulated is true ONLY for dev-mode simulated settlements — never in production.
+	Simulated     bool       `json:"simulated,omitempty"`
 }
 
 type FedNowGateway struct {
@@ -50,6 +57,14 @@ type FedNowGateway struct {
 	kafkaURL    string
 	daprURL     string
 	maxAmount   float64
+	// adapterURL is the real FedNow network adapter that submits pacs.008
+	// messages. Unset → no settlement is claimed unless dev simulation is on.
+	adapterURL  string
+	// simulationAllowed is true ONLY when FEDNOW_SIMULATE_SETTLEMENT=true is
+	// explicitly set outside production.
+	simulationAllowed bool
+	// internalKey gates /submit, /return, /status (fail closed when unset).
+	internalKey string
 }
 
 type Metrics struct {
@@ -97,12 +112,16 @@ func NewFedNowGateway() *FedNowGateway {
 	if maxAmt <= 0 {
 		maxAmt = 500000
 	}
+	isProd := os.Getenv("GO_ENV") == "production" || os.Getenv("NODE_ENV") == "production"
 	return &FedNowGateway{
 		transfers: make(map[string]*FedNowTransfer),
 		metrics:   &Metrics{},
 		kafkaURL:  getEnv("KAFKA_REST_URL", "http://localhost:8093"),
 		daprURL:   getEnv("DAPR_HTTP_URL", "http://localhost:3500"),
 		maxAmount: maxAmt,
+		adapterURL:        os.Getenv("FEDNOW_ADAPTER_URL"),
+		simulationAllowed: !isProd && os.Getenv("FEDNOW_SIMULATE_SETTLEMENT") == "true",
+		internalKey:       os.Getenv("INTERNAL_SERVICE_KEY"),
 	}
 }
 
@@ -142,14 +161,26 @@ func (g *FedNowGateway) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate FedNow transaction
-	txID := req.MessageID
-	if txID == "" {
-		txID = generateID("FEDNOW")
+	// Whitelist-validate attacker-controlled fields before they go anywhere
+	// near an ISO 20022 message (defense-in-depth behind xml escaping).
+	if !validCreditorName(txInfo.Creditor.Name) {
+		jsonError(w, "Invalid creditor name", http.StatusBadRequest)
+		return
 	}
+	if !reAccountNumber.MatchString(txInfo.CreditorAccount.ID) {
+		jsonError(w, "Invalid creditor account number (1-34 chars, [A-Za-z0-9-])", http.StatusBadRequest)
+		return
+	}
+
+	// Transaction ID is ALWAYS server-generated — a client-supplied ID would
+	// let callers overwrite existing transfer records.
+	txID := generateID("FEDNOW")
 	e2eID := txInfo.PaymentID.EndToEndID
 	if e2eID == "" {
 		e2eID = generateID("E2E")
+	} else if !reEndToEndID.MatchString(e2eID) {
+		jsonError(w, "Invalid endToEndId (1-35 chars, [A-Za-z0-9-])", http.StatusBadRequest)
+		return
 	}
 
 	transfer := &FedNowTransfer{
@@ -157,7 +188,7 @@ func (g *FedNowGateway) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		EndToEndID:    e2eID,
 		Amount:        amount,
 		Currency:      currency,
-		Status:        "ACSP", // Accepted Settlement in Process
+		Status:        "RCVD", // Received — NOT yet accepted/settled on the FedNow network
 		CreatedAt:     time.Now(),
 		RoutingNumber: routingNumber,
 		AccountNumber: txInfo.CreditorAccount.ID,
@@ -166,6 +197,34 @@ func (g *FedNowGateway) handleSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// Build ISO 20022 pacs.008
 	transfer.ISO20022Msg = buildPacs008(transfer)
+	if transfer.ISO20022Msg == "" {
+		jsonError(w, "Failed to build pacs.008 message", http.StatusInternalServerError)
+		return
+	}
+
+	// Settlement path — never fabricate acceptance/settlement:
+	//  1. Real adapter configured → submit the pacs.008; only the adapter's
+	//     acknowledgement moves the transfer to ACSP.
+	//  2. Explicit dev simulation (FEDNOW_SIMULATE_SETTLEMENT=true, non-prod)
+	//     → simulated settlement, clearly labeled `simulated:true` everywhere.
+	//  3. Otherwise → transfer stays RCVD (received, pending network adapter).
+	if g.adapterURL != "" {
+		if err := g.submitToAdapter(transfer); err != nil {
+			slog.Error("FedNow adapter submission failed — failing loud", "txId", txID, "err", err)
+			g.mu.Lock()
+			transfer.Status = "RJCT" // Rejected
+			g.mu.Unlock()
+			jsonError(w, fmt.Sprintf("FedNow network submission failed: %v", err), http.StatusBadGateway)
+			return
+		}
+		g.mu.Lock()
+		transfer.Status = "ACSP" // Accepted Settlement in Process — per adapter ack
+		g.mu.Unlock()
+	} else if g.simulationAllowed {
+		transfer.Simulated = true
+		transfer.Status = "ACSP"
+		slog.Warn("DEV SIMULATION (FEDNOW_SIMULATE_SETTLEMENT=true): fabricating settlement", "txId", txID)
+	} // else: stays RCVD — no settlement claimed
 
 	// Store
 	g.mu.Lock()
@@ -176,39 +235,41 @@ func (g *FedNowGateway) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			_ = dbUpsert("transfer:"+txID, transfer)
 			_ = dbLogEvent("fednow_transfer_submitted", map[string]interface{}{
-				"transactionId": txID, "amount": amount, "status": "ACSP",
+				"transactionId": txID, "amount": amount, "status": transfer.Status, "simulated": transfer.Simulated,
 			})
 		}()
 	}
 
-	// Simulate instant settlement (FedNow settles in <30 seconds)
-	go func() {
-		time.Sleep(2 * time.Second)
-		now := time.Now()
-		// DB-primary update (middleware-ready: TigerBeetle two-phase commit in production)
-		if db != nil {
-			_ = dbUpsert("transfer:"+txID, map[string]interface{}{
-				"transactionId": txID, "endToEndId": e2eID,
-				"amount": amount, "currency": currency, "status": "ACSC",
-				"settledAt": now.Format(time.RFC3339),
-			})
-		}
-		g.mu.Lock()
-		if t, ok := g.transfers[txID]; ok {
-			t.Status = "ACSC" // Accepted Settlement Completed
-			t.SettledAt = &now
-		}
-		g.mu.Unlock()
+	// Simulated settlement runs ONLY in explicit dev mode and is labeled as such.
+	if transfer.Simulated {
+		go func() {
+			time.Sleep(2 * time.Second)
+			now := time.Now()
+			if db != nil {
+				_ = dbUpsert("transfer:"+txID, map[string]interface{}{
+					"transactionId": txID, "endToEndId": e2eID,
+					"amount": amount, "currency": currency, "status": "ACSC",
+					"settledAt": now.Format(time.RFC3339), "simulated": true,
+				})
+			}
+			g.mu.Lock()
+			if t, ok := g.transfers[txID]; ok {
+				t.Status = "ACSC" // Accepted Settlement Completed (SIMULATED)
+				t.SettledAt = &now
+				t.Simulated = true
+			}
+			g.mu.Unlock()
 
-		// Publish settlement event to Kafka via Dapr
-		g.publishEvent("remitflow.transfers.fednow.settled", map[string]interface{}{
-			"transactionId": txID,
-			"endToEndId":    e2eID,
-			"amount":        amount,
-			"status":        "ACSC",
-			"settledAt":     now.Format(time.RFC3339),
-		})
-	}()
+			g.publishEvent("remitflow.transfers.fednow.settled", map[string]interface{}{
+				"transactionId": txID,
+				"endToEndId":    e2eID,
+				"amount":        amount,
+				"status":        "ACSC",
+				"simulated":     true,
+				"settledAt":     now.Format(time.RFC3339),
+			})
+		}()
+	}
 
 	// Update metrics
 	latency := float64(time.Since(start).Milliseconds())
@@ -226,19 +287,63 @@ func (g *FedNowGateway) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		"endToEndId":    e2eID,
 		"amount":        amount,
 		"currency":      currency,
-		"status":        "ACSP",
+		"status":        transfer.Status,
+		"simulated":     transfer.Simulated,
 		"timestamp":     time.Now().Format(time.RFC3339),
 	})
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"transactionId":      txID,
-		"endToEndId":         e2eID,
-		"status":             "ACSP",
-		"reference":          txID,
+		"transactionId":       txID,
+		"endToEndId":          e2eID,
+		"status":              transfer.Status,
+		"simulated":           transfer.Simulated,
+		"reference":           txID,
 		"estimatedSettlement": "< 30 seconds",
-		"rail":               "FedNow",
-		"processedAt":        time.Now().Format(time.RFC3339),
+		"rail":                "FedNow",
+		"processedAt":         time.Now().Format(time.RFC3339),
 	})
+}
+
+// submitToAdapter posts the pacs.008 message to the configured FedNow network
+// adapter. Any failure is an error — the caller fails loud (502) rather than
+// pretending the transfer was accepted.
+func (g *FedNowGateway) submitToAdapter(t *FedNowTransfer) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimRight(g.adapterURL, "/")+"/v1/pacs008", bytes.NewBufferString(t.ISO20022Msg))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("X-Transaction-Id", t.TransactionID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("adapter returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// requireAuth gates a handler behind the internal service key. Fail closed:
+// when INTERNAL_SERVICE_KEY is unset, every guarded endpoint returns 401.
+func (g *FedNowGateway) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key := r.Header.Get("X-API-Key")
+		bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		ok := g.internalKey != "" &&
+			((key != "" && subtle.ConstantTimeCompare([]byte(key), []byte(g.internalKey)) == 1) ||
+				(bearer != "" && subtle.ConstantTimeCompare([]byte(bearer), []byte(g.internalKey)) == 1))
+		if !ok {
+			jsonError(w, "unauthorized: valid X-API-Key or Bearer token required", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (g *FedNowGateway) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -388,26 +493,87 @@ func (g *FedNowGateway) publishEvent(topic string, data interface{}) {
 	}
 }
 
+// ── ISO 20022 pacs.008 — built with encoding/xml so every attacker-controlled
+// value is auto-escaped. Raw fmt.Sprintf interpolation was an XML-injection
+// vector (GO-H6). ──
+
+type pacs008Amount struct {
+	Ccy   string `xml:"Ccy,attr"`
+	Value string `xml:",chardata"`
+}
+
+type pacs008Document struct {
+	XMLName xml.Name `xml:"Document"`
+	Xmlns   string   `xml:"xmlns,attr"`
+	GrpHdr  struct {
+		MsgID    string `xml:"MsgId"`
+		CreDtTm  string `xml:"CreDtTm"`
+		NbOfTxs  int    `xml:"NbOfTxs"`
+		SttlmInf struct {
+			SttlmMtd string `xml:"SttlmMtd"`
+		} `xml:"SttlmInf"`
+	} `xml:"FIToFICstmrCdtTrf>GrpHdr"`
+	CdtTrfTxInf struct {
+		PmtID struct {
+			EndToEndID string `xml:"EndToEndId"`
+			TxID       string `xml:"TxId"`
+		} `xml:"PmtId"`
+		IntrBkSttlmAmt pacs008Amount `xml:"IntrBkSttlmAmt"`
+		CdtrAgt        struct {
+			FinInstnID struct {
+				ClrSysMmbID struct {
+					MmbID string `xml:"MmbId"`
+				} `xml:"ClrSysMmbId"`
+			} `xml:"FinInstnId"`
+		} `xml:"CdtrAgt"`
+		Cdtr struct {
+			Nm string `xml:"Nm"`
+		} `xml:"Cdtr"`
+		CdtrAcct struct {
+			ID struct {
+				Othr struct {
+					ID string `xml:"Id"`
+				} `xml:"Othr"`
+			} `xml:"Id"`
+		} `xml:"CdtrAcct"`
+	} `xml:"FIToFICstmrCdtTrf>CdtTrfTxInf"`
+}
+
+// Field validators — whitelist charset, cap lengths (ISO 20022 limits).
+var (
+	reAccountNumber = regexp.MustCompile(`^[A-Za-z0-9\-]{1,34}$`)
+	reEndToEndID    = regexp.MustCompile(`^[A-Za-z0-9\-]{1,35}$`)
+)
+
+func validCreditorName(name string) bool {
+	if name == "" || len(name) > 140 {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f { // no control characters
+			return false
+		}
+	}
+	return true
+}
+
 func buildPacs008(t *FedNowTransfer) string {
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<Document xmlns="urn:iso:std:iso:20022:tech:xsd:pacs.008.001.12">
-  <FIToFICstmrCdtTrf>
-    <GrpHdr>
-      <MsgId>%s</MsgId>
-      <CreDtTm>%s</CreDtTm>
-      <NbOfTxs>1</NbOfTxs>
-      <SttlmInf><SttlmMtd>CLRG</SttlmMtd></SttlmInf>
-    </GrpHdr>
-    <CdtTrfTxInf>
-      <PmtId><EndToEndId>%s</EndToEndId><TxId>%s</TxId></PmtId>
-      <IntrBkSttlmAmt Ccy="%s">%.2f</IntrBkSttlmAmt>
-      <CdtrAgt><FinInstnId><ClrSysMmbId><MmbId>%s</MmbId></ClrSysMmbId></FinInstnId></CdtrAgt>
-      <Cdtr><Nm>%s</Nm></Cdtr>
-      <CdtrAcct><Id><Othr><Id>%s</Id></Othr></Id></CdtrAcct>
-    </CdtTrfTxInf>
-  </FIToFICstmrCdtTrf>
-</Document>`, t.TransactionID, t.CreatedAt.Format(time.RFC3339), t.EndToEndID, t.TransactionID,
-		t.Currency, t.Amount, t.RoutingNumber, t.CreditorName, t.AccountNumber)
+	doc := pacs008Document{Xmlns: "urn:iso:std:iso:20022:tech:xsd:pacs.008.001.12"}
+	doc.GrpHdr.MsgID = t.TransactionID
+	doc.GrpHdr.CreDtTm = t.CreatedAt.Format(time.RFC3339)
+	doc.GrpHdr.NbOfTxs = 1
+	doc.GrpHdr.SttlmInf.SttlmMtd = "CLRG"
+	doc.CdtTrfTxInf.PmtID.EndToEndID = t.EndToEndID
+	doc.CdtTrfTxInf.PmtID.TxID = t.TransactionID
+	doc.CdtTrfTxInf.IntrBkSttlmAmt = pacs008Amount{Ccy: t.Currency, Value: fmt.Sprintf("%.2f", t.Amount)}
+	doc.CdtTrfTxInf.CdtrAgt.FinInstnID.ClrSysMmbID.MmbID = t.RoutingNumber
+	doc.CdtTrfTxInf.Cdtr.Nm = t.CreditorName
+	doc.CdtTrfTxInf.CdtrAcct.ID.Othr.ID = t.AccountNumber
+	out, err := xml.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "" // callers validate fields beforehand; marshal cannot fail on them
+	}
+	return xml.Header + string(out)
 }
 
 func validateABARouting(routing string) bool {
@@ -573,10 +739,12 @@ func main() {
 	port := getEnv("PORT", "9003")
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/submit", gateway.handleSubmit)
-	mux.HandleFunc("/status", gateway.handleStatus)
-	mux.HandleFunc("/status/", gateway.handleStatus)
-	mux.HandleFunc("/return", gateway.handleReturn)
+	// GO-H7: payment-rail endpoints require authentication (fail closed when
+	// INTERNAL_SERVICE_KEY is unset).
+	mux.HandleFunc("/submit", gateway.requireAuth(gateway.handleSubmit))
+	mux.HandleFunc("/status", gateway.requireAuth(gateway.handleStatus))
+	mux.HandleFunc("/status/", gateway.requireAuth(gateway.handleStatus))
+	mux.HandleFunc("/return", gateway.requireAuth(gateway.handleReturn))
 	mux.HandleFunc("/health", gateway.handleHealth)
 	mux.HandleFunc("/healthz", gateway.handleHealth)
 	mux.HandleFunc("/metrics", gateway.handleMetrics)
@@ -597,7 +765,14 @@ func main() {
 		})
 	})
 
-	srv := &http.Server{Addr: ":" + port, Handler: mux}
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
 	go func() {
 		log.Printf("[FedNow Gateway] Starting on :%s", port)
