@@ -29,6 +29,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -188,9 +189,11 @@ func (cb *CircuitBreaker) recordFailure() {
 
 // ── HMAC Verification ───────────────────────────────────────────────────────
 
+// verifyHMAC validates a webhook HMAC-SHA256 signature. FAIL CLOSED: an empty
+// secret or empty signature NEVER verifies — there is no "dev mode accept all".
 func verifyHMAC(payload []byte, signature, secret string) bool {
-	if secret == "" {
-		return true // Dev mode: accept all
+	if secret == "" || signature == "" {
+		return false
 	}
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(payload)
@@ -445,47 +448,99 @@ func executeBillerPayment(req SettlementRequest, provider string) (*SettlementRe
 
 // ── Provider API Calls ──────────────────────────────────────────────────────
 
-func callCirclePayout(req SettlementRequest, ref string) (*SettlementResult, error) {
-	if circleAPIKey == "" {
-		log.Printf("[Circle] No API key — returning mock settlement")
-		return &SettlementResult{
-			OperationID: req.OperationID,
-			Provider:    "circle",
-			ExternalRef: ref,
-			Status:      "submitted",
-			Timestamp:   time.Now().UTC().Format(time.RFC3339),
-		}, nil
+// devSimulatedSettlementsAllowed reports whether SIMULATED provider payouts are
+// permitted. They are ONLY allowed outside production when
+// SETTLEMENT_ALLOW_SIMULATED=true is explicitly set. In production, or without
+// the explicit opt-in, unconfigured providers fail closed with an error.
+func devSimulatedSettlementsAllowed() bool {
+	env := strings.ToLower(os.Getenv("GO_ENV") + os.Getenv("NODE_ENV") + os.Getenv("APP_ENV"))
+	if strings.Contains(env, "prod") {
+		return false
 	}
+	return os.Getenv("SETTLEMENT_ALLOW_SIMULATED") == "true"
+}
 
-	// TODO: Make actual Circle API call with circleAPIKey
+func simulatedSettlement(req SettlementRequest, provider, ref string) *SettlementResult {
 	return &SettlementResult{
 		OperationID: req.OperationID,
-		Provider:    "circle",
-		ExternalRef: ref,
+		Provider:    provider,
+		ExternalRef: "SIMULATED-" + ref,
+		Status:      "simulated",
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+// callProviderPayout submits a real payout to a provider's HTTP API. It returns
+// an error unless the provider confirms acceptance (2xx). No fabricated refs.
+func callProviderPayout(provider, baseURL, apiKey string, req SettlementRequest, ref string) (*SettlementResult, error) {
+	if baseURL == "" {
+		return nil, fmt.Errorf("NOT_CONFIGURED: %s API base URL is not set; refusing to report an unsubmitted payout", provider)
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"idempotencyKey": ref,
+		"operationId":    req.OperationID,
+		"payload":        req.Payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	httpReq, err := http.NewRequest("POST", strings.TrimRight(baseURL, "/")+"/payouts", strings.NewReader(string(payload)))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("%s payout submission failed: %w", provider, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("%s payout rejected (HTTP %d)", provider, resp.StatusCode)
+	}
+	var out struct {
+		ID        string `json:"id"`
+		Reference string `json:"reference"`
+	}
+	externalRef := ref
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&out); err == nil {
+		if out.ID != "" {
+			externalRef = out.ID
+		} else if out.Reference != "" {
+			externalRef = out.Reference
+		}
+	}
+	return &SettlementResult{
+		OperationID: req.OperationID,
+		Provider:    provider,
+		ExternalRef: externalRef,
 		Status:      "submitted",
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}, nil
 }
 
+func callCirclePayout(req SettlementRequest, ref string) (*SettlementResult, error) {
+	if circleAPIKey == "" {
+		if !devSimulatedSettlementsAllowed() {
+			return nil, fmt.Errorf("NOT_CONFIGURED: CIRCLE_API_KEY is not set; refusing to fabricate a Circle payout")
+		}
+		log.Printf("[Circle] DEV SIMULATION (SETTLEMENT_ALLOW_SIMULATED=true): no API key — returning SIMULATED settlement")
+		return simulatedSettlement(req, "circle", ref), nil
+	}
+	return callProviderPayout("circle", os.Getenv("CIRCLE_API_URL"), circleAPIKey, req, ref)
+}
+
 func callYellowCardPayout(req SettlementRequest, ref string) (*SettlementResult, error) {
 	if yellowCardAPIKey == "" {
-		log.Printf("[YellowCard] No API key — returning mock settlement")
-		return &SettlementResult{
-			OperationID: req.OperationID,
-			Provider:    "yellow_card",
-			ExternalRef: ref,
-			Status:      "submitted",
-			Timestamp:   time.Now().UTC().Format(time.RFC3339),
-		}, nil
+		if !devSimulatedSettlementsAllowed() {
+			return nil, fmt.Errorf("NOT_CONFIGURED: YELLOWCARD_API_KEY is not set; refusing to fabricate a YellowCard payout")
+		}
+		log.Printf("[YellowCard] DEV SIMULATION (SETTLEMENT_ALLOW_SIMULATED=true): no API key — returning SIMULATED settlement")
+		return simulatedSettlement(req, "yellow_card", ref), nil
 	}
-
-	return &SettlementResult{
-		OperationID: req.OperationID,
-		Provider:    "yellow_card",
-		ExternalRef: ref,
-		Status:      "submitted",
-		Timestamp:   time.Now().UTC().Format(time.RFC3339),
-	}, nil
+	return callProviderPayout("yellow_card", os.Getenv("YELLOWCARD_API_URL"), yellowCardAPIKey, req, ref)
 }
 
 func callMojaloopTransfer(req SettlementRequest, ref string) (*SettlementResult, error) {
@@ -592,14 +647,12 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, provider, secret stri
 	}
 	atomic.AddUint64(&webhookCount, 1)
 
-	body := make([]byte, 0)
-	buf := make([]byte, 4096)
-	for {
-		n, err := r.Body.Read(buf)
-		body = append(body, buf[:n]...)
-		if err != nil {
-			break
-		}
+	// Bound the body read (max 1 MiB) — no unbounded reads.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Request body too large or unreadable", 413)
+		return
 	}
 
 	// Verify HMAC signature
@@ -608,9 +661,11 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, provider, secret stri
 		signature = r.Header.Get("X-Webhook-Signature")
 	}
 
+	// FAIL CLOSED: reject any webhook that does not verify, regardless of
+	// whether a secret is configured.
 	verified := verifyHMAC(body, signature, secret)
-	if !verified && secret != "" {
-		log.Printf("[Webhook] %s signature verification FAILED", provider)
+	if !verified {
+		log.Printf("[Webhook] %s signature verification FAILED (secret configured: %v)", provider, secret != "")
 		http.Error(w, "Invalid signature", 401)
 		return
 	}
@@ -775,16 +830,18 @@ func redeemClaimHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Hold the lock across the entire check-and-set so two concurrent redeems
+	// cannot both observe status=="pending" (double-redeem TOCTOU).
 	mu.Lock()
 	claim, exists := p2pClaims[req.ClaimID]
-	mu.Unlock()
-
 	if !exists {
+		mu.Unlock()
 		http.Error(w, "Claim not found", 404)
 		return
 	}
 
 	if claim.Status != "pending" {
+		mu.Unlock()
 		http.Error(w, fmt.Sprintf("Claim already %s", claim.Status), 400)
 		return
 	}
@@ -792,6 +849,7 @@ func redeemClaimHandler(w http.ResponseWriter, r *http.Request) {
 	expiresAt, _ := time.Parse(time.RFC3339, claim.ExpiresAt)
 	if time.Now().After(expiresAt) {
 		claim.Status = "expired"
+		mu.Unlock()
 		http.Error(w, "Claim has expired", 410)
 		return
 	}
@@ -799,21 +857,23 @@ func redeemClaimHandler(w http.ResponseWriter, r *http.Request) {
 	claim.Status = "claimed"
 	claim.ClaimedByID = req.ClaimerID
 	claim.ClaimedAt = time.Now().UTC().Format(time.RFC3339)
+	claimedStablecoin, claimedAmount := claim.Stablecoin, claim.Amount
+	mu.Unlock()
 
 	publishKafkaEvent("stablecoin_p2p", map[string]interface{}{
 		"claim_id":   req.ClaimID,
 		"claimer_id": req.ClaimerID,
-		"stablecoin": claim.Stablecoin,
-		"amount":     claim.Amount,
+		"stablecoin": claimedStablecoin,
+		"amount":     claimedAmount,
 		"action":     "claim_redeemed",
 	})
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":    true,
 		"claim_id":   req.ClaimID,
-		"stablecoin": claim.Stablecoin,
-		"amount":     claim.Amount,
-		"claimed_at": claim.ClaimedAt,
+		"stablecoin": claimedStablecoin,
+		"amount":     claimedAmount,
+		"claimed_at": time.Now().UTC().Format(time.RFC3339),
 	})
 }
 
@@ -824,11 +884,11 @@ func getClaimHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mu.RLock()
+	// Write lock: expiry check mutates claim.Status.
+	mu.Lock()
 	claim, exists := p2pClaims[claimID]
-	mu.RUnlock()
-
 	if !exists {
+		mu.Unlock()
 		http.Error(w, "Claim not found", 404)
 		return
 	}
@@ -838,6 +898,7 @@ func getClaimHandler(w http.ResponseWriter, r *http.Request) {
 	if time.Now().After(expiresAt) && claim.Status == "pending" {
 		claim.Status = "expired"
 	}
+	mu.Unlock()
 
 	json.NewEncoder(w).Encode(claim)
 }
@@ -890,7 +951,32 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// requireProductionSecrets fails the boot in production when any provider
+// webhook secret is unset — with fail-closed verifyHMAC, missing secrets would
+// break providers anyway; booting without them silently was the original bug.
+func requireProductionSecrets() {
+	env := strings.ToLower(os.Getenv("GO_ENV") + os.Getenv("NODE_ENV") + os.Getenv("APP_ENV"))
+	if !strings.Contains(env, "production") && !strings.Contains(env, "prod") {
+		return
+	}
+	var missing []string
+	for name, val := range map[string]string{
+		"CIRCLE_WEBHOOK_SECRET":     circleWebhookSecret,
+		"YELLOWCARD_WEBHOOK_SECRET": yellowCardWebhookSecret,
+		"MOONPAY_WEBHOOK_SECRET":    moonpayWebhookSecret,
+		"TRANSAK_WEBHOOK_SECRET":    transakWebhookSecret,
+	} {
+		if val == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		log.Fatalf("FATAL: production boot refused — webhook secrets not set: %s", strings.Join(missing, ", "))
+	}
+}
+
 func main() {
+	requireProductionSecrets()
 	mux := http.NewServeMux()
 
 	// Health + Metrics
