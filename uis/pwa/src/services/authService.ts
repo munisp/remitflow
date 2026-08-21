@@ -80,6 +80,15 @@ class AuthService {
   private readonly SSO_PROBE_KEY = "keycloak_sso_probe";
   private readonly SSO_PROBE_TTL_MS = 5 * 60 * 1000;
 
+  /**
+   * SECURITY (CLI-002): the access token is kept in module memory ONLY —
+   * never written to localStorage, so an XSS payload or browser extension
+   * cannot exfiltrate it from persistent storage. The token is lost on
+   * page reload and must be re-obtained via refreshToken() (credential
+   * flow) or the cookie-based SSO session.
+   */
+  private accessToken: string | null = null;
+
   // ─── Keycloak SSO (Authorization Code + PKCE) ─────────────────────────────
 
   /**
@@ -342,7 +351,7 @@ class AuthService {
       }
 
       if (data.refresh_token) {
-        localStorage.setItem(this.REFRESH_TOKEN_KEY, data.refresh_token);
+        this.setRefreshToken(data.refresh_token);
       }
 
       // Extract and store keycloak_id from login response
@@ -425,10 +434,100 @@ class AuthService {
   }
 
   /**
-   * Refresh access token using refresh token
+   * SECURITY (CLI-002): refresh-token storage.
+   *
+   * The platform server owns the preferred httpOnly-cookie refresh flow for
+   * SSO sessions: POST /api/auth/refresh exchanges the httpOnly
+   * `kc_refresh_token` cookie (set by /api/oauth/callback) and rotates it
+   * server-side — the refresh token never touches JS-readable storage in
+   * that flow (see refreshSsoSession below).
+   *
+   * The core-banking credential login, however, returns the refresh token
+   * in the JSON body and no httpOnly-cookie variant of its refresh
+   * endpoint exists on the core-banking upstream. As an intermediate step
+   * the credential-flow refresh token is kept in sessionStorage instead of
+   * localStorage: it is no longer shared across tabs/windows and is wiped
+   * when the tab closes, shrinking the exfiltration window. RESIDUAL RISK:
+   * an in-page XSS payload can still read sessionStorage; the durable fix
+   * is a server-issued httpOnly Secure SameSite=strict refresh cookie for
+   * the credential flow as well (server change required).
+   */
+  private setRefreshToken(token: string): void {
+    try {
+      sessionStorage.setItem(this.REFRESH_TOKEN_KEY, token);
+    } catch {
+      // Storage unavailable (private mode) — refresh will not survive
+      // a reload; fail closed without persisting anywhere.
+    }
+    // Purge any legacy localStorage copy from older builds.
+    try {
+      localStorage.removeItem(this.REFRESH_TOKEN_KEY);
+    } catch {
+      // ignore
+    }
+  }
+
+  private getRefreshToken(): string | null {
+    try {
+      const token = sessionStorage.getItem(this.REFRESH_TOKEN_KEY);
+      if (token) return token;
+      // One-time migration: move any legacy localStorage copy to
+      // sessionStorage, then purge the persistent copy.
+      const legacy = localStorage.getItem(this.REFRESH_TOKEN_KEY);
+      if (legacy) {
+        try {
+          sessionStorage.setItem(this.REFRESH_TOKEN_KEY, legacy);
+        } catch {
+          // ignore
+        }
+        localStorage.removeItem(this.REFRESH_TOKEN_KEY);
+        return legacy;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  private clearRefreshToken(): void {
+    try {
+      sessionStorage.removeItem(this.REFRESH_TOKEN_KEY);
+    } catch {
+      // ignore
+    }
+    try {
+      localStorage.removeItem(this.REFRESH_TOKEN_KEY);
+    } catch {
+      // ignore
+    }
+  }
+
+  /**
+   * Extend the cookie-based SSO session by calling the platform server's
+   * httpOnly refresh endpoint (POST /api/auth/refresh). The refresh token
+   * lives exclusively in the httpOnly `kc_refresh_token` cookie — it is
+   * never readable by client JS. Returns true when the session was
+   * extended, false when the server rejected/rotated it away.
+   */
+  async refreshSsoSession(): Promise<boolean> {
+    try {
+      const response = await fetch(`${PLATFORM_API_BASE}/auth/refresh`, {
+        method: "POST",
+        headers: { Accept: "application/json" },
+        credentials: "include",
+      });
+      return response.ok;
+    } catch {
+      // Server unreachable — indeterminate; caller keeps current state.
+      return false;
+    }
+  }
+
+  /**
+   * Refresh access token using refresh token (credential flow).
    */
   async refreshToken(): Promise<LoginResponse | null> {
-    const refreshToken = localStorage.getItem(this.REFRESH_TOKEN_KEY);
+    const refreshToken = this.getRefreshToken();
 
     if (!refreshToken) {
       return null;
@@ -467,7 +566,7 @@ class AuthService {
       }
 
       if (data.refresh_token) {
-        localStorage.setItem(this.REFRESH_TOKEN_KEY, data.refresh_token);
+        this.setRefreshToken(data.refresh_token);
       }
 
       return data;
@@ -497,7 +596,7 @@ class AuthService {
    */
   logout(): void {
     this.removeToken();
-    localStorage.removeItem(this.REFRESH_TOKEN_KEY);
+    this.clearRefreshToken();
     localStorage.removeItem(this.TOKEN_EXPIRY_KEY);
     this.removeUser();
     this.removeKeycloakId();
@@ -506,24 +605,35 @@ class AuthService {
   }
 
   /**
-   * Get current auth token
+   * Get current auth token (in-memory only — CLI-002).
    */
   getToken(): string | null {
-    return localStorage.getItem(this.AUTH_TOKEN_KEY);
+    return this.accessToken;
   }
 
   /**
-   * Set auth token
+   * Set auth token (in-memory only — never persisted).
    */
   setToken(token: string): void {
-    localStorage.setItem(this.AUTH_TOKEN_KEY, token);
+    this.accessToken = token;
+    // Purge any legacy localStorage copy from older builds.
+    try {
+      localStorage.removeItem(this.AUTH_TOKEN_KEY);
+    } catch {
+      // ignore
+    }
   }
 
   /**
    * Remove auth token
    */
   removeToken(): void {
-    localStorage.removeItem(this.AUTH_TOKEN_KEY);
+    this.accessToken = null;
+    try {
+      localStorage.removeItem(this.AUTH_TOKEN_KEY);
+    } catch {
+      // ignore
+    }
   }
 
   /**
