@@ -105,7 +105,7 @@ services:
       FLUVIO_ENDPOINT: "${FLUVIO_ENDPOINT:-fluvio-sc:9003}"
       OPENSEARCH_URL: "${OPENSEARCH_URL:-http://opensearch:9200}"
       OPENSEARCH_USER: "${OPENSEARCH_USERNAME:-admin}"  # canonical var: OPENSEARCH_USERNAME
-      OPENSEARCH_PASSWORD: "${OPENSEARCH_PASSWORD:-admin}"
+      OPENSEARCH_PASSWORD: "${OPENSEARCH_PASSWORD:?OPENSEARCH_PASSWORD is required}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
     depends_on:
       - redis
@@ -134,7 +134,7 @@ services:
       PORT: "8220"
       OPENSEARCH_URL: "${OPENSEARCH_URL:-http://opensearch:9200}"
       OPENSEARCH_USER: "${OPENSEARCH_USERNAME:-admin}"  # canonical var: OPENSEARCH_USERNAME
-      OPENSEARCH_PASSWORD: "${OPENSEARCH_PASSWORD:-admin}"
+      OPENSEARCH_PASSWORD: "${OPENSEARCH_PASSWORD:?OPENSEARCH_PASSWORD is required}"
       LAKEHOUSE_URL: "${LAKEHOUSE_URL:-http://python-lakehouse:8130}"
       KEYCLOAK_URL: "${KEYCLOAK_URL:-http://keycloak:8080}"
       KEYCLOAK_REALM: "${KEYCLOAK_REALM:-remitflow}"
