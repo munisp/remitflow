@@ -34,6 +34,17 @@ import psycopg2
 import psycopg2.pool
 import psycopg2.extras
 
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-qr-nfc-analytics] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("qr-nfc-analytics")
 
@@ -42,7 +53,7 @@ logger = logging.getLogger("qr-nfc-analytics")
 PORT = int(os.environ.get("PORT", "8124"))
 KAFKA_BROKERS = os.environ.get("KAFKA_BROKERS", "localhost:9092")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
-POSTGRES_URL = os.environ.get("DATABASE_URL", "postgres://remitflow:remitflow123@localhost:5432/remitflow")
+POSTGRES_URL = _require_env("DATABASE_URL")
 OPENSEARCH_URL = os.environ.get("OPENSEARCH_URL", "http://localhost:9200")
 LAKEHOUSE_URL = os.environ.get("LAKEHOUSE_URL", "http://localhost:8181")
 
