@@ -67,7 +67,19 @@ import psycopg2
 import psycopg2.extras
 from contextlib import contextmanager
 
-_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+
+
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-anomaly-detector] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+_DB_URL = _require_env("DATABASE_URL")
 _db_pool = None
 
 def _get_db():
@@ -716,7 +728,7 @@ import atexit
 def _get_db_conn():
     """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""
     try:
-        db_url = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+        db_url = _require_env("DATABASE_URL")
         conn = psycopg2.connect(db_url)
         conn.autocommit = True
         return conn

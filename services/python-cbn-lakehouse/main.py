@@ -46,7 +46,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
-DB_URL = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow@postgres:5432/remitflow")
+
+
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-cbn-lakehouse] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+DB_URL = _require_env("DATABASE_URL")
 OPENSEARCH_URL = os.getenv("OPENSEARCH_URL", "http://opensearch:9200")
 KAFKA_BROKERS = os.getenv("KAFKA_BROKERS", "kafka:9092")
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
@@ -62,7 +74,7 @@ import psycopg2.extras
 import signal
 import atexit
 
-_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+_DB_URL = _require_env("DATABASE_URL")
 _pg_conn = None
 
 def _get_pg():
