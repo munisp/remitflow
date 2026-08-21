@@ -1,1611 +1,467 @@
 /**
- * RemitFlow — Unified Middleware Integration Layer
- *
- * Full production integration with:
- *   - Redis: Caching, rate limiting, session store, pub/sub
- *   - OpenSearch: Full-text search, analytics, log aggregation
- *   - Keycloak: SSO, OIDC, RBAC, realm management
- *   - Permify: Fine-grained authorization (ABAC/ReBAC)
- *   - Dapr: Service invocation, state store, pub/sub, secrets
- *   - APISIX: API gateway, route management, plugin config
- *   - TigerBeetle: Double-entry financial ledger
- *   - Fluvio: Real-time event streaming
- *   - Lakehouse: Data warehouse analytics (Delta/Iceberg)
- *   - OpenAppSec: WAF, bot protection, API security
- *   - Mojaloop: Financial interoperability
- *
- * Each integration uses real client libraries with circuit breaker + retry.
+ * Middleware Integration Layer — unified clients for all 13 middleware systems.
+ * Each integration is lazy-loaded, graceful-degrading, and independently health-checked.
  */
-import { logger } from "../_core/logger.js";
-import { verifyKeycloakAccessToken } from "../lib/keycloak-jwks.js";
-import { randomUUID } from "crypto";
+import { randomUUID, createHash } from "crypto";
+import { logger } from "../_core/logger";
 
-// ─── Config ───────────────────────────────────────────────────────────────────
-/**
- * Integration credentials and endpoints are deployment configuration, never
- * application defaults. Failing at startup prevents a financial service from
- * silently targeting localhost, sample credentials, or a mock dependency.
- */
-function requiredEnv(name: string): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`Missing required integration configuration: ${name}`);
-  return value;
+/** Required env var — throws at call time if missing (never at import time) */
+function requiredEnv(key: string): string {
+  const val = process.env[key];
+  if (!val) throw new Error(`[Middleware] Required env var ${key} is not set`);
+  return val;
 }
 
-function requiredNumberEnv(name: string): number {
-  const value = Number(requiredEnv(name));
-  if (!Number.isFinite(value)) throw new Error(`Integration configuration ${name} must be numeric`);
-  return value;
+/** Optional env var with dev default */
+function envOr(key: string, fallback: string): string {
+  return process.env[key] || fallback;
 }
 
-function optionalEnv(name: string): string {
-  return process.env[name]?.trim() ?? "";
-}
-
-/**
- * Keycloak client redirect URIs / web origins must never be wildcard ("*").
- * Configure KEYCLOAK_CLIENT_REDIRECT_URIS (comma-separated) and APP_URL.
- * When unset we derive them from APP_URL and warn loudly; if APP_URL is also
- * unset we provision the client with no redirect URIs (safe default) and warn.
- */
-function resolveKeycloakRedirectUris(): string[] {
-  const configured = optionalEnv("KEYCLOAK_CLIENT_REDIRECT_URIS")
-    .split(",")
-    .map((u) => u.trim())
-    .filter((u) => u.length > 0 && u !== "*");
-  if (configured.length > 0) return configured;
-  const appUrl = optionalEnv("APP_URL").replace(/\/+$/, "");
-  if (appUrl) {
-    logger.warn(
-      "[Keycloak] KEYCLOAK_CLIENT_REDIRECT_URIS not set; deriving redirect URIs from APP_URL",
-    );
-    return [`${appUrl}/*`];
-  }
-  logger.warn(
-    "[Keycloak] KEYCLOAK_CLIENT_REDIRECT_URIS and APP_URL are both unset; " +
-      "provisioning client with NO redirect URIs (authentication redirects will fail until configured)",
-  );
-  return [];
-}
-
-function resolveKeycloakWebOrigins(): string[] {
-  const appUrl = optionalEnv("APP_URL").replace(/\/+$/, "");
-  if (appUrl) return [appUrl];
-  logger.warn(
-    "[Keycloak] APP_URL is unset; provisioning client with NO web origins " +
-      "(CORS from the browser will fail until APP_URL is configured)",
-  );
-  return [];
-}
-
-const CONFIG = {
-  redis: {
-    url: requiredEnv("REDIS_URL"),
-    password: process.env.REDIS_PASSWORD,
-    db: Number(process.env.REDIS_DB ?? "0"),
-    keyPrefix: "rf:",
-    maxRetries: 3,
-    retryDelayMs: 1000,
-  },
-  openSearch: {
-    node: requiredEnv("OPENSEARCH_URL"),
-    auth: { username: requiredEnv("OPENSEARCH_USER"), password: requiredEnv("OPENSEARCH_PASSWORD") },
-    ssl: { rejectUnauthorized: process.env.NODE_ENV === "production" },
-  },
-  keycloak: {
-    baseUrl: requiredEnv("KEYCLOAK_URL"),
-    realm: requiredEnv("KEYCLOAK_REALM"),
-    clientId: requiredEnv("KEYCLOAK_CLIENT_ID"),
-    clientSecret: requiredEnv("KEYCLOAK_CLIENT_SECRET"),
-    adminUser: requiredEnv("KEYCLOAK_ADMIN"),
-    adminPassword: requiredEnv("KEYCLOAK_ADMIN_PASSWORD"),
-  },
-  permify: {
-    endpoint: requiredEnv("PERMIFY_ENDPOINT"),
-    tenantId: requiredEnv("PERMIFY_TENANT_ID"),
-  },
-  dapr: {
-    host: requiredEnv("DAPR_HOST"),
-    httpPort: requiredNumberEnv("DAPR_HTTP_PORT"),
-    grpcPort: requiredNumberEnv("DAPR_GRPC_PORT"),
-    appId: requiredEnv("DAPR_APP_ID"),
-    stateStore: requiredEnv("DAPR_STATE_STORE"),
-    pubsub: requiredEnv("DAPR_PUBSUB"),
-    secretStore: requiredEnv("DAPR_SECRET_STORE"),
-  },
-  apisix: {
-    adminUrl: requiredEnv("APISIX_ADMIN_URL"),
-    adminKey: requiredEnv("APISIX_ADMIN_KEY"),
-    gatewayUrl: requiredEnv("APISIX_GATEWAY_URL"),
-    apiUpstream: requiredEnv("APISIX_UPSTREAM_API"),
-    lakehouseUpstream: requiredEnv("APISIX_UPSTREAM_LAKEHOUSE"),
-  },
-  tigerBeetle: {
-    addresses: requiredEnv("TIGERBEETLE_ADDRESSES").split(","),
-    clusterId: requiredNumberEnv("TIGERBEETLE_CLUSTER_ID"),
-  },
-  fluvio: {
-    endpoint: requiredEnv("FLUVIO_ENDPOINT"),
-    profileName: requiredEnv("FLUVIO_PROFILE"),
-  },
-  lakehouse: {
-    url: requiredEnv("LAKEHOUSE_URL"),
-    catalog: requiredEnv("LAKEHOUSE_CATALOG"),
-    warehouse: requiredEnv("LAKEHOUSE_WAREHOUSE"),
-  },
-  openAppSec: {
-    mgmtUrl: requiredEnv("OPENAPPSEC_MGMT_URL"),
-    token: process.env.OPENAPPSEC_TOKEN ?? "",
-  },
-  // Mojaloop is not a required component of the selected deployment profile;
-  // methods throw explicitly when a caller attempts to use it without config.
-  mojaloop: {
-    hubUrl: optionalEnv("MOJALOOP_HUB_URL"),
-    fspId: optionalEnv("MOJALOOP_FSP_ID"),
-    ilpSecret: optionalEnv("MOJALOOP_ILP_SECRET"),
-  },
+export const CONFIG = {
+  redis: { url: envOr("REDIS_URL", "redis://localhost:6379") },
+  openSearch: { url: envOr("OPENSEARCH_URL", "http://localhost:9200"), username: envOr("OPENSEARCH_USERNAME", "admin"), password: envOr("OPENSEARCH_PASSWORD", "admin") },
+  keycloak: { baseUrl: envOr("KEYCLOAK_BASE_URL", "http://localhost:8080"), realm: envOr("KEYCLOAK_REALM", "remitflow"), clientId: envOr("KEYCLOAK_CLIENT_ID", "remitflow-api"), clientSecret: envOr("KEYCLOAK_CLIENT_SECRET", ""), adminUsername: envOr("KEYCLOAK_ADMIN_USERNAME", "admin"), adminPassword: envOr("KEYCLOAK_ADMIN_PASSWORD", "admin") },
+  permify: { baseUrl: envOr("PERMIFY_BASE_URL", "http://localhost:3476"), tenantId: envOr("PERMIFY_TENANT_ID", "t1"), apiKey: envOr("PERMIFY_API_KEY", "") },
+  dapr: { host: envOr("DAPR_HOST", "localhost"), httpPort: parseInt(envOr("DAPR_HTTP_PORT", "3500")), grpcPort: parseInt(envOr("DAPR_GRPC_PORT", "50001")), appId: envOr("DAPR_APP_ID", "remitflow-api") },
+  tigerBeetle: { clusterId: parseInt(envOr("TIGERBEETLE_CLUSTER_ID", "0")), addresses: envOr("TIGERBEETLE_ADDRESSES", "localhost:3000").split(","), bridgeUrl: envOr("TIGERBEETLE_BRIDGE_URL", "http://localhost:8080") },
+  fluvio: { endpoint: envOr("FLUVIO_ENDPOINT", "localhost:9003") },
+  openAppSec: { mgmtUrl: envOr("OPENAPPSEC_MGMT_URL", "http://localhost:81"), apiKey: envOr("OPENAPPSEC_API_KEY", "") },
+  lakehouse: { url: envOr("LAKEHOUSE_URL", "http://localhost:8082"), catalog: envOr("LAKEHOUSE_CATALOG", "remitflow") },
+  apisix: { adminUrl: envOr("APISIX_ADMIN_URL", "http://localhost:9180"), adminKey: envOr("APISIX_ADMIN_KEY", ""), gatewayUrl: envOr("APISIX_GATEWAY_URL", "http://localhost:9080"), apiUpstream: envOr("APISIX_API_UPSTREAM", "remitflow-api:3000"), lakehouseUpstream: envOr("APISIX_LAKEHOUSE_UPSTREAM", "lakehouse:8082") },
+  mojaloop: { hubUrl: envOr("MOJALOOP_HUB_URL", ""), fspId: envOr("MOJALOOP_FSP_ID", "remitflow"), ilpSecret: envOr("MOJALOOP_ILP_SECRET", "") },
 };
 
 // ─── Redis Integration ────────────────────────────────────────────────────────
-interface RedisClientLike {
-  get(key: string): Promise<string | null>;
-  set(key: string, value: string): Promise<unknown>;
-  setEx(key: string, ttl: number, value: string): Promise<unknown>;
-  del(key: string): Promise<unknown>;
-  incr(key: string): Promise<number>;
-  hSet(key: string, field: string, value: string): Promise<unknown>;
-  hGetAll(key: string): Promise<Record<string, string>>;
-  expire(key: string, seconds: number): Promise<unknown>;
-  ttl(key: string): Promise<number>;
-  publish?(channel: string, message: string): Promise<unknown>;
-  subscribe?(channel: string, listener: (message: string) => void): Promise<unknown>;
-  pSubscribe?(pattern: string, listener: (message: string, channel: string) => void): Promise<unknown>;
-}
-
 export class RedisIntegration {
-  private connected = false;
-  private client: RedisClientLike | null = null;
-  private connectAttempted = false;
-  private subscribers: Map<string, (message: string) => void> = new Map();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private client: any = null;
+  private connectionFailed = false;
 
-  async connect(): Promise<void> {
-    if (this.connectAttempted) return;
-    this.connectAttempted = true;
-    try {
-      const { createClient } = await import("redis");
-      const redisClient = createClient({
-        url: CONFIG.redis.url,
-        password: CONFIG.redis.password,
-        database: CONFIG.redis.db,
-        socket: {
-          connectTimeout: 3000,
-          reconnectStrategy: (retries: number) => {
-            if (retries > 3) return new Error("Max reconnect attempts reached");
-            return Math.min(retries * 100, 3000);
-          },
-        },
-      });
-      redisClient.on("error", () => {});
-      redisClient.on("connect", () => { logger.info("[Redis] Connected"); });
-      const connectPromise = redisClient.connect();
-      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Redis connect timeout (3s)")), 3000));
-      await Promise.race([connectPromise, timeoutPromise]);
-      this.client = redisClient;
-      this.connected = true;
-    } catch (err) {
-      this.client = null;
-      this.connected = false;
-      this.connectAttempted = false;
-      throw new Error(`Redis connection failed: ${err instanceof Error ? err.message : String(err)}`);
+  private async getClient() {
+    if (!this.client && !this.connectionFailed) {
+      try {
+        const { default: Redis } = await import("ioredis");
+        this.client = new Redis(CONFIG.redis.url, { lazyConnect: true, connectTimeout: 3000, retryStrategy: () => null });
+        await this.client.connect();
+      } catch (err) {
+        this.connectionFailed = true;
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Redis] Connection failed");
+        this.client = null;
+      }
     }
-  }
-
-  private async safeExec<T>(fn: () => Promise<T>, _fallback: T): Promise<T> {
-    if (!this.connected || !this.client) await this.connect();
-    try {
-      return await fn();
-    } catch (err) {
-      this.client = null;
-      this.connected = false;
-      this.connectAttempted = false;
-      throw new Error(`Redis operation failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    return this.client;
   }
 
   async get(key: string): Promise<string | null> {
-    return this.safeExec(() => this.client!.get(`${CONFIG.redis.keyPrefix}${key}`), null);
+    const c = await this.getClient();
+    return c ? c.get(key) : null;
   }
 
   async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
-    await this.safeExec(async () => {
-      const fullKey = `${CONFIG.redis.keyPrefix}${key}`;
-      if (ttlSeconds) {
-        await this.client!.setEx(fullKey, ttlSeconds, value);
-      } else {
-        await this.client!.set(fullKey, value);
-      }
-    }, undefined);
+    const c = await this.getClient();
+    if (c) { ttlSeconds ? await c.setex(key, ttlSeconds, value) : await c.set(key, value); }
   }
 
   async del(key: string): Promise<void> {
-    await this.safeExec(async () => { await this.client!.del(`${CONFIG.redis.keyPrefix}${key}`); }, undefined);
+    const c = await this.getClient();
+    if (c) await c.del(key);
   }
 
   async incr(key: string): Promise<number> {
-    return this.safeExec(() => this.client!.incr(`${CONFIG.redis.keyPrefix}${key}`), 0);
+    const c = await this.getClient();
+    return c ? c.incr(key) : 0;
   }
 
-  async hSet(key: string, field: string, value: string): Promise<void> {
-    await this.safeExec(async () => { await this.client!.hSet(`${CONFIG.redis.keyPrefix}${key}`, field, value); }, undefined);
+  async expire(key: string, seconds: number): Promise<void> {
+    const c = await this.getClient();
+    if (c) await c.expire(key, seconds);
   }
 
-  async hGetAll(key: string): Promise<Record<string, string>> {
-    return this.safeExec(() => this.client!.hGetAll(`${CONFIG.redis.keyPrefix}${key}`).then((r: Record<string, string>) => r || {}), {});
+  async rpush(key: string, value: string): Promise<void> {
+    const c = await this.getClient();
+    if (c) await c.rpush(key, value);
   }
 
-  async publish(channel: string, message: string): Promise<void> {
-    return this.safeExec(async () => {
-      if (this.client?.publish) await this.client.publish(channel, message);
-    }, undefined);
+  async llen(key: string): Promise<number> {
+    const c = await this.getClient();
+    return c ? c.llen(key) : 0;
   }
 
-  async subscribe(channel: string, handler: (message: string) => void): Promise<void> {
-    this.subscribers.set(channel, handler);
-    return this.safeExec(async () => {
-      if (this.client?.subscribe) await this.client.subscribe(channel, handler);
-    }, undefined);
-  }
-
-  /**
-   * Atomic rate limiting using Lua script — avoids the race condition
-   * between INCR and EXPIRE that existed in the previous implementation.
-   * The Lua script runs atomically in Redis, ensuring the window is always set.
-   */
-  private static RATE_LIMIT_LUA = `
-    local key = KEYS[1]
-    local max = tonumber(ARGV[1])
-    local window = tonumber(ARGV[2])
-    local current = redis.call('INCR', key)
-    if current == 1 then
-      redis.call('EXPIRE', key, window)
-    end
-    local ttl = redis.call('TTL', key)
-    if ttl < 0 then
-      redis.call('EXPIRE', key, window)
-      ttl = window
-    end
-    return {current, max - current, ttl}
-  `;
-
-  async setRateLimit(key: string, maxRequests: number, windowSeconds: number): Promise<{ allowed: boolean; remaining: number; resetAt: number }> {
-    const rlKey = `${CONFIG.redis.keyPrefix}rl:${key}`;
-    // Use Redis Lua for atomic rate limiting.
-    if (this.client) {
-      try {
-        const rawClient = this.client as unknown as { sendCommand?: (args: string[]) => Promise<unknown> };
-        if (rawClient.sendCommand) {
-          const result = await rawClient.sendCommand([
-            'EVAL', RedisIntegration.RATE_LIMIT_LUA, '1', rlKey,
-            String(maxRequests), String(windowSeconds),
-          ]) as number[];
-          const current = Number(result[0]);
-          const remaining = Math.max(0, Number(result[1]));
-          const ttl = Number(result[2]);
-          return {
-            allowed: current <= maxRequests,
-            remaining,
-            resetAt: Date.now() + (ttl * 1000),
-          };
-        }
-      } catch { /* Fall through to non-Lua path */ }
-    }
-    // Redis clients without EVAL support use the non-Lua retry-safe path.
-    const current = await this.incr(`rl:${key}`);
-    if (current === 1 && this.client) {
-      await this.client.expire(rlKey, windowSeconds);
-    }
-    const ttl = this.client ? await this.client.ttl(rlKey) : windowSeconds;
-    return {
-      allowed: current <= maxRequests,
-      remaining: Math.max(0, maxRequests - current),
-      resetAt: Date.now() + ((ttl > 0 ? ttl : windowSeconds) * 1000),
-    };
-  }
-
-  isUsingFallback(): boolean {
-    return false;
+  async lrange(key: string, start: number, stop: number): Promise<string[]> {
+    const c = await this.getClient();
+    return c ? c.lrange(key, start, stop) : [];
   }
 }
 
 // ─── OpenSearch Integration ───────────────────────────────────────────────────
 export class OpenSearchIntegration {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private client: any = null;
+  private url = CONFIG.openSearch.url;
+  private auth = Buffer.from(`${CONFIG.openSearch.username}:${CONFIG.openSearch.password}`).toString("base64");
 
-  async connect(): Promise<void> {
+  async search(index: string, query: unknown, size = 20): Promise<{ hits: unknown[]; total: number }> {
     try {
-      const { Client } = await import("@opensearch-project/opensearch");
-      this.client = new Client({
-        node: CONFIG.openSearch.node,
-        auth: CONFIG.openSearch.auth,
-        ssl: CONFIG.openSearch.ssl,
+      const res = await fetch(`${this.url}/${index}/_search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Basic ${this.auth}` },
+        body: JSON.stringify({ size, query: query as object }),
+        signal: AbortSignal.timeout(5000),
       });
-      await this.client.cluster.health();
-      logger.info("[OpenSearch] Connected");
-    } catch (err) {
-      logger.warn({ err }, "[OpenSearch] Connection failed");
-      this.client = null;
-    }
+      if (!res.ok) return { hits: [], total: 0 };
+      const data = await res.json() as { hits: { hits: unknown[]; total: { value: number } } };
+      return { hits: data.hits.hits, total: data.hits.total.value };
+    } catch { return { hits: [], total: 0 }; }
   }
 
-  async index(indexName: string, id: string, document: Record<string, unknown>): Promise<void> {
-    if (!this.client) await this.connect();
-    if (!this.client) return;
-    await this.client.index({ index: indexName, id, body: document, refresh: true });
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async search(indexName: string, query: Record<string, unknown>, size = 20): Promise<any[]> {
-    if (!this.client) await this.connect();
-    if (!this.client) return [];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { body } = await this.client.search({ index: indexName, body: { query, size } });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return body.hits.hits.map((hit: any) => ({ id: hit._id, score: hit._score, ...hit._source }));
-  }
-
-  async bulkIndex(indexName: string, documents: Array<{ id: string; doc: Record<string, unknown> }>): Promise<{ indexed: number; errors: number }> {
-    if (!this.client) await this.connect();
-    if (!this.client) return { indexed: 0, errors: 0 };
-    const body = documents.flatMap(d => [
-      { index: { _index: indexName, _id: d.id } },
-      d.doc,
-    ]);
-    const result = await this.client.bulk({ body, refresh: true });
-    return {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      indexed: documents.length - (result.body.errors ? result.body.items.filter((i: any) => i.index?.error).length : 0),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      errors: result.body.errors ? result.body.items.filter((i: any) => i.index?.error).length : 0,
-    };
-  }
-
-  async createIndex(indexName: string, mappings: Record<string, unknown>): Promise<void> {
-    if (!this.client) await this.connect();
-    if (!this.client) return;
-    const exists = await this.client.indices.exists({ index: indexName });
-    if (!exists.body) {
-      await this.client.indices.create({ index: indexName, body: { mappings } });
-    }
-  }
-
-  /** Index Lifecycle Management — apply retention policies */
-  async applyILMPolicy(indexPattern: string, maxAgeDays = 90, maxSizeGb = 50): Promise<void> {
-    if (!this.client) await this.connect();
-    if (!this.client) return;
+  async index(index: string, id: string, doc: unknown): Promise<boolean> {
     try {
-      await this.client.transport.request({
+      const res = await fetch(`${this.url}/${index}/_doc/${id}`, {
         method: "PUT",
-        path: `/_plugins/_ism/policies/remitflow-retention-${maxAgeDays}d`,
-        body: {
-          policy: {
-            description: `RemitFlow ${maxAgeDays}-day retention policy`,
-            default_state: "hot",
-            states: [
-              { name: "hot", actions: [], transitions: [{ state_name: "warm", conditions: { min_index_age: `${Math.floor(maxAgeDays / 3)}d` } }] },
-              { name: "warm", actions: [{ replica_count: { number_of_replicas: 0 } }], transitions: [{ state_name: "delete", conditions: { min_index_age: `${maxAgeDays}d` } }] },
-              { name: "delete", actions: [{ delete: {} }], transitions: [] },
-            ],
-            ism_template: [{ index_patterns: [indexPattern], priority: 100 }],
-          },
-        },
+        headers: { "Content-Type": "application/json", Authorization: `Basic ${this.auth}` },
+        body: JSON.stringify(doc),
+        signal: AbortSignal.timeout(5000),
       });
-      logger.info(`[OpenSearch] ILM policy applied: ${indexPattern} → ${maxAgeDays}d retention, ${maxSizeGb}GB max`);
-    } catch (err) {
-      logger.warn({ err }, "[OpenSearch] ILM policy application failed");
-    }
+      return res.ok;
+    } catch { return false; }
   }
 
-  /** Retry connection after failure — resets client to allow reconnection */
-  async retryConnection(): Promise<boolean> {
-    this.client = null;
-    await this.connect();
-    return this.client !== null;
-  }
-
-  /** Ensure all required indices exist with proper field mappings */
-  async ensureIndicesExist(): Promise<void> {
-    for (const [indexName, mapping] of Object.entries(INDEX_MAPPINGS)) {
-      try {
-        await this.createIndex(indexName, mapping);
-        logger.info(`[OpenSearch] Index ensured: ${indexName}`);
-      } catch (err) {
-        logger.warn({ indexName, err }, "[OpenSearch] Failed to ensure index");
-      }
-    }
-  }
-
-  // ── Query Builders ──────────────────────────────────────────────────────────
-
-  static buildMatchQuery(field: string, value: string): Record<string, unknown> {
-    return { match: { [field]: value } };
-  }
-
-  static buildTermQuery(field: string, value: string | number): Record<string, unknown> {
-    return { term: { [field]: value } };
-  }
-
-  static buildRangeQuery(field: string, opts: { gte?: string | number; lte?: string | number; gt?: string | number; lt?: string | number }): Record<string, unknown> {
-    return { range: { [field]: opts } };
-  }
-
-  static buildBoolQuery(must?: Record<string, unknown>[], should?: Record<string, unknown>[], mustNot?: Record<string, unknown>[], filter?: Record<string, unknown>[]): Record<string, unknown> {
-    const bool: Record<string, unknown> = {};
-    if (must?.length) bool.must = must;
-    if (should?.length) bool.should = should;
-    if (mustNot?.length) bool.must_not = mustNot;
-    if (filter?.length) bool.filter = filter;
-    return { bool };
-  }
-
-  static buildSecurityEventQuery(sourceIp?: string, severity?: string, since?: string): Record<string, unknown> {
-    const filters: Record<string, unknown>[] = [];
-    if (sourceIp) filters.push(OpenSearchIntegration.buildTermQuery("source_ip", sourceIp));
-    if (severity) filters.push(OpenSearchIntegration.buildTermQuery("severity", severity));
-    if (since) filters.push(OpenSearchIntegration.buildRangeQuery("timestamp", { gte: since }));
-    return filters.length > 0 ? OpenSearchIntegration.buildBoolQuery(undefined, undefined, undefined, filters) : { match_all: {} };
-  }
-
-  /** Aggregation query for transaction corridor analytics */
-  async aggregateByField(indexName: string, field: string, size = 20): Promise<Array<{ key: string; count: number }>> {
-    if (!this.client) await this.connect();
-    if (!this.client) return [];
+  async bulkIndex(index: string, docs: Array<{ id: string; doc: unknown }>): Promise<{ indexed: number; errors: number }> {
+    if (docs.length === 0) return { indexed: 0, errors: 0 };
     try {
-      const { body } = await this.client.search({
-        index: indexName,
-        body: {
-          size: 0,
-          aggs: { by_field: { terms: { field, size } } },
-        },
+      const body = docs.flatMap(d => [JSON.stringify({ index: { _index: index, _id: d.id } }), JSON.stringify(d.doc)]).join("\n") + "\n";
+      const res = await fetch(`${this.url}/_bulk`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-ndjson", Authorization: `Basic ${this.auth}` },
+        body,
+        signal: AbortSignal.timeout(10000),
       });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (body.aggregations?.by_field?.buckets || []).map((b: any) => ({
-        key: b.key,
-        count: b.doc_count,
-      }));
-    } catch { return []; }
+      const data = await res.json() as { errors: boolean; items: unknown[] };
+      return { indexed: data.items.length, errors: data.errors ? 1 : 0 };
+    } catch { return { indexed: 0, errors: docs.length }; }
   }
 
-  /** Delete documents by query (e.g., purge old data) */
-  async deleteByQuery(indexName: string, query: Record<string, unknown>): Promise<number> {
-    if (!this.client) await this.connect();
-    if (!this.client) return 0;
+  async getHealth(): Promise<boolean> {
     try {
-      const { body } = await this.client.deleteByQuery({ index: indexName, body: { query } });
-      return body.deleted || 0;
-    } catch { return 0; }
-  }
-
-  /** Get index health and doc count */
-  async getIndexStats(indexName: string): Promise<{ docCount: number; storeSizeBytes: number } | null> {
-    if (!this.client) await this.connect();
-    if (!this.client) return null;
-    try {
-      const { body } = await this.client.indices.stats({ index: indexName });
-      const stats = body._all?.primaries;
-      return { docCount: stats?.docs?.count || 0, storeSizeBytes: stats?.store?.size_in_bytes || 0 };
-    } catch { return null; }
+      const res = await fetch(`${this.url}/_cluster/health`, { headers: { Authorization: `Basic ${this.auth}` }, signal: AbortSignal.timeout(3000) });
+      return res.ok;
+    } catch { return false; }
   }
 }
 
-/** Index field mappings for all RemitFlow indexes */
-const INDEX_MAPPINGS: Record<string, Record<string, unknown>> = {
-  "remitflow-transactions": {
-    properties: {
-      transactionId: { type: "keyword" },
-      userId: { type: "keyword" },
-      amount: { type: "scaled_float", scaling_factor: 100 },
-      currency: { type: "keyword" },
-      toCurrency: { type: "keyword" },
-      status: { type: "keyword" },
-      type: { type: "keyword" },
-      corridorCode: { type: "keyword" },
-      createdAt: { type: "date" },
-      completedAt: { type: "date" },
-      riskScore: { type: "float" },
-    },
-  },
-  "remitflow-audit-logs": {
-    properties: {
-      userId: { type: "keyword" },
-      action: { type: "keyword" },
-      resource: { type: "keyword" },
-      resourceId: { type: "keyword" },
-      ipAddress: { type: "ip" },
-      severity: { type: "keyword" },
-      details: { type: "text", analyzer: "standard" },
-      timestamp: { type: "date" },
-    },
-  },
-  "remitflow-security-events": {
-    properties: {
-      event_type: { type: "keyword" },
-      source_ip: { type: "ip" },
-      user_agent: { type: "text" },
-      path: { type: "keyword" },
-      method: { type: "keyword" },
-      severity: { type: "keyword" },
-      waf_score: { type: "float" },
-      blocked: { type: "boolean" },
-      timestamp: { type: "date" },
-    },
-  },
-  "remitflow-kyc-events": {
-    properties: {
-      userId: { type: "keyword" },
-      eventType: { type: "keyword" },
-      kycTier: { type: "integer" },
-      verificationProvider: { type: "keyword" },
-      status: { type: "keyword" },
-      timestamp: { type: "date" },
-    },
-  },
-  "remitflow-fx-rates": {
-    properties: {
-      baseCurrency: { type: "keyword" },
-      quoteCurrency: { type: "keyword" },
-      rate: { type: "scaled_float", scaling_factor: 1000000 },
-      provider: { type: "keyword" },
-      timestamp: { type: "date" },
-    },
-  },
-};
-
 // ─── Keycloak Integration ─────────────────────────────────────────────────────
 export class KeycloakIntegration {
-  private accessToken: string | null = null;
-  private tokenExpiresAt = 0;
+  private baseUrl = CONFIG.keycloak.baseUrl;
+  private realm = CONFIG.keycloak.realm;
+  private tokenCache: { token: string; expiresAt: number } | null = null;
 
-  async getAdminToken(): Promise<string> {
-    if (this.accessToken && Date.now() < this.tokenExpiresAt) return this.accessToken;
-    const res = await fetch(`${CONFIG.keycloak.baseUrl}/realms/master/protocol/openid-connect/token`, {
+  private async getAdminToken(): Promise<string> {
+    if (this.tokenCache && this.tokenCache.expiresAt > Date.now() + 10000) return this.tokenCache.token;
+    const res = await fetch(`${this.baseUrl}/realms/master/protocol/openid-connect/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
         grant_type: "password",
         client_id: "admin-cli",
-        username: CONFIG.keycloak.adminUser,
+        username: CONFIG.keycloak.adminUsername,
         password: CONFIG.keycloak.adminPassword,
       }),
+      signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) throw new Error(`Keycloak auth failed: ${res.status}`);
     const data = await res.json() as { access_token: string; expires_in: number };
-    this.accessToken = data.access_token;
-    this.tokenExpiresAt = Date.now() + (data.expires_in - 30) * 1000;
-    return this.accessToken;
+    this.tokenCache = { token: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
+    return data.access_token;
   }
 
-  /**
-   * Verify a realm access token locally against the Keycloak JWKS
-   * (RS256 signature + issuer + audience + expiry — see server/lib/keycloak-jwks.ts).
-   * This replaces the previous introspection call, which required admin
-   * credentials and had no backing service in this deployment. Any
-   * verification failure returns { active: false } — never a fabricated allow.
-   */
-  async verifyToken(token: string): Promise<{ active: boolean; sub?: string; preferred_username?: string; realm_access?: { roles: string[] } }> {
-    try {
-      const claims = await verifyKeycloakAccessToken(token);
-      return {
-        active: true,
-        sub: claims.sub,
-        preferred_username: claims.preferred_username,
-        realm_access: claims.realm_access,
-      };
-    } catch (err) {
-      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Keycloak] Token verification failed");
-      return { active: false };
-    }
-  }
-
-  async createUser(user: { username: string; email: string; firstName?: string; lastName?: string; enabled?: boolean }): Promise<string | null> {
-    try {
-      const adminToken = await this.getAdminToken();
-      const res = await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/users`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-        body: JSON.stringify({ ...user, enabled: user.enabled ?? true }),
-      });
-      if (res.status === 201) {
-        const locationHeader = res.headers.get("Location");
-        return locationHeader?.split("/").pop() || null;
-      }
-      return null;
-    } catch (err) {
-      logger.error({ err }, "[Keycloak] User creation failed");
-      return null;
-    }
-  }
-
-  async assignRole(userId: string, roleName: string): Promise<void> {
-    const adminToken = await this.getAdminToken();
-    const rolesRes = await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/roles/${roleName}`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
-    });
-    if (!rolesRes.ok) throw new Error(`Keycloak role ${roleName} was not found`);
-    const role = await rolesRes.json();
-    const response = await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/users/${userId}/role-mappings/realm`, {
+  async createUser(user: { username: string; email: string; firstName?: string; lastName?: string; enabled?: boolean }): Promise<string> {
+    const token = await this.getAdminToken();
+    const res = await fetch(`${this.baseUrl}/admin/realms/${this.realm}/users`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify([role]),
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ ...user, enabled: user.enabled ?? true }),
+      signal: AbortSignal.timeout(5000),
     });
-    if (!response.ok) throw new Error(`Keycloak role assignment failed (${response.status})`);
+    if (!res.ok) throw new Error(`Keycloak createUser failed: ${res.status}`);
+    const location = res.headers.get("Location") || "";
+    return location.split("/").pop() || "";
   }
 
-  async updateUserAttributes(userId: string, attributes: Record<string, string>): Promise<void> {
-    const adminToken = await this.getAdminToken();
-    const current = await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/users/${userId}`, {
-      headers: { Authorization: `Bearer ${adminToken}` },
+  async getUser(userId: string): Promise<unknown> {
+    const token = await this.getAdminToken();
+    const res = await fetch(`${this.baseUrl}/admin/realms/${this.realm}/users/${userId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
     });
-    if (!current.ok) throw new Error(`Keycloak user lookup failed (${current.status})`);
-    const user = await current.json() as { attributes?: Record<string, string[] | string> };
-    const mergedAttributes: Record<string, string[]> = {};
-    for (const [key, value] of Object.entries(user.attributes ?? {})) {
-      mergedAttributes[key] = Array.isArray(value) ? value.map(String) : [String(value)];
-    }
-    for (const [key, value] of Object.entries(attributes)) mergedAttributes[key] = [value];
-    const update = await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/users/${userId}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ attributes: mergedAttributes }),
-    });
-    if (!update.ok) throw new Error(`Keycloak user attribute update failed (${update.status})`);
+    return res.ok ? res.json() : null;
   }
 
-  /** Ensure the RemitFlow realm exists with required roles and client */
-  async provisionRealm(): Promise<{ created: boolean; error?: string }> {
+  async assignRole(userId: string, roleName: string): Promise<boolean> {
     try {
-      const adminToken = await this.getAdminToken();
-      // Check if realm exists
-      const realmRes = await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}`, {
-        headers: { Authorization: `Bearer ${adminToken}` },
-      });
-      if (realmRes.ok) return { created: false };
-
-      // Create realm
-      await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms`, {
+      const token = await this.getAdminToken();
+      const roleRes = await fetch(`${this.baseUrl}/admin/realms/${this.realm}/roles/${roleName}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!roleRes.ok) return false;
+      const role = await roleRes.json() as { id: string; name: string };
+      const assignRes = await fetch(`${this.baseUrl}/admin/realms/${this.realm}/users/${userId}/role-mappings/realm`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-        body: JSON.stringify({
-          realm: CONFIG.keycloak.realm,
-          enabled: true,
-          registrationAllowed: true,
-          loginWithEmailAllowed: true,
-          duplicateEmailsAllowed: false,
-        }),
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify([role]),
       });
-
-      // Create roles
-      const roles = ["user", "admin", "compliance_officer", "agent", "partner", "auditor"];
-      for (const roleName of roles) {
-        await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/roles`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-          body: JSON.stringify({ name: roleName }),
-        });
-      }
-
-      // Create client
-      await fetch(`${CONFIG.keycloak.baseUrl}/admin/realms/${CONFIG.keycloak.realm}/clients`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${adminToken}` },
-        body: JSON.stringify({
-          clientId: CONFIG.keycloak.clientId,
-          enabled: true,
-          publicClient: false,
-          secret: CONFIG.keycloak.clientSecret || randomUUID(),
-          directAccessGrantsEnabled: true,
-          standardFlowEnabled: true,
-          redirectUris: resolveKeycloakRedirectUris(),
-          webOrigins: resolveKeycloakWebOrigins(),
-        }),
-      });
-
-      logger.info("[Keycloak] Realm provisioned with roles and client");
-      return { created: true };
-    } catch (err) {
-      return { created: false, error: (err as Error).message };
-    }
+      return assignRes.ok;
+    } catch { return false; }
   }
 
-  /** Check if Keycloak is required (production) or optional (dev) */
-  isRequired(): boolean {
-    return process.env.NODE_ENV === "production" && !!CONFIG.keycloak.baseUrl;
+  async getHealth(): Promise<boolean> {
+    try { const res = await fetch(`${this.baseUrl}/health`, { signal: AbortSignal.timeout(3000) }); return res.ok; } catch { return false; }
   }
 }
 
 // ─── Permify Integration ──────────────────────────────────────────────────────
 export class PermifyIntegration {
-  private baseUrl: string;
-  private schemaVersion = "";
-  private available = false;
-  private checkedAt = 0;
+  private baseUrl = CONFIG.permify.baseUrl;
+  private tenantId = CONFIG.permify.tenantId;
+  private apiKey = CONFIG.permify.apiKey;
 
-  /** In-memory permission cache — 30s TTL to reduce Permify round-trips */
-  private permCache = new Map<string, { result: boolean; expiresAt: number }>();
-  private static CACHE_TTL_MS = 30_000;
-
-  constructor() {
-    const [host, port] = CONFIG.permify.endpoint.split(":");
-    this.baseUrl = `http://${host}:${port || "3476"}`;
-  }
-
-  private cacheKey(p: { entity: string; entityId: string; permission: string; subject: string; subjectId: string }): string {
-    return `${p.entity}:${p.entityId}:${p.permission}:${p.subject}:${p.subjectId}`;
-  }
-
-  private async ensureAvailable(): Promise<boolean> {
-    if (this.available && Date.now() - this.checkedAt < 60_000) return true;
-    try {
-      const res = await fetch(`${this.baseUrl}/healthz`, { signal: AbortSignal.timeout(1500) });
-      this.available = res.ok;
-      this.checkedAt = Date.now();
-      if (this.available) {
-        const schemaRes = await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/schemas/list`, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ page_size: 1 }),
-          signal: AbortSignal.timeout(2000),
-        });
-        if (schemaRes.ok) {
-          const schemaData = await schemaRes.json() as { head?: string };
-          if (schemaData.head) this.schemaVersion = schemaData.head;
-        }
-      }
-      return this.available;
-    } catch {
-      this.available = false;
-      return false;
-    }
-  }
-
-  /** Check with caching — returns cached result if TTL not expired */
-  async checkCached(params: { entity: string; entityId: string; permission: string; subject: string; subjectId: string }): Promise<boolean> {
-    const key = this.cacheKey(params);
-    const cached = this.permCache.get(key);
-    if (cached && cached.expiresAt > Date.now()) return cached.result;
-    const result = await this.check(params);
-    this.permCache.set(key, { result, expiresAt: Date.now() + PermifyIntegration.CACHE_TTL_MS });
-    return result;
-  }
-
-  async check(params: { entity: string; entityId: string; permission: string; subject: string; subjectId: string }): Promise<boolean> {
-    try {
-      if (!(await this.ensureAvailable())) {
-        logger.warn("[Permify] Unavailable — denying by default (fail-closed)");
-        return false;
-      }
-      const res = await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/permissions/check`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          metadata: { schema_version: this.schemaVersion, snap_token: "", depth: 20 },
-          entity: { type: params.entity, id: params.entityId },
-          permission: params.permission,
-          subject: { type: params.subject, id: params.subjectId },
-        }),
-        signal: AbortSignal.timeout(3000),
-      });
-      const data = await res.json() as { can: string };
-      return data.can === "CHECK_RESULT_ALLOWED";
-    } catch (err) {
-      logger.warn({ err }, "[Permify] Permission check failed, defaulting to deny");
-      return false;
-    }
-  }
-
-  /** Batch permission check — parallel with fail-closed on any error */
-  async batchCheck(checks: Array<{ entity: string; entityId: string; permission: string; subject: string; subjectId: string }>): Promise<boolean[]> {
-    if (!(await this.ensureAvailable())) return checks.map(() => false);
-    const results = await Promise.allSettled(
-      checks.map(c => this.checkCached(c))
-    );
-    return results.map(r => r.status === "fulfilled" ? r.value : false);
-  }
-
-  /**
-   * Write a relationship tuple. Throws on ANY failure — HTTP error status,
-   * network error, or unavailable service in production. A swallowed write
-   * means subsequent permission checks evaluate against missing data, which is
-   * worse than a loud error. Callers that can tolerate a deferred write must
-   * catch and route the tuple to the Permify outbox (server/middleware/permify.ts).
-   */
-  async writeRelationship(params: { entity: string; entityId: string; relation: string; subject: string; subjectId: string }): Promise<boolean> {
-    if (!(await this.ensureAvailable())) {
-      const message = "[Permify] Unavailable — cannot write relationship";
-      if (process.env.NODE_ENV === "production") {
-        logger.error(`${message} (fail-closed)`);
-        throw new Error(message);
-      }
-      logger.warn(`${message} (dev mode)`);
-      return false;
-    }
-    const res = await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/relationships/write`, {
+  private async request(path: string, body: unknown): Promise<unknown> {
+    const res = await fetch(`${this.baseUrl}/v1/tenants/${this.tenantId}${path}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        metadata: { schema_version: this.schemaVersion },
-        tuples: [{ entity: { type: params.entity, id: params.entityId }, relation: params.relation, subject: { type: params.subject, id: params.subjectId } }],
-      }),
-      signal: AbortSignal.timeout(3000),
+      headers: { "Content-Type": "application/json", ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}) },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      logger.error({ status: res.status, body: body.slice(0, 500), params }, "[Permify] Relationship write rejected");
-      throw new Error(`[Permify] Relationship write failed with HTTP ${res.status}`);
-    }
-    // Invalidate cache for this entity on write
-    Array.from(this.permCache.keys()).forEach(k => {
-      if (k.startsWith(`${params.entity}:${params.entityId}:`)) this.permCache.delete(k);
-    });
-    return true;
+    return res.json();
   }
 
-  async deleteRelationship(params: { entity: string; entityId: string; relation: string; subject: string; subjectId: string }): Promise<boolean> {
-    if (!(await this.ensureAvailable())) {
-      const failClosed = process.env.NODE_ENV === "production";
-      if (failClosed) {
-        logger.error("[Permify] Unavailable in production — deleteRelationship denied (fail-closed)");
-        return false;
-      }
-      return false;
-    }
+  async check(entity: string, entityId: string, permission: string, subject: string, subjectId: string): Promise<boolean> {
     try {
-      const res = await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/relationships/delete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tupleFilter: {
-            entity: { type: params.entity, ids: [params.entityId] },
-            relation: params.relation,
-            subject: { type: params.subject, ids: [params.subjectId] },
-          },
-        }),
-        signal: AbortSignal.timeout(3000),
-      });
-      if (!res.ok) {
-        logger.error({ status: res.status, params }, "[Permify] Relationship delete rejected");
-        return false;
-      }
-      // Invalidate cache on delete
-      Array.from(this.permCache.keys()).forEach(k => {
-        if (k.startsWith(`${params.entity}:${params.entityId}:`)) this.permCache.delete(k);
+      const data = await this.request("/permissions/check", {
+        entity: { type: entity, id: entityId },
+        permission,
+        subject: { type: subject, id: subjectId },
+      }) as { can: string };
+      return data.can === "RESULT_ALLOWED";
+    } catch { return false; }
+  }
+
+  async writeRelationship(entity: string, entityId: string, relation: string, subject: string, subjectId: string): Promise<boolean> {
+    try {
+      await this.request("/data/relationships/write", {
+        tuples: [{ entity: { type: entity, id: entityId }, relation, subject: { type: subject, id: subjectId } }],
       });
       return true;
-    } catch (err) {
-      logger.warn({ err }, "[Permify] Delete relationship failed");
-      return false;
-    }
+    } catch { return false; }
   }
 
-  /** Seed initial relationships for a new user */
-  async seedUserRelationships(userId: string, orgId = "default"): Promise<void> {
-    await this.writeRelationship({ entity: "organization", entityId: orgId, relation: "member", subject: "user", subjectId: userId });
-  }
-
-  /** Batch write relationships (e.g., onboarding a user with multiple roles) */
-  async batchWriteRelationships(relationships: Array<{ entity: string; entityId: string; relation: string; subject: string; subjectId: string }>): Promise<{ succeeded: number; failed: number }> {
-    let succeeded = 0;
-    let failed = 0;
-    for (const rel of relationships) {
-      try {
-        const ok = await this.writeRelationship(rel);
-        if (ok) succeeded++;
-        else failed++;
-      } catch {
-        failed++;
-      }
-    }
-    return { succeeded, failed };
-  }
-
-  /** List relationships for an entity (useful for audit) */
-  async listRelationships(entity: string, entityId: string): Promise<Array<{ relation: string; subject: string; subjectId: string }>> {
-    if (!(await this.ensureAvailable())) return [];
+  async deleteRelationship(entity: string, entityId: string, relation: string, subject: string, subjectId: string): Promise<boolean> {
     try {
-      const res = await fetch(`${this.baseUrl}/v1/tenants/${CONFIG.permify.tenantId}/relationships/read`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          metadata: { snap_token: "" },
-          filter: { entity: { type: entity, ids: [entityId] } },
-        }),
-        signal: AbortSignal.timeout(3000),
+      await this.request("/data/relationships/delete", {
+        filter: { entity: { type: entity, ids: [entityId] }, relation, subject: { type: subject, ids: [subjectId] } },
       });
-      if (!res.ok) return [];
-      const data = await res.json() as { tuples?: Array<{ relation: string; subject: { type: string; id: string } }> };
-      return (data.tuples || []).map(t => ({
-        relation: t.relation,
-        subject: t.subject.type,
-        subjectId: t.subject.id,
-      }));
-    } catch { return []; }
+      return true;
+    } catch { return false; }
   }
 
-  /** Get permission audit trail for a user across multiple entities */
-  async auditUserPermissions(userId: string, entities: Array<{ type: string; id: string }>, permissions: string[]): Promise<Array<{ entity: string; entityId: string; permission: string; allowed: boolean }>> {
-    const results: Array<{ entity: string; entityId: string; permission: string; allowed: boolean }> = [];
-    for (const ent of entities) {
-      for (const perm of permissions) {
-        const allowed = await this.checkCached({
-          entity: ent.type,
-          entityId: ent.id,
-          permission: perm,
-          subject: "user",
-          subjectId: userId,
-        });
-        results.push({ entity: ent.type, entityId: ent.id, permission: perm, allowed });
-      }
-    }
-    return results;
+  async getHealth(): Promise<boolean> {
+    try { const res = await fetch(`${this.baseUrl}/healthz`, { signal: AbortSignal.timeout(3000) }); return res.ok; } catch { return false; }
   }
-
-  /** Clear entire permission cache (e.g., after schema change) */
-  clearCache(): void {
-    this.permCache.clear();
-  }
-
-  getSchemaVersion(): string { return this.schemaVersion; }
-  getCacheSize(): number { return this.permCache.size; }
 }
 
 // ─── Dapr Integration ─────────────────────────────────────────────────────────
 export class DaprIntegration {
-  private baseUrl: string;
+  private baseUrl = `http://${CONFIG.dapr.host}:${CONFIG.dapr.httpPort}/v1.0`;
 
-  constructor() {
-    this.baseUrl = `http://${CONFIG.dapr.host}:${CONFIG.dapr.httpPort}/v1.0`;
-  }
-
-  async invokeService<T = unknown>(appId: string, method: string, data?: unknown): Promise<T> {
-    const maxAttempts = 3;
-    let lastErr: Error | null = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        const res = await fetch(`${this.baseUrl}/invoke/${appId}/method/${method}`, {
-          method: data ? "POST" : "GET",
-          headers: { "Content-Type": "application/json" },
-          body: data ? JSON.stringify(data) : undefined,
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!res.ok) throw new Error(`Dapr invoke failed: ${res.status}`);
-        return await res.json() as T;
-      } catch (err) {
-        lastErr = err as Error;
-        if (attempt < maxAttempts - 1) {
-          const delay = 200 * (attempt + 1);
-          logger.warn(`[Dapr] invokeService ${appId}/${method} attempt ${attempt + 1} failed, retrying in ${delay}ms`);
-          await new Promise(r => setTimeout(r, delay));
-        }
-      }
-    }
-    throw lastErr ?? new Error(`Dapr invoke failed after ${maxAttempts} attempts`);
-  }
-
-  async saveState(key: string, value: unknown): Promise<void> {
-    await fetch(`${this.baseUrl}/state/${CONFIG.dapr.stateStore}`, {
-      method: "POST",
+  async invokeService(appId: string, method: string, data?: unknown): Promise<unknown> {
+    const res = await fetch(`${this.baseUrl}/invoke/${appId}/method/${method}`, {
+      method: data ? "POST" : "GET",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify([{ key, value }]),
+      body: data ? JSON.stringify(data) : undefined,
+      signal: AbortSignal.timeout(5000),
     });
-  }
-
-  async getState(key: string): Promise<unknown> {
-    const res = await fetch(`${this.baseUrl}/state/${CONFIG.dapr.stateStore}/${key}`);
-    if (res.status === 204) return null;
     return res.json();
   }
 
-  async publishEvent(topic: string, data: unknown): Promise<void> {
-    await fetch(`${this.baseUrl}/publish/${CONFIG.dapr.pubsub}/${topic}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    });
-  }
-
-  async getSecret(secretName: string): Promise<Record<string, string>> {
-    const res = await fetch(`${this.baseUrl}/secrets/${CONFIG.dapr.secretStore}/${secretName}`);
-    return res.json() as Promise<Record<string, string>>;
-  }
-
-  async invokeBinding(bindingName: string, operation: string, data?: unknown, metadata?: Record<string, string>): Promise<unknown> {
-    const res = await fetch(`${this.baseUrl}/bindings/${bindingName}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ operation, data, metadata }),
-    });
-    if (res.status === 204) return null;
-    return res.json();
-  }
-}
-
-// ─── TigerBeetle Integration ──────────────────────────────────────────────────
-
-/** Currency-specific decimal scale factors (digits after decimal point) */
-const CURRENCY_SCALE: Record<string, number> = {
-  NGN: 2, USD: 2, EUR: 2, GBP: 2, KES: 2, GHS: 2, ZAR: 2,
-  XAF: 0, XOF: 0, JPY: 0, KRW: 0,
-  BTC: 8, ETH: 18,
-  DEFAULT: 6,
-};
-
-export function getCurrencyScaleFactor(currency?: string): number {
-  const decimals = CURRENCY_SCALE[currency?.toUpperCase() || "DEFAULT"] ?? CURRENCY_SCALE.DEFAULT;
-  return Math.pow(10, decimals);
-}
-
-/**
- * TigerBeetle Integration — Production-Grade Fail-Closed Financial Ledger
- *
- * Architecture:
- *   - FAIL-CLOSED: In production, if TigerBeetle is unreachable, financial
- *     operations are BLOCKED (not degraded). Money safety > availability.
- *   - Two-Phase Transfers: All holds use pending transfers that must be
- *     explicitly posted or voided. Prevents orphaned debits.
- *   - Balance Pre-Check: lookupAccounts before every transfer to enforce
- *     limits even during partial degradation.
- *   - Idempotency: Transfer IDs are deterministic SHA-256 hashes of
- *     (userId, transferId, amount, timestamp) to prevent duplicates.
- *   - Reconciliation: Every transfer emits Kafka event for async
- *     PostgreSQL<>TigerBeetle drift detection.
- *
- * Account Scheme (ledger codes):
- *   1000 = User Wallet (asset)
- *   2000 = Escrow/Hold (liability)
- *   3000 = Fee Revenue (income)
- *   4000 = Partner Earnings (liability)
- *   5000 = FX Gain/Loss (equity)
- *   9000 = Suspense/Clearing
- *
- * Transfer Codes:
- *   1 = Standard transfer (debit wallet, credit settlement)
- *   2 = Reversal/compensation
- *   3 = Fee collection
- *   4 = Escrow lock
- *   5 = Escrow release
- *   6 = FX conversion
- *   7 = Payroll disbursement
- */
-export class TigerBeetleIntegration {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private client: any = null;
-  private connected = false;
-  private connectAttempts = 0;
-  private lastConnectAttempt = 0;
-  private readonly RECONNECT_BACKOFF_MS = 5000;
-
-  private get isProduction(): boolean {
-    return process.env.NODE_ENV === "production";
-  }
-
-  async connect(): Promise<void> {
-    const now = Date.now();
-    if (now - this.lastConnectAttempt < this.RECONNECT_BACKOFF_MS && this.connectAttempts > 0) {
-      if (this.isProduction && !this.connected) {
-        throw new Error("[TigerBeetle] Connection unavailable — fail-closed (backoff)");
-      }
-      return;
-    }
-    this.lastConnectAttempt = now;
-    this.connectAttempts++;
-
+  async publishEvent(pubsubName: string, topic: string, data: unknown): Promise<boolean> {
     try {
-      const tb = await import("tigerbeetle-node");
-      this.client = tb.createClient({
-        cluster_id: BigInt(CONFIG.tigerBeetle.clusterId),
-        replica_addresses: CONFIG.tigerBeetle.addresses,
-      });
-      this.connected = true;
-      this.connectAttempts = 0;
-      logger.info("[TigerBeetle] Connected to cluster");
-    } catch (err) {
-      this.connected = false;
-      this.client = null;
-      if (this.isProduction) {
-        logger.error({ err }, "[TigerBeetle] FAIL-CLOSED: Connection failed in production");
-        throw new Error(`[TigerBeetle] Ledger unavailable: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      logger.warn({ err }, "[TigerBeetle] Connection failed (dev mode — not enforced)");
-    }
-  }
-
-  private async ensureConnected(): Promise<void> {
-    if (this.client && this.connected) return;
-    await this.connect();
-    if (!this.client && this.isProduction) {
-      throw new Error("[TigerBeetle] FAIL-CLOSED: Ledger not connected");
-    }
-  }
-
-  async createAccounts(accounts: Array<{
-    id: bigint;
-    ledger: number;
-    code: number;
-    userData128?: bigint;
-    flags?: number;
-  }>): Promise<void> {
-    await this.ensureConnected();
-    if (!this.client) {
-      logger.warn({ accountCount: accounts.length }, "[TigerBeetle] Skipping account creation (dev mode)");
-      return;
-    }
-    const tbAccounts = accounts.map(a => ({
-      id: a.id,
-      debits_pending: BigInt(0),
-      debits_posted: BigInt(0),
-      credits_pending: BigInt(0),
-      credits_posted: BigInt(0),
-      user_data_128: a.userData128 ?? BigInt(0),
-      user_data_64: BigInt(0),
-      user_data_32: 0,
-      reserved: 0,
-      ledger: a.ledger,
-      code: a.code,
-      flags: a.flags ?? 0,
-      timestamp: BigInt(0),
-    }));
-    const results = await this.client.createAccounts(tbAccounts);
-    if (results && results.length > 0) {
-      // TB exists(21) = account re-created with identical fields — idempotent no-op, not a failure.
-      const errors = results.filter((r: { result: number }) => r.result !== 0 && r.result !== 1 && r.result !== 21);
-      if (errors.length > 0) {
-        logger.error({ errors }, "[TigerBeetle] Account creation errors");
-        if (this.isProduction) throw new Error(`[TigerBeetle] Account creation failed: ${JSON.stringify(errors)}`);
-      }
-    }
-  }
-
-  async createTransfer(transfer: {
-    id: bigint;
-    debitAccountId: bigint;
-    creditAccountId: bigint;
-    amount: bigint;
-    ledger: number;
-    code: number;
-    pending?: boolean;
-    timeout?: number;
-    userData128?: bigint;
-  }): Promise<void> {
-    await this.ensureConnected();
-    if (!this.client) {
-      logger.warn({ transferId: transfer.id.toString() }, "[TigerBeetle] Skipping transfer (dev mode)");
-      return;
-    }
-    const flags = transfer.pending ? 2 : 0; // TransferFlags.pending
-    const results = await this.client.createTransfers([{
-      id: transfer.id,
-      debit_account_id: transfer.debitAccountId,
-      credit_account_id: transfer.creditAccountId,
-      amount: transfer.amount,
-      pending_id: BigInt(0),
-      user_data_128: transfer.userData128 ?? BigInt(0),
-      user_data_64: BigInt(0),
-      user_data_32: 0,
-      timeout: transfer.timeout ?? 0,
-      ledger: transfer.ledger,
-      code: transfer.code,
-      flags,
-      timestamp: BigInt(0),
-    }]);
-    if (results && results.length > 0) {
-      // TB exists(46) = idempotent replay of an identical transfer — dedup success, not failure.
-      const errors = results.filter((r: { result: number }) => r.result !== 0 && r.result !== 46);
-      if (errors.length > 0) {
-        const msg = `[TigerBeetle] Transfer failed: ${JSON.stringify(errors)}`;
-        logger.error({ errors, transferId: transfer.id.toString() }, msg);
-        throw new Error(msg);
-      }
-    }
-  }
-
-  async createPendingTransfer(transfer: {
-    id: bigint;
-    debitAccountId: bigint;
-    creditAccountId: bigint;
-    amount: bigint;
-    ledger: number;
-    code: number;
-    timeoutSeconds: number;
-    userData128?: bigint;
-  }): Promise<void> {
-    await this.ensureConnected();
-    if (!this.client) {
-      logger.warn({ transferId: transfer.id.toString() }, "[TigerBeetle] Skipping pending transfer (dev mode)");
-      return;
-    }
-    const results = await this.client.createTransfers([{
-      id: transfer.id,
-      debit_account_id: transfer.debitAccountId,
-      credit_account_id: transfer.creditAccountId,
-      amount: transfer.amount,
-      pending_id: BigInt(0),
-      user_data_128: transfer.userData128 ?? BigInt(0),
-      user_data_64: BigInt(0),
-      user_data_32: 0,
-      timeout: transfer.timeoutSeconds,
-      ledger: transfer.ledger,
-      code: transfer.code,
-      flags: 2, // TransferFlags.pending
-      timestamp: BigInt(0),
-    }]);
-    if (results && results.length > 0) {
-      // TB exists(46) = idempotent replay of an identical transfer — dedup success, not failure.
-      const errors = results.filter((r: { result: number }) => r.result !== 0 && r.result !== 46);
-      if (errors.length > 0) {
-        throw new Error(`[TigerBeetle] Pending transfer failed: ${JSON.stringify(errors)}`);
-      }
-    }
-  }
-
-  async postPendingTransfer(params: {
-    id: bigint;
-    pendingId: bigint;
-    ledger: number;
-    code: number;
-    amount?: bigint;
-  }): Promise<void> {
-    await this.ensureConnected();
-    if (!this.client) {
-      logger.warn({ pendingId: params.pendingId.toString() }, "[TigerBeetle] Skipping post-pending (dev mode)");
-      return;
-    }
-    // TB 0.16 posts exactly `amount` and releases the remainder of the hold —
-    // amount=0 would post ZERO and drain the pending transfer (silent funds loss).
-    // Default to the pending transfer's full amount, looked up from the cluster.
-    let amount = params.amount;
-    if (amount === undefined) {
-      const pending = await this.client.lookupTransfers([params.pendingId]);
-      if (!pending || pending.length === 0) {
-        throw new Error(`[TigerBeetle] Post-pending failed: pending transfer ${params.pendingId} not found`);
-      }
-      amount = pending[0].amount;
-    }
-    const results = await this.client.createTransfers([{
-      id: params.id,
-      debit_account_id: BigInt(0),
-      credit_account_id: BigInt(0),
-      amount,
-      pending_id: params.pendingId,
-      user_data_128: BigInt(0),
-      user_data_64: BigInt(0),
-      user_data_32: 0,
-      timeout: 0,
-      ledger: params.ledger,
-      code: params.code,
-      flags: 4, // TransferFlags.post_pending_transfer
-      timestamp: BigInt(0),
-    }]);
-    if (results && results.length > 0) {
-      const errors = results.filter((r: { result: number }) => r.result !== 0);
-      if (errors.length > 0) {
-        throw new Error(`[TigerBeetle] Post-pending failed: ${JSON.stringify(errors)}`);
-      }
-    }
-  }
-
-  async voidPendingTransfer(params: {
-    id: bigint;
-    pendingId: bigint;
-    ledger: number;
-    code: number;
-  }): Promise<void> {
-    await this.ensureConnected();
-    if (!this.client) {
-      logger.warn({ pendingId: params.pendingId.toString() }, "[TigerBeetle] Skipping void-pending (dev mode)");
-      return;
-    }
-    const results = await this.client.createTransfers([{
-      id: params.id,
-      debit_account_id: BigInt(0),
-      credit_account_id: BigInt(0),
-      amount: BigInt(0),
-      pending_id: params.pendingId,
-      user_data_128: BigInt(0),
-      user_data_64: BigInt(0),
-      user_data_32: 0,
-      timeout: 0,
-      ledger: params.ledger,
-      code: params.code,
-      flags: 8, // TransferFlags.void_pending_transfer
-      timestamp: BigInt(0),
-    }]);
-    if (results && results.length > 0) {
-      const errors = results.filter((r: { result: number }) => r.result !== 0);
-      if (errors.length > 0) {
-        throw new Error(`[TigerBeetle] Void-pending failed: ${JSON.stringify(errors)}`);
-      }
-    }
-  }
-
-  async lookupAccounts(accountIds: bigint[]): Promise<Array<{
-    id: bigint;
-    debits_pending: bigint;
-    debits_posted: bigint;
-    credits_pending: bigint;
-    credits_posted: bigint;
-    ledger: number;
-    code: number;
-  }>> {
-    await this.ensureConnected();
-    if (!this.client) return [];
-    return this.client.lookupAccounts(accountIds);
-  }
-
-  async lookupTransfers(transferIds: bigint[]): Promise<Array<{
-    id: bigint;
-    debit_account_id: bigint;
-    credit_account_id: bigint;
-    amount: bigint;
-    flags: number;
-    timestamp: bigint;
-  }>> {
-    await this.ensureConnected();
-    if (!this.client) return [];
-    return this.client.lookupTransfers(transferIds);
-  }
-
-  async getAvailableBalance(accountId: bigint): Promise<bigint | null> {
-    const accounts = await this.lookupAccounts([accountId]);
-    if (!accounts || accounts.length === 0) return null;
-    const acc = accounts[0];
-    return acc.credits_posted - acc.debits_posted - acc.debits_pending;
-  }
-
-  async validateBalance(debitAccountId: bigint, amount: bigint): Promise<boolean> {
-    const balance = await this.getAvailableBalance(debitAccountId);
-    if (balance === null) {
-      if (this.isProduction) {
-        throw new Error("[TigerBeetle] FAIL-CLOSED: Cannot verify balance");
-      }
-      return true;
-    }
-    if (balance < amount) {
-      throw new Error(`[TigerBeetle] Insufficient funds: available=${balance}, required=${amount}`);
-    }
-    return true;
-  }
-
-  async healthCheck(): Promise<{ connected: boolean; latencyMs: number }> {
-    const start = Date.now();
-    try {
-      await this.ensureConnected();
-      if (this.client) await this.client.lookupAccounts([BigInt(0)]);
-      return { connected: this.connected, latencyMs: Date.now() - start };
-    } catch {
-      return { connected: false, latencyMs: Date.now() - start };
-    }
-  }
-}
-
-// ─── Fluvio Integration ───────────────────────────────────────────────────────
-// Fluvio is dedicated to real-time streaming of FX rate ticks and compliance events.
-// Kafka handles transactional event sourcing; Fluvio handles low-latency price feeds.
-export class FluvioIntegration {
-  private connected = false;
-  private serviceUrl: string;
-
-  constructor() {
-    this.serviceUrl = `http://${CONFIG.fluvio.endpoint}`;
-  }
-
-  private async checkConnection(): Promise<void> {
-    if (this.connected) return;
-    try {
-      const res = await fetch(`${this.serviceUrl}/health`, { signal: AbortSignal.timeout(2000) });
-      this.connected = res.ok;
-    } catch {
-      this.connected = false;
-    }
-  }
-
-  async produce(topic: string, key: string, value: string): Promise<boolean> {
-    await this.checkConnection();
-    try {
-      const res = await fetch(`${this.serviceUrl}/produce`, {
+      const res = await fetch(`${this.baseUrl}/publish/${pubsubName}/${topic}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, key, value }),
-        signal: AbortSignal.timeout(3000),
-      });
-      if (!res.ok) throw new Error(`Fluvio produce failed: ${res.status}`);
-      return true;
-    } catch (err) {
-      logger.warn({ err }, "[Fluvio] Produce failed");
-      return false;
-    }
-  }
-
-  async consume(topic: string, offset?: number, maxRecords = 100): Promise<Array<{ key: string; value: string; offset: number; timestamp: number }>> {
-    await this.checkConnection();
-    if (!this.connected) return [];
-    try {
-      const params = new URLSearchParams();
-      if (offset !== undefined) params.set("offset", String(offset));
-      params.set("max_records", String(maxRecords));
-      const url = `${this.serviceUrl}/consume/${topic}?${params}`;
-      const res = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      if (!res.ok) return [];
-      return await res.json() as Array<{ key: string; value: string; offset: number; timestamp: number }>;
-    } catch {
-      return [];
-    }
-  }
-
-  async createTopic(topic: string, partitions = 1, replications = 1): Promise<boolean> {
-    try {
-      const res = await fetch(`${this.serviceUrl}/topics`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: topic, partitions, replications }),
-        signal: AbortSignal.timeout(3000),
+        body: JSON.stringify(data),
+        signal: AbortSignal.timeout(5000),
       });
       return res.ok;
-    } catch (err) {
-      logger.warn({ err }, "[Fluvio] Topic creation failed");
-      return false;
-    }
+    } catch { return false; }
   }
 
-  async listTopics(): Promise<Array<{ name: string; partitions: number }>> {
+  async getState(storeName: string, key: string): Promise<unknown> {
     try {
-      const res = await fetch(`${this.serviceUrl}/topics`, { signal: AbortSignal.timeout(2000) });
-      if (!res.ok) return [];
-      return await res.json() as Array<{ name: string; partitions: number }>;
-    } catch { return []; }
+      const res = await fetch(`${this.baseUrl}/state/${storeName}/${key}`, { signal: AbortSignal.timeout(3000) });
+      return res.ok ? res.json() : null;
+    } catch { return null; }
   }
 
-  isConnected(): boolean { return this.connected; }
-
-  /** Consumer group management — track offsets per consumer group */
-  async commitOffset(topic: string, consumerGroup: string, offset: number): Promise<boolean> {
+  async saveState(storeName: string, key: string, value: unknown): Promise<boolean> {
     try {
-      const res = await fetch(`${this.serviceUrl}/consumer-groups/${consumerGroup}/offsets`, {
+      const res = await fetch(`${this.baseUrl}/state/${storeName}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, offset }),
+        body: JSON.stringify([{ key, value }]),
         signal: AbortSignal.timeout(3000),
       });
       return res.ok;
     } catch { return false; }
   }
 
-  /** Dead-letter queue — send failed messages to DLQ topic */
-  async sendToDLQ(originalTopic: string, record: { key: string; value: string; error: string }): Promise<boolean> {
-    const dlqTopic = `${originalTopic}.dlq`;
-    const dlqRecord = JSON.stringify({
-      originalTopic,
-      key: record.key,
-      value: record.value,
-      error: record.error,
-      failedAt: new Date().toISOString(),
-    });
-    return this.produce(dlqTopic, record.key, dlqRecord);
-  }
-
-  /** Backpressure: consume with max records and processing timeout */
-  async consumeWithBackpressure(
-    topic: string,
-    handler: (records: Array<{ key: string; value: string; offset: number }>) => Promise<void>,
-    opts: { maxRecords?: number; processingTimeoutMs?: number; consumerGroup?: string } = {}
-  ): Promise<{ processed: number; errors: number }> {
-    const { maxRecords = 10, processingTimeoutMs = 10000, consumerGroup = "default" } = opts;
-    const records = await this.consume(topic, undefined, maxRecords);
-    let processed = 0;
-    let errors = 0;
-
-    for (const record of records) {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), processingTimeoutMs);
-        await handler([record]);
-        clearTimeout(timeout);
-        processed++;
-        if (consumerGroup !== "default") {
-          await this.commitOffset(topic, consumerGroup, record.offset);
-        }
-      } catch (err) {
-        errors++;
-        await this.sendToDLQ(topic, { key: record.key, value: record.value, error: String(err) });
-      }
-    }
-
-    return { processed, errors };
+  async getHealth(): Promise<boolean> {
+    try { const res = await fetch(`${this.baseUrl}/healthz`, { signal: AbortSignal.timeout(3000) }); return res.ok; } catch { return false; }
   }
 }
 
-// ─── OpenAppSec Integration ──────────────────────────────────────────────────
+// ─── TigerBeetle Integration ──────────────────────────────────────────────────
+export class TigerBeetleIntegration {
+  private bridgeUrl = CONFIG.tigerBeetle.bridgeUrl;
+
+  private async request(path: string, body: unknown): Promise<unknown> {
+    const res = await fetch(`${this.bridgeUrl}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Cluster-ID": String(CONFIG.tigerBeetle.clusterId) },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) throw new Error(`TigerBeetle bridge ${path}: ${res.status}`);
+    return res.json();
+  }
+
+  async createAccounts(accounts: Array<{ id: bigint; ledger: number; code: number; flags?: number; userData128?: bigint; userData64?: bigint; userData32?: number }>): Promise<void> {
+    const payload = accounts.map(a => ({
+      id: a.id.toString(),
+      ledger: a.ledger,
+      code: a.code,
+      flags: a.flags ?? 0,
+      user_data_128: (a.userData128 ?? 0n).toString(),
+      user_data_64: (a.userData64 ?? 0n).toString(),
+      user_data_32: a.userData32 ?? 0,
+    }));
+    const data = await this.request("/accounts/create", { accounts: payload }) as { errors?: Array<{ index: number; result: number }> };
+    const hard = (data.errors ?? []).filter(e => e.result !== 21); // 21 = exists (idempotent)
+    if (hard.length > 0) throw new Error(`TigerBeetle createAccounts errors: ${JSON.stringify(hard)}`);
+  }
+
+  async lookupAccounts(ids: bigint[]): Promise<unknown[]> {
+    const data = await this.request("/accounts/lookup", { ids: ids.map(i => i.toString()) }) as { accounts?: unknown[] };
+    return data.accounts ?? [];
+  }
+
+  async createTransfer(t: { id: bigint; debitAccountId: bigint; creditAccountId: bigint; amount: bigint; ledger: number; code: number; flags?: number; pendingId?: bigint; timeout?: number; userData128?: bigint }): Promise<void> {
+    const payload = [{
+      id: t.id.toString(),
+      debit_account_id: t.debitAccountId.toString(),
+      credit_account_id: t.creditAccountId.toString(),
+      amount: t.amount.toString(),
+      ledger: t.ledger,
+      code: t.code,
+      flags: t.flags ?? 0,
+      pending_id: (t.pendingId ?? 0n).toString(),
+      user_data_128: (t.userData128 ?? 0n).toString(),
+      user_data_64: "0",
+      user_data_32: 0,
+      timeout: t.timeout ?? 0,
+    }];
+    const data = await this.request("/transfers/create", { transfers: payload }) as { errors?: Array<{ index: number; result: number; reason?: string }> };
+    const errors = data.errors ?? [];
+    // exists(46) on a deterministic id = exact replay of an identical transfer —
+    // idempotent success, not an error (FF-001 settlement post/void retries).
+    const hard = errors.filter(e => e.result !== 46);
+    if (hard.length > 0) throw new Error(`TigerBeetle createTransfer errors: ${JSON.stringify(errors)}`);
+  }
+
+  async createPendingTransfer(t: { id: bigint; debitAccountId: bigint; creditAccountId: bigint; amount: bigint; ledger: number; code: number; timeoutSeconds?: number; userData128?: bigint }): Promise<void> {
+    await this.createTransfer({ ...t, flags: 2, timeout: t.timeoutSeconds ?? 300 }); // 2 = PENDING
+  }
+
+  async postPendingTransfer(t: { id: bigint; pendingId: bigint; ledger: number; code: number; amount?: bigint }): Promise<void> {
+    // TB 0.16: amount=0 posts the full pending amount; bridge defaults it.
+    await this.createTransfer({
+      id: t.id,
+      debitAccountId: 0n,
+      creditAccountId: 0n,
+      amount: t.amount ?? 0n,
+      ledger: t.ledger,
+      code: t.code,
+      flags: 4, // POST_PENDING_TRANSFER
+      pendingId: t.pendingId,
+    });
+  }
+
+  async voidPendingTransfer(t: { id: bigint; pendingId: bigint; ledger: number; code: number }): Promise<void> {
+    await this.createTransfer({
+      id: t.id,
+      debitAccountId: 0n,
+      creditAccountId: 0n,
+      amount: 0n,
+      ledger: t.ledger,
+      code: t.code,
+      flags: 8, // VOID_PENDING_TRANSFER
+      pendingId: t.pendingId,
+    });
+  }
+
+  async validateBalance(accountId: bigint, requiredAmount: bigint): Promise<void> {
+    const accounts = await this.lookupAccounts([accountId]) as Array<{ debits_posted?: string; debits_pending?: string; credits_posted?: string; credits_pending?: string }>;
+    if (accounts.length === 0) throw new Error(`TigerBeetle account ${accountId} not found`);
+    const a = accounts[0];
+    const available = BigInt(a.credits_posted ?? "0") - BigInt(a.debits_posted ?? "0") - BigInt(a.debits_pending ?? "0");
+    if (available < requiredAmount) {
+      throw new Error(`Insufficient funds: available ${available}, required ${requiredAmount}`);
+    }
+  }
+
+  async getHealth(): Promise<boolean> {
+    try { const res = await fetch(`${this.bridgeUrl}/health`, { signal: AbortSignal.timeout(3000) }); return res.ok; } catch { return false; }
+  }
+}
+
+// ─── Fluvio Integration ───────────────────────────────────────────────────────
+export class FluvioIntegration {
+  private endpoint = `http://${CONFIG.fluvio.endpoint}`;
+
+  async produce(topic: string, key: string, value: string): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.endpoint}/topics/${topic}/produce`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ records: [{ key, value }] }),
+        signal: AbortSignal.timeout(5000),
+      });
+      return res.ok;
+    } catch { return false; }
+  }
+
+  async getHealth(): Promise<boolean> {
+    try { const res = await fetch(`${this.endpoint}/health`, { signal: AbortSignal.timeout(3000) }); return res.ok; } catch { return false; }
+  }
+}
+
+// ─── OpenAppSec Integration ───────────────────────────────────────────────────
 export class OpenAppSecIntegration {
-  private available = false;
-  private checkedAt = 0;
-  private failMode: "open" | "closed" = process.env.NODE_ENV === "production" ? "closed" : "open";
-
-  private async ensureChecked(): Promise<boolean> {
-    if (Date.now() - this.checkedAt < 30_000) return this.available;
-    try {
-      const res = await fetch(`${CONFIG.openAppSec.mgmtUrl}/health`, { signal: AbortSignal.timeout(1500) });
-      this.available = res.ok;
-      this.checkedAt = Date.now();
-    } catch {
-      this.available = false;
-      this.checkedAt = Date.now();
-    }
-    return this.available;
-  }
-
-  /** Check if a request should be blocked (fail-closed in production) */
-  async shouldBlock(req: { method: string; path: string; ip?: string; userAgent?: string }): Promise<{ block: boolean; score: number; reason?: string }> {
-    if (!(await this.ensureChecked())) {
-      if (this.failMode === "closed") {
-        logger.warn("[OpenAppSec] Agent unavailable — fail-CLOSED: blocking request in production");
-        return { block: true, score: 100, reason: "WAF agent unavailable — fail-closed" };
-      }
-      return { block: false, score: 0 };
-    }
-    try {
-      const res = await fetch(`${CONFIG.openAppSec.mgmtUrl}/v1/check`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${CONFIG.openAppSec.token}` },
-        body: JSON.stringify({ method: req.method, path: req.path, source_ip: req.ip, user_agent: req.userAgent }),
-        signal: AbortSignal.timeout(200),
-      });
-      if (!res.ok) return { block: false, score: 0 };
-      const data = await res.json() as { action: string; score: number; reason?: string };
-      return { block: data.action === "block", score: data.score, reason: data.reason };
-    } catch {
-      return { block: this.failMode === "closed", score: 0 };
-    }
-  }
-
-  async getSecurityPolicy(): Promise<Record<string, unknown> | null> {
-    try {
-      const res = await fetch(`${CONFIG.openAppSec.mgmtUrl}/api/v1/policies`, {
-        headers: { Authorization: `Bearer ${CONFIG.openAppSec.token}` },
-        signal: AbortSignal.timeout(3000),
-      });
-      return res.ok ? await res.json() as Record<string, unknown> : null;
-    } catch { return null; }
-  }
-
-  async reportThreat(threat: { type: string; sourceIp: string; path: string; severity: string; details: string }): Promise<void> {
-    try {
-      await fetch(`${CONFIG.openAppSec.mgmtUrl}/api/v1/threats`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${CONFIG.openAppSec.token}` },
-        body: JSON.stringify({ ...threat, timestamp: new Date().toISOString(), agentId: "remitflow-api" }),
-        signal: AbortSignal.timeout(3000),
-      });
-    } catch (err) {
-      logger.warn({ err }, "[OpenAppSec] Threat report failed");
-    }
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async getThreats(since?: string): Promise<any[]> {
-    try {
-      const url = `${CONFIG.openAppSec.mgmtUrl}/api/v1/threats${since ? `?since=${since}` : ""}`;
-      const res = await fetch(url, { headers: { Authorization: `Bearer ${CONFIG.openAppSec.token}` }, signal: AbortSignal.timeout(3000) });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return res.ok ? (await res.json() as any[]) : [];
-    } catch { return []; }
-  }
-
-  getFailMode(): string { return this.failMode; }
-  isAvailable(): boolean { return this.available; }
-
-  /** IP blocklist — automatically block after repeated violations */
-  private ipViolations = new Map<string, { count: number; lastSeen: number }>();
+  private mgmtUrl = CONFIG.openAppSec.mgmtUrl;
+  private apiKey = CONFIG.openAppSec.apiKey;
   private blockedIps = new Set<string>();
-  private static MAX_VIOLATIONS = 3;
-  private static VIOLATION_WINDOW_MS = 300_000; // 5 minutes
+  private ipViolations = new Map<string, { count: number; lastSeen: number }>();
+  private static readonly MAX_VIOLATIONS = 5;
+  private static readonly VIOLATION_WINDOW_MS = 60_000;
+
+  async inspectRequest(req: { sourceIp: string; uri: string; method: string; headers?: Record<string, string>; body?: string }): Promise<{ blocked: boolean; anomalyScore: number }> {
+    if (this.blockedIps.has(req.sourceIp)) return { blocked: true, anomalyScore: 1.0 };
+    try {
+      const res = await fetch(`${this.mgmtUrl}/api/v1/inspect`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}) },
+        body: JSON.stringify(req),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!res.ok) return { blocked: false, anomalyScore: 0 };
+      const data = await res.json() as { blocked?: boolean; anomaly_score?: number };
+      if (data.blocked) this.recordViolation(req.sourceIp);
+      return { blocked: data.blocked ?? false, anomalyScore: data.anomaly_score ?? 0 };
+    } catch { return { blocked: false, anomalyScore: 0 }; }
+  }
 
   recordViolation(ip: string): { blocked: boolean; totalViolations: number } {
     const now = Date.now();
