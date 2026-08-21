@@ -64,3 +64,36 @@ export async function verifyTOTP(token: string, secret: string): Promise<boolean
     return false;
   }
 }
+
+export interface TotpEnrollment {
+  /** true when the user has an active TOTP enrollment in either source */
+  enabled: boolean;
+  /** the TOTP secret to verify against (null when not enrolled) */
+  secret: string | null;
+  /** false when the database was unavailable — callers may fail closed on this */
+  dbAvailable: boolean;
+}
+
+/**
+ * SEC-25: Resolve a user's TOTP enrollment from the authoritative
+ * mfa_settings table (totpEnabled/totpSecret), falling back to the legacy
+ * users.twoFactorEnabled/twoFactorSecret columns. Enrollment is split-brain
+ * (productionV85 writes mfa_settings; routers.ts writes users), so both
+ * sources must be consulted or the >$1k 2FA gate silently never fires.
+ */
+export async function getTotpEnrollment(userId: number): Promise<TotpEnrollment> {
+  const { getDb } = await import("./db");
+  const db = await getDb();
+  if (!db) return { enabled: false, secret: null, dbAvailable: false };
+  const { eq } = await import("drizzle-orm");
+  const { mfaSettings, users } = await import("../drizzle/schema");
+  const [mfa] = await db.select().from(mfaSettings).where(eq(mfaSettings.userId, userId)).limit(1);
+  if (mfa?.totpEnabled && mfa.totpSecret) {
+    return { enabled: true, secret: mfa.totpSecret, dbAvailable: true };
+  }
+  const [userRow] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  if (userRow?.twoFactorEnabled && userRow.twoFactorSecret) {
+    return { enabled: true, secret: userRow.twoFactorSecret, dbAvailable: true };
+  }
+  return { enabled: false, secret: null, dbAvailable: true };
+}

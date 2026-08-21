@@ -18,6 +18,15 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
 const isProd =
   process.env.NODE_ENV === "production" || process.env.APP_ENV === "production";
 
+// SEC-31: fail-closed boot — refuse to start in production without the
+// service-to-service token that guards /tenant, /system and /billing.
+if (isProd && !process.env.TENANT_MANAGEMENT_API_TOKEN) {
+  throw new Error(
+    "[tenant-management] TENANT_MANAGEMENT_API_TOKEN is not set in production: refusing " +
+      "to start with unauthenticated tenant lifecycle/billing endpoints.",
+  );
+}
+
 if (allowedOrigins.length === 0) {
   if (isProd) {
     throw new Error(

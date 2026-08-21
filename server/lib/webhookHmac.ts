@@ -1,12 +1,27 @@
 import crypto from "crypto";
 
-const WEBHOOK_SECRETS: Record<string, string> = {
-  pix: process.env.WEBHOOK_SECRET_PIX ?? "dev-pix-secret",
-  upi: process.env.WEBHOOK_SECRET_UPI ?? "dev-upi-secret",
-  cips: process.env.WEBHOOK_SECRET_CIPS ?? "dev-cips-secret",
-  mojaloop: process.env.WEBHOOK_SECRET_MOJALOOP ?? "dev-mojaloop-secret",
-  swift: process.env.WEBHOOK_SECRET_SWIFT ?? "dev-swift-secret",
+// SEC-06: fail-closed secret resolution. In production a missing
+// WEBHOOK_SECRET_* must reject every webhook for that rail — never fall back
+// to a known "dev-*" secret. The dev bypass (accepting unsigned webhooks when
+// the secret is unset) is only available outside production AND behind the
+// explicit ALLOW_INSECURE_WEBHOOKS=1 opt-in.
+const isProduction = process.env.NODE_ENV === "production";
+const ALLOW_INSECURE_WEBHOOKS = !isProduction && process.env.ALLOW_INSECURE_WEBHOOKS === "1";
+
+const WEBHOOK_SECRETS: Record<string, string | undefined> = {
+  pix: process.env.WEBHOOK_SECRET_PIX,
+  upi: process.env.WEBHOOK_SECRET_UPI,
+  cips: process.env.WEBHOOK_SECRET_CIPS,
+  mojaloop: process.env.WEBHOOK_SECRET_MOJALOOP,
+  swift: process.env.WEBHOOK_SECRET_SWIFT,
 };
+
+if (isProduction) {
+  const missing = Object.entries(WEBHOOK_SECRETS).filter(([, v]) => !v).map(([k]) => `WEBHOOK_SECRET_${k.toUpperCase()}`);
+  if (missing.length > 0) {
+    throw new Error(`FATAL: webhook secrets not configured in production (fail-closed): ${missing.join(", ")}`);
+  }
+}
 
 // In-memory deduplication store with 24h window
 const processedWebhooks = new Map<string, number>();
@@ -25,12 +40,12 @@ export function verifyWebhookSignature(
   const secret = WEBHOOK_SECRETS[provider];
 
   if (!secret) {
+    // Fail-closed: no secret configured. The ONLY exception is an explicit
+    // dev-only opt-in (ALLOW_INSECURE_WEBHOOKS=1, never honored in production).
+    if (ALLOW_INSECURE_WEBHOOKS) {
+      return true;
+    }
     return false;
-  }
-
-  // Allow unsigned payloads in dev mode (secrets prefixed dev-)
-  if (secret.startsWith("dev-")) {
-    return true;
   }
 
   // Check multiple signature header formats
