@@ -331,13 +331,23 @@ export const diasporaBondRouter = router({
 
       // Deduct from wallet immediately if wallet payment
       if (input.paymentSource === "wallet") {
-        await db
+        // FF-012: guarded debit with row-count check — concurrent subscribers
+        // must not overdraw; the race loser updates 0 rows and is rejected.
+        const bondDebit = await db
           .update(wallets)
           .set({
             balance: sql`${wallets.balance} - ${input.amountUsd + platformFee}`,
             updatedAt: new Date(),
           })
-          .where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD")));
+          .where(and(
+            eq(wallets.userId, ctx.user.id),
+            eq(wallets.currency, "USD"),
+            sql`CAST(${wallets.balance} AS NUMERIC) >= ${input.amountUsd + platformFee}`,
+          ))
+          .returning({ id: wallets.id });
+        if (bondDebit.length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Insufficient USD wallet balance (concurrent debit)" });
+        }
 
         // Confirm subscription
         await db
