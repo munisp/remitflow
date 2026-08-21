@@ -102,7 +102,13 @@ def run_accrual_cycle() -> dict:
 
     try:
         import psycopg2
-        conn = psycopg2.connect(PG_URL or "dbname=remitflow user=remitflow password=remitflow123 host=localhost port=5432")
+        if not PG_URL:
+            # Fail closed: never fall back to well-known default DB credentials.
+            raise RuntimeError(
+                "[interest-accrual] DATABASE_URL is not set; refusing to connect "
+                "with default credentials. Configure DATABASE_URL explicitly."
+            )
+        conn = psycopg2.connect(PG_URL)
     except ImportError:
         # Fallback: use urllib to call the Node.js API
         return _run_accrual_via_api()
