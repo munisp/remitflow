@@ -88,8 +88,13 @@ describe("Webhook HMAC Verification", () => {
     expect(src).toContain("x-signature");
   });
 
-  it("allows unsigned payloads in dev mode (secrets prefixed dev-)", () => {
-    expect(src).toContain('secret.startsWith("dev-")');
+  it("fails closed when a webhook secret is unset (SEC-06)", () => {
+    // No "dev-*" secret fallback that silently accepts unsigned payloads.
+    expect(src).not.toContain('?? "dev-');
+    expect(src).not.toContain('secret.startsWith("dev-")');
+    // Dev bypass requires explicit opt-in and is never honored in production.
+    expect(src).toContain("ALLOW_INSECURE_WEBHOOKS");
+    expect(src).toContain('process.env.ALLOW_INSECURE_WEBHOOKS === "1"');
   });
 });
 

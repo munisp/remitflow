@@ -675,6 +675,9 @@ export const partnerWebhooksV2Router = router({
       if (!webhook[0]) throw new Error("Webhook not found");
       const payload = { event: input.event, timestamp: new Date().toISOString(), data: { test: true, webhookId: input.id } };
       try {
+        // SEC-09: SSRF guard — validate scheme/host/DNS before delivery
+        const { assertPublicWebhookUrl } = await import("../lib/http-client");
+        await assertPublicWebhookUrl(webhook[0].url);
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5000);
         const resp = await fetch(webhook[0].url, {
@@ -683,7 +686,8 @@ export const partnerWebhooksV2Router = router({
           body: JSON.stringify(payload),
           signal: controller.signal,
         }).finally(() => clearTimeout(timeout));
-        return { success: resp.ok, statusCode: resp.status, payload };
+        // SEC-09: blind response — no status-code oracle
+        return { success: resp.ok, payload };
       } catch (err: any) {
         return { success: false, error: err.message, payload };
       }

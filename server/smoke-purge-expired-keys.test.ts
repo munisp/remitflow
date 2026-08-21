@@ -2,7 +2,7 @@
  * Smoke tests for /api/scheduled/purge-expired-keys handler
  *
  * Tests cover:
- * - Auth guard: rejects requests without x-scheduled-task header or admin bearer token
+ * - Auth guard: requires Bearer SCHEDULED_TASK_TOKEN (constant-time); fails closed 503 when unset
  * - Handler logic: correctly identifies and deletes expired idempotency keys
  * - Response shape: returns { ok, purged, ranAt }
  * - Idempotency: running twice on the same data deletes 0 on the second pass
@@ -41,12 +41,16 @@ function createPurgeHandler(deps: {
 }) {
   return async function purgeExpiredKeysHandler(req: any, res: any) {
     try {
-      const isScheduledTask = req.headers["x-scheduled-task"] === "true";
+      // Mirrors the fixed production auth (SEC-12): Bearer token compared in
+      // constant time against env-required SCHEDULED_TASK_TOKEN. Fail-closed
+      // 503 when unset; cookie presence and x-scheduled-task are NOT accepted.
       const adminToken = deps.getAdminToken?.() ?? "";
-      const bearerToken = (req.headers.authorization || "").replace("Bearer ", "");
-      // Require x-scheduled-task header OR a non-empty matching bearer token
-      const hasValidToken = adminToken.length > 0 && bearerToken === adminToken;
-      if (!isScheduledTask && !hasValidToken) {
+      if (!adminToken) {
+        return res.status(503).json({ error: "Scheduled task authentication not configured" });
+      }
+      const authHeader = req.headers.authorization || "";
+      const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : "";
+      if (!bearerToken || bearerToken !== adminToken) {
         return res.status(401).json({ error: "Unauthorized" });
       }
       const db = await deps.getDb();
@@ -73,6 +77,8 @@ function makeRes() {
   return res;
 }
 
+const DEFAULT_TEST_TOKEN = "test-scheduled-token";
+
 function makeHandler(overrides?: {
   getDb?: () => Promise<any>;
   getAdminToken?: () => string;
@@ -81,18 +87,30 @@ function makeHandler(overrides?: {
     getDb: overrides?.getDb ?? (() => Promise.resolve(makeDb())),
     idempotencyKeys: fakeIdempotencyKeys,
     lte: fakeLte,
-    getAdminToken: overrides?.getAdminToken,
+    getAdminToken: overrides?.getAdminToken ?? (() => DEFAULT_TEST_TOKEN),
   });
+}
+
+function authedReq(extraHeaders: Record<string, string> = {}) {
+  return makeReq({ authorization: `Bearer ${DEFAULT_TEST_TOKEN}`, ...extraHeaders });
 }
 
 // ─── Auth guard tests ─────────────────────────────────────────────────────────
 describe("/api/scheduled/purge-expired-keys — auth guard", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("rejects requests with no auth header and no x-scheduled-task header", async () => {
+  it("rejects requests with no Authorization header", async () => {
     const handler = makeHandler();
     const res = makeRes();
     await handler(makeReq(), res);
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.json).toHaveBeenCalledWith({ error: "Unauthorized" });
+  });
+
+  it("rejects requests carrying only the forgeable x-scheduled-task header (SEC-12)", async () => {
+    const handler = makeHandler();
+    const res = makeRes();
+    await handler(makeReq({ "x-scheduled-task": "true" }), res);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: "Unauthorized" });
   });
@@ -105,12 +123,12 @@ describe("/api/scheduled/purge-expired-keys — auth guard", () => {
     expect(res.json).toHaveBeenCalledWith({ error: "Unauthorized" });
   });
 
-  it("allows requests with x-scheduled-task: true header (no token required)", async () => {
-    const handler = makeHandler();
+  it("fails closed with 503 when SCHEDULED_TASK_TOKEN is unset (SEC-12)", async () => {
+    const handler = makeHandler({ getAdminToken: () => "" });
     const res = makeRes();
-    await handler(makeReq({ "x-scheduled-task": "true" }), res);
-    expect(res.status).not.toHaveBeenCalledWith(401);
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true }));
+    await handler(makeReq({ authorization: "Bearer anything" }), res);
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(res.json).toHaveBeenCalledWith({ error: "Scheduled task authentication not configured" });
   });
 
   it("allows requests with correct SCHEDULED_TASK_TOKEN bearer token", async () => {
@@ -120,12 +138,10 @@ describe("/api/scheduled/purge-expired-keys — auth guard", () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true }));
   });
 
-  it("rejects when SCHEDULED_TASK_TOKEN is empty (no token configured) and no x-scheduled-task header", async () => {
-    // When adminToken is empty, hasValidToken is always false → must use x-scheduled-task header
-    const handler = makeHandler({ getAdminToken: () => "" });
+  it("rejects empty bearer token even when SCHEDULED_TASK_TOKEN is configured", async () => {
+    const handler = makeHandler({ getAdminToken: () => "secret-token-123" });
     const res = makeRes();
-    // No x-scheduled-task, no bearer token → rejected because adminToken is empty
-    await handler(makeReq(), res);
+    await handler(makeReq({ authorization: "Bearer " }), res);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(res.json).toHaveBeenCalledWith({ error: "Unauthorized" });
   });
@@ -139,7 +155,7 @@ describe("/api/scheduled/purge-expired-keys — handler logic", () => {
     const localDelete = vi.fn().mockReturnValue({ where: vi.fn().mockReturnValue({ returning: vi.fn().mockResolvedValue([]) }) });
     const handler = makeHandler({ getDb: () => Promise.resolve({ delete: localDelete }) });
     const res = makeRes();
-    await handler(makeReq({ "x-scheduled-task": "true" }), res);
+    await handler(authedReq(), res);
     expect(localDelete).toHaveBeenCalledWith(fakeIdempotencyKeys);
   });
 
@@ -151,9 +167,10 @@ describe("/api/scheduled/purge-expired-keys — handler logic", () => {
       getDb: () => Promise.resolve({ delete: localDelete }),
       idempotencyKeys: fakeIdempotencyKeys,
       lte: localLte,
+      getAdminToken: () => DEFAULT_TEST_TOKEN,
     });
     const res = makeRes();
-    await handler(makeReq({ "x-scheduled-task": "true" }), res);
+    await handler(authedReq(), res);
     expect(localLte).toHaveBeenCalledWith(fakeIdempotencyKeys.expiresAt, expect.any(Date));
     expect(localWhere).toHaveBeenCalledWith(expect.objectContaining({ type: "lte" }));
   });
@@ -166,7 +183,7 @@ describe("/api/scheduled/purge-expired-keys — handler logic", () => {
       }),
     });
     const res = makeRes();
-    await handler(makeReq({ "x-scheduled-task": "true" }), res);
+    await handler(authedReq(), res);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true, purged: 3 }));
   });
 
@@ -177,7 +194,7 @@ describe("/api/scheduled/purge-expired-keys — handler logic", () => {
       }),
     });
     const res = makeRes();
-    await handler(makeReq({ "x-scheduled-task": "true" }), res);
+    await handler(authedReq(), res);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ ok: true, purged: 0 }));
   });
 
@@ -188,7 +205,7 @@ describe("/api/scheduled/purge-expired-keys — handler logic", () => {
       }),
     });
     const res = makeRes();
-    await handler(makeReq({ "x-scheduled-task": "true" }), res);
+    await handler(authedReq(), res);
     const call = res.json.mock.calls[0][0];
     expect(call.ranAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
     expect(new Date(call.ranAt).getTime()).not.toBeNaN();
@@ -201,7 +218,7 @@ describe("/api/scheduled/purge-expired-keys — handler logic", () => {
       }),
     });
     const res = makeRes();
-    await handler(makeReq({ "x-scheduled-task": "true" }), res);
+    await handler(authedReq(), res);
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: "DB connection lost" }));
   });
@@ -211,7 +228,7 @@ describe("/api/scheduled/purge-expired-keys — handler logic", () => {
       getDb: () => Promise.reject(new Error("Connection pool exhausted")),
     });
     const res = makeRes();
-    await handler(makeReq({ "x-scheduled-task": "true" }), res);
+    await handler(authedReq(), res);
     expect(res.status).toHaveBeenCalledWith(500);
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ error: "Connection pool exhausted" }));
   });
