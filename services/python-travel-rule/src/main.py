@@ -33,8 +33,19 @@ from pydantic import BaseModel, Field
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from starlette.responses import Response
 
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[src] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
 # ── Configuration ──────────────────────────────────────────────────────────────
-DATABASE_URL     = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@postgres:5432/remitflow")
+DATABASE_URL     = _require_env("DATABASE_URL")
 NOTABENE_API_KEY = os.environ.get("NOTABENE_API_KEY", "")
 NOTABENE_URL     = os.environ.get("NOTABENE_URL", "https://api.notabene.id")
 SYGNA_API_KEY    = os.environ.get("SYGNA_API_KEY", "")
