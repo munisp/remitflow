@@ -17,17 +17,21 @@ deployment:
     allow_admin:
       # Loopback only — the Admin API port is published on 127.0.0.1 in compose.
       - 127.0.0.1/32
-      # go-apisix-manager reaches the Admin API from the remitflow-internal
-      # docker network (172.20.0.0/16). Tighten to the manager's static IP in
-      # production; never use 0.0.0.0/0.
-      - 172.20.0.0/16
+      # go-apisix-manager static IP on remitflow-internal (set in
+      # docker-compose.yml). The ONLY workload identity allowed to call the
+      # Admin API. Never widen to a subnet or 0.0.0.0/0.
+      - 172.20.0.10/32
+      # remitflow-internal bridge gateway: host processes reaching the
+      # loopback-published 127.0.0.1:9180 appear with this source IP (DNAT).
+      - 172.20.0.1/32
     admin_key:
       # ROTATE IMMEDIATELY: the previous keys were committed in plaintext and
       # must be considered compromised.
-      # These values are env-substitution placeholders — this file MUST be
-      # rendered at deploy time (e.g. `envsubst < apisix.yaml > conf/config.yaml`
-      # or your CD secret-rendering step) before APISIX starts, with
-      # APISIX_ADMIN_KEY matching the value supplied to go-apisix-manager.
+      # These values are env-substitution placeholders. docker-compose.yml
+      # mounts this file as config.yaml.template and renders it into
+      # conf/config.yaml at container start (sed + fail-closed placeholder
+      # check). APISIX_ADMIN_KEY must match the value supplied to
+      # go-apisix-manager. Never commit a rendered file.
       - name: "admin"
         key: ${APISIX_ADMIN_KEY}
         role: admin
@@ -43,6 +47,10 @@ deployment:
       - "http://etcd:2379"
     prefix: "/apisix"
     timeout: 30
+    # etcd auth is enabled in compose (INFRA-001); the password is rendered
+    # from ETCD_ROOT_PASSWORD at container start (same render as admin keys).
+    username: root
+    password: ${ETCD_ROOT_PASSWORD}
 
 plugin_attr:
   prometheus:
