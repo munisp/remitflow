@@ -25,6 +25,7 @@ Usage:
 """
 
 import os
+import hmac
 import json
 import uuid
 import hashlib
@@ -34,7 +35,7 @@ from typing import Optional, Literal
 from dataclasses import dataclass, field, asdict
 
 import asyncpg
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import Depends, FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from reportlab.lib.pagesizes import A4
@@ -47,6 +48,17 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 import io
 
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-str-generator] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -54,7 +66,7 @@ logger = logging.getLogger("str-generator")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://remitflow:remitflow@postgres:5432/remitflow")
+DATABASE_URL = _require_env("DATABASE_URL")
 REPORTING_ENTITY_NAME = os.getenv("REPORTING_ENTITY_NAME", "RemitFlow Ltd")
 REPORTING_ENTITY_ID = os.getenv("REPORTING_ENTITY_ID", "RMF-001")
 REPORTING_ENTITY_COUNTRY = os.getenv("REPORTING_ENTITY_COUNTRY", "NG")
@@ -407,8 +419,22 @@ def generate_str_pdf(req: STRRequest, str_id: str, narrative: str) -> bytes:
 async def health():
     return {"status": "ok", "service": "python-str-generator", "version": "1.0.0"}
 
+# ── Internal auth (fail-closed) ───────────────────────────────────────────────
+# STR generation creates regulatory filings; it must never be callable without
+# authentication. No default token: if INTERNAL_API_TOKEN is unset these
+# endpoints return 503.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
+
+
 @app.post("/v1/str/generate")
-async def generate_str(req: STRRequest, background_tasks: BackgroundTasks):
+async def generate_str(req: STRRequest, background_tasks: BackgroundTasks, _auth: None = Depends(require_internal_auth)):
     """Generate a complete STR package (narrative + XML + PDF)."""
     str_id = req.str_id or f"STR-{REPORTING_ENTITY_ID}-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
 
@@ -448,7 +474,7 @@ async def generate_str(req: STRRequest, background_tasks: BackgroundTasks):
     })
 
 @app.post("/v1/str/{str_id}/pdf")
-async def get_str_pdf(str_id: str, req: STRRequest):
+async def get_str_pdf(str_id: str, req: STRRequest, _auth: None = Depends(require_internal_auth)):
     """Return the PDF binary for a generated STR."""
     narrative = req.narrative if req.narrative else generate_narrative(req)
     pdf_bytes = generate_str_pdf(req, str_id, narrative)
@@ -459,7 +485,7 @@ async def get_str_pdf(str_id: str, req: STRRequest):
     )
 
 @app.post("/v1/str/{str_id}/xml")
-async def get_str_xml(str_id: str, req: STRRequest):
+async def get_str_xml(str_id: str, req: STRRequest, _auth: None = Depends(require_internal_auth)):
     """Return the goAML XML for a generated STR."""
     narrative = req.narrative if req.narrative else generate_narrative(req)
     xml_content = generate_goaml_xml(req, str_id, narrative)
