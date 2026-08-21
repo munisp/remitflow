@@ -212,7 +212,17 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
     }
   } catch (err) {
     if (err instanceof TRPCError) throw err;
-    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Sanctions check degraded");
+    // SEC-17: sanctions screening is a security control — fail CLOSED in
+    // production. A screening outage must never let a transfer through.
+    if (process.env.NODE_ENV === "production") {
+      logger.error({ err: err instanceof Error ? err.message : String(err), transferId: input.transferId },
+        "[Pipeline] FAIL-CLOSED: sanctions screening unavailable — blocking transfer");
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: "Transfer blocked: sanctions screening is temporarily unavailable. Please try again.",
+      });
+    }
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Sanctions check degraded (dev mode — proceeding)");
   }
 
   // 2. Fraud ML scoring (Python service)
@@ -241,7 +251,18 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
     }
   } catch (err) {
     if (err instanceof TRPCError) throw err;
-    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Fraud ML degraded");
+    // SEC-17: in production, fraud-scoring outages fail closed unless the
+    // operator explicitly opts into degraded-open operation via
+    // ALLOW_DEGRADED_FRAUD_VELOCITY=1 (documented risk acceptance).
+    if (process.env.NODE_ENV === "production" && process.env.ALLOW_DEGRADED_FRAUD_VELOCITY !== "1") {
+      logger.error({ err: err instanceof Error ? err.message : String(err), transferId: input.transferId },
+        "[Pipeline] FAIL-CLOSED: fraud scoring unavailable — blocking transfer (set ALLOW_DEGRADED_FRAUD_VELOCITY=1 to opt into degraded-open)");
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: "Transfer blocked: fraud screening is temporarily unavailable. Please try again.",
+      });
+    }
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Fraud ML degraded (degraded-open)");
   }
 
   // 3. Velocity check
@@ -257,7 +278,18 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
       }
     } catch (err) {
       if (err instanceof TRPCError) throw err;
-      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Velocity check degraded");
+      // SEC-17: in production, velocity-check outages fail closed unless the
+      // operator explicitly opts into degraded-open via
+      // ALLOW_DEGRADED_FRAUD_VELOCITY=1 (documented risk acceptance).
+      if (process.env.NODE_ENV === "production" && process.env.ALLOW_DEGRADED_FRAUD_VELOCITY !== "1") {
+        logger.error({ err: err instanceof Error ? err.message : String(err), transferId: input.transferId },
+          "[Pipeline] FAIL-CLOSED: velocity check unavailable — blocking transfer (set ALLOW_DEGRADED_FRAUD_VELOCITY=1 to opt into degraded-open)");
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Transfer blocked: transfer velocity check is temporarily unavailable. Please try again.",
+        });
+      }
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Velocity check degraded (degraded-open)");
     }
   }
 

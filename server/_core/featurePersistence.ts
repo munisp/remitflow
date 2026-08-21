@@ -546,6 +546,9 @@ async function processWebhookQueue(): Promise<void> {
     for (const webhook of pending) {
       webhook.attempts++;
       try {
+        // SEC-09: SSRF guard — validate scheme/host/DNS before delivery
+        const { assertPublicWebhookUrl } = await import("../lib/http-client");
+        await assertPublicWebhookUrl(webhook.url);
         const res = await fetch(webhook.url, {
           method: "POST",
           headers: {
