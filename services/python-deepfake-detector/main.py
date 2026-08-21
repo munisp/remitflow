@@ -32,7 +32,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import numpy as np
-from fastapi import FastAPI, HTTPException, Request, Response
+import hmac
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -41,7 +46,18 @@ import psycopg2
 import psycopg2.extras
 from contextlib import contextmanager
 
-_DB_URL = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
+def _require_env(name: str) -> str:
+    """Return the env var or fail loudly; never fall back to well-known default credentials."""
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"[python-deepfake-detector] {name} is not set. Refusing to fall back to "
+            "well-known default credentials; configure it explicitly."
+        )
+    return value
+
+
+_DB_URL = _require_env("DATABASE_URL")
 _db_pool = None
 
 def _get_db():
@@ -220,18 +236,66 @@ class BatchCheckResponse(BaseModel):
 
 # ─── Image Loading ────────────────────────────────────────────────────────────
 
+# SSRF guard (PY-008 remediation): https only by default, DNS-resolved hosts must
+# be public IPs, redirects are not followed, and response size is capped.
+MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))  # 10 MiB
+ALLOW_INSECURE_IMAGE_HTTP = os.getenv("ALLOW_INSECURE_IMAGE_HTTP", "false").lower() == "true"
+
+
+def _validate_image_url(url: str) -> str:
+    parsed = urlparse(url)
+    allowed_schemes = {"https"} | ({"http"} if ALLOW_INSECURE_IMAGE_HTTP else set())
+    if parsed.scheme.lower() not in allowed_schemes:
+        raise HTTPException(status_code=400, detail="image_url must use https")
+    host = parsed.hostname
+    if not host:
+        raise HTTPException(status_code=400, detail="image_url has no host")
+    port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        raise HTTPException(status_code=400, detail="image_url host does not resolve")
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="image_url resolved to an invalid address")
+        if (
+            ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+        ):
+            raise HTTPException(status_code=400, detail="image_url resolves to a non-public address")
+    return url
+
+
 async def _load_image_bytes(req: DeepfakeCheckRequest) -> bytes:
     if req.image_base64:
         # Strip data URI prefix if present
         b64 = req.image_base64
         if "," in b64:
             b64 = b64.split(",", 1)[1]
-        return base64.b64decode(b64)
+        raw = base64.b64decode(b64)
+        if len(raw) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="image exceeds maximum allowed size")
+        return raw
     if req.image_url:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(req.image_url)
-            resp.raise_for_status()
-            return resp.content
+        url = _validate_image_url(req.image_url)
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+            async with client.stream("GET", url) as resp:
+                if resp.is_redirect:
+                    raise HTTPException(status_code=400, detail="image_url redirects are not followed")
+                resp.raise_for_status()
+                cl = resp.headers.get("content-length")
+                if cl and cl.isdigit() and int(cl) > MAX_IMAGE_BYTES:
+                    raise HTTPException(status_code=413, detail="image exceeds maximum allowed size")
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes(65536):
+                    total += len(chunk)
+                    if total > MAX_IMAGE_BYTES:
+                        raise HTTPException(status_code=413, detail="image exceeds maximum allowed size")
+                    chunks.append(chunk)
+                return b"".join(chunks)
     raise ValueError("Either image_url or image_base64 must be provided")
 
 
@@ -538,6 +602,19 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# ── Internal auth (fail-closed) ───────────────────────────────────────────────
+# /check and /batch fetch remote images; without auth they are an SSRF oracle.
+# No default token: if INTERNAL_API_TOKEN is unset these endpoints return 503.
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+
+def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
+    if not INTERNAL_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTERNAL_API_TOKEN is not configured; endpoint disabled")
+    if not x_internal_token or not hmac.compare_digest(x_internal_token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal API token")
+
+
 @app.get("/metrics/pod")
 async def _prometheus_metrics():
     uptime = _time_mod.time() - _PROCESS_START_TIME
@@ -589,75 +666,53 @@ async def _on_shutdown():
     logging.getLogger("python-deepfake-detector").info("FastAPI shutdown event — cleaning up resources")
 
 
-# Initialise the primary PostgreSQL persistence connection before serving requests.
-_get_db()
+# Initialize PostgreSQL tables (middleware-ready)
+try:
+    _get_db()
+except Exception:
+    pass
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(","),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 
 @app.post("/check", response_model=DeepfakeCheckResponse)
-async def check_deepfake(req: DeepfakeCheckRequest, request: Request):
-    """Analyse a single face image for deepfake artifacts."""
+async def check_deepfake(req: DeepfakeCheckRequest, _auth: None = Depends(require_internal_auth)):
+    """Analyse a single image for deepfake artifacts."""
+    user_key = req.user_id or req.session_id or "anonymous"
     _metrics["total_requests"] += 1
-    user_key = req.user_id or request.client.host or "anonymous"
 
     if not _rate_limiter.check(user_key):
         _metrics["rate_limited"] += 1
-        logger.warning(f"Rate limit exceeded for user: {user_key}")
-        raise HTTPException(status_code=429, detail="Rate limit exceeded — max {RATE_LIMIT_RPM} requests/minute")
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
-    if not req.image_url and not req.image_base64:
-        raise HTTPException(status_code=422, detail="Either image_url or image_base64 is required")
-
-    result = await run_deepfake_check(req)
-    logger.info(
-        f"Deepfake check: user={user_key} is_deepfake={result.is_deepfake} "
-        f"confidence={result.confidence:.3f} method={result.method} "
-        f"latency={result.processing_time_ms:.0f}ms"
-    )
-    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
-    import time as _time
-    try:
-        _result_data = result if isinstance(result, dict) else {"result": str(result)}
-        _db_upsert("deepfake_detector", f"check:{int(_time.time()*1000)}", _result_data)
-        _db_log_event("deepfake_detector", "check", _result_data)
-    except Exception:
-        pass
-    return result
+    return await run_deepfake_check(req)
 
 
 @app.post("/batch", response_model=BatchCheckResponse)
-async def check_deepfake_batch(req: BatchCheckRequest, request: Request):
-    """Analyse up to 8 face images in parallel."""
-    _metrics["total_requests"] += 1
+async def check_batch(req: BatchCheckRequest, _auth: None = Depends(require_internal_auth)):
+    """Analyse up to MAX_BATCH_SIZE images in one request."""
     if len(req.images) > MAX_BATCH_SIZE:
-        raise HTTPException(status_code=422, detail=f"Batch size exceeds maximum of {MAX_BATCH_SIZE}")
+        raise HTTPException(status_code=400, detail=f"Maximum {MAX_BATCH_SIZE} images per batch")
 
-    user_key = req.user_id or request.client.host or "anonymous"
+    user_key = req.user_id or "anonymous"
+    _metrics["total_requests"] += 1
+
     if not _rate_limiter.check(user_key):
         _metrics["rate_limited"] += 1
         raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
     start = time.monotonic()
-    results = await asyncio.gather(*[run_deepfake_check(img) for img in req.images])
+    tasks = [run_deepfake_check(img) for img in req.images]
+    results = await asyncio.gather(*tasks, return_exceptions=False)
 
     any_deepfake = any(r.is_deepfake for r in results)
     max_confidence = max((r.confidence for r in results), default=0.0)
 
-    # Persist result to PostgreSQL (middleware-ready: swap to TigerBeetle/Kafka in production)
-    import time as _time
-    try:
-        _result_data = BatchCheckResponse if isinstance(BatchCheckResponse, dict) else {"result": str(BatchCheckResponse)}
-        _db_upsert("deepfake_detector", f"batch:{int(_time.time()*1000)}", _result_data)
-        _db_log_event("deepfake_detector", "batch", _result_data)
-    except Exception:
-        pass
     return BatchCheckResponse(
         results=list(results),
         any_deepfake=any_deepfake,
@@ -669,156 +724,32 @@ async def check_deepfake_batch(req: BatchCheckRequest, request: Request):
 @app.get("/health")
 async def health():
     return {
+        "status": "ok",
         "service": "python-deepfake-detector",
-        "version": "1.0.0",
-        "status": "healthy",
-        "model_loaded": _model_available,
+        "model_available": _model_available,
         "model_id": HF_MODEL_ID if _model_available else None,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "fallbacks": {
+            "frequency_domain": ENABLE_FREQUENCY_FALLBACK,
+            "landmark_consistency": ENABLE_LANDMARK_FALLBACK,
+        },
+        "confidence_threshold": DEEPFAKE_CONFIDENCE_THRESHOLD,
     }
 
 
 @app.get("/metrics")
 async def metrics():
     lines = [
-        "# HELP deepfake_requests_total Total deepfake check requests",
-        "# TYPE deepfake_requests_total counter",
-        f"deepfake_requests_total {_metrics['total_requests']}",
-        "# HELP deepfake_detected_total Images classified as deepfake",
-        "# TYPE deepfake_detected_total counter",
-        f"deepfake_detected_total {_metrics['deepfake_detected']}",
-        "# HELP deepfake_real_total Images classified as real",
-        "# TYPE deepfake_real_total counter",
-        f"deepfake_real_total {_metrics['real_detected']}",
-        "# HELP deepfake_model_errors_total Model inference errors",
-        "# TYPE deepfake_model_errors_total counter",
-        f"deepfake_model_errors_total {_metrics['model_errors']}",
-        "# HELP deepfake_fallback_used_total Times fallback detection was used",
-        "# TYPE deepfake_fallback_used_total counter",
-        f"deepfake_fallback_used_total {_metrics['fallback_used']}",
-        "# HELP deepfake_rate_limited_total Requests rejected by rate limiter",
-        "# TYPE deepfake_rate_limited_total counter",
-        f"deepfake_rate_limited_total {_metrics['rate_limited']}",
+        f"deepfake_detector_total_requests {_metrics['total_requests']}",
+        f"deepfake_detector_deepfake_detected {_metrics['deepfake_detected']}",
+        f"deepfake_detector_real_detected {_metrics['real_detected']}",
+        f"deepfake_detector_model_errors {_metrics['model_errors']}",
+        f"deepfake_detector_fallback_used {_metrics['fallback_used']}",
+        f"deepfake_detector_rate_limited {_metrics['rate_limited']}",
     ]
-    from fastapi.responses import PlainTextResponse
-    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
-
-
-@app.on_event("startup")
-async def startup():
-    logger.info("Starting RemitFlow Deepfake Detection Service v1.0.0")
-    # Test mode exercises deterministic fail-closed fallbacks without fetching external model artifacts.
-    if os.getenv("REMITFLOW_TEST_MODE", "false").lower() != "true":
-        asyncio.create_task(_load_model())
+    return Response(content="\n".join(lines), media_type="text/plain")
 
 
 if __name__ == "__main__":
     import uvicorn
-
-# ─── PostgreSQL Persistence (middleware-ready: swap to TigerBeetle/Kafka in production) ───
-import psycopg2
-import json as _json
-import signal
-import atexit
-
-def _get_db_conn():
-    """Get PostgreSQL connection (middleware-ready: swap to TigerBeetle in production)."""
-    try:
-        db_url = os.environ.get("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow")
-        conn = psycopg2.connect(db_url)
-        conn.autocommit = True
-        return conn
-    except Exception:
-        return None
-
-def _db_ensure_tables(table_prefix):
-    """Create state and events tables if they don't exist."""
-    conn = _get_db_conn()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS {table_prefix}_state (
-                    id TEXT PRIMARY KEY,
-                    data JSONB NOT NULL DEFAULT '{{}}',
-                    created_at TIMESTAMPTZ DEFAULT NOW(),
-                    updated_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cur.execute(f"""
-                CREATE TABLE IF NOT EXISTS {table_prefix}_events (
-                    id BIGSERIAL PRIMARY KEY,
-                    event_type TEXT NOT NULL,
-                    payload JSONB DEFAULT '{{}}',
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
-            cur.close()
-            conn.close()
-        except Exception:
-            pass
-
-def _db_upsert(table_prefix, record_id, data):
-    """Upsert a record to PostgreSQL state table."""
-    conn = _get_db_conn()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                f"INSERT INTO {table_prefix}_state (id, data, updated_at) VALUES (%s, %s, NOW()) "
-                f"ON CONFLICT (id) DO UPDATE SET data = %s, updated_at = NOW()",
-                (record_id, _json.dumps(data), _json.dumps(data))
-            )
-            cur.close()
-            conn.close()
-        except Exception:
-            pass
-
-def _db_get(table_prefix, record_id):
-    """Get a record from PostgreSQL state table."""
-    conn = _get_db_conn()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute(f"SELECT data FROM {table_prefix}_state WHERE id = %s", (record_id,))
-            row = cur.fetchone()
-            cur.close()
-            conn.close()
-            if row:
-                return row[0]
-        except Exception:
-            pass
-    return None
-
-def _db_list(table_prefix, limit=200):
-    """List records from PostgreSQL state table."""
-    conn = _get_db_conn()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute(f"SELECT data FROM {table_prefix}_state ORDER BY updated_at DESC LIMIT %s", (limit,))
-            rows = cur.fetchall()
-            cur.close()
-            conn.close()
-            return [r[0] for r in rows]
-        except Exception:
-            pass
-    return []
-
-def _db_log_event(table_prefix, event_type, payload):
-    """Log an event to PostgreSQL events table."""
-    conn = _get_db_conn()
-    if conn:
-        try:
-            cur = conn.cursor()
-            cur.execute(
-                f"INSERT INTO {table_prefix}_events (event_type, payload) VALUES (%s, %s)",
-                (event_type, _json.dumps(payload))
-            )
-            cur.close()
-            conn.close()
-        except Exception:
-            pass
-
-    port = int(os.getenv("PORT", "8097"))
+    port = int(os.getenv("DEEPFAKE_DETECTOR_PORT", "8097"))
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
