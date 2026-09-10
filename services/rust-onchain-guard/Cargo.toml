@@ -1,0 +1,16 @@
+[package]
+name    = "rust-onchain-guard"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "rust-onchain-guard"
+path = "src/main.rs"
+
+[dependencies]
+# std-only binary: signature/fencing-token guard implemented without external crates
+
+[profile.release]
+opt-level = 3
+lto       = true
+codegen-units = 1
