@@ -118,6 +118,11 @@ app = FastAPI(title="RemitFlow Sanctions Updater", version="1.0.0")
 # Triggering sanctions-list updates is an administrative operation. No default
 # token: if INTERNAL_API_TOKEN is unset these endpoints return 503.
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+if not INTERNAL_API_TOKEN:
+    raise RuntimeError(
+        "INTERNAL_API_TOKEN is not set: refusing to start — an unset token would "
+        "crash request handling with TypeError instead of a clean 401. Configure it explicitly."
+    )
 
 
 def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:
