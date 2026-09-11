@@ -719,9 +719,18 @@ export const businessSavingsRouter = router({
     .input(z.object({
       accountId: z.number(),
       amountUsd: z.number().positive().max(10_000_000),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
+      // W12: canonical TOTP step-up (fail-closed) — savings withdrawal credits
+      // the user's spendable balance (money-moving).
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "savings withdrawal");
+      // W12: bypasses the transfer pipeline — apply the transferEngine-
+      // equivalent KYC tier check (fail-closed).
+      const { requireKycTierForAmount } = await import("../_core/totpStepUp");
+      await requireKycTierForAmount(ctx.user.id, input.amountUsd, "savings withdrawal");
       const [account] = await db
         .select()
         .from(businessSavingsAccounts)
