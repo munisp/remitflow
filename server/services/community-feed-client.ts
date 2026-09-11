@@ -1,10 +1,12 @@
 /**
  * RemitFlow Community Feed Client
- * Typed HTTP client for the Go community activity feed microservice (port 8084)
+ *
+ * Wave 7 (C8): go-community-feed was deleted as an unbuildable scaffold — no
+ * feed service exists. Every method now throws UNAVAILABLE ("service not
+ * deployed"); health() honestly reports offline.
  */
 
-const FEED_BASE = process.env.COMMUNITY_FEED_URL ?? "http://localhost:8084";
-const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN ?? "remitflow-internal-2024";
+const NOT_DEPLOYED = "community-feed service not deployed";
 
 export interface ActivityEvent {
   id: string;
@@ -39,38 +41,28 @@ export interface FeedStats {
   uptimeSeconds: number;
 }
 
-async function fetchFeed<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${FEED_BASE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Internal-Token": INTERNAL_TOKEN,
-      ...(options?.headers ?? {}),
-    },
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!res.ok) {
-    throw new Error(`[CommunityFeed] ${path} → ${res.status} ${res.statusText}`);
-  }
-  return res.json() as Promise<T>;
+function unavailable<T>(method: string): Promise<T> {
+  return Promise.reject(new Error(`UNAVAILABLE: ${NOT_DEPLOYED} — communityFeedClient.${method} cannot be served`));
 }
 
 export const communityFeedClient = {
-  /** Get recent activity events (last 50) */
+  /** Get recent activity events — service not deployed, always throws */
   getRecent: (): Promise<{ events: ActivityEvent[]; count: number }> =>
-    fetchFeed("/recent"),
+    unavailable("getRecent()"),
 
-  /** Get feed health and stats */
-  getStats: (): Promise<FeedStats> => fetchFeed("/stats"),
+  /** Get feed health and stats — service not deployed, always throws */
+  getStats: (): Promise<FeedStats> =>
+    unavailable("getStats()"),
 
-  /** Publish an event to the feed (internal use only) */
-  publish: (event: PublishEventRequest): Promise<{ ok: boolean; eventId: string }> =>
-    fetchFeed("/publish", {
-      method: "POST",
-      body: JSON.stringify(event),
-    }),
+  /** Publish an event — service not deployed, always throws */
+  publish: (_event: PublishEventRequest): Promise<{ ok: boolean; eventId: string }> =>
+    unavailable("publish()"),
 
-  /** Health check */
+  /** Health check — honest: the service does not exist, always offline */
   health: (): Promise<{ status: string; service: string; stats: FeedStats }> =>
-    fetchFeed("/health"),
+    Promise.resolve({
+      status: "offline",
+      service: "community-feed (not deployed)",
+      stats: { connectedClients: 0, totalEvents: 0, eventsPerMinute: 0, uptimeSeconds: 0 },
+    }),
 };
