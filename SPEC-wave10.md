@@ -1,48 +1,60 @@
-# RemitFlow Wave 10 Spec — Consolidated Wave 8 & 9 Honest Audits
+# SPEC-wave10.md — Melio-feature implementation contracts
 
-Wave 10 closes the remaining Wave 8/9 backlog without repeating their audit mistakes.
-This document is the single, verifiable contract between product ambition and engineering reality.
+Base: /mnt/agents/output/remitflow @ audit-fixes (orchestrator commits schema + helpers FIRST; coders branch after).
+Global discipline (non-negotiable, from Waves 6–9): fail closed everywhere; honest `pending_*`/real statuses, never fabricated terminal states; TOTP step-up (canonical Wave-7 C2 pattern: getTotpEnrollment → `!dbAvailable` throw → `.enabled && .secret` → verifyTOTP) on every money-moving or approval mutation; `assertFeatureEligible`/plan gating where specified; enum-safe schema-real writes only (new tables are yours; existing tables/enums READ-ONLY); secrets via `server/_core/secretBox.ts` encryptField/decryptField; no new third-party npm deps beyond what the base package.json has (Go/Rust/Python services declare their own manifests); service-to-service calls use `INTERNAL_SERVICE_KEY` constant-time compare + env base URL, throw when unconfigured; validation = esbuild per TS file, `python3 -m py_compile` per py file; Go/Rust compile flagged R1 (no toolchain).
 
-## Scope
+## Shared foundation (orchestrator-owned, in base commit — do not edit)
+- `drizzle/schema.ts` appended: `vendors`, `vendorBills`, `billDocuments`, `approvalPolicies`, `approvalRequests`, `approvalSteps`, `invoicesV2`, `invoiceItems`, `cardFundingIntents`, `accountingConnections`, `accountingSyncLogs`, `partnerPayoutRequests`, `ocrJobs`. Migration: `drizzle/0087_wave10_melio_features.sql` (additive; includes UNIQUE on vendor_bills.idempotency_key, partner_payout_requests.idempotency_key, invoices_v2.payment_link_token_hash).
+- `server/_core/speedTiers.ts`: `quoteSpeedTiers(amount, currency, rail)` → `[{tier:"standard"|"same_day"|"instant", feePct, feeCap, etaMinutes, etaHonest:true}]` (env-tunable via SPEED_TIER_CONFIG_JSON) + `speedTierFee(amount, rail, tier)` (throws on unavailable tier). Used by C1/C2/C5.
+- Status vocabularies (use exactly):
+  vendorBills: captured→pending_approval→approved|rejected; approved→scheduled→paying→paid|failed; any→cancelled.
+  invoicesV2: draft→sent→partially_paid→paid; sent→overdue (Temporal sweeper); any non-paid→void.
+  approvalRequests: pending→approved|rejected|expired. approvalSteps: pending→approved|rejected.
+  cardFundingIntents: requires_capture→captured→executing→executed|failed; captured→refunded.
+  partnerPayoutRequests: received→screening→funded→executing→settled|failed.
+  ocrJobs: queued→processing→extracted|failed|review.
+  accountingConnections: pending_auth→active|error|revoked.
+- Kafka topics (existing `kafka.send` pattern): `remitflow.vendor-bills`, `remitflow.invoices`, `remitflow.embedded-payouts`, `remitflow.accounting-sync`. Fluvio topics: `bill-capture-inbound`, `bill-capture-extracted`, `ledger-events-bronze`. OpenSearch indexes: `vendor_bills`, `invoices_v2`, `vendors`. Temporal task queues: `ap-approvals`, `ar-aging`, `accounting-sync`.
+- Env (fail closed when feature invoked unconfigured): `BILL_CAPTURE_URL`(:8112), `ACCOUNTING_SYNC_URL`(:8113), `GEO_ANALYTICS_URL`(:8114), `PERMIFY_URL`, `PERMIFY_API_KEY`, `KEYCLOAK_ISSUER`, `KEYCLOAK_CLIENT_ID`, `OPENSEARCH_URL`, `FLUVIO_ENDPOINT`, `QBO_CLIENT_ID/QBO_CLIENT_SECRET`, `XERO_CLIENT_ID/XERO_CLIENT_SECRET`, `PAYOUTS_API_HMAC_SECRET`, `CHARGEBACK_HOLD_HOURS`(default 24).
 
-**In scope (6 features):**
-- **C1 — FX-Earnings Micro-Saving** (S1-S3): rounded FX fees micro-savings with explicit opt-in, real ledger, no phantom APY/yields.
-- **C2 — Contributor Marketplace** (S4-S6): paid contributor marketplace with revenue-share escrow, honest payout ledger, zero fake payouts.
-- **C3 — Regulatory-by-Region Playbooks** (S7-S9): playbook engine for NGN/CFA/Brazil with deterministic rule mapping, real filing calendar, no hallucinated regulator contact info.
-- **C4 — Remittance-Linked Insurance** (S10-S12): opt-in transfer-linked micro-insurance via partner API or fail-closed pending coverage, no fake claims settlement.
-- **C5 — B2B API Partner Tiers** (S13-S15): tiered partner program with real rate limits, honest SLA dashboard (no synthetic uptime), real webhook retries.
-- **C6 — Agent Liquidity Forecast** (S16-S18): agent liquidity forecast + rebalancing advisory from real telemetry, no fabricated agent earnings.
+## C1 — AP core (P0-1, P0-3, P2-9) — TS + Temporal + Permify + TB + Mojaloop
+Files (own): `server/routers/vendorBills.ts`, `server/services/approvalEngine.ts`, `server/_core/permifyClient.ts`, `server/_core/keycloakOidc.ts`, `server/temporal/apApprovalWorkflow.ts`. Mounts: append ONLY `vendorBills`, `approvalPolicies` at the end of the appRouter composition in `server/routers.ts` (small, commented hunk; orchestrator merges).
+- approvalEngine: evaluate policies (scope+minAmount match → create approval_request with sequential steps from policy approvers; self-approval blocked unless policy allows; unresolved approver set → BLOCK, fail closed). Permify check via permifyClient (`POST {PERMIFY_URL}/v1/tenants/t1/permissions/check`, constant-time key compare, timeout, error → DENY). approve/reject: TOTP step-up + role check + guarded single-winner step update (`UPDATE approval_steps SET status WHERE id AND status='pending'` + row-count check); final step flips the entity status in the SAME db.transaction; Kafka event.
+- vendorBills router: create (manual/api), list/get (tenant-scoped), uploadDocument → bill_documents + enqueue OCR (call `enqueueOcrJob` from `server/routers/billCapture.ts` — import only, C3 owns that file), submitForApproval, schedule, executePayment (TOTP step-up; guarded wallet debit in db.transaction; TB hold per existing `_core/tigerBeetle` patterns; payout via the Mojaloop FSP client pattern used at routers.ts:3300 or stablecoin/bank rail per vendor.payoutMethod; paying→paid ONLY on rail confirmation else failed+reason; speed tier via quoteSpeedTiers + speedTierFee with fee credited to platform float per Wave-9 Q4 pattern), cancel (pre-paying only). Idempotency: idempotency_key UNIQUE + replay-safe return of the original record.
+- keycloakOidc.ts: OIDC discovery + JWKS verification helper for business-portal bearer tokens (KEYCLOAK_ISSUER unset → throw at use; maps `sub`→user lookup; accepted alongside session auth on C1 routers only).
+- apApprovalWorkflow.ts: Temporal workflow on queue `ap-approvals`: wait-for-approval with timeout → expire (status expired + Kafka event) + reminder activity (enum-valid notification types only).
 
-**Explicitly out of scope (security audit residue — deferred to audit-fix branch):**
-- SEC-01 through SEC-12 (DOMPurify, CSP nonce, env hardcoding, etc.) — tracked on `audit-fixes` branch, not in this wave's scope.
-- **OQ-01** (Biometric HMAC key): high-risk auth/crypto finding — Wave 10 ships NO biometric auth paths; biometric verification endpoints remain disabled. Feature will not be re-enabled until OQ-01 is resolved on the audit-fix branch.
+## C2 — AR core (P0-4, P1-5) — TS + Stripe + Temporal
+Files (own): `server/routers/invoicesV2Router.ts`, `server/routers/paymentLinks.ts`, `server/routers/cardFunding.ts`, `server/temporal/arAgingWorkflow.ts`. Mounts appended in routers.ts: `invoicesV2`, `paymentLinks`, `cardFunding` (small commented hunk; orchestrator merges).
+- invoicesV2: CRUD with line items; totals computed server-side (never trust client totals); draft→sent (email + Kafka); recordPayment (partial payments; guarded amountPaid accumulation in db.transaction; flips partially_paid/paid); void; list with aging buckets (0-30/31-60/61-90/90+ from dueDate).
+- paymentLinks: PUBLIC tokenized endpoints (no session): store only sha256 hash of a 32-byte random token; resolve via constant-time compare; return invoice summary; pay via wallet (auth), card (Stripe PaymentIntent through cardFunding), or bank rail; fee-shifting: when invoice.feeShifting, card fee added to payer total; payment executes ONLY after Stripe `payment_intent.succeeded` webhook or wallet debit success; on success → recordPayment + Kafka `invoice.paid` + `indexInvoice` from `server/services/searchIndexer.ts` (import only, C5 owns).
+- cardFunding: create intent for purpose vendor_bill|invoice|transfer (Stripe PaymentIntent amount+fee); webhook confirms capture → captured, holdUntil = now + CHARGEBACK_HOLD_HOURS (skip hold only for reversible rails; ENFORCE for irreversible rails e.g. stablecoin); execute → performs the purpose payment through the owning execution path → executed; failure → failed + Stripe refund (never silent).
+- arAgingWorkflow.ts: daily on `ar-aging`: sent & dueDate<now → overdue + reminder (enum-valid type) + Kafka event.
 
-## Wave 8/9 Audit Lessons (baked into Wave 10)
+## C3 — Bill capture OCR (P0-2) — Python + Fluvio + Redis + TS ingestion
+Files (own): `services/python-bill-capture/**` (:8112), `server/routers/billCapture.ts`. Mount `billCapture` in routers.ts.
+- Python service (mirror python-p2p-intelligence structure): POST /extract (INTERNAL_SERVICE_KEY constant-time) accepts storageKey → OCR via the PaddleOCR/Docling pipeline pattern in server/routers/kycOrchestration.ts — CHECK services/ for an existing kyc-ocr python service and reuse its extraction client; if no OCR engine configured (OCR_ENGINE unset) → return {"status":"unconfigured"}, NEVER fake data; field extraction (vendor, amount, currency, dueDate, invoiceNumber, lineItems) with per-field confidence; GET /health. Fluvio: consume `bill-capture-inbound`, produce `bill-capture-extracted` (fluvio python client; FLUVIO_ENDPOINT unset → inline HTTP callback + warn).
+- billCapture.ts: per-tenant inbound address token (`bills-<token>@`); email webhook (shared-secret header, constant-time) → store doc (Wave-9 MIME allowlist + key sanitization patterns), create ocr_jobs row + push Redis queue `ocr:queue` (+ idempotency set `ocr:seen:<key>`) and/or Fluvio; export `enqueueOcrJob(billId, storageKey)` for C1; job status query; `confirmExtraction`: human reviews OCR result (confidence<threshold forced to review) → guarded status='captured' update onto vendor_bills — NEVER auto-apply low-confidence fields.
 
-Wave 8 (F8-1 through F8-15) and Wave 9 (W9-Q1 through W9-Q14) repeatedly caught the same failure modes. Wave 10 specifications hard-code the fixes:
+## C4 — Accounting sync (P1-6) — Go + Dapr + TS router
+Files (own): `services/go-accounting-sync/**` (:8113, Dapr sidecar annotations under deploy/dapr/), `server/routers/accountingSync.ts`, `deploy/dapr/components/*.yaml` (kafka pubsub, redis state). Mount `accountingSync` in routers.ts.
+- Go service (stdlib net/http; Dapr sidecar at DAPR_HTTP_PORT default 3500 for pubsub publish + state get/set; DAPR absent → direct fallback + warn): GET /health; GET /auth/{provider}/start (state nonce; QBO/XERO env unconfigured → 503 fail closed); POST /auth/{provider}/callback (code→tokens; hand tokens to the TS accountingSync callback — tokens encrypted via secretBox in TS; Go never persists raw tokens); POST /sync/push (export bills/payments/invoices as provider entities, idempotent via sync cursor in Dapr state); POST /sync/pull (vendor/bill updates); GET /export/csv.
+- accountingSync.ts: connect start/callback (owns accounting_connections rows; tokens via encryptField), triggerSync (PBAC admin), status/logs, CSV export reading doubleEntry (`server/routers/doubleEntry.ts` patterns); registers the `accounting-sync` Temporal schedule (reuse existing scheduler pattern); emits `remitflow.accounting-sync` events.
 
-| Pattern | Bad Example | Wave 10 Rule |
-|--------|------------|-------------|
-| **Fabricated metrics** | Wave 9 partner tiers advertised fake uptime numbers (W9-Q3) | Dashboards read ONLY real aggregated telemetry; unconfigured → `data unavailable` |
-| **Phantom financial flows** | Wave 8 APY/yield endpoints returned computed-but-fake numbers (F8-6) | No yield/insurance payout math unless connected to real ledger or partner API; otherwise explicit `pending`/`unavailable` |
-| **Hardcoded contact/regulator info** | Wave 8 compliance docs contained invented regulator addresses (F8-9) | Playbooks must have zero hardcoded addresses/phones; all contact points from env config |
-| **Silent fallbacks for payments** | Wave 9 payout executor silently fell back to "manual review" (W9-Q5) | Payouts/insurance claims either succeed with real transaction ID or throw honest error |
-| **Telemetry hallucination** | Wave 8 agent dashboards extrapolated trends from thin data (F8-12) | Forecasts require minimum data window; below threshold → explicitly say so |
+## C5 — Vendors + Embedded Payouts API + search/gateway (P1-7, P1-8) — TS + OpenSearch + APISIX/OpenAppSec
+Files (own): `server/routers/vendors.ts`, `server/routers/embeddedPayouts.ts`, `server/services/searchIndexer.ts`, `deploy/apisix/routes-wave10.yaml`, `deploy/openappsec/profile-wave10.yaml`. Mounts `vendors`, `embeddedPayouts` in routers.ts.
+- vendors.ts: vendor CRUD (tenant-scoped; TOTP step-up on payout-method change), KYB doc upload (Wave-9 allowlist), tax fields (tin, whtRate, taxDocStatus), open balance (computed from vendor_bills), payment history; index via searchIndexer.
+- embeddedPayouts.ts: partner-scoped API (auth = existing partnerApiKeys pattern from partnerApplications.ts + HMAC body signature with PAYOUTS_API_HMAC_SECRET, constant-time): POST /payouts (idempotency_key UNIQUE; payee inline or vendorId; corridor→rail resolution: mojaloop FSP / mobile money / stablecoin / bank; sanctions screening via the EXISTING fail-closed screening used by transferCore — polyglotClient.screenSanctions throws on failure since Wave 7; TB hold from partner float account; statuses per vocab; webhook delivery to partner with HMAC via existing webhook infra), GET /payouts/:id, GET /corridors (honest available rails + speed tiers via quoteSpeedTiers).
+- searchIndexer.ts: `indexVendorBill/indexInvoice/indexVendor` upserts to OpenSearch (`{OPENSEARCH_URL}/<index>/_doc/<id>`; fail-soft warn on write — search is non-critical; READS must fall back to DB, never fabricate results); Kafka consumer for the 3 topics (reuse repo kafka consumer pattern; if none, expose `startSearchIndexer()` boot-registered in `_core/index.ts` like startStablecoinSchedulers).
+- APISIX routes-wave10.yaml: public `/pl/*` → paymentLinks (rate-limit + OpenAppSec), `/partner/v1/*` → embeddedPayouts (key-auth + HMAC), `/services/bill-capture` + `/services/accounting-sync` internal-only. OpenAppSec profile-wave10.yaml: WAF rules for the two public surfaces.
 
-## Constraints
+## C6 — Lakehouse + geo analytics — Rust + Python + infra
+Files (own): `services/rust-lakehouse-writer/**` (Cargo), `services/python-geo-analytics/**` (:8114), `deploy/lakehouse/**`, `docker-compose.wave10.yml`.
+- rust-lakehouse-writer: Fluvio consumer (`fluvio` crate) on `ledger-events-bronze` + `bill-capture-extracted` → Parquet (arrow2/parquet crate) partitioned `lake/bronze/<topic>/dt=YYYY-MM-DD/part-<ts>.parquet`; FLUVIO_ENDPOINT + LAKE_DIR from env, fail closed; batch flush every N msgs or T seconds; metrics :9115.
+- python-geo-analytics: stdlib service: POST /corridor-coverage (TS callback supplies agent/partner/corridor data → coverage stats; GeoLibre `geolib` import guarded — unavailable → core stats computed, geo fields null + warn; NEVER fabricate geo data); `deploy/lakehouse/sedona_queries.sql` with Apache Sedona SQL (ST_Distance/ST_Within) for corridor-density analysis over the bronze lakehouse; existing drizzle tables `operational_geo_locations`/`operational_geo_corridors` are the relational side; GET /health.
+- docker-compose.wave10.yml: add opensearch + fluvio if ABSENT from the existing compose (check first; extend, never duplicate), lakehouse volume, healthchecks; must not break existing services.
 
-1. **No fake data:** Never invent balances, rates, APY, payouts, uptime, agent earnings, or regulator contacts. If a dependency is missing, return explicit failure.
-2. **Real ledger only:** All financial state transitions (fees, savings, escrow, payouts) MUST write to the transactional ledger (TigerBeetle or Postgres with idempotency keys). No in-memory "wallets" for money movement.
-3. **Audit trail:** Every opt-in, payout, claim, tier change, and playbook execution MUST emit an immutable audit log entry with hash-chaining.
-4. **Test coverage:** Each feature ships with tests that verify the honest behavior: missing config → explicit error, insufficient data → explicit message, ledger write failure → rollback + error.
-5. **Security boundary:** No new auth/crypto surfaces. OQ-01 (biometric HMAC) remains open; Wave 10 features do NOT add biometric dependencies.
-6. **Config-driven:** All external endpoints (insurance partner, SLA telemetry source, regulator calendar feeds) come from environment configuration with schema validation at startup; missing config → fail fast at boot, not at request time.
+## Verification (Wave 10-V)
+Two adversarial verifiers: (1) money-flow falsification (status machines, atomicity, step-ups, idempotency, screening fail-closed, chargeback-hold logic); (2) integration reality (every new env/service call fails closed unconfigured; no fabricated statuses; mounts correct; schema-real writes; events actually emitted; esbuild/py_compile pass; Go/Rust structural review R1).
 
-## Success Criteria
-
-A feature is "done" when:
-1. It passes its audit: a hostile reviewer cannot find a fabricated number, phantom payout, or silent fallback.
-2. Missing dependencies produce explicit, actionable errors (not 500s with stack traces, not silent empty states).
-3. All money movements are idempotent, ledger-backed, and auditable.
-4. Integration tests prove the honest-failure paths, not just the happy path.
-5. The feature is demoable end-to-end with real config (or with a stub that loudly identifies itself as a stub).
+## Merge order: C1 → C2 → C3 → C4 → C5 → C6 (routers.ts hunk conflicts resolved by orchestrator).
