@@ -250,7 +250,6 @@ export class MockLiquidityProvider implements LiquidityProvider {
           estimatedSettlement: "N/A",
         };
       }
-
       this.poolBalances[params.stablecoin] = pool - stablecoinAmount;
     } else {
       this.poolBalances[params.stablecoin] = (this.poolBalances[params.stablecoin] ?? 0) + stablecoinAmount;
