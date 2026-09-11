@@ -48,6 +48,39 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_init_fail_soft_when_sdk_disabled() {
+        // OTEL_SDK_DISABLED=true must yield a disabled guard without panicking —
+        // the bridge keeps serving money paths with logs only, and /health
+        // reports "telemetry": false. This is the fail-soft contract.
+        std::env::set_var("OTEL_SDK_DISABLED", "true");
+        let guard = crate::telemetry::init();
+        assert!(
+            !crate::telemetry::telemetry_enabled(),
+            "OTEL_SDK_DISABLED=true must disable telemetry"
+        );
+        guard.shutdown();
+        assert!(
+            !crate::telemetry::telemetry_enabled(),
+            "shutdown must leave telemetry disabled"
+        );
+        std::env::remove_var("OTEL_SDK_DISABLED");
+    }
+
+    #[test]
+    fn transfer_kind_classifies_two_phase_flags() {
+        use crate::{
+            transfer_kind, TRANSFER_FLAG_PENDING, TRANSFER_FLAG_POST_PENDING,
+            TRANSFER_FLAG_VOID_PENDING,
+        };
+        assert_eq!(transfer_kind(TRANSFER_FLAG_PENDING), "pending");
+        assert_eq!(transfer_kind(TRANSFER_FLAG_POST_PENDING), "post");
+        assert_eq!(transfer_kind(TRANSFER_FLAG_VOID_PENDING), "void");
+        assert_eq!(transfer_kind(0), "standard");
+        // LINKED (1) without a two-phase flag is still a standard transfer.
+        assert_eq!(transfer_kind(1), "standard");
+    }
+
+    #[test]
     fn op_error_serializes_to_ts_contract_shape() {
         // TS consumes `Number(err.code)` — code must be the NUMERIC
         // TigerBeetle result code, with the human name carried by `reason`.

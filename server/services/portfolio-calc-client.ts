@@ -1,9 +1,12 @@
 /**
  * RemitFlow Portfolio Calculator Client
- * Typed HTTP client for the Rust portfolio-calc microservice (port 8088)
+ *
+ * Wave 7 (C10): NO portfolio-calc service exists anywhere in services/ — the
+ * old target was a phantom. Every method now throws UNAVAILABLE ("service not
+ * deployed"); health() honestly reports offline.
  */
 
-const PORTFOLIO_CALC_BASE = process.env.PORTFOLIO_CALC_URL ?? "http://localhost:8088";
+const NOT_DEPLOYED = "portfolio-calc service not deployed";
 
 export interface HoldingInput {
   symbol: string;
@@ -115,41 +118,24 @@ export interface DcaResponse {
   }>;
 }
 
-async function calcFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const url = `${PORTFOLIO_CALC_BASE}${path}`;
-  const res = await fetch(url, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options?.headers ?? {}) },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Portfolio calc error ${res.status}: ${body}`);
-  }
-  return res.json() as Promise<T>;
+function unavailable<T>(method: string): Promise<T> {
+  return Promise.reject(new Error(`UNAVAILABLE: ${NOT_DEPLOYED} — portfolioCalcClient.${method} cannot be served`));
 }
 
 export const portfolioCalcClient = {
-  /** Full portfolio analysis: P&L, allocation, risk metrics, rebalancing */
-  analyze: (req: PortfolioRequest): Promise<PortfolioAnalysis> =>
-    calcFetch<PortfolioAnalysis>("/analyze", {
-      method: "POST",
-      body: JSON.stringify(req),
-    }),
+  /** Full portfolio analysis — service not deployed, always throws */
+  analyze: (_req: PortfolioRequest): Promise<PortfolioAnalysis> =>
+    unavailable("analyze()"),
 
-  /** Calculate returns for a single position */
-  calcReturns: (req: ReturnCalcRequest): Promise<ReturnCalcResponse> =>
-    calcFetch<ReturnCalcResponse>("/returns", {
-      method: "POST",
-      body: JSON.stringify(req),
-    }),
+  /** Calculate returns for a single position — service not deployed, always throws */
+  calcReturns: (_req: ReturnCalcRequest): Promise<ReturnCalcResponse> =>
+    unavailable("calcReturns()"),
 
-  /** Project DCA (Dollar-Cost Averaging) outcomes */
-  dcaProjection: (req: DcaRequest): Promise<DcaResponse> =>
-    calcFetch<DcaResponse>("/dca", {
-      method: "POST",
-      body: JSON.stringify(req),
-    }),
+  /** Project DCA outcomes — service not deployed, always throws */
+  dcaProjection: (_req: DcaRequest): Promise<DcaResponse> =>
+    unavailable("dcaProjection()"),
 
-  /** Health check */
-  health: (): Promise<{ status: string }> => calcFetch("/health"),
+  /** Health check — honest: the service does not exist, always offline */
+  health: (): Promise<{ status: string }> =>
+    Promise.resolve({ status: "offline" }),
 };
