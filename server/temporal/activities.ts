@@ -11,6 +11,7 @@
  */
 
 import { activityInfo, heartbeat, log } from "@temporalio/activity";
+import { createHash } from "crypto";
 import { getDb } from "../db";
 import { transactions, wallets, users, kycDocuments } from "../../drizzle/schema";
 import { eq, and, sql } from "drizzle-orm";
@@ -147,16 +148,102 @@ export async function releaseFundsActivity(
 ): Promise<void> {
   log.info("Releasing reserved funds (compensation)", { walletId });
   const db = await getDb();
-  if (!db) return;
+  // Fail closed: a missing DB must NOT silently skip compensation (the
+  // reservation would stay locked forever) — throw so Temporal retries.
+  if (!db) throw new Error("Database unavailable — release compensation cannot run (Temporal will retry)");
 
   const totalDeduct = input.amount + input.fee;
-  await db.execute(
-    sql`UPDATE wallets SET 
-        balance = balance + ${totalDeduct}, 
-        locked_balance = GREATEST(0, locked_balance - ${totalDeduct})
-        WHERE id = ${walletId}`
-  );
-  log.info("Funds released", { walletId, amount: totalDeduct });
+  // W12 audit fixes:
+  //  (a) Correct column: the real wallets column is "lockedBalance"
+  //      (drizzle/schema.ts wallets; baseline DDL 0000:4476) — the previous
+  //      raw SQL targeted locked_balance, which does NOT exist on wallets, so
+  //      every compensation attempt ERRORED and reserved funds stayed locked.
+  //  (b) PER-RESERVATION idempotency record (gate follow-up): the aggregate
+  //      guard `"lockedBalance" >= totalDeduct` alone was NOT sufficient — a
+  //      SECOND in-flight reservation on the same wallet can keep that
+  //      predicate true, letting a replayed release draw down the OTHER
+  //      reservation's lock (double release → created spendable balance).
+  //      reserveFundsActivity never threads its reservationId here, but
+  //      TransferInput.idempotencyKey IS threaded and is the stable
+  //      per-transfer (hence per-reservation) identifier. We therefore keep a
+  //      release ledger record keyed REL-<sha256(idempotencyKey)[:24]> in the
+  //      transactions table (type 'refund' — funds honestly returned to
+  //      available balance). Record + release commit in ONE db.transaction
+  //      behind a per-key advisory xact lock (transactions.reference has no
+  //      unique constraint — the lock + in-tx lookup is the arbiter, same
+  //      pattern as the PayPal/Flutterwave top-up credits). A replay finds
+  //      the record and is a VERIFIED no-op regardless of the wallet's
+  //      aggregate lock state.
+  const releaseRef = `REL-${createHash("sha256").update(input.idempotencyKey).digest("hex").slice(0, 24)}`;
+  await db.transaction(async (tx: any) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${releaseRef}, 42))`);
+    const [prior] = await tx
+      .select({ id: transactions.id })
+      .from(transactions)
+      .where(and(eq(transactions.reference, releaseRef), eq(transactions.userId, input.userId), eq(transactions.type, "refund")))
+      .limit(1);
+    if (prior) {
+      log.info("Release already recorded for this reservation — verified idempotent no-op (cross-reservation replay closed)", { releaseRef, walletId });
+      return;
+    }
+    // Aggregate safety net beneath the per-reservation record: release ONLY
+    // while the lock still covers the amount.
+    const released = (await tx.execute(sql`
+      UPDATE wallets SET
+        balance = balance + ${totalDeduct},
+        "lockedBalance" = "lockedBalance" - ${totalDeduct},
+        "updatedAt" = NOW(),
+        version = version + 1
+      WHERE id = ${walletId}
+        AND "lockedBalance" >= ${totalDeduct}
+      RETURNING id
+    `)) as unknown as Array<{ id: number }>;
+    if (released.length > 0) {
+      await tx.insert(transactions).values({
+        userId: input.userId,
+        type: "refund" as any,
+        status: "completed" as any,
+        fromCurrency: input.fromCurrency,
+        fromAmount: totalDeduct.toFixed(2),
+        fee: "0",
+        description: `Saga compensation: released reserved funds (reservation key ${input.idempotencyKey})`,
+        reference: releaseRef,
+      } as any);
+      log.info("Funds released", { walletId, amount: totalDeduct, releaseRef });
+      return;
+    }
+    // 0 rows and no prior record: wallet missing, reservation consumed by
+    // executeTransferActivity, or an inconsistent lock state. Re-read and
+    // decide — never credit blindly, and record NOTHING (no release happened).
+    const [w] = await tx
+      .select({ lockedBalance: wallets.lockedBalance })
+      .from(wallets)
+      .where(eq(wallets.id, walletId))
+      .limit(1);
+    if (!w) {
+      // Wallet gone — cannot verify anything. Throw → tx rolls back → Temporal
+      // retries, then the workflow logs the compensation failure for manual ops.
+      throw new Error(`releaseFundsActivity: wallet ${walletId} not found — cannot verify release state`);
+    }
+    const locked = Number(w.lockedBalance ?? 0);
+    if (locked <= 0) {
+      // Lock fully drawn down: released before the record era (pre-fix) or the
+      // transfer executed and consumed the reservation. NO credit — that would
+      // double-pay.
+      log.info("Reservation already released/consumed — idempotent no-op", { walletId, lockedBalance: w.lockedBalance, releaseRef });
+      return;
+    }
+    // Partial lock residue (0 < locked < totalDeduct): inconsistent state —
+    // releasing only `locked` would strand money, releasing totalDeduct would
+    // create money. Fail closed: no credit, no record, surface for manual
+    // reconciliation.
+    log.error("releaseFundsActivity: partial lock residue — refusing to guess money movement; MANUAL RECONCILIATION REQUIRED", {
+      walletId,
+      lockedBalance: w.lockedBalance,
+      expectedRelease: totalDeduct,
+      releaseRef,
+    });
+  });
 }
 
 /**
@@ -255,33 +342,68 @@ export async function executeTransferActivity(
     return { transferId: `db-only-${input.idempotencyKey}`, status: "COMPLETED" as const, timestamp: new Date().toISOString() };
   });
 
-  // Write to PostgreSQL
-  const ref = `TRF${Date.now()}`;
-  await db.insert(transactions).values({
-    userId: input.userId,
-    type: "send",
-    status: "completed",
-    fromCurrency: input.fromCurrency,
-    fromAmount: input.amount.toString(),
-    toCurrency: input.toCurrency,
-    toAmount: input.toAmount.toFixed(2),
-    fee: input.fee.toFixed(2),
-    fxRate: input.fxRate.toFixed(6),
-    description: input.description ?? `Transfer to ${input.recipientName}`,
-    recipientName: input.recipientName,
-    recipientAccount: input.recipientAccount,
-    recipientBank: input.recipientBank,
-    recipientCountry: input.recipientCountry,
-    reference: ref,
-  } as any);
+  // Write to PostgreSQL.
+  // W12 audit fixes:
+  //  (a) DETERMINISTIC reference: `TRF${Date.now()}` changed on every Temporal
+  //      retry, so a commit-uncertain failure double-inserted the ledger row
+  //      and double-released the lock. The ref now derives from the workflow's
+  //      idempotency key and a lookup-before-write makes a retry a verified
+  //      no-op (transactions.reference is varchar(64) — 36 chars here).
+  const ref = `TRF-${createHash("sha256").update(input.idempotencyKey).digest("hex").slice(0, 32)}`;
+  const existing = await db
+    .select({ id: transactions.id })
+    .from(transactions)
+    .where(and(eq(transactions.reference, ref), eq(transactions.userId, input.userId)))
+    .limit(1);
+  if (existing.length > 0) {
+    log.info("Transfer already recorded — idempotent replay (no second insert, no second lock release)", { ref });
+    return { transactionRef: ref };
+  }
 
-  // Release locked balance
+  //  (b) ATOMICITY: the ledger-row insert and the reservation unlock commit in
+  //      ONE db.transaction — previously separate statements (crash between
+  //      them = completed transfer with funds still locked), and the unlock
+  //      targeted the non-existent `locked_balance` / `user_id` column names
+  //      (real: "lockedBalance" / "userId"), so EVERY attempt errored.
+  //  (c) The unlock is GUARDED: it only consumes a lock that still covers this
+  //      reservation — an unguarded GREATEST(0, …) could silently eat a LATER
+  //      reservation's locked funds. 0 rows → throw → whole tx rolls back.
   const totalDeduct = input.amount + input.fee;
-  await db.execute(
-    sql`UPDATE wallets SET 
-        locked_balance = GREATEST(0, locked_balance - ${totalDeduct})
-        WHERE user_id = ${input.userId} AND currency = ${input.fromCurrency}`
-  );
+  await db.transaction(async (tx: any) => {
+    await tx.insert(transactions).values({
+      userId: input.userId,
+      type: "send",
+      status: "completed",
+      fromCurrency: input.fromCurrency,
+      fromAmount: input.amount.toString(),
+      toCurrency: input.toCurrency,
+      toAmount: input.toAmount.toFixed(2),
+      fee: input.fee.toFixed(2),
+      fxRate: input.fxRate.toFixed(6),
+      description: input.description ?? `Transfer to ${input.recipientName}`,
+      recipientName: input.recipientName,
+      recipientAccount: input.recipientAccount,
+      recipientBank: input.recipientBank,
+      recipientCountry: input.recipientCountry,
+      reference: ref,
+    } as any);
+
+    const unlocked = (await tx.execute(sql`
+      UPDATE wallets SET
+        "lockedBalance" = "lockedBalance" - ${totalDeduct},
+        "updatedAt" = NOW(),
+        version = version + 1
+      WHERE "userId" = ${input.userId}
+        AND currency = ${input.fromCurrency}
+        AND "lockedBalance" >= ${totalDeduct}
+      RETURNING id
+    `)) as unknown as Array<{ id: number }>;
+    if (unlocked.length === 0) {
+      throw new Error(
+        `Reservation lock missing/insufficient for wallet user=${input.userId} currency=${input.fromCurrency} (need ${totalDeduct.toFixed(2)}) — refusing to record a settled transfer without consuming its reservation`,
+      );
+    }
+  });
 
   heartbeat("Transfer executed");
   log.info("Transfer executed", { ref, ledgerTransferId: ledgerResult.transferId });
@@ -312,15 +434,26 @@ export async function notifyRecipientActivity(
   };
   log.info("Transfer event published", event);
 
-  // DB notification
-  const db = await getDb();
-  if (db) {
-    await db.execute(
-      sql`INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
-          VALUES (${input.userId}, 'Transfer Sent', 
-          ${`Your transfer of ${input.amount.toLocaleString()} ${input.fromCurrency} to ${input.recipientName} is complete.`},
-          'transfer', false, NOW())`
-    );
+  // DB notification — W9-FIX3: real schema columns ("userId"/"isRead"/"createdAt"),
+  // enum-valid type 'transaction' ('transfer' is not in notifTypeEnum), and a
+  // try/catch: a notification failure must NEVER throw out of this activity for
+  // a completed transfer — Temporal would retry forever.
+  try {
+    const db = await getDb();
+    if (db) {
+      await db.execute(
+        sql`INSERT INTO notifications ("userId", title, message, type, "isRead", "createdAt")
+            VALUES (${input.userId}, 'Transfer Sent',
+            ${`Your transfer of ${input.amount.toLocaleString()} ${input.fromCurrency} to ${input.recipientName} is complete.`},
+            'transaction'::notif_type, false, NOW())`
+      );
+    }
+  } catch (err) {
+    log.warn("Notification insert failed (non-fatal — transfer already completed)", {
+      userId: input.userId,
+      ref: transactionRef,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -401,10 +534,12 @@ export async function documentExtractionActivity(
     : { verificationId: `mock-kyc-${input.userId}-${Date.now()}`, source: "mock" };
 
   // Update DB with processing status
+  // W9/Q9 (F14-5): kyc_doc_status enum is ["pending","under_review","approved","rejected"]
+  // — "processing" is rejected by Postgres; "under_review" preserves the semantics.
   const db = await getDb();
   if (db) {
     await db.update(kycDocuments)
-      .set({ status: "processing" } as any)
+      .set({ status: "under_review" })
       .where(eq(kycDocuments.id, input.kycDocId));
   }
 
@@ -668,30 +803,64 @@ export async function executeRecurringPaymentActivity(
       return { success: false, error: `Insufficient balance: ${wallet.balance} < ${totalDeduct}` };
     }
 
-    // Pessimistic debit
-    const [debitedRecurring] = await db.update(wallets)
-      .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) - ${totalDeduct} AS VARCHAR)` })
-      .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${totalDeduct}`))
-      .returning();
-    if (!debitedRecurring) throw new Error(`Insufficient balance (concurrent update)`);;
+    // W12-FIX (gate): DETERMINISTIC per-occurrence reference. The previous
+    // `REC${Date.now()}` changed on every Temporal retry, so a commit-uncertain
+    // failure (debit+insert committed, outcome lost) double-debited on retry.
+    // RecurringPaymentInput carries NO idempotency key or occurrence id, so
+    // the retry-stable identifier comes from the Temporal activity context:
+    // workflowExecution.runId (unique per workflow RUN — a restarted
+    // `recurring-<scheduleId>` run can reuse activityId sequence numbers, so
+    // workflowId alone is not enough) + activityId (unique per loop
+    // occurrence within a run, constant across retries of the SAME activity
+    // execution). This activity has no non-Temporal callers (verified: only
+    // RecurringPaymentWorkflow invokes it), so activityInfo() always has a
+    // context.
+    const info = activityInfo();
+    const ref = `REC-${createHash("sha256")
+      .update(`${info.workflowExecution.runId}:${info.activityId}`)
+      .digest("hex")
+      .slice(0, 32)}`;
+    // Lookup-before-write: a retry of a committed occurrence is a verified
+    // no-op (returns the recorded ref), never a second debit.
+    const [existingRec] = await db
+      .select({ id: transactions.id })
+      .from(transactions)
+      .where(and(eq(transactions.reference, ref), eq(transactions.userId, input.userId), eq(transactions.type, "send")))
+      .limit(1);
+    if (existingRec) {
+      log.info("Recurring payment already recorded — idempotent replay (no second debit)", { ref, scheduleId: input.scheduleId });
+      return { success: true, transactionRef: ref };
+    }
 
-    // Record transaction
-    const ref = `REC${Date.now()}`;
-    await db.insert(transactions).values({
-      userId: input.userId,
-      type: "send",
-      status: "completed",
-      fromCurrency: input.fromCurrency,
-      fromAmount: input.amount.toString(),
-      toCurrency: input.toCurrency,
-      toAmount: input.amount.toString(),
-      fee: fee.toFixed(2),
-      description: input.description ?? `Recurring payment to ${input.recipientName}`,
-      recipientName: input.recipientName,
-      recipientAccount: input.recipientAccount,
-      recipientBank: input.recipientBank,
-      reference: ref,
-    } as any);
+    // W12: guarded debit AND the ledger-row insert commit in ONE
+    // db.transaction — previously separate statements, so a crash/failure
+    // after the debit left the wallet debited with NO transaction record
+    // (money vanished from the user's perspective).
+    await db.transaction(async (tx: any) => {
+      // Pessimistic guarded debit (optimistic balance guard + row-count check)
+      const [debitedRecurring] = await tx.update(wallets)
+        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) - ${totalDeduct} AS VARCHAR)` })
+        .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${totalDeduct}`))
+        .returning();
+      if (!debitedRecurring) throw new Error(`Insufficient balance (concurrent update)`);
+
+      // Record transaction (same tx — rolls back with the debit on failure)
+      await tx.insert(transactions).values({
+        userId: input.userId,
+        type: "send",
+        status: "completed",
+        fromCurrency: input.fromCurrency,
+        fromAmount: input.amount.toString(),
+        toCurrency: input.toCurrency,
+        toAmount: input.amount.toString(),
+        fee: fee.toFixed(2),
+        description: input.description ?? `Recurring payment to ${input.recipientName}`,
+        recipientName: input.recipientName,
+        recipientAccount: input.recipientAccount,
+        recipientBank: input.recipientBank,
+        reference: ref,
+      } as any);
+    });
 
     log.info("Recurring payment executed", { ref, scheduleId: input.scheduleId });
     return { success: true, transactionRef: ref };

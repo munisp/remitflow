@@ -16,7 +16,7 @@
  *  12. Stablecoin insurance integration
  */
 
-import { randomUUID, randomBytes, createHmac, createHash } from "crypto";
+import { randomUUID, randomBytes, createHmac, createHash, timingSafeEqual } from "crypto";
 import { logger } from "./logger";
 import { getTemporalClient } from "./temporal";
 import { publishEvent, KAFKA_TOPICS, createKafkaConsumer } from "../middleware/kafka";
@@ -147,7 +147,11 @@ export function verifyOnRampWebhook(
     return true;
   }
   const expected = createHmac("sha256", secret).update(payload).digest("hex");
-  return signature === expected;
+  // W9/Q11: constant-time compare — length mismatch is invalid, never throws.
+  const sigBuf = Buffer.from(signature, "utf8");
+  const expBuf = Buffer.from(expected, "utf8");
+  if (sigBuf.length !== expBuf.length) return false;
+  return timingSafeEqual(sigBuf, expBuf);
 }
 
 export function processOnRampWebhook(event: OnRampWebhookEvent): {
