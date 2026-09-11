@@ -1,9 +1,13 @@
 /**
  * RemitFlow Investment ML Client
- * Typed HTTP client for the Python investment ML recommendation engine (port 8089)
+ *
+ * Wave 7 (C10): NO investment-ml service exists anywhere in services/ — the
+ * old target was a phantom whose fallback fabricated a constant risk score
+ * presented as personalized ML output. Every method now throws UNAVAILABLE
+ * ("service not deployed"); health() honestly reports offline.
  */
 
-const INVESTMENT_ML_BASE = process.env.INVESTMENT_ML_URL ?? "http://localhost:8089";
+const NOT_DEPLOYED = "investment-ml service not deployed";
 
 export interface HoldingInput {
   symbol: string;
@@ -92,41 +96,24 @@ export interface SentimentResponse {
   analyzed_at: string;
 }
 
-async function mlFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const url = `${INVESTMENT_ML_BASE}${path}`;
-  const res = await fetch(url, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options?.headers ?? {}) },
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Investment ML error ${res.status}: ${body}`);
-  }
-  return res.json() as Promise<T>;
+function unavailable<T>(method: string): Promise<T> {
+  return Promise.reject(new Error(`UNAVAILABLE: ${NOT_DEPLOYED} — investmentMlClient.${method} cannot be served`));
 }
 
 export const investmentMlClient = {
-  /** Get AI-driven investment recommendations for a user */
-  recommend: (req: RecommendRequest): Promise<RecommendResponse> =>
-    mlFetch<RecommendResponse>("/recommend", {
-      method: "POST",
-      body: JSON.stringify(req),
-    }),
+  /** AI-driven recommendations — service not deployed, always throws */
+  recommend: (_req: RecommendRequest): Promise<RecommendResponse> =>
+    unavailable("recommend()"),
 
-  /** Score a user's investment risk profile */
-  scoreRisk: (req: RiskScoreRequest): Promise<RiskScoreResponse> =>
-    mlFetch<RiskScoreResponse>("/score-risk", {
-      method: "POST",
-      body: JSON.stringify(req),
-    }),
+  /** Risk profile scoring — service not deployed, always throws */
+  scoreRisk: (_req: RiskScoreRequest): Promise<RiskScoreResponse> =>
+    unavailable("scoreRisk()"),
 
-  /** Get sentiment analysis for a list of symbols */
-  getSentiment: (req: SentimentRequest): Promise<SentimentResponse> =>
-    mlFetch<SentimentResponse>("/sentiment", {
-      method: "POST",
-      body: JSON.stringify(req),
-    }),
+  /** Sentiment analysis — service not deployed, always throws */
+  getSentiment: (_req: SentimentRequest): Promise<SentimentResponse> =>
+    unavailable("getSentiment()"),
 
-  /** Health check */
-  health: (): Promise<{ status: string }> => mlFetch("/health"),
+  /** Health check — honest: the service does not exist, always offline */
+  health: (): Promise<{ status: string }> =>
+    Promise.resolve({ status: "offline" }),
 };

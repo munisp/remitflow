@@ -1,0 +1,61 @@
+# APISIX Observability Global Rules — RemitFlow (W11-C1)
+# ─────────────────────────────────────────────────────────────────────────────
+# Target image: apache/apisix:3.9.0-debian (docker-compose.yml:1076).
+# ONLY STOCK PLUGINS — same discipline as deploy/apisix/routes-wave10.yaml.
+#
+# Two global rules, applied via the Admin API (they are data-plane state, not
+# config-file state — same application path as routes-wave10.yaml):
+#
+#   1. prometheus     — enables metric collection on every request. The export
+#                       server itself is configured in config.yaml plugin_attr
+#                       (services/gateway-config/apisix.yaml:55-61 — already
+#                       present, :9091, path /apisix/prometheus/metrics) and
+#                       scraped by the collector + Prometheus.
+#
+#   2. opentelemetry  — exports one trace span per gateway request to the
+#                       OTel collector at http://otel-collector:4318 (OTLP/HTTP)
+#                       using the stock batch_span_processor.
+#
+# PREREQUISITE (honest gap, one line, owned by the gateway track):
+#   The opentelemetry plugin is NOT currently in the `plugins:` allow-list of
+#   services/gateway-config/apisix.yaml (that file enables 60+ stock plugins,
+#   including prometheus at :113, but not opentelemetry). APISIX refuses to
+#   run a plugin absent from that list. Add exactly one line to that file:
+#       plugins:
+#         ...
+#         - opentelemetry
+#   See deploy/apisix/config-plugin-enable-snippet.yaml for the full diff.
+#
+# Apply (same pattern as services/gateway-config/apply-stablecoin-routes.py):
+#   curl -X PUT "http://127.0.0.1:9180/apisix/admin/global_rules/observability-tracing" \
+#        -H "X-API-KEY: $APISIX_ADMIN_KEY" -d @global-rule-opentelemetry.json
+#   (render from the YAML below; ids kept stable for idempotent re-apply)
+
+global_rules:
+  # ── Gateway → collector tracing ──────────────────────────────────────────
+  - id: observability-tracing
+    plugins:
+      opentelemetry:
+        # Trace-ID propagation is automatic (W3C traceparent); the TS core
+        # (server/telemetry/otel.ts) continues the same trace via OTLP.
+        sampler:
+          name: trace_id_ratio
+          options:
+            fraction: 0.5        # gateway layer samples 50%; TS core re-samples
+        collector:
+          address: otel-collector:4318   # OTLP/HTTP receiver (docker-compose.observability.yml)
+          request_timeout: 3
+        batch_span_processor:
+          drop_on_queue_full: false
+          max_queue_size: 2048
+          batch_timeout: 5
+          inactive_timeout: 2
+          max_export_batch_size: 512
+        additional_attributes:
+          - deployment=remitflow
+
+  # ── Gateway request metrics (export server already configured) ───────────
+  - id: observability-metrics
+    plugins:
+      prometheus:
+        prefer_name: true        # metric names carry route/service names, not ids
