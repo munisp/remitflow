@@ -49,16 +49,40 @@ function fromScaled(value: bigint, precision: number): string {
   return `${negative ? "-" : ""}${whole}.${fraction}`;
 }
 
-/** Safely parse an external amount for non-persistence display calculations. */
-export function safeParseAmount(value: string | number | null | undefined): number {
-  if (value === null || value === undefined) return 0;
+/**
+ * Safely parse an external amount for non-persistence display calculations.
+ *
+ * FF-FIX: pass `{ unsigned: true }` in debit paths — sign-bearing or invalid
+ * input then returns NaN (never a negative number and never a silent 0), so
+ * callers must validate with Number.isFinite + `> 0` before any money movement.
+ */
+export function safeParseAmount(
+  value: string | number | null | undefined,
+  opts?: { unsigned?: boolean }
+): number {
+  if (value === null || value === undefined) return opts?.unsigned ? NaN : 0;
   try {
     const normalized = normalizeInput(value);
+    if (opts?.unsigned && /^[+-]/.test(normalized)) return NaN;
     const parsed = Number(normalized);
-    return Number.isFinite(parsed) ? parsed : 0;
+    if (!Number.isFinite(parsed)) return opts?.unsigned ? NaN : 0;
+    if (opts?.unsigned && parsed < 0) return NaN;
+    return parsed;
   } catch {
-    return 0;
+    return opts?.unsigned ? NaN : 0;
   }
+}
+
+/**
+ * Parse an amount that MUST be a finite, unsigned, strictly-positive number.
+ * Throws on any violation — use in debit paths instead of safeParseAmount.
+ */
+export function parsePositiveAmount(value: string | number | null | undefined, fieldName = "amount"): number {
+  const parsed = safeParseAmount(value, { unsigned: true });
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`Invalid positive amount for ${fieldName}: ${String(value)}`);
+  }
+  return parsed;
 }
 
 /** Add two amounts using fixed-point arithmetic. */
