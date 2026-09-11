@@ -1479,3 +1479,170 @@ export async function initV4Schema(db: any): Promise<void> {
       is_synthetic BOOLEAN NOT NULL DEFAULT false,
       flags JSONB DEFAULT '[]',
       recommendation TEXT NOT NULL,
+      analyzed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS document_fraud_checks (
+      id SERIAL PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      document_type TEXT NOT NULL,
+      issuing_country TEXT NOT NULL,
+      is_authentic BOOLEAN NOT NULL,
+      confidence_score NUMERIC(4,3) NOT NULL,
+      verdict TEXT NOT NULL,
+      checks_json JSONB NOT NULL,
+      analyzed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS edd_submissions (
+      id SERIAL PRIMARY KEY,
+      submission_id TEXT UNIQUE NOT NULL,
+      user_id TEXT NOT NULL,
+      source_of_wealth TEXT NOT NULL,
+      source_of_funds TEXT NOT NULL,
+      employer_name TEXT,
+      annual_income NUMERIC,
+      income_currency TEXT,
+      evidence_document_ids JSONB DEFAULT '[]',
+      additional_notes TEXT,
+      risk_level TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending_review',
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      reviewed_at TIMESTAMPTZ
+    );
+
+    CREATE TABLE IF NOT EXISTS onchain_transfers (
+      id SERIAL PRIMARY KEY,
+      tx_hash TEXT UNIQUE NOT NULL,
+      from_address TEXT NOT NULL,
+      to_address TEXT NOT NULL,
+      amount TEXT NOT NULL,
+      token_address TEXT,
+      chain TEXT NOT NULL,
+      status TEXT NOT NULL,
+      gas_used TEXT,
+      block_number BIGINT,
+      user_id TEXT NOT NULL,
+      explorer_url TEXT,
+      executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS insurance_claims (
+      id SERIAL PRIMARY KEY,
+      claim_id TEXT UNIQUE NOT NULL,
+      user_id TEXT NOT NULL,
+      policy_id TEXT NOT NULL,
+      incident_type TEXT NOT NULL,
+      incident_date TEXT NOT NULL,
+      affected_amount NUMERIC NOT NULL,
+      affected_currency TEXT NOT NULL,
+      description TEXT,
+      evidence_urls JSONB DEFAULT '[]',
+      status TEXT NOT NULL DEFAULT 'submitted',
+      nexus_claim_id TEXT,
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS transfer_simulations (
+      id SERIAL PRIMARY KEY,
+      simulation_id TEXT UNIQUE NOT NULL,
+      from_user_id TEXT NOT NULL,
+      to_user_id TEXT NOT NULL,
+      amount NUMERIC NOT NULL,
+      currency TEXT NOT NULL,
+      target_currency TEXT NOT NULL,
+      corridor TEXT NOT NULL,
+      rail TEXT,
+      would_succeed BOOLEAN NOT NULL,
+      steps_json JSONB NOT NULL,
+      fees_json JSONB NOT NULL,
+      fx_rate NUMERIC NOT NULL,
+      recipient_receives NUMERIC NOT NULL,
+      simulated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS routing_decisions (
+      id SERIAL PRIMARY KEY,
+      corridor TEXT NOT NULL,
+      amount NUMERIC NOT NULL,
+      currency TEXT NOT NULL,
+      selected_rail TEXT NOT NULL,
+      fallback_rails JSONB DEFAULT '[]',
+      reason TEXT,
+      decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS fx_hedges (
+      id SERIAL PRIMARY KEY,
+      hedge_id TEXT UNIQUE NOT NULL,
+      quote_id TEXT NOT NULL,
+      from_currency TEXT NOT NULL,
+      to_currency TEXT NOT NULL,
+      amount NUMERIC NOT NULL,
+      locked_rate NUMERIC NOT NULL,
+      lp_order_id TEXT,
+      hedged_amount NUMERIC NOT NULL DEFAULT 0,
+      spread_cost NUMERIC NOT NULL DEFAULT 0,
+      status TEXT NOT NULL,
+      hedged_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS dead_letter_queue (
+      id TEXT PRIMARY KEY,
+      original_topic TEXT NOT NULL,
+      payload JSONB NOT NULL,
+      error_message TEXT,
+      last_error TEXT,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      max_retries INTEGER NOT NULL DEFAULT 7,
+      next_retry_at TIMESTAMPTZ,
+      status TEXT NOT NULL DEFAULT 'pending',
+      resolved_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS reconciliation_results (
+      id SERIAL PRIMARY KEY,
+      balanced BOOLEAN NOT NULL,
+      total_debits TEXT NOT NULL,
+      total_credits TEXT NOT NULL,
+      discrepancy_count INTEGER NOT NULL DEFAULT 0,
+      reconciled_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_synthetic_identity_applicant ON synthetic_identity_checks(applicant_id);
+    CREATE INDEX IF NOT EXISTS idx_document_fraud_document ON document_fraud_checks(document_id);
+    CREATE INDEX IF NOT EXISTS idx_edd_user ON edd_submissions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_onchain_user ON onchain_transfers(user_id);
+    CREATE INDEX IF NOT EXISTS idx_onchain_chain ON onchain_transfers(chain);
+    CREATE INDEX IF NOT EXISTS idx_insurance_user ON insurance_claims(user_id);
+    CREATE INDEX IF NOT EXISTS idx_dlq_retry ON dead_letter_queue(next_retry_at) WHERE status = 'pending';
+    CREATE INDEX IF NOT EXISTS idx_routing_corridor ON routing_decisions(corridor);
+    CREATE INDEX IF NOT EXISTS idx_fx_hedges_quote ON fx_hedges(quote_id);
+  `);
+}
+
+// ── Exports ─────────────────────────────────────────────────────────────────
+
+export const platformV4 = {
+  // KYC/KYB
+  detectSyntheticIdentity,
+  verifyDocumentAuthenticity,
+  submitEDDInformation,
+  // Stablecoins
+  executeOnChainTransfer,
+  submitInsuranceClaim,
+  // Flow of Funds
+  simulateTransfer,
+  selectRailWithFailover,
+  hedgeFxRateLock,
+  processDLQ,
+  // Middleware
+  registerFluvioSmartModules,
+  applyOpenSearchLifecyclePolicies,
+  triggerLakehousePipeline,
+  syncAPISixRoutes,
+  reconcileTigerBeetle,
+  // Schema
+  initV4Schema,
+};
