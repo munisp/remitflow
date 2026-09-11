@@ -76,6 +76,11 @@ def _require_env(name: str) -> str:
 DATABASE_URL = _require_env("DATABASE_URL")
 # Fail-closed: no default token. Every report endpoint requires this token.
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+if not INTERNAL_API_TOKEN:
+    raise RuntimeError(
+        "INTERNAL_API_TOKEN is not set: refusing to start — an unset token would "
+        "crash request handling with TypeError instead of a clean 401. Configure it explicitly."
+    )
 INSTITUTION_NAME = os.getenv("INSTITUTION_NAME", "RemitFlow Financial Services")
 INSTITUTION_EIN = os.getenv("INSTITUTION_EIN", "XX-XXXXXXX")
 INSTITUTION_ADDRESS = os.getenv("INSTITUTION_ADDRESS", "123 Financial District, New York, NY 10004")
