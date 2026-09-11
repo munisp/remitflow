@@ -142,6 +142,10 @@ type LedgerService struct {
 	tbAddresses  []string
 	tbClusterID  uint64
 	mu           sync.RWMutex
+	// eventPersistFailures/lastEventPersistErr surface ledger_events insert
+	// failures (F12): the event/audit stream must never fail open silently.
+	eventPersistFailures int64
+	lastEventPersistErr  string
 }
 
 // ─── Amount Conversion (integer cents × 10^6 for precision) ──────────────────
@@ -234,41 +238,64 @@ func initDB() *sql.DB {
 
 // ─── Kafka Event Publishing ──────────────────────────────────────────────────
 
-func (s *LedgerService) publishEvent(eventType, transferID string, payload map[string]interface{}) {
+// publishEvent persists the event to ledger_events. FAIL VISIBLE: a persist
+// failure is returned to the caller AND degrades the service health endpoint —
+// it is never silently swallowed (F12).
+func (s *LedgerService) publishEvent(eventType, transferID string, payload map[string]interface{}) error {
 	payloadJSON, _ := json.Marshal(payload)
 	_, err := s.db.Exec(
 		"INSERT INTO ledger_events (event_type, transfer_id, payload) VALUES ($1, $2, $3)",
 		eventType, transferID, string(payloadJSON),
 	)
 	if err != nil {
-		log.Printf("[ledger-service] Event persist failed: %v", err)
+		log.Printf("[ledger-service] ERROR: event persist failed (event=%s transfer=%s): %v — event stream degraded", eventType, transferID, err)
+		s.mu.Lock()
+		s.eventPersistFailures++
+		s.lastEventPersistErr = err.Error()
+		s.mu.Unlock()
+		return fmt.Errorf("event persist failed: %w", err)
 	}
 	log.Printf("[Kafka] Publishing to TIGERBEETLE_OPERATIONS: %s (transfer=%s)", eventType, transferID)
+	return nil
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 func (s *LedgerService) handleHealth(w http.ResponseWriter, r *http.Request) {
 	pgOK := s.db.Ping() == nil
+	s.mu.RLock()
+	eventFailures := s.eventPersistFailures
+	lastEventErr := s.lastEventPersistErr
+	s.mu.RUnlock()
+	eventStreamDegraded := eventFailures > 0
+
 	status := "healthy"
-	if !pgOK {
+	if !pgOK || eventStreamDegraded {
 		status = "degraded"
 	}
 
 	resp := map[string]interface{}{
-		"status":                status,
-		"service":               "go-ledger-service",
-		"version":               "v2.0.0-production",
-		"tigerbeetle_connected": true,
-		"postgres_connected":    pgOK,
-		"kafka_connected":       true,
-		"fail_closed":           s.isProduction,
-		"two_phase_enabled":     true,
-		"dapr_enabled":          true,
-		"temporal_enabled":      true,
-		"timestamp":             time.Now().UTC().Format(time.RFC3339),
+		"status":                  status,
+		"service":                 "go-ledger-service",
+		"version":                 "v2.0.0-production",
+		"tigerbeetle_connected":   true,
+		"postgres_connected":      pgOK,
+		"kafka_connected":         true,
+		"event_stream_degraded":   eventStreamDegraded,
+		"event_persist_failures":  eventFailures,
+		"last_event_persist_error": lastEventErr,
+		"fail_closed":             s.isProduction,
+		"two_phase_enabled":       true,
+		"dapr_enabled":            true,
+		"temporal_enabled":        true,
+		"timestamp":               time.Now().UTC().Format(time.RFC3339),
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if eventStreamDegraded {
+		// Mark unhealthy so orchestrators alert/restart: ledger events are
+		// being acknowledged to callers while not persisted (F12).
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
 	json.NewEncoder(w).Encode(resp)
 }
 
