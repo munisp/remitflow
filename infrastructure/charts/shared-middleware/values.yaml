@@ -48,20 +48,20 @@ dapr:
 # (os.Getenv / env::var / os.getenv across shared-middleware's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install shared-middleware infrastructure/charts/shared-middleware \
 #     -n 54remit -f infrastructure/values-secrets/shared-middleware.yaml
 # (a gitignored, per-environment file).
 secrets:
-  APISIX_ADMIN_URL: "CHANGE_ME"
+  APISIX_ADMIN_URL: ""  # REQUIRED
   DAPR_HTTP_PORT: "3500"
-  FLUVIO_GATEWAY_URL: "CHANGE_ME"
-  INTERNAL_SERVICE_KEY: "CHANGE_ME"
+  FLUVIO_GATEWAY_URL: ""  # REQUIRED
+  INTERNAL_SERVICE_KEY: ""  # REQUIRED
   KAFKA_BROKERS: "kafka-service:9092"
-  KEYCLOAK_URL: "CHANGE_ME"
-  LAKEHOUSE_URL: "CHANGE_ME"
-  OPENSEARCH_URL: "CHANGE_ME"
-  PERMIFY_GRPC_ADDR: "CHANGE_ME"
-  REDIS_ADDR: "CHANGE_ME"
-  TEMPORAL_HOST_PORT: "CHANGE_ME"
-  TIGERBEETLE_ADDR: "CHANGE_ME"
+  KEYCLOAK_URL: ""  # REQUIRED
+  LAKEHOUSE_URL: ""  # REQUIRED
+  OPENSEARCH_URL: ""  # REQUIRED
+  PERMIFY_GRPC_ADDR: ""  # REQUIRED
+  REDIS_ADDR: ""  # REQUIRED
+  TEMPORAL_HOST_PORT: ""  # REQUIRED
+  TIGERBEETLE_ADDR: ""  # REQUIRED

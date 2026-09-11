@@ -1,0 +1,60 @@
+# RemitFlow — Grafana Loki log backend (W11-C1)
+# Image: grafana/loki:3.2.1 (schema v13 / TSDB — required by Loki 3.x)
+# Single-binary monolithic mode, filesystem storage on the loki-data volume.
+# Retention: 168h (7d) via compactor retention (delete requests API enabled).
+
+auth_enabled: false              # single-tenant compose profile; gateway enforces authz
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /var/loki
+  storage:
+    filesystem:
+      chunks_directory: /var/loki/chunks
+      rules_directory: /var/loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb                # Loki 3.x default index store
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+storage_config:
+  tsdb_shipper:
+    active_index_directory: /var/loki/tsdb-index
+    cache_location: /var/loki/tsdb-cache
+
+compactor:
+  working_directory: /var/loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+limits_config:
+  retention_period: 168h         # 7 days
+  ingestion_rate_mb: 8
+  ingestion_burst_size_mb: 16
+  max_label_name_length: 1024
+  # tenant.id / service.name come in as Loki labels from the collector's loki
+  # exporter via the loki.resource.labels hint — keep cardinality bounded:
+  max_label_names_per_series: 30
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+
+# NOTE: Loki >= 3.0 also accepts OTLP natively at /otlp/v1/logs; when the
+# collector is bumped past contrib 0.110.0 (where the loki exporter is
+# deprecated), switch the exporter to otlphttp without touching this file.
+analytics:
+  reporting_enabled: false

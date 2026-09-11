@@ -48,15 +48,15 @@ dapr:
 # (os.Getenv / env::var / os.getenv across rust-agent-reconciliation's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install rust-agent-reconciliation infrastructure/charts/rust-agent-reconciliation \
 #     -n 54remit -f infrastructure/values-secrets/rust-agent-reconciliation.yaml
 # (a gitignored, per-environment file).
 secrets:
-  CASH_OUT_ALERT_FLOOR_NGN: "CHANGE_ME"
-  DATABASE_URL: "CHANGE_ME"
-  HIGH_TX_COUNT_THRESHOLD: "CHANGE_ME"
-  LARGE_TX_THRESHOLD_NGN: "CHANGE_ME"
-  MAJOR_DISCREPANCY_PCT: "CHANGE_ME"
-  MINOR_DISCREPANCY_PCT: "CHANGE_ME"
+  CASH_OUT_ALERT_FLOOR_NGN: ""  # REQUIRED
+  DATABASE_URL: ""  # REQUIRED
+  HIGH_TX_COUNT_THRESHOLD: ""  # REQUIRED
+  LARGE_TX_THRESHOLD_NGN: ""  # REQUIRED
+  MAJOR_DISCREPANCY_PCT: ""  # REQUIRED
+  MINOR_DISCREPANCY_PCT: ""  # REQUIRED
   PORT: "8098"

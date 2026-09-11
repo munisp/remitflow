@@ -48,17 +48,17 @@ dapr:
 # (os.Getenv / env::var / os.getenv across python-pix-adapter's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install python-pix-adapter infrastructure/charts/python-pix-adapter \
 #     -n 54remit -f infrastructure/values-secrets/python-pix-adapter.yaml
 # (a gitignored, per-environment file).
 secrets:
-  BCB_PIX_URL: "CHANGE_ME"
-  DATABASE_URL: "CHANGE_ME"
-  PIX_CERT_PATH: "CHANGE_ME"
-  PIX_CLIENT_ID: "CHANGE_ME"
-  PIX_CLIENT_SECRET: "CHANGE_ME"
-  PIX_INTERNAL_API_KEY: "CHANGE_ME"
-  PIX_ISPB: "CHANGE_ME"
-  PIX_KEY_PATH: "CHANGE_ME"
+  BCB_PIX_URL: ""  # REQUIRED
+  DATABASE_URL: ""  # REQUIRED
+  PIX_CERT_PATH: ""  # REQUIRED
+  PIX_CLIENT_ID: ""  # REQUIRED
+  PIX_CLIENT_SECRET: ""  # REQUIRED
+  PIX_INTERNAL_API_KEY: ""  # REQUIRED
+  PIX_ISPB: ""  # REQUIRED
+  PIX_KEY_PATH: ""  # REQUIRED
   PORT: "8080"

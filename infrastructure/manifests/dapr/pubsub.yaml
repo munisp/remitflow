@@ -20,10 +20,11 @@ metadata:
   namespace: 54remit
 type: Opaque
 stringData:
-  # CHANGE_ME — replace with the real Redis password (or delete and use the
-  # ExternalSecret sketched above). ROTATE: this value previously existed in
-  # plaintext in this file's git history and must be considered compromised.
-  redis-password: "CHANGE_ME_ROTATE_REQUIRED"
+  # REQUIRED — set the real Redis password via --set / a secrets manager (or
+  # delete and use the ExternalSecret sketched above). ROTATE: this value
+  # previously existed in plaintext in this file's git history and must be
+  # considered compromised.
+  redis-password: ""
 ---
 apiVersion: dapr.io/v1alpha1
 kind: Component

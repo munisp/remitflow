@@ -48,17 +48,17 @@ dapr:
 # (os.Getenv / env::var / os.getenv across kyc-event-consumer's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install kyc-event-consumer infrastructure/charts/kyc-event-consumer \
 #     -n 54remit -f infrastructure/values-secrets/kyc-event-consumer.yaml
 # (a gitignored, per-environment file).
 secrets:
-  CONSUMER_GROUP: "CHANGE_ME"
+  CONSUMER_GROUP: ""  # REQUIRED
   DAPR_HTTP_PORT: "3500"
-  DATABASE_URL: "CHANGE_ME"
+  DATABASE_URL: ""  # REQUIRED
   KAFKA_BROKERS: "kafka-service:9092"
   PORT: "8120"
-  REDIS_URL: "CHANGE_ME"
-  TEMPORAL_NAMESPACE: "CHANGE_ME"
-  TEMPORAL_TASK_QUEUE: "CHANGE_ME"
-  TEMPORAL_URL: "CHANGE_ME"
+  REDIS_URL: ""  # REQUIRED
+  TEMPORAL_NAMESPACE: ""  # REQUIRED
+  TEMPORAL_TASK_QUEUE: ""  # REQUIRED
+  TEMPORAL_URL: ""  # REQUIRED
