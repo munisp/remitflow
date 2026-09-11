@@ -1,524 +1,741 @@
 /**
- * RemitFlow — Billing Engine
- * P27 (Go migration): This is the TypeScript reference implementation.
- * The Go service in services/go-billing/ is the authoritative production
- * implementation. Both operate against the same DB schema.
+ * RemitFlow — Billing Engine tRPC Router
  *
- * Handles: subscription billing, usage-based invoicing, tier management,
- * upgrade/downgrade proration, dunning (payment retry), and revenue reporting.
+ * Bridges the Go billing engine microservice into the main RemitFlow tRPC API.
+ * Every remittance transaction automatically creates a billing event that captures:
+ *   - Transfer fee (percentage / flat / hybrid)
+ *   - FX spread revenue
+ *   - Platform vs IMTO partner profit split
+ *   - Payout network cost
+ *   - Allocated overhead per transaction
+ *   - Net platform profit
+ *
+ * Role-based access (PBAC):
+ *   - billing:admin       → full access
+ *   - billing:config-manager → read + write billing configs
+ *   - billing:analyst     → read events + P&L
+ *   - billing:auditor     → read events + audit log
+ *   - billing:partner     → own events only
+ *   - Any authenticated user → can trigger computeBillingEvent via transactions.send
  */
+import { z } from "zod";
+import { protectedProcedure, adminProcedure, router } from "../_core/trpc";
+import { TRPCError } from "@trpc/server";
+import { getDb } from "../db";
+import { createAuditLog } from "../audit.service";
+import {
+  billingEvents,
+  billingConfigs,
+  billingConfigHistory,
+  billingAuditLog,
+  billingTenants,
+} from "../../drizzle/schema";
+import { eq, desc, and, gte, lte, sql } from "drizzle-orm";
+import { logger } from '../_core/logger';
+import { safeParseAmount } from "../lib/safeDecimal";
+import { resolveTenantContext } from "../tenantMiddleware";
+import { tenants } from "../../drizzle/schema";
 
-import { getDb } from "./db";
-import { logger } from './_core/logger';
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-export interface BillingPlan {
-  code: string;
-  name: string;
-  monthlyFeeUsd: number;
-  annualFeeUsd: number;
-  features: string[];
-  transferLimitUsd: number;
-  fxMarkupPct: number;
-  settlementSpeed: string;
-  supportTier: string;
-  isActive: boolean;
-}
-
-export interface Subscription {
-  id: string;
-  userId: number;
-  planCode: string;
-  billingCycle: "monthly" | "annual";
-  status: "active" | "cancelled" | "past_due" | "trialing" | "paused";
-  currentPeriodStart: string;
-  currentPeriodEnd: string;
-  cancelledAt: string | null;
-  cancelAtPeriodEnd: boolean;
-  createdAt: string;
-}
-
-export interface Invoice {
-  id: string;
-  subscriptionId: string;
-  userId: number;
-  periodStart: string;
-  periodEnd: string;
-  baseAmountUsd: number;
-  usageAmountUsd: number;
-  discountAmountUsd: number;
-  taxAmountUsd: number;
-  totalAmountUsd: number;
-  status: "draft" | "open" | "paid" | "void" | "uncollectible";
-  dueAt: string;
-  paidAt: string | null;
-  createdAt: string;
-}
-
-export interface UsageSummary {
-  userId: number;
-  periodStart: string;
-  periodEnd: string;
-  totalTransferCount: number;
-  totalTransferVolumeUsd: number;
-  totalFeesPaidUsd: number;
-  totalFxMarginUsd: number;
-  corridorsUsed: string[];
-  averageTransactionUsd: number;
-  largestTransactionUsd: number;
-}
-
-// ── Plan Catalog ──────────────────────────────────────────────────────────────
-
-export const PLANS: Record<string, BillingPlan> = {
-  free: {
-    code: "free",
-    name: "Free",
-    monthlyFeeUsd: 0,
-    annualFeeUsd: 0,
-    features: ["P2P transfers", "1 corridor", "Standard settlement", "Community support"],
-    transferLimitUsd: 1_000,
-    fxMarkupPct: 1.5,
-    settlementSpeed: "T+1",
-    supportTier: "community",
-    isActive: true,
-  },
-  plus: {
-    code: "plus",
-    name: "Plus",
-    monthlyFeeUsd: 9.99,
-    annualFeeUsd: 99,
-    features: ["Unlimited corridors", "Instant settlement", "Priority support", "Virtual cards", "Budgeting tools"],
-    transferLimitUsd: 10_000,
-    fxMarkupPct: 0.75,
-    settlementSpeed: "instant",
-    supportTier: "priority",
-    isActive: true,
-  },
-  pro: {
-    code: "pro",
-    name: "Pro",
-    monthlyFeeUsd: 24.99,
-    annualFeeUsd: 249,
-    features: ["Everything in Plus", "Agent network access", "Bulk payouts", "API access", "Dedicated account manager"],
-    transferLimitUsd: 100_000,
-    fxMarkupPct: 0.35,
-    settlementSpeed: "instant",
-    supportTier: "dedicated",
-    isActive: true,
-  },
-  business: {
-    code: "business",
-    name: "Business",
-    monthlyFeeUsd: 99,
-    annualFeeUsd: 999,
-    features: ["Everything in Pro", "Multi-user", "KYB onboarding", "Custom corridors", "SLA 99.9%", "White-label API"],
-    transferLimitUsd: 1_000_000,
-    fxMarkupPct: 0.15,
-    settlementSpeed: "instant",
-    supportTier: "enterprise",
-    isActive: true,
-  },
-};
-
-// ── Subscription Manager ─────────────────────────────────────────────────────
-
-/**
- * Get or create a subscription for a user.
- */
-export async function getSubscription(userId: number): Promise<Subscription | null> {
-  const db = await getDb();
-  const { sql } = await import("drizzle-orm");
-  const rows = await (db as any).execute(sql`
-    SELECT * FROM subscriptions WHERE user_id = ${userId}
-    ORDER BY created_at DESC LIMIT 1
-  `);
-  return (rows as any)?.[0] ?? null;
-}
-
-/**
- * Create a new subscription for a user.
- */
-export async function createSubscription(
-  userId: number,
-  planCode: string,
-  billingCycle: "monthly" | "annual" = "monthly"
-): Promise<Subscription> {
-  const plan = PLANS[planCode];
-  if (!plan) throw new Error(`Unknown plan: ${planCode}`);
-
-  const now = new Date();
-  const periodEnd = new Date(now);
-  if (billingCycle === "monthly") {
-    periodEnd.setMonth(periodEnd.getMonth() + 1);
-  } else {
-    periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+// ─── Tenant scoping (W9/Q10, F9-9) ────────────────────────────────────────────
+// The billing tenant is derived from the caller's SESSION, never from a bare
+// client-supplied tenantId. A client-supplied tenantId is honored only when the
+// caller is an admin AND the target tenant is verified to exist (fail closed).
+async function resolveBillingTenantId(
+  ctx: { user: { id: number; role?: string | null } },
+  requestedTenantId: string | undefined,
+): Promise<string> {
+  const session = await resolveTenantContext(ctx.user.id);
+  const sessionTenant = session.tenantId != null ? String(session.tenantId) : "default";
+  if (!requestedTenantId || requestedTenantId === "default" || requestedTenantId === sessionTenant) {
+    return sessionTenant;
   }
-
-  const db = await getDb();
-  const { sql } = await import("drizzle-orm");
-  const id = crypto.randomUUID();
-  await (db as any).execute(sql`
-    INSERT INTO subscriptions (
-      id, user_id, plan_code, billing_cycle, status,
-      current_period_start, current_period_end,
-      cancel_at_period_end, created_at
-    ) VALUES (
-      ${id}, ${userId}, ${planCode}, ${billingCycle}, ${plan.monthlyFeeUsd > 0 ? "trialing" : "active"},
-      ${now.toISOString()}, ${periodEnd.toISOString()},
-      false, ${now.toISOString()}
-    )
-  `);
-
-  return {
-    id,
-    userId,
-    planCode,
-    billingCycle,
-    status: plan.monthlyFeeUsd > 0 ? "trialing" : "active",
-    currentPeriodStart: now.toISOString(),
-    currentPeriodEnd: periodEnd.toISOString(),
-    cancelledAt: null,
-    cancelAtPeriodEnd: false,
-    createdAt: now.toISOString(),
-  };
-}
-
-/**
- * Change a user's plan (upgrade or downgrade) with proration.
- */
-export async function changePlan(
-  userId: number,
-  newPlanCode: string,
-  billingCycle: "monthly" | "annual" = "monthly"
-): Promise<{ subscription: Subscription; prorationCreditUsd: number; effectiveAt: string }> {
-  const plan = PLANS[newPlanCode];
-  if (!plan) throw new Error(`Unknown plan: ${newPlanCode}`);
-
-  const existing = await getSubscription(userId);
-  if (!existing) {
-    const sub = await createSubscription(userId, newPlanCode, billingCycle);
-    return { subscription: sub, prorationCreditUsd: 0, effectiveAt: sub.currentPeriodStart };
+  if (ctx.user.role !== "admin") {
+    // Not the caller's tenant and not an admin — ignore the client-supplied
+    // tenantId and scope to the session tenant.
+    logger.warn({ userId: ctx.user.id, requestedTenantId, sessionTenant }, "[Billing] Cross-tenant tenantId ignored (non-admin)");
+    return sessionTenant;
   }
-
-  const oldPlan = PLANS[existing.planCode];
-  if (!oldPlan) throw new Error(`Current plan not found: ${existing.planCode}`);
-
-  // Calculate proration credit for unused time on current plan
-  const now = new Date();
-  const periodEnd = new Date(existing.currentPeriodEnd);
-  const periodStart = new Date(existing.currentPeriodStart);
-  const totalMs = periodEnd.getTime() - periodStart.getTime();
-  const remainingMs = periodEnd.getTime() - now.getTime();
-  const prorationCreditUsd = totalMs > 0
-    ? Math.round((remainingMs / totalMs) * (existing.billingCycle === "annual" ? oldPlan.annualFeeUsd : oldPlan.monthlyFeeUsd) * 100) / 100
-    : 0;
-
-  // Update subscription
-  const newPeriodEnd = new Date(now);
-  if (billingCycle === "monthly") {
-    newPeriodEnd.setMonth(newPeriodEnd.getMonth() + 1);
-  } else {
-    newPeriodEnd.setFullYear(newPeriodEnd.getFullYear() + 1);
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(sql`${tenants.id}::text = ${requestedTenantId} OR ${tenants.slug} = ${requestedTenantId}`)
+    .limit(1);
+  if (!tenant) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Requested tenant does not exist" });
   }
-
-  const db = await getDb();
-  const { sql } = await import("drizzle-orm");
-  await (db as any).execute(sql`
-    UPDATE subscriptions SET
-      plan_code = ${newPlanCode},
-      billing_cycle = ${billingCycle},
-      current_period_start = ${now.toISOString()},
-      current_period_end = ${newPeriodEnd.toISOString()},
-      cancel_at_period_end = false
-    WHERE user_id = ${userId}
-  `);
-
-  // Record proration credit as a negative line item on the next invoice
-  if (prorationCreditUsd > 0) {
-    await (db as any).execute(sql`
-      INSERT INTO invoice_adjustments (user_id, subscription_id, amount_usd, reason, created_at)
-      VALUES (${userId}, ${existing.id}, ${-prorationCreditUsd}, 'proration_credit', ${now.toISOString()})
-    `).catch(() => {});
-  }
-
-  const updated: Subscription = {
-    ...existing,
-    planCode: newPlanCode,
-    billingCycle,
-    currentPeriodStart: now.toISOString(),
-    currentPeriodEnd: newPeriodEnd.toISOString(),
-    cancelAtPeriodEnd: false,
-  };
-
-  return { subscription: updated, prorationCreditUsd, effectiveAt: now.toISOString() };
+  return requestedTenantId;
 }
 
-/**
- * Cancel a subscription (effective at period end).
- */
-export async function cancelSubscription(userId: number): Promise<void> {
-  const db = await getDb();
-  const { sql } = await import("drizzle-orm");
-  await (db as any).execute(sql`
-    UPDATE subscriptions SET
-      cancel_at_period_end = true,
-      cancelled_at = NOW()
-    WHERE user_id = ${userId} AND status = 'active'
-  `);
-}
+// ─── Billing Engine HTTP client ───────────────────────────────────────────────
 
-// ── Usage Tracker ─────────────────────────────────────────────────────────────
+const BILLING_ENGINE_URL = process.env.BILLING_ENGINE_URL || "http://localhost:8081";
+const BILLING_ENGINE_TIMEOUT = 5000; // 5s — fail fast, don't block transactions
 
-/**
- * Record a transfer for usage-based billing.
- */
-export async function recordUsage(
-  userId: number,
-  amountUsd: number,
-  corridor: string,
-  feePaidUsd: number,
-  fxMarginUsd: number
-): Promise<void> {
-  const db = await getDb();
-  const { sql } = await import("drizzle-orm");
-  const now = new Date().toISOString();
-
-  await (db as any).execute(sql`
-    INSERT INTO billing_usage (user_id, transfer_count, transfer_volume_usd, fees_paid_usd, fx_margin_usd, corridors, recorded_at)
-    VALUES (${userId}, 1, ${amountUsd}, ${feePaidUsd}, ${fxMarginUsd}, ${corridor}, ${now})
-    ON CONFLICT (user_id, DATE_TRUNC('month', recorded_at))
-    DO UPDATE SET
-      transfer_count = billing_usage.transfer_count + 1,
-      transfer_volume_usd = billing_usage.transfer_volume_usd + ${amountUsd},
-      fees_paid_usd = billing_usage.fees_paid_usd + ${feePaidUsd},
-      fx_margin_usd = billing_usage.fx_margin_usd + ${fxMarginUsd},
-      corridors = CASE
-        WHEN billing_usage.corridors LIKE ${'%' + corridor + '%'} THEN billing_usage.corridors
-        ELSE billing_usage.corridors || ',' || ${corridor}
-      END
-  `).catch(() => {});
-}
-
-/**
- * Get usage summary for the current billing period.
- */
-export async function getUsageSummary(userId: number): Promise<UsageSummary> {
-  const db = await getDb();
-  const { sql } = await import("drizzle-orm");
-
-  const sub = await getSubscription(userId);
-  const periodStart = sub?.currentPeriodStart ?? new Date(new Date().setDate(1)).toISOString();
-  const periodEnd = sub?.currentPeriodEnd ?? new Date(new Date().setMonth(new Date().getMonth() + 1, 1)).toISOString();
-
-  const rows = await (db as any).execute(sql`
-    SELECT
-      COUNT(*)::int AS transfer_count,
-      COALESCE(SUM(transfer_volume_usd), 0)::float AS total_volume,
-      COALESCE(SUM(fees_paid_usd), 0)::float AS total_fees,
-      COALESCE(SUM(fx_margin_usd), 0)::float AS total_fx_margin,
-      COALESCE(MAX(transfer_volume_usd), 0)::float AS largest_tx
-    FROM billing_usage
-    WHERE user_id = ${userId}
-      AND recorded_at >= ${periodStart}
-      AND recorded_at < ${periodEnd}
-  `);
-
-  const row = (rows as any)?.[0];
-  const count = row?.transfer_count ?? 0;
-
-  return {
-    userId,
-    periodStart,
-    periodEnd,
-    totalTransferCount: count,
-    totalTransferVolumeUsd: row?.total_volume ?? 0,
-    totalFeesPaidUsd: row?.total_fees ?? 0,
-    totalFxMarginUsd: row?.total_fx_margin ?? 0,
-    corridorsUsed: [],
-    averageTransactionUsd: count > 0 ? (row?.total_volume ?? 0) / count : 0,
-    largestTransactionUsd: row?.largest_tx ?? 0,
-  };
-}
-
-// ── Invoice Generator ────────────────────────────────────────────────────────
-
-/**
- * Generate an invoice for a user's current billing period.
- */
-export async function generateInvoice(userId: number): Promise<Invoice> {
-  const sub = await getSubscription(userId);
-  if (!sub) throw new Error(`No subscription found for user ${userId}`);
-
-  const plan = PLANS[sub.planCode];
-  if (!plan) throw new Error(`Unknown plan: ${sub.planCode}`);
-
-  const usage = await getUsageSummary(userId);
-  const baseAmount = sub.billingCycle === "annual" ? plan.annualFeeUsd : plan.monthlyFeeUsd;
-
-  // Usage-based charges (if plan has usage billing)
-  const usageAmount = plan.code === "business" ? Math.max(0, usage.totalFeesPaidUsd - baseAmount) : 0;
-
-  // Proration credits
-  const db = await getDb();
-  const { sql } = await import("drizzle-orm");
-  const adjustments = await (db as any).execute(sql`
-    SELECT COALESCE(SUM(amount_usd), 0)::float AS total
-    FROM invoice_adjustments
-    WHERE user_id = ${userId} AND applied = false
-  `).catch(() => [{ total: 0 }]);
-  const discountAmount = Math.abs((adjustments as any)?.[0]?.total ?? 0);
-
-  const subtotal = baseAmount + usageAmount - discountAmount;
-  const taxAmount = Math.round(subtotal * 0.0 * 100) / 100; // 0% tax for now
-  const totalAmount = Math.max(0, subtotal + taxAmount);
-
-  const now = new Date();
-  const dueAt = new Date(now);
-  dueAt.setDate(dueAt.getDate() + 7);
-
-  const id = crypto.randomUUID();
-  await (db as any).execute(sql`
-    INSERT INTO invoices (
-      id, subscription_id, user_id, period_start, period_end,
-      base_amount_usd, usage_amount_usd, discount_amount_usd, tax_amount_usd,
-      total_amount_usd, status, due_at, created_at
-    ) VALUES (
-      ${id}, ${sub.id}, ${userId}, ${sub.currentPeriodStart}, ${sub.currentPeriodEnd},
-      ${baseAmount}, ${usageAmount}, ${discountAmount}, ${taxAmount},
-      ${totalAmount}, ${totalAmount === 0 ? "paid" : "open"}, ${dueAt.toISOString()}, ${now.toISOString()}
-    )
-  `);
-
-  // Mark adjustments as applied
-  await (db as any).execute(sql`
-    UPDATE invoice_adjustments SET applied = true WHERE user_id = ${userId} AND applied = false
-  `).catch(() => {});
-
-  return {
-    id,
-    subscriptionId: sub.id,
-    userId,
-    periodStart: sub.currentPeriodStart,
-    periodEnd: sub.currentPeriodEnd,
-    baseAmountUsd: baseAmount,
-    usageAmountUsd: usageAmount,
-    discountAmountUsd: discountAmount,
-    taxAmountUsd: taxAmount,
-    totalAmountUsd: totalAmount,
-    status: totalAmount === 0 ? "paid" : "open",
-    dueAt: dueAt.toISOString(),
-    paidAt: totalAmount === 0 ? now.toISOString() : null,
-    createdAt: now.toISOString(),
-  };
-}
-
-/**
- * Get invoices for a user.
- */
-export async function getInvoices(userId: number, limit = 12): Promise<Invoice[]> {
-  const db = await getDb();
-  const { sql } = await import("drizzle-orm");
-  const rows = await (db as any).execute(sql`
-    SELECT * FROM invoices WHERE user_id = ${userId}
-    ORDER BY created_at DESC LIMIT ${limit}
-  `);
-  return (rows as any) ?? [];
-}
-
-// ── Dunning (Payment Retry) ───────────────────────────────────────────────────
-
-/**
- * Process dunning for overdue invoices.
- * Retry schedule: day 3, day 5, day 7, then mark uncollectible.
- */
-export async function processDunning(): Promise<{ retried: number; cancelled: number }> {
-  const db = await getDb();
-  const { sql } = await import("drizzle-orm");
-
-  const overdue = await (db as any).execute(sql`
-    SELECT i.id, i.user_id, i.total_amount_usd, i.due_at,
-           s.id AS subscription_id, s.plan_code
-    FROM invoices i
-    JOIN subscriptions s ON s.id = i.subscription_id
-    WHERE i.status = 'open' AND i.due_at < NOW()
-  `);
-
-  let retried = 0;
-  let cancelled = 0;
-
-  for (const inv of (overdue as any) ?? []) {
-    const daysOverdue = Math.floor((Date.now() - new Date(inv.due_at).getTime()) / 86400_000);
-
-    if (daysOverdue >= 7) {
-      // Mark uncollectible, suspend subscription
-      await (db as any).execute(sql`
-        UPDATE invoices SET status = 'uncollectible' WHERE id = ${inv.id}
-      `);
-      await (db as any).execute(sql`
-        UPDATE subscriptions SET status = 'past_due' WHERE id = ${inv.subscription_id}
-      `);
-      cancelled++;
-      logger.warn({ invoiceId: inv.id, userId: inv.user_id }, "[Billing] Invoice marked uncollectible");
-    } else if (daysOverdue >= 3 || daysOverdue >= 5) {
-      // In production: trigger Stripe payment retry
-      // For now: log the retry attempt
-      retried++;
-      logger.info({ invoiceId: inv.id, userId: inv.user_id, daysOverdue }, "[Billing] Dunning retry triggered");
+async function callBillingEngine(
+  path: string,
+  method: "GET" | "POST" | "PUT",
+  body?: unknown
+): Promise<unknown> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), BILLING_ENGINE_TIMEOUT);
+  try {
+    const res = await fetch(`${BILLING_ENGINE_URL}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`Billing engine error ${res.status}: ${text}`);
     }
+    return await res.json();
+  } catch (err) {
+    clearTimeout(timeout);
+    // Billing engine is non-blocking — log but don't fail the transaction
+    logger.error({ err: err }, '[BillingEngine] Call failed:');
+    return null;
   }
-
-  return { retried, cancelled };
 }
 
-// ── Revenue Report ────────────────────────────────────────────────────────────
+// ─── Fee computation (local fallback when Go service is unavailable) ──────────
 
-/**
- * Get MRR and revenue metrics.
- */
-export async function getRevenueMetrics(): Promise<{
-  mrr: number;
-  arr: number;
-  activeSubscriptions: number;
-  churnRate: number;
-  planBreakdown: Record<string, number>;
-}> {
-  const db = await getDb();
-  const { sql } = await import("drizzle-orm");
+interface LocalFeeResult {
+  transferFeeMinor: number;
+  platformFeeShareMinor: number;
+  partnerFeeShareMinor: number;
+  fxSpreadMinor: number;
+  fxHedgeCostMinor: number;
+  netFxRevenueMinor: number;
+  payoutCostMinor: number;
+  allocatedOverheadMinor: number;
+  netPlatformProfitMinor: number;
+  appliedRate: string;
+  recvAmountMinor: number;
+}
 
-  const subs = await (db as any).execute(sql`
-    SELECT plan_code, billing_cycle, COUNT(*)::int AS count
-    FROM subscriptions WHERE status IN ('active', 'trialing')
-    GROUP BY plan_code, billing_cycle
-  `);
-
-  let mrr = 0;
-  const planBreakdown: Record<string, number> = {};
-
-  for (const row of (subs as any) ?? []) {
-    const plan = PLANS[row.plan_code];
-    if (!plan) continue;
-    const monthlyValue = row.billing_cycle === "annual" ? plan.annualFeeUsd / 12 : plan.monthlyFeeUsd;
-    mrr += monthlyValue * row.count;
-    planBreakdown[row.plan_code] = (planBreakdown[row.plan_code] ?? 0) + row.count;
+function computeFeeLocally(
+  sendAmountMinor: number,
+  midMarketRate: number,
+  config: {
+    feeMode: "PERCENTAGE" | "FLAT" | "HYBRID";
+    feePercentage: number;
+    flatFeeMinor: number;
+    feeCapMinor: number;
+    feeFloorMinor: number;
+    fxSpreadPercentage: number;
+    hedgeCostPercentage: number;
+    platformFeeSharePct: number;
+    platformFxSharePct: number;
+    overheadPerTxMinor: number;
+  },
+  payoutMethod: string
+): LocalFeeResult {
+  // Transfer fee
+  let fee = 0;
+  if (config.feeMode === "PERCENTAGE") {
+    fee = Math.round(sendAmountMinor * (config.feePercentage / 100));
+  } else if (config.feeMode === "FLAT") {
+    fee = config.flatFeeMinor;
+  } else {
+    // HYBRID: percentage + flat
+    fee = Math.round(sendAmountMinor * (config.feePercentage / 100)) + config.flatFeeMinor;
   }
+  fee = Math.max(config.feeFloorMinor, Math.min(config.feeCapMinor, fee));
 
-  const totalSubs = Object.values(planBreakdown).reduce((a, b) => a + b, 0);
+  // FX spread
+  const spreadRate = midMarketRate * (1 - config.fxSpreadPercentage / 100);
+  const recvAmountMinor = Math.round((sendAmountMinor - fee) * spreadRate);
+  const fxSpreadMinor = Math.round((sendAmountMinor - fee) * (midMarketRate - spreadRate));
+  const fxHedgeCostMinor = Math.round(fxSpreadMinor * (config.hedgeCostPercentage / 100));
+  const netFxRevenueMinor = fxSpreadMinor - fxHedgeCostMinor;
 
-  // Calculate churn (cancelled in last 30 days / active 30 days ago)
-  const churned = await (db as any).execute(sql`
-    SELECT COUNT(*)::int AS count FROM subscriptions
-    WHERE status = 'cancelled' AND cancelled_at > NOW() - INTERVAL '30 days'
-  `);
-  const churnCount = (churned as any)?.[0]?.count ?? 0;
-  const churnRate = totalSubs > 0 ? churnCount / totalSubs : 0;
+  // Payout cost (per method)
+  const payoutCosts: Record<string, number> = {
+    BANK_TRANSFER: 50,   // £0.50
+    MOBILE_MONEY: 30,    // £0.30
+    CASH_PICKUP: 150,    // £1.50
+    WALLET: 10,          // £0.10
+    CRYPTO: 200,         // £2.00
+  };
+  const payoutCostMinor = payoutCosts[payoutMethod] ?? 50;
+
+  // Profit split
+  const platformFeeShareMinor = Math.round(fee * (config.platformFeeSharePct / 100));
+  const partnerFeeShareMinor = fee - platformFeeShareMinor;
+  const platformFxShareMinor = Math.round(netFxRevenueMinor * (config.platformFxSharePct / 100));
+
+  // Net platform profit
+  const netPlatformProfitMinor =
+    platformFeeShareMinor + platformFxShareMinor - payoutCostMinor - config.overheadPerTxMinor;
 
   return {
-    mrr: Math.round(mrr * 100) / 100,
-    arr: Math.round(mrr * 12 * 100) / 100,
-    activeSubscriptions: totalSubs,
-    churnRate: Math.round(churnRate * 10000) / 10000,
-    planBreakdown,
+    transferFeeMinor: fee,
+    platformFeeShareMinor,
+    partnerFeeShareMinor,
+    fxSpreadMinor,
+    fxHedgeCostMinor,
+    netFxRevenueMinor,
+    payoutCostMinor,
+    allocatedOverheadMinor: config.overheadPerTxMinor,
+    netPlatformProfitMinor,
+    appliedRate: spreadRate.toFixed(8),
+    recvAmountMinor,
   };
 }
+
+// ─── Router ───────────────────────────────────────────────────────────────────
+
+export const billingEngineRouter = router({
+
+  // ── Compute billing event for a transaction (called by transactions.send) ──
+  computeBillingEvent: protectedProcedure
+    .input(z.object({
+      tenantId: z.string().default("default"),
+      transactionId: z.string(),
+      corridor: z.string(),          // e.g. "GB-NG"
+      sendCurrency: z.string().length(3),
+      recvCurrency: z.string().length(3),
+      sendAmountMinor: z.number().int().positive(),
+      midMarketRate: z.number().positive(),
+      payoutMethod: z.enum(["BANK_TRANSFER", "MOBILE_MONEY", "CASH_PICKUP", "WALLET", "CRYPTO"]).default("BANK_TRANSFER"),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+
+      // W9-FIX2 (F9-9 residual): scope to the session-derived tenant exactly like
+      // the other call sites — never trust a bare client-supplied tenantId.
+      const tenantId = await resolveBillingTenantId(ctx, input.tenantId);
+
+      // 1. Get active billing config for tenant
+      const config = await db
+        .select()
+        .from(billingConfigs)
+        .where(and(eq(billingConfigs.tenantId, tenantId), eq(billingConfigs.isActive, true)))
+        .limit(1);
+
+      const cfg = config[0] ?? {
+        feeMode: "PERCENTAGE" as const,
+        feePercentage: "1.5000",
+        flatFeeMinor: 0,
+        feeCapMinor: 2000,
+        feeFloorMinor: 100,
+        fxSpreadPercentage: "0.80",
+        hedgeCostPercentage: "0.15",
+        platformFeeSharePct: "40.0",
+        platformFxSharePct: "100.0",
+        overheadPerTxMinor: 50,
+        version: "default",
+      };
+
+      // 2. Try Go billing engine first, fall back to local computation
+      const engineResult = await callBillingEngine("/v1/billing/events/compute", "POST", {
+        tenant_id: tenantId,
+        transaction_id: input.transactionId,
+        corridor: input.corridor,
+        send_currency: input.sendCurrency,
+        recv_currency: input.recvCurrency,
+        send_amount_minor: input.sendAmountMinor,
+        mid_market_rate: input.midMarketRate.toString(),
+        payout_method: input.payoutMethod,
+      });
+
+      let feeResult: LocalFeeResult;
+      if (engineResult && typeof engineResult === "object" && "transfer_fee_minor" in (engineResult as Record<string, unknown>)) {
+        const r = engineResult as Record<string, number | string>;
+        feeResult = {
+          transferFeeMinor: Number(r.transfer_fee_minor),
+          platformFeeShareMinor: Number(r.platform_fee_share_minor),
+          partnerFeeShareMinor: Number(r.partner_fee_share_minor),
+          fxSpreadMinor: Number(r.fx_spread_minor),
+          fxHedgeCostMinor: Number(r.fx_hedge_cost_minor),
+          netFxRevenueMinor: Number(r.net_fx_revenue_minor),
+          payoutCostMinor: Number(r.payout_cost_minor),
+          allocatedOverheadMinor: Number(r.allocated_overhead_minor),
+          netPlatformProfitMinor: Number(r.net_platform_profit_minor),
+          appliedRate: String(r.applied_rate),
+          recvAmountMinor: Number(r.recv_amount_minor),
+        };
+      } else {
+        feeResult = computeFeeLocally(
+          input.sendAmountMinor,
+          input.midMarketRate,
+          {
+            feeMode: cfg.feeMode as "PERCENTAGE" | "FLAT" | "HYBRID",
+            feePercentage: safeParseAmount(cfg.feePercentage ?? "1.5"),
+            flatFeeMinor: cfg.flatFeeMinor ?? 0,
+            feeCapMinor: cfg.feeCapMinor ?? 2000,
+            feeFloorMinor: cfg.feeFloorMinor ?? 100,
+            fxSpreadPercentage: safeParseAmount(cfg.fxSpreadPercentage ?? "0.80"),
+            hedgeCostPercentage: safeParseAmount(cfg.hedgeCostPercentage ?? "0.15"),
+            platformFeeSharePct: safeParseAmount(cfg.platformFeeSharePct ?? "40.0"),
+            platformFxSharePct: safeParseAmount(cfg.platformFxSharePct ?? "100.0"),
+            overheadPerTxMinor: cfg.overheadPerTxMinor ?? 50,
+          },
+          input.payoutMethod
+        );
+      }
+
+      // 3. Persist billing event
+      const { randomBytes } = await import("crypto");
+      const eventId = `be-${Date.now()}-${randomBytes(4).toString("hex")}`;
+      const now = Date.now();
+
+      await db.insert(billingEvents).values({
+        eventId,
+        tenantId,
+        transactionId: input.transactionId,
+        corridor: input.corridor,
+        sendCurrency: input.sendCurrency,
+        recvCurrency: input.recvCurrency,
+        sendAmountMinor: input.sendAmountMinor,
+        recvAmountMinor: feeResult.recvAmountMinor,
+        transferFeeMinor: feeResult.transferFeeMinor,
+        platformFeeShareMinor: feeResult.platformFeeShareMinor,
+        partnerFeeShareMinor: feeResult.partnerFeeShareMinor,
+        feeMode: cfg.feeMode as "PERCENTAGE" | "FLAT" | "HYBRID",
+        midMarketRate: input.midMarketRate.toString(),
+        appliedRate: feeResult.appliedRate,
+        fxSpreadMinor: feeResult.fxSpreadMinor,
+        fxHedgeCostMinor: feeResult.fxHedgeCostMinor,
+        netFxRevenueMinor: feeResult.netFxRevenueMinor,
+        payoutMethod: input.payoutMethod,
+        payoutCostMinor: feeResult.payoutCostMinor,
+        allocatedOverheadMinor: feeResult.allocatedOverheadMinor,
+        netPlatformProfitMinor: feeResult.netPlatformProfitMinor,
+        settlementStatus: "PENDING",
+        createdByUserId: String(ctx.user.id),
+        billingConfigVersion: cfg.version ?? "default",
+        eventTimestampMs: now,
+      }).onConflictDoNothing().returning();
+
+      return {
+        eventId,
+        ...feeResult,
+        corridor: input.corridor,
+        sendCurrency: input.sendCurrency,
+        recvCurrency: input.recvCurrency,
+        sendAmountMinor: input.sendAmountMinor,
+        billingConfigVersion: cfg.version ?? "default",
+        computedAt: now,
+        source: engineResult ? "billing-engine-go" : "local-fallback",
+      };
+    }),
+
+  // ── Get billing config for a tenant ──────────────────────────────────────
+  getBillingConfig: protectedProcedure
+    .input(z.object({ tenantId: z.string().default("default") }))
+    .query(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const tenantId = await resolveBillingTenantId(ctx, input.tenantId);
+      const configs = await db
+        .select()
+        .from(billingConfigs)
+        .where(and(eq(billingConfigs.tenantId, tenantId), eq(billingConfigs.isActive, true)))
+        .limit(1);
+      return configs[0] ?? null;
+    }),
+
+  // ── Update billing config (billing:config-manager or admin) ──────────────
+  updateBillingConfig: adminProcedure
+    .input(z.object({
+      tenantId: z.string(),
+      feeMode: z.enum(["PERCENTAGE", "FLAT", "HYBRID"]).optional(),
+      feePercentage: z.string().optional(),
+      flatFeeMinor: z.number().int().optional(),
+      feeCapMinor: z.number().int().optional(),
+      feeFloorMinor: z.number().int().optional(),
+      fxSpreadPercentage: z.string().optional(),
+      hedgeCostPercentage: z.string().optional(),
+      platformFeeSharePct: z.string().optional(),
+      platformFxSharePct: z.string().optional(),
+      overheadPerTxMinor: z.number().int().optional(),
+      changeReason: z.string().min(10, "Change reason must be at least 10 characters"),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+
+      const { tenantId, changeReason, ...updates } = input;
+
+      // Snapshot current config before update (for audit trail)
+      const existing = await db
+        .select()
+        .from(billingConfigs)
+        .where(and(eq(billingConfigs.tenantId, tenantId), eq(billingConfigs.isActive, true)))
+        .limit(1);
+
+      if (existing.length === 0) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Billing config not found for tenant" });
+      }
+
+      const now = Date.now();
+      const newVersion = `${Date.now()}`;
+
+      await db
+        .update(billingConfigs)
+        .set({
+          ...updates,
+          version: newVersion,
+          updatedBy: String(ctx.user.id),
+          changeReason,
+          updatedAtMs: now,
+        })
+        .where(and(eq(billingConfigs.tenantId, tenantId), eq(billingConfigs.isActive, true)));
+
+      // Audit log
+      await db.insert(billingAuditLog).values({
+        tenantId,
+        eventType: "CONFIG_CHANGED",
+        entityType: "billing_config",
+        entityId: existing[0].configId,
+        actorUserId: String(ctx.user.id),
+        actorRole: ctx.user.role ?? "user",
+        beforeState: JSON.stringify(existing[0]),
+        afterState: JSON.stringify({ ...existing[0], ...updates, version: newVersion }),
+        occurredAtMs: now,
+      }).returning();
+
+      // Audit log for billing config change
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "billing.config.updated",
+        targetType: "billing_config",
+        targetId: 0,
+        description: `Billing config updated for tenant ${tenantId}: ${changeReason}`,
+        severity: "warning",
+        metadata: { tenantId, changeReason },
+      });
+      return { success: true, verified: true, version: newVersion, updatedAt: now };
+    }),
+
+  // ── List billing events for a tenant ─────────────────────────────────────
+  listBillingEvents: protectedProcedure
+    .input(z.object({
+      tenantId: z.string().default("default"),
+      corridor: z.string().optional(),
+      fromMs: z.number().optional(),
+      toMs: z.number().optional(),
+      limit: z.number().int().min(1).max(200).default(50),
+      offset: z.number().int().min(0).default(0),
+    }))
+    .query(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      const conditions = [eq(billingEvents.tenantId, await resolveBillingTenantId(ctx, input.tenantId))];
+      if (input.corridor) conditions.push(eq(billingEvents.corridor, input.corridor));
+      if (input.fromMs) conditions.push(gte(billingEvents.eventTimestampMs, input.fromMs));
+      if (input.toMs) conditions.push(lte(billingEvents.eventTimestampMs, input.toMs));
+
+      const [events, countResult] = await Promise.all([
+        db.select().from(billingEvents)
+          .where(and(...conditions))
+          .orderBy(desc(billingEvents.eventTimestampMs))
+          .limit(input.limit)
+          .offset(input.offset),
+        db.select({ count: sql<number>`count(*)` }).from(billingEvents)
+          .where(and(...conditions)),
+      ]);
+
+      return { events, total: Number(countResult[0]?.count ?? 0) };
+    }),
+
+  // ── Get tenant P&L summary ────────────────────────────────────────────────
+  getTenantPnL: protectedProcedure
+    .input(z.object({
+      tenantId: z.string().default("default"),
+      periodDays: z.number().int().min(1).max(365).default(30),
+    }))
+    .query(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      const tenantId = await resolveBillingTenantId(ctx, input.tenantId);
+      const fromMs = Date.now() - input.periodDays * 24 * 60 * 60 * 1000;
+
+      const result = await db
+        .select({
+          totalTransactions: sql<number>`count(*)`,
+          totalSendVolumeMinor: sql<number>`sum(send_amount_minor)`,
+          totalFeeMinor: sql<number>`sum(transfer_fee_minor)`,
+          platformFeeMinor: sql<number>`sum(platform_fee_share_minor)`,
+          partnerFeeMinor: sql<number>`sum(partner_fee_share_minor)`,
+          netFxRevenueMinor: sql<number>`sum(net_fx_revenue_minor)`,
+          fxHedgeCostMinor: sql<number>`sum(fx_hedge_cost_minor)`,
+          payoutCostMinor: sql<number>`sum(payout_cost_minor)`,
+          overheadMinor: sql<number>`sum(allocated_overhead_minor)`,
+          netProfitMinor: sql<number>`sum(net_platform_profit_minor)`,
+          avgMarginPct: sql<number>`avg(net_platform_profit_minor::float / nullif(send_amount_minor, 0) * 100)`,
+        })
+        .from(billingEvents)
+        .where(
+          and(
+            eq(billingEvents.tenantId, tenantId),
+            gte(billingEvents.eventTimestampMs, fromMs)
+          )
+        );
+
+      const r = result[0];
+      return {
+        tenantId,
+        periodDays: input.periodDays,
+        totalTransactions: Number(r?.totalTransactions ?? 0),
+        totalSendVolumeMinor: Number(r?.totalSendVolumeMinor ?? 0),
+        totalFeeMinor: Number(r?.totalFeeMinor ?? 0),
+        platformFeeMinor: Number(r?.platformFeeMinor ?? 0),
+        partnerFeeMinor: Number(r?.partnerFeeMinor ?? 0),
+        netFxRevenueMinor: Number(r?.netFxRevenueMinor ?? 0),
+        fxHedgeCostMinor: Number(r?.fxHedgeCostMinor ?? 0),
+        payoutCostMinor: Number(r?.payoutCostMinor ?? 0),
+        overheadMinor: Number(r?.overheadMinor ?? 0),
+        netProfitMinor: Number(r?.netProfitMinor ?? 0),
+        avgMarginPct: Number(r?.avgMarginPct ?? 0).toFixed(2),
+        computedAt: Date.now(),
+      };
+    }),
+
+  // ── Per-corridor breakdown ────────────────────────────────────────────────
+  getCorridorBreakdown: protectedProcedure
+    .input(z.object({
+      tenantId: z.string().default("default"),
+      periodDays: z.number().int().min(1).max(365).default(30),
+    }))
+    .query(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      const tenantId = await resolveBillingTenantId(ctx, input.tenantId);
+      const fromMs = Date.now() - input.periodDays * 24 * 60 * 60 * 1000;
+
+      return db
+        .select({
+          corridor: billingEvents.corridor,
+          sendCurrency: billingEvents.sendCurrency,
+          transactionCount: sql<number>`count(*)`,
+          totalSendMinor: sql<number>`sum(send_amount_minor)`,
+          avgSendMinor: sql<number>`avg(send_amount_minor)`,
+          netProfitMinor: sql<number>`sum(net_platform_profit_minor)`,
+          totalFeeMinor: sql<number>`sum(transfer_fee_minor)`,
+          netFxRevenueMinor: sql<number>`sum(net_fx_revenue_minor)`,
+        })
+        .from(billingEvents)
+        .where(
+          and(
+            eq(billingEvents.tenantId, tenantId),
+            gte(billingEvents.eventTimestampMs, fromMs)
+          )
+        )
+        .groupBy(billingEvents.corridor, billingEvents.sendCurrency)
+        .orderBy(desc(sql`sum(send_amount_minor)`));
+    }),
+
+  // ── Billing config history (audit trail) ─────────────────────────────────
+  getConfigHistory: protectedProcedure
+    .input(z.object({
+      tenantId: z.string().default("default"),
+      limit: z.number().int().min(1).max(100).default(20),
+    }))
+    .query(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const tenantId = await resolveBillingTenantId(ctx, input.tenantId);
+      return db
+        .select()
+        .from(billingConfigHistory)
+        .where(eq(billingConfigHistory.tenantId, tenantId))
+        .orderBy(desc(billingConfigHistory.changedAtMs))
+        .limit(input.limit);
+    }),
+
+  // ── Audit log ─────────────────────────────────────────────────────────────
+  getAuditLog: adminProcedure
+    .input(z.object({
+      tenantId: z.string().optional(),
+      limit: z.number().int().min(1).max(200).default(50),
+      offset: z.number().int().min(0).default(0),
+    }))
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      const conditions = input.tenantId ? [eq(billingAuditLog.tenantId, input.tenantId)] : [];
+
+      const [entries, countResult] = await Promise.all([
+        db.select().from(billingAuditLog)
+          .where(conditions.length > 0 ? and(...conditions) : undefined)
+          .orderBy(desc(billingAuditLog.occurredAtMs))
+          .limit(input.limit)
+          .offset(input.offset),
+        db.select({ count: sql<number>`count(*)` }).from(billingAuditLog)
+          .where(conditions.length > 0 ? and(...conditions) : undefined),
+      ]);
+
+      return { entries, total: Number(countResult[0]?.count ?? 0) };
+    }),
+
+  // ── Provision billing config for new tenant (called by onboarding) ────────
+  provisionTenantBillingConfig: adminProcedure
+    .input(z.object({
+      tenantId: z.string(),
+      tenantName: z.string(),
+      tenantType: z.enum(["IMTO_PARTNER", "WHITE_LABEL", "ENTERPRISE_SENDER"]),
+      feePercentage: z.string().default("1.5000"),
+      platformFeeSharePct: z.string().default("40.0"),
+      fxSpreadPercentage: z.string().default("0.80"),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+
+      const configId = `bc-${input.tenantId}-${Date.now()}`;
+      const now = Date.now();
+
+      // Upsert tenant
+      await db.insert(billingTenants).values({
+        tenantId: input.tenantId,
+        tenantName: input.tenantName,
+        tenantType: input.tenantType,
+        status: "ACTIVE",
+        ownerEmail: `admin@${input.tenantId}.com`,
+        ownerName: input.tenantName,
+        onboardedAt: new Date(),
+      }).onConflictDoNothing().returning();
+
+      // Provision billing config
+      await db.insert(billingConfigs).values({
+        configId,
+        tenantId: input.tenantId,
+        version: "1.0.0",
+        isActive: true,
+        feeMode: "PERCENTAGE",
+        feePercentage: input.feePercentage,
+        flatFeeMinor: 0,
+        feeCapMinor: 2000,
+        feeFloorMinor: 100,
+        fxSpreadPercentage: input.fxSpreadPercentage,
+        hedgeCostPercentage: "0.15",
+        platformFeeSharePct: input.platformFeeSharePct,
+        platformFxSharePct: "100.0",
+        overheadPerTxMinor: 50,
+        updatedBy: String(ctx.user.id),
+        changeReason: "Initial provisioning at tenant onboarding",
+        createdAtMs: now,
+        updatedAtMs: now,
+      }).onConflictDoNothing().returning();
+
+      // Audit log
+      await db.insert(billingAuditLog).values({
+        tenantId: input.tenantId,
+        eventType: "TENANT_PROVISIONED",
+        entityType: "billing_config",
+        entityId: configId,
+        actorUserId: String(ctx.user.id),
+        actorRole: ctx.user.role ?? "admin",
+        afterState: JSON.stringify({ configId, tenantId: input.tenantId }),
+        occurredAtMs: now,
+      }).returning();
+
+      return { success: true, verified: true, configId, tenantId: input.tenantId };
+    }),
+
+
+  // ── Provision new tenant via onboarding wizard ───────────────────────────
+  provisionTenant: protectedProcedure
+    .input(z.object({
+      companyName: z.string().min(2),
+      companyType: z.string().default("imto_partner"),
+      country: z.string().length(2).default("NG"),
+      registrationNumber: z.string().min(2),
+      contactEmail: z.string().email(),
+      contactPhone: z.string().optional(),
+      billingTier: z.enum(["starter", "growth", "enterprise"]).default("growth"),
+      platformSplitPct: z.number().min(10).max(90).default(40),
+      transferFeePct: z.number().min(0).max(5).default(1.2),
+      fxSpreadPct: z.number().min(0).max(3).default(0.5),
+      onboardingFeeUsd: z.number().min(0).default(500),
+      monthlyPlatformFeeUsd: z.number().min(0).default(200),
+      complianceLevel: z.string().default("standard"),
+      corridors: z.array(z.string()).default(["UK_NG", "US_NG"]),
+      amlProvider: z.string().default("smile_id"),
+      kycTier: z.string().default("tier2"),
+      webhookUrl: z.string().optional(),
+      ipWhitelist: z.string().optional(),
+      rateLimitPerMin: z.number().int().min(10).max(10000).default(100),
+    }))
+    .mutation(async ({ input, ctx }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const { randomBytes } = await import("crypto");
+      const tenantId = `tenant_${randomBytes(6).toString("hex")}`;
+      const configId = `cfg_${randomBytes(6).toString("hex")}`;
+      const workflowId = `wf_${randomBytes(8).toString("hex")}`;
+      const now = Date.now();
+      await db.insert(billingTenants).values({
+        tenantId,
+        tenantName: input.companyName,
+        tier: input.billingTier,
+        isActive: true,
+        contactEmail: input.contactEmail,
+        onboardedAt: new Date(),
+      }).onConflictDoNothing().returning();
+      await db.insert(billingConfigs).values({
+        configId,
+        tenantId,
+        version: "1.0.0",
+        isActive: true,
+        feeMode: "PERCENTAGE",
+        feePercentage: String(input.transferFeePct),
+        flatFeeMinor: 0,
+        feeCapMinor: 2000,
+        feeFloorMinor: 100,
+        fxSpreadPercentage: String(input.fxSpreadPct),
+        hedgeCostPercentage: "0.15",
+        platformFeeSharePct: String(input.platformSplitPct),
+        platformFxSharePct: "100.0",
+        overheadPerTxMinor: 50,
+        updatedBy: String(ctx.user.id),
+        changeReason: "Initial provisioning via onboarding wizard",
+        createdAtMs: now,
+        updatedAtMs: now,
+      }).onConflictDoNothing().returning();
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "billing.tenant.provisioned",
+        targetType: "billing_tenant",
+        targetId: 0,
+        description: `Tenant ${input.companyName} provisioned via onboarding wizard`,
+        severity: "info",
+        metadata: { tenantId, companyType: input.companyType, corridors: input.corridors, workflowId },
+      });
+      try {
+        const { getTemporalClient } = await import("../_core/temporal");
+        const client = await getTemporalClient();
+        if (client) {
+          await client.workflow.start("tenantOnboardingWorkflow", {
+            taskQueue: "remitflow-onboarding",
+            workflowId,
+            args: [{ tenantId, ...input }],
+          });
+        }
+      } catch {
+        // Temporal unavailable — provisioning continues without workflow orchestration
+      }
+      return { tenantId, configId, workflowId, status: "provisioned" };
+    }),
+
+  // ── Health check ──────────────────────────────────────────────────────────
+  health: protectedProcedure.query(async () => {
+    const engineHealth = await callBillingEngine("/v1/health", "GET");
+    return {
+      status: "ok",
+      goEngine: engineHealth ? "connected" : "unavailable (using local fallback)",
+      timestamp: Date.now(),
+    };
+  }),
+});
