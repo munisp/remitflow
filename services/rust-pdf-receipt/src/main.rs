@@ -1,662 +1,728 @@
-//! RemitFlow PDF Receipt Service
-//!
-//! Generates branded PDF transaction receipts using printpdf.
-//! Merchants/customers download a cryptographically verifiable PDF for each transaction.
-//!
-//! Endpoints:
-//!   POST /receipt             — generate a PDF receipt, returns { url, sha256, file_path }
-//!   GET  /receipt/:txn_id     — download a previously generated receipt PDF
-//!   GET  /health              — liveness probe
-//!   GET  /metrics             — Prometheus text exposition
-//!
-//! Storage layout (PDF_STORAGE_PATH, default ./receipts):
-//!   {PDF_STORAGE_PATH}/{txn_id}.pdf   — PDF bytes
-//!   {PDF_STORAGE_PATH}/{txn_id}.meta  — JSON metadata (sha256, template, generated_at)
-//!
-//! Every generated PDF embeds a SHA-256 checksum in metadata and returns it
-//! to the caller, so receipt integrity can be verified after the fact.
+/*!
+ * RemitFlow — Rust PDF Receipt Service
+ * High-performance receipt data generator using Actix-web + Tokio
+ * Port: 8096
+ *
+ * This service generates structured receipt data (JSON) that the
+ * frontend renders into a downloadable PDF using browser print API.
+ * For server-side PDF bytes, it delegates to the Python pdf-receipt service.
+ *
+ * Endpoints:
+ *   GET  /health
+ *   POST /receipt/transfer     — Generate transfer receipt data
+ *   POST /receipt/statement    — Generate account statement data
+ *   POST /receipt/kyc          — Generate KYC confirmation letter data
+ *   POST /receipt/batch        — Generate batch payment summary receipt
+ *   GET  /receipt/template/:type — Get HTML receipt template
+ */
 
-use axum::{
-    extract::{Path, State},
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
-};
+use actix_cors::Cors;
+use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
 use chrono::{DateTime, Utc};
-use prometheus::{Encoder, IntCounter, IntGauge, Registry, TextEncoder};
-use printpdf::*;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::{
-    collections::HashMap,
-    env,
-    path::PathBuf,
-    sync::{Arc, RwLock},
-};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
-use tracing::{error, info, warn};
+use serde_json;
+use std::collections::HashMap;
 use uuid::Uuid;
 
-// ─── Configuration ───────────────────────────────────────────────────────────
-
-struct Config {
-    port: u16,
-    storage_path: PathBuf,
-}
-
-impl Config {
-    fn from_env() -> Self {
-        let storage_path = env::var("PDF_STORAGE_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./receipts"));
-        Self {
-            port: env::var("PORT")
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(8112),
-            storage_path,
+// ── PostgreSQL persistence layer ──────────────────────────────────────────────
+mod db {
+    use std::env;
+    use std::sync::OnceLock;
+use std::time::Instant;
+static _PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    
+    static DB_URL: OnceLock<String> = OnceLock::new();
+    
+    pub fn get_db_url() -> &'static str {
+        DB_URL.get_or_init(|| {
+            env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgresql://remitflow:remitflow123@localhost:5432/remitflow".to_string())
+        })
+    }
+    
+    /// Initialize the service's state table in PostgreSQL
+    pub async fn init_db(service_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let table_name = service_name.replace('-', "_");
+        let client = tokio_postgres::connect(get_db_url(), tokio_postgres::NoTls).await;
+        match client {
+            Ok((client, connection)) => {
+                tokio::spawn(async move { if let Err(e) = connection.await { eprintln!("DB connection error: {}", e); } });
+                let create_sql = format!(
+                    "CREATE TABLE IF NOT EXISTS {table}_state (
+                        id TEXT PRIMARY KEY,
+                        data JSONB NOT NULL DEFAULT '{{}}',
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )", table = table_name);
+                client.execute(&create_sql, &[]).await?;
+                let idx_sql = format!(
+                    "CREATE INDEX IF NOT EXISTS idx_{table}_updated ON {table}_state(updated_at)",
+                    table = table_name);
+                client.execute(&idx_sql, &[]).await?;
+                eprintln!("[{}] PostgreSQL connected, table {}_state ready", service_name, table_name);
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("[{}] PostgreSQL unavailable ({}), using in-memory fallback", service_name, e);
+                Ok(())
+            }
         }
+    }
+    
+    /// Upsert a record into the state table
+    pub async fn upsert(service_name: &str, id: &str, data: &serde_json::Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let table_name = service_name.replace('-', "_");
+        let client = tokio_postgres::connect(get_db_url(), tokio_postgres::NoTls).await;
+        if let Ok((client, connection)) = client {
+            tokio::spawn(async move { let _ = connection.await; });
+            let sql = format!(
+                "INSERT INTO {table}_state (id, data, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (id) DO UPDATE SET data = $2, updated_at = NOW()",
+                table = table_name);
+            client.execute(&sql, &[&id, &serde_json::to_string(data)?]).await?;
+        }
+        Ok(())
     }
 }
 
-// ─── Shared state ─────────────────────────────────────────────────────────────
+// ─── Request / Response Types ─────────────────────────────────────────────────
 
-struct AppState {
-    config: Config,
-    registry: Registry,
-    receipts_generated: IntCounter,
-    receipts_errors: IntCounter,
-    active_requests: IntGauge,
-    cache: RwLock<HashMap<String, CachedReceipt>>,
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TransferReceiptRequest {
+    pub transaction_id: Option<i64>,
+    pub reference: String,
+    pub sender_name: String,
+    pub sender_email: String,
+    pub recipient_name: String,
+    pub recipient_bank: Option<String>,
+    pub recipient_account: Option<String>,
+    pub recipient_country: Option<String>,
+    pub send_amount: f64,
+    pub send_currency: String,
+    pub receive_amount: Option<f64>,
+    pub receive_currency: Option<String>,
+    pub exchange_rate: Option<f64>,
+    pub fee: f64,
+    pub total_cost: Option<f64>,
+    pub status: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub payment_method: Option<String>,
+    pub notes: Option<String>,
 }
 
-struct CachedReceipt {
-    file_path: PathBuf,
-    sha256: String,
-    size_bytes: usize,
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct StatementRequest {
+    pub user_name: String,
+    pub user_email: String,
+    pub account_number: Option<String>,
+    pub period_from: String,
+    pub period_to: String,
+    pub opening_balance: f64,
+    pub closing_balance: f64,
+    pub currency: String,
+    pub transactions: Vec<StatementTransaction>,
 }
 
-// ─── Request / response types ─────────────────────────────────────────────────
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct StatementTransaction {
+    pub date: String,
+    pub description: String,
+    pub reference: String,
+    pub debit: Option<f64>,
+    pub credit: Option<f64>,
+    pub balance: f64,
+    pub status: String,
+}
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ReceiptRequest {
-    transaction_id: String,
-    user_id: String,
-    user_name: String,
-    transaction_type: String,
-    from_currency: String,
-    from_amount: f64,
-    to_currency: String,
-    to_amount: f64,
-    exchange_rate: f64,
-    fee: f64,
-    status: String,
-    description: Option<String>,
-    recipient_name: Option<String>,
-    recipient_account: Option<String>,
-    created_at: Option<String>,
-    template: Option<String>,
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct KycReceiptRequest {
+    pub user_name: String,
+    pub user_email: String,
+    pub kyc_tier: String,
+    pub approved_at: String,
+    pub daily_limit: f64,
+    pub monthly_limit: f64,
+    pub currency: String,
+    pub documents_verified: Vec<String>,
+    pub reference: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct BatchReceiptRequest {
+    pub batch_id: String,
+    pub initiator_name: String,
+    pub total_payments: i32,
+    pub completed: i32,
+    pub failed: i32,
+    pub total_amount: f64,
+    pub currency: String,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub payments: Vec<BatchPaymentLine>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct BatchPaymentLine {
+    pub recipient: String,
+    pub amount: f64,
+    pub currency: String,
+    pub status: String,
+    pub reference: String,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReceiptResponse {
-    transaction_id: String,
-    url: String,
-    file_path: String,
-    sha256: String,
-    size_bytes: usize,
-    template: String,
-    generated_at: String,
+pub struct ReceiptData {
+    pub receipt_id: String,
+    pub receipt_type: String,
+    pub generated_at: String,
+    pub branding: BrandingInfo,
+    pub data: serde_json::Value,
+    pub html_template: String,
+    pub print_ready: bool,
 }
 
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
-    code: String,
+#[derive(Debug, Serialize, Clone)]
+pub struct BrandingInfo {
+    pub company: String,
+    pub tagline: String,
+    pub address: String,
+    pub phone: String,
+    pub email: String,
+    pub website: String,
+    pub fca_reg: String,
+    pub emi_licence: String,
+    pub logo_text: String,
 }
 
-#[derive(Debug, Serialize)]
-struct HealthResponse {
-    status: &'static str,
-    service: &'static str,
-    version: &'static str,
-    storage_path: String,
-    storage_writable: bool,
-    cached_receipts: usize,
+// ─── Branding ─────────────────────────────────────────────────────────────────
+
+fn get_branding() -> BrandingInfo {
+    BrandingInfo {
+        company: "RemitFlow Financial Services Ltd".to_string(),
+        tagline: "Borderless Money, Boundless Opportunity".to_string(),
+        address: "1 Canada Square, Canary Wharf, London E14 5AB, United Kingdom".to_string(),
+        phone: "+44 20 7946 0958".to_string(),
+        email: "support@remitflow.app".to_string(),
+        website: "https://remitflow.app".to_string(),
+        fca_reg: "FCA Authorised Payment Institution: 900001".to_string(),
+        emi_licence: "EMI Licence: EMI-2024-001".to_string(),
+        logo_text: "RemitFlow".to_string(),
+    }
 }
 
-#[derive(Debug, Serialize)]
-struct ReceiptMeta {
-    transaction_id: String,
-    sha256: String,
-    template: String,
-    size_bytes: usize,
-    generated_at: String,
-}
+// ─── HTML Template Builder ────────────────────────────────────────────────────
 
-// ─── PDF generation ───────────────────────────────────────────────────────────
-
-fn fmt_amount(amount: f64, currency: &str) -> String {
-    format!("{} {:.2}", currency, amount)
-}
-
-fn build_receipt_pdf(req: &ReceiptRequest) -> Result<Vec<u8>, String> {
-    let (doc, page1, layer1) = PdfDocument::new(
-        "RemitFlow Receipt",
-        Mm(210.0),
-        Mm(297.0),
-        "Layer 1",
-    );
-    let layer = doc.get_page(page1).get_layer(layer1);
-
-    // Load a built-in font (no external font file required)
-    let font = doc
-        .add_builtin_font(BuiltinFont::HelveticaBold)
-        .map_err(|e| format!("font error: {}", e))?;
-    let font_regular = doc
-        .add_builtin_font(BuiltinFont::Helvetica)
-        .map_err(|e| format!("font error: {}", e))?;
-
-    let blue = Color::Rgb(Rgb::new(0.12, 0.25, 0.69, None)); // #1E40AF
-    let green = Color::Rgb(Rgb::new(0.06, 0.72, 0.51, None)); // #10B981
-    let gray = Color::Rgb(Rgb::new(0.42, 0.45, 0.50, None));
-    let dark = Color::Rgb(Rgb::new(0.07, 0.09, 0.15, None));
-
-    // ── Header banner ────────────────────────────────────────────────────────
-    let points = vec![
-        (Point::new(Mm(0.0), Mm(297.0)), false),
-        (Point::new(Mm(210.0), Mm(297.0)), false),
-        (Point::new(Mm(210.0), Mm(265.0)), false),
-        (Point::new(Mm(0.0), Mm(265.0)), false),
-    ];
-    let header = Line {
-        points,
-        is_closed: true,
-        has_fill: true,
-        has_stroke: false,
-        is_clipping_path: false,
-    };
-    layer.set_fill_color(blue.clone());
-    layer.add_shape(header);
-
-    // Logo text
-    layer.set_fill_color(Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None)));
-    layer.use_text("RemitFlow", 28.0, Mm(15.0), Mm(275.0), &font);
-    layer.use_text(
-        "TRANSACTION RECEIPT",
-        12.0,
-        Mm(15.0),
-        Mm(267.0),
-        &font_regular,
-    );
-
-    // Status badge
-    let status_color = if req.status == "completed" || req.status == "COMPLETED" {
-        green.clone()
+fn build_transfer_html(req: &TransferReceiptRequest, receipt_id: &str, branding: &BrandingInfo) -> String {
+    let receive_section = if let (Some(recv_amt), Some(recv_curr)) = (req.receive_amount, &req.receive_currency) {
+        format!(
+            r#"<tr><td class="label">Recipient Receives</td><td class="value highlight">{:.2} {}</td></tr>"#,
+            recv_amt, recv_curr
+        )
     } else {
-        Color::Rgb(Rgb::new(0.96, 0.62, 0.04, None)) // amber
+        String::new()
     };
-    layer.set_fill_color(status_color);
-    let badge_text = req.status.to_uppercase();
-    layer.use_text(&badge_text, 11.0, Mm(160.0), Mm(273.0), &font);
 
-    // ── Transaction ID ────────────────────────────────────────────────────────
-    layer.set_fill_color(gray.clone());
-    layer.use_text("TRANSACTION ID", 8.0, Mm(15.0), Mm(255.0), &font_regular);
-    layer.set_fill_color(dark.clone());
-    layer.use_text(&req.transaction_id, 11.0, Mm(15.0), Mm(248.0), &font);
-
-    // Date
-    let date_str = req
-        .created_at
-        .clone()
-        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string());
-    layer.set_fill_color(gray.clone());
-    layer.use_text("DATE", 8.0, Mm(120.0), Mm(255.0), &font_regular);
-    layer.set_fill_color(dark.clone());
-    layer.use_text(&date_str, 10.0, Mm(120.0), Mm(248.0), &font_regular);
-
-    // ── Amount box ────────────────────────────────────────────────────────────
-    let amount_y = Mm(228.0);
-    let box_pts = vec![
-        (Point::new(Mm(15.0), Mm(245.0)), false),
-        (Point::new(Mm(195.0), Mm(245.0)), false),
-        (Point::new(Mm(195.0), amount_y), false),
-        (Point::new(Mm(15.0), amount_y), false),
-    ];
-    let amt_box = Line {
-        points: box_pts,
-        is_closed: true,
-        has_fill: true,
-        has_stroke: false,
-        is_clipping_path: false,
+    let rate_section = if let Some(rate) = req.exchange_rate {
+        format!(
+            r#"<tr><td class="label">Exchange Rate</td><td class="value">1 {} = {:.6} {}</td></tr>"#,
+            req.send_currency,
+            rate,
+            req.receive_currency.as_deref().unwrap_or("")
+        )
+    } else {
+        String::new()
     };
-    layer.set_fill_color(Color::Rgb(Rgb::new(0.94, 0.97, 1.0, None))); // light blue
-    layer.add_shape(amt_box);
 
-    layer.set_fill_color(gray.clone());
-    layer.use_text("AMOUNT SENT", 8.0, Mm(20.0), Mm(240.0), &font_regular);
-    layer.set_fill_color(blue.clone());
-    layer.use_text(
-        &fmt_amount(req.from_amount, &req.from_currency),
-        24.0,
-        Mm(20.0),
-        Mm(232.0),
-        &font,
-    );
-
-    // ── Transfer details ──────────────────────────────────────────────────────
-    let details: Vec<(&str, String)> = vec![
-        ("Sender", req.user_name.clone()),
-        ("User ID", req.user_id.clone()),
-        ("Type", req.transaction_type.clone()),
-        (
-            "Recipient",
-            req.recipient_name.clone().unwrap_or_else(|| "—".into()),
-        ),
-        (
-            "Recipient Account",
-            req.recipient_account.clone().unwrap_or_else(|| "—".into()),
-        ),
-        (
-            "You Sent",
-            fmt_amount(req.from_amount, &req.from_currency),
-        ),
-        ("They Receive", fmt_amount(req.to_amount, &req.to_currency)),
-        ("Exchange Rate", format!("1 {} = {:.4} {}", req.from_currency, req.exchange_rate, req.to_currency)),
-        ("Fee", fmt_amount(req.fee, &req.from_currency)),
-        (
-            "Total Charged",
-            fmt_amount(req.from_amount + req.fee, &req.from_currency),
-        ),
-        (
-            "Description",
-            req.description.clone().unwrap_or_else(|| "—".into()),
-        ),
-    ];
-
-    let mut y = 218.0_f32;
-    for (label, value) in &details {
-        // Alternating row background
-        if (y as i32) % 2 == 0 {
-            let row_pts = vec![
-                (Point::new(Mm(15.0), Mm(y + 4.0)), false),
-                (Point::new(Mm(195.0), Mm(y + 4.0)), false),
-                (Point::new(Mm(195.0), Mm(y - 3.0)), false),
-                (Point::new(Mm(15.0), Mm(y - 3.0)), false),
-            ];
-            let row = Line {
-                points: row_pts,
-                is_closed: true,
-                has_fill: true,
-                has_stroke: false,
-                is_clipping_path: false,
-            };
-            layer.set_fill_color(Color::Rgb(Rgb::new(0.97, 0.98, 0.99, None)));
-            layer.add_shape(row);
-        }
-
-        layer.set_fill_color(gray.clone());
-        layer.use_text(label.to_uppercase(), 7.5, Mm(20.0), Mm(y), &font_regular);
-        layer.set_fill_color(dark.clone());
-        layer.use_text(value, 10.0, Mm(90.0), Mm(y), &font_regular);
-        y -= 8.0;
-    }
-
-    // ── Divider ───────────────────────────────────────────────────────────────
-    let div_y = y + 2.0;
-    let div_pts = vec![
-        (Point::new(Mm(15.0), Mm(div_y)), false),
-        (Point::new(Mm(195.0), Mm(div_y)), false),
-    ];
-    let div = Line {
-        points: div_pts,
-        is_closed: false,
-        has_fill: false,
-        has_stroke: true,
-        is_clipping_path: false,
+    let bank_section = if let Some(bank) = &req.recipient_bank {
+        format!(r#"<tr><td class="label">Recipient Bank</td><td class="value">{}</td></tr>"#, bank)
+    } else {
+        String::new()
     };
-    layer.set_outline_color(gray.clone());
-    layer.set_outline_thickness(0.5);
-    layer.add_shape(div);
 
-    // ── Security footer ───────────────────────────────────────────────────────
-    let footer_y = div_y - 8.0;
-    layer.set_fill_color(gray.clone());
-    layer.use_text(
-        "This is an official RemitFlow transaction receipt.",
-        8.0,
-        Mm(15.0),
-        Mm(footer_y),
-        &font_regular,
-    );
-    layer.use_text(
-        "Verify this receipt at https://remitflow.example.com/verify",
-        8.0,
-        Mm(15.0),
-        Mm(footer_y - 5.0),
-        &font_regular,
-    );
-    layer.use_text(
-        "RemitFlow Inc. | support@remitflow.example.com | PCI-DSS Compliant",
-        7.5,
-        Mm(15.0),
-        Mm(footer_y - 12.0),
-        &font_regular,
-    );
+    let account_section = if let Some(acc) = &req.recipient_account {
+        let masked = if acc.len() > 4 { format!("****{}", &acc[acc.len()-4..]) } else { acc.clone() };
+        format!(r#"<tr><td class="label">Account Number</td><td class="value">{}</td></tr>"#, masked)
+    } else {
+        String::new()
+    };
 
-    // Watermark
-    layer.set_fill_color(Color::Rgb(Rgb::new(0.95, 0.95, 0.95, None)));
-    layer.use_text("REMITFLOW", 60.0, Mm(40.0), Mm(120.0), &font);
+    let status_color = match req.status.as_str() {
+        "completed" => "#10b981",
+        "pending" | "processing" => "#f59e0b",
+        "failed" => "#ef4444",
+        _ => "#6b7280",
+    };
 
-    doc.save(&mut Vec::new().into())
-        .map_err(|e| format!("PDF save error: {}", e))
+    format!(r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Transfer Receipt — {reference}</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f8fafc; color: #1e293b; }}
+  .receipt {{ max-width: 600px; margin: 40px auto; background: white; border-radius: 16px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); overflow: hidden; }}
+  .header {{ background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%); color: white; padding: 32px; text-align: center; }}
+  .logo {{ font-size: 28px; font-weight: 800; letter-spacing: -0.5px; color: #10b981; }}
+  .tagline {{ font-size: 12px; color: #94a3b8; margin-top: 4px; }}
+  .status-badge {{ display: inline-block; padding: 6px 20px; border-radius: 20px; font-size: 13px; font-weight: 600; margin-top: 16px; background: {status_color}22; color: {status_color}; border: 1px solid {status_color}44; }}
+  .amount-hero {{ padding: 32px; text-align: center; border-bottom: 1px solid #f1f5f9; }}
+  .send-amount {{ font-size: 42px; font-weight: 800; color: #0f172a; }}
+  .currency {{ font-size: 20px; color: #64748b; font-weight: 500; }}
+  .arrow {{ font-size: 24px; color: #10b981; margin: 8px 0; }}
+  .receive-amount {{ font-size: 28px; font-weight: 700; color: #10b981; }}
+  .details {{ padding: 24px 32px; }}
+  .section-title {{ font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; margin-bottom: 12px; margin-top: 20px; }}
+  table {{ width: 100%; border-collapse: collapse; }}
+  .label {{ color: #64748b; font-size: 14px; padding: 8px 0; width: 45%; }}
+  .value {{ font-size: 14px; font-weight: 500; text-align: right; padding: 8px 0; }}
+  .value.highlight {{ color: #10b981; font-weight: 700; }}
+  .divider {{ border: none; border-top: 1px solid #f1f5f9; margin: 16px 0; }}
+  .footer {{ background: #f8fafc; padding: 24px 32px; text-align: center; }}
+  .footer p {{ font-size: 11px; color: #94a3b8; line-height: 1.6; }}
+  .receipt-id {{ font-size: 10px; color: #cbd5e1; margin-top: 8px; }}
+  @media print {{
+    body {{ background: white; }}
+    .receipt {{ box-shadow: none; margin: 0; border-radius: 0; }}
+  }}
+</style>
+</head>
+<body>
+<div class="receipt">
+  <div class="header">
+    <div class="logo">{logo}</div>
+    <div class="tagline">{tagline}</div>
+    <div class="status-badge">{status_upper}</div>
+  </div>
+  <div class="amount-hero">
+    <div><span class="send-amount">{send_amount:.2}</span> <span class="currency">{send_currency}</span></div>
+    {receive_section_hero}
+  </div>
+  <div class="details">
+    <div class="section-title">Transfer Details</div>
+    <table>
+      <tr><td class="label">Reference</td><td class="value">{reference}</td></tr>
+      <tr><td class="label">Date</td><td class="value">{created_at}</td></tr>
+      {rate_section}
+      <tr><td class="label">Transfer Fee</td><td class="value">{fee:.2} {send_currency}</td></tr>
+      {total_cost_row}
+    </table>
+    <hr class="divider">
+    <div class="section-title">Recipient</div>
+    <table>
+      <tr><td class="label">Name</td><td class="value">{recipient_name}</td></tr>
+      {bank_section}
+      {account_section}
+      {country_section}
+    </table>
+    <hr class="divider">
+    <div class="section-title">Sender</div>
+    <table>
+      <tr><td class="label">Name</td><td class="value">{sender_name}</td></tr>
+      <tr><td class="label">Email</td><td class="value">{sender_email}</td></tr>
+    </table>
+  </div>
+  <div class="footer">
+    <p>{company}<br>{address}<br>{phone} · {email}<br>{fca_reg}</p>
+    <p class="receipt-id">Receipt ID: {receipt_id} · Generated: {generated_at}</p>
+  </div>
+</div>
+</body>
+</html>"#,
+        reference = req.reference,
+        status_color = status_color,
+        logo = branding.logo_text,
+        tagline = branding.tagline,
+        status_upper = req.status.to_uppercase(),
+        send_amount = req.send_amount,
+        send_currency = req.send_currency,
+        receive_section_hero = if let (Some(recv_amt), Some(recv_curr)) = (req.receive_amount, &req.receive_currency) {
+            format!(r#"<div class="arrow">↓</div><div><span class="receive-amount">{:.2}</span> <span class="currency">{}</span></div>"#, recv_amt, recv_curr)
+        } else { String::new() },
+        rate_section = rate_section,
+        fee = req.fee,
+        total_cost_row = if let Some(tc) = req.total_cost {
+            format!(r#"<tr><td class="label">Total Cost</td><td class="value">{:.2} {}</td></tr>"#, tc, req.send_currency)
+        } else { String::new() },
+        recipient_name = req.recipient_name,
+        bank_section = bank_section,
+        account_section = account_section,
+        country_section = if let Some(c) = &req.recipient_country {
+            format!(r#"<tr><td class="label">Country</td><td class="value">{}</td></tr>"#, c)
+        } else { String::new() },
+        sender_name = req.sender_name,
+        sender_email = req.sender_email,
+        company = branding.company,
+        address = branding.address,
+        phone = branding.phone,
+        email = branding.email,
+        fca_reg = branding.fca_reg,
+        receipt_id = receipt_id,
+        created_at = req.created_at,
+        generated_at = Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    )
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
-async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let writable = std::fs::create_dir_all(&state.config.storage_path).is_ok();
-    let cached = state.cache.read().map(|c| c.len()).unwrap_or(0);
-    Json(HealthResponse {
-        status: "healthy",
-        service: "rust-pdf-receipt",
-        version: "1.0.0",
-        storage_path: state.config.storage_path.display().to_string(),
-        storage_writable: writable,
-        cached_receipts: cached,
-    })
+#[get("/health")]
+async fn health() -> impl Responder {
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "ok",
+        "service": "rust-pdf-receipt",
+        "version": "1.0.0",
+        "language": "Rust",
+        "timestamp": Utc::now().to_rfc3339(),
+    }))
 }
 
-async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let encoder = TextEncoder::new();
-    let metric_families = state.registry.gather();
-    let mut buf = Vec::new();
-    encoder.encode(&metric_families, &mut buf).unwrap_or_default();
-    (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        buf,
-    )
-}
+#[post("/receipt/transfer")]
+async fn transfer_receipt(req: web::Json<TransferReceiptRequest>) -> impl Responder {
+    let receipt_id = format!("RFR-{}", Uuid::new_v4().to_string().to_uppercase().replace('-', "")[..12].to_string());
+    let branding = get_branding();
+    let html = build_transfer_html(&req, &receipt_id, &branding);
 
-async fn generate_receipt(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<ReceiptRequest>,
-) -> Response {
-    state.active_requests.inc();
-    let result = generate_receipt_inner(state.clone(), req).await;
-    state.active_requests.dec();
-
-    match result {
-        Ok(resp) => {
-            state.receipts_generated.inc();
-            Json(resp).into_response()
-        }
-        Err((status, msg)) => {
-            state.receipts_errors.inc();
-            (
-                status,
-                Json(ErrorResponse {
-                    error: msg,
-                    code: status.as_u16().to_string(),
-                }),
-            )
-                .into_response()
-        }
-    }
-}
-
-async fn generate_receipt_inner(
-    state: Arc<AppState>,
-    req: ReceiptRequest,
-) -> Result<ReceiptResponse, (StatusCode, String)> {
-    // Validate
-    if req.transaction_id.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "transaction_id is required".into()));
-    }
-    if req.user_id.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "user_id is required".into()));
-    }
-    if req.from_amount <= 0.0 {
-        return Err((StatusCode::BAD_REQUEST, "from_amount must be positive".into()));
-    }
-
-    let template = req.template.clone().unwrap_or_else(|| "standard".into());
-    let txn_id = req.transaction_id.clone();
-
-    // Check cache first
-    {
-        let cache = state.cache.read().map_err(|e| {
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("cache error: {}", e))
-        })?;
-        if let Some(cached) = cache.get(&txn_id) {
-            info!(txn_id, "receipt served from cache");
-            return Ok(ReceiptResponse {
-                transaction_id: txn_id,
-                url: format!("/receipt/{}", cached.file_path.display()),
-                file_path: cached.file_path.display().to_string(),
-                sha256: cached.sha256.clone(),
-                size_bytes: cached.size_bytes,
-                template,
-                generated_at: Utc::now().to_rfc3339(),
-            });
-        }
-    }
-
-    // Generate PDF (sync, CPU-bound — spawn_blocking)
-    let req_clone = ReceiptRequest {
-        transaction_id: req.transaction_id.clone(),
-        user_id: req.user_id.clone(),
-        user_name: req.user_name.clone(),
-        transaction_type: req.transaction_type.clone(),
-        from_currency: req.from_currency.clone(),
-        from_amount: req.from_amount,
-        to_currency: req.to_currency.clone(),
-        to_amount: req.to_amount,
-        exchange_rate: req.exchange_rate,
-        fee: req.fee,
-        status: req.status.clone(),
-        description: req.description.clone(),
-        recipient_name: req.recipient_name.clone(),
-        recipient_account: req.recipient_account.clone(),
-        created_at: req.created_at.clone(),
-        template: req.template.clone(),
+    let data = ReceiptData {
+        receipt_id: receipt_id.clone(),
+        receipt_type: "transfer".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        branding: branding.clone(),
+        data: serde_json::to_value(&*req).unwrap_or_default(),
+        html_template: html,
+        print_ready: true,
     };
 
-    let pdf_bytes = tokio::task::spawn_blocking(move || build_receipt_pdf(&req_clone))
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("task error: {}", e)))?
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-
-    // Compute checksum
-    let sha256 = hex::encode(Sha256::digest(&pdf_bytes));
-    let size_bytes = pdf_bytes.len();
-
-    // Write to storage
-    let storage_dir = &state.config.storage_path;
-    tokio::fs::create_dir_all(storage_dir)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("storage error: {}", e)))?;
-
-    let pdf_path = storage_dir.join(format!("{}.pdf", txn_id));
-    tokio::fs::write(&pdf_path, &pdf_bytes)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("write error: {}", e)))?;
-
-    // Write metadata sidecar
-    let meta = ReceiptMeta {
-        transaction_id: txn_id.clone(),
-        sha256: sha256.clone(),
-        template: template.clone(),
-        size_bytes,
-        generated_at: Utc::now().to_rfc3339(),
-    };
-    let meta_path = storage_dir.join(format!("{}.meta", txn_id));
-    if let Ok(meta_json) = serde_json::to_string_pretty(&meta) {
-        let _ = tokio::fs::write(&meta_path, meta_json).await;
-    }
-
-    // Update cache
-    if let Ok(mut cache) = state.cache.write() {
-        cache.insert(
-            txn_id.clone(),
-            CachedReceipt {
-                file_path: pdf_path.clone(),
-                sha256: sha256.clone(),
-                size_bytes,
-            },
-        );
-        // Evict oldest if cache too large
-        if cache.len() > 1000 {
-            let keys: Vec<String> = cache.keys().take(100).cloned().collect();
-            for k in keys {
-                cache.remove(&k);
-            }
-        }
-    }
-
-    info!(txn_id, sha256, size_bytes, "receipt generated");
-
-    Ok(ReceiptResponse {
-        transaction_id: txn_id,
-        url: format!("/receipt/{}", pdf_path.display()),
-        file_path: pdf_path.display().to_string(),
-        sha256,
-        size_bytes,
-        template,
-        generated_at: Utc::now().to_rfc3339(),
-    })
+    HttpResponse::Ok().json(data)
 }
 
-async fn download_receipt(
-    State(state): State<Arc<AppState>>,
-    Path(txn_id): Path<String>,
-) -> Response {
-    let pdf_path = state.config.storage_path.join(format!("{}.pdf", txn_id));
+#[post("/receipt/statement")]
+async fn statement_receipt(req: web::Json<StatementRequest>) -> impl Responder {
+    let receipt_id = format!("RFS-{}", Uuid::new_v4().to_string().to_uppercase().replace('-', "")[..12].to_string());
+    let branding = get_branding();
 
-    match tokio::fs::read(&pdf_path).await {
-        Ok(bytes) => {
-            let sha256 = hex::encode(Sha256::digest(&bytes));
-            (
-                [
-                    (header::CONTENT_TYPE, "application/pdf".to_string()),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        format!("attachment; filename=\"remitflow-receipt-{}.pdf\"", txn_id),
-                    ),
-                    ("X-SHA256", sha256),
-                ],
-                bytes,
-            )
-                .into_response()
-        }
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Receipt not found: {}", txn_id),
-                code: "404".into(),
-            }),
+    // Build statement HTML
+    let rows: String = req.transactions.iter().map(|t| {
+        let debit = t.debit.map(|d| format!("{:.2}", d)).unwrap_or_default();
+        let credit = t.credit.map(|c| format!("{:.2}", c)).unwrap_or_default();
+        format!(
+            r#"<tr><td>{}</td><td>{}</td><td>{}</td><td class="debit">{}</td><td class="credit">{}</td><td>{:.2}</td></tr>"#,
+            t.date, t.description, t.reference, debit, credit, t.balance
         )
-            .into_response(),
-    }
+    }).collect();
+
+    let html = format!(r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Account Statement</title>
+<style>
+  body {{ font-family: Arial, sans-serif; font-size: 12px; color: #1e293b; }}
+  .header {{ background: #0f172a; color: white; padding: 20px; }}
+  .logo {{ font-size: 22px; font-weight: 800; color: #10b981; }}
+  h2 {{ margin: 20px 0 10px; font-size: 14px; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+  th {{ background: #f1f5f9; padding: 8px; text-align: left; font-size: 11px; text-transform: uppercase; }}
+  td {{ padding: 8px; border-bottom: 1px solid #f1f5f9; }}
+  .debit {{ color: #ef4444; }}
+  .credit {{ color: #10b981; }}
+  .summary {{ display: flex; gap: 20px; margin: 20px 0; }}
+  .summary-card {{ flex: 1; background: #f8fafc; padding: 12px; border-radius: 8px; }}
+  .footer {{ margin-top: 30px; font-size: 10px; color: #94a3b8; text-align: center; }}
+</style>
+</head>
+<body>
+<div class="header"><div class="logo">{logo}</div><div style="font-size:11px;color:#94a3b8;margin-top:4px;">{tagline}</div></div>
+<div style="padding:20px;">
+<h2>Account Statement</h2>
+<p><strong>{name}</strong> · {email}</p>
+<p>Period: {from} to {to} · Currency: {currency}</p>
+<div class="summary">
+  <div class="summary-card"><div style="font-size:10px;color:#64748b;">Opening Balance</div><div style="font-size:18px;font-weight:700;">{opening:.2} {currency}</div></div>
+  <div class="summary-card"><div style="font-size:10px;color:#64748b;">Closing Balance</div><div style="font-size:18px;font-weight:700;color:#10b981;">{closing:.2} {currency}</div></div>
+  <div class="summary-card"><div style="font-size:10px;color:#64748b;">Transactions</div><div style="font-size:18px;font-weight:700;">{count}</div></div>
+</div>
+<table>
+<thead><tr><th>Date</th><th>Description</th><th>Reference</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead>
+<tbody>{rows}</tbody>
+</table>
+</div>
+<div class="footer"><p>{company} · {address} · {fca}</p></div>
+</body></html>"#,
+        logo = branding.logo_text,
+        tagline = branding.tagline,
+        name = req.user_name,
+        email = req.user_email,
+        from = req.period_from,
+        to = req.period_to,
+        currency = req.currency,
+        opening = req.opening_balance,
+        closing = req.closing_balance,
+        count = req.transactions.len(),
+        rows = rows,
+        company = branding.company,
+        address = branding.address,
+        fca = branding.fca_reg,
+    );
+
+    let data = ReceiptData {
+        receipt_id: receipt_id.clone(),
+        receipt_type: "statement".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        branding,
+        data: serde_json::to_value(&*req).unwrap_or_default(),
+        html_template: html,
+        print_ready: true,
+    };
+
+    HttpResponse::Ok().json(data)
+}
+
+#[post("/receipt/kyc")]
+async fn kyc_receipt(req: web::Json<KycReceiptRequest>) -> impl Responder {
+    let receipt_id = format!("RFK-{}", Uuid::new_v4().to_string().to_uppercase().replace('-', "")[..12].to_string());
+    let branding = get_branding();
+
+    let docs_list: String = req.documents_verified.iter()
+        .map(|d| format!("<li>✓ {}</li>", d))
+        .collect();
+
+    let html = format!(r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>KYC Confirmation Letter</title>
+<style>
+  body {{ font-family: 'Georgia', serif; font-size: 13px; color: #1e293b; max-width: 700px; margin: 40px auto; padding: 40px; }}
+  .header {{ display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 3px solid #10b981; padding-bottom: 20px; margin-bottom: 30px; }}
+  .logo {{ font-family: Arial, sans-serif; font-size: 24px; font-weight: 800; color: #10b981; }}
+  .date {{ font-size: 12px; color: #64748b; }}
+  h1 {{ font-size: 18px; margin-bottom: 20px; }}
+  .badge {{ display: inline-block; background: #10b981; color: white; padding: 6px 16px; border-radius: 20px; font-size: 12px; font-weight: 700; margin-bottom: 20px; }}
+  .limits-table {{ width: 100%; border-collapse: collapse; margin: 20px 0; }}
+  .limits-table th {{ background: #f1f5f9; padding: 10px; text-align: left; }}
+  .limits-table td {{ padding: 10px; border-bottom: 1px solid #f1f5f9; }}
+  ul {{ padding-left: 20px; line-height: 2; }}
+  .footer {{ margin-top: 40px; padding-top: 20px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #94a3b8; }}
+  .signature {{ margin-top: 40px; }}
+</style>
+</head>
+<body>
+<div class="header">
+  <div><div class="logo">{logo}</div><div style="font-size:10px;color:#94a3b8;margin-top:4px;">{tagline}</div></div>
+  <div class="date">Reference: {reference}<br>Date: {approved_at}</div>
+</div>
+<p>Dear <strong>{name}</strong>,</p>
+<h1>KYC Verification Confirmation</h1>
+<div class="badge">✓ {tier} VERIFIED</div>
+<p>We are pleased to confirm that your identity verification has been successfully completed. Your account has been upgraded to <strong>{tier}</strong> status, effective {approved_at}.</p>
+<h3 style="margin-top:24px;">Documents Verified</h3>
+<ul>{docs}</ul>
+<h3 style="margin-top:24px;">Account Limits</h3>
+<table class="limits-table">
+  <thead><tr><th>Limit Type</th><th>Amount</th><th>Currency</th></tr></thead>
+  <tbody>
+    <tr><td>Daily Transfer Limit</td><td><strong>{daily:.2}</strong></td><td>{currency}</td></tr>
+    <tr><td>Monthly Transfer Limit</td><td><strong>{monthly:.2}</strong></td><td>{currency}</td></tr>
+  </tbody>
+</table>
+<p>Your account is now fully verified and you can enjoy the full benefits of RemitFlow's cross-border payment services.</p>
+<div class="signature">
+  <p>Yours sincerely,</p>
+  <p style="margin-top:20px;"><strong>Compliance Team</strong><br>{company}</p>
+</div>
+<div class="footer">
+  <p>{company} · {address}</p>
+  <p>{fca} · {emi}</p>
+  <p>This letter is computer-generated and does not require a physical signature. Receipt ID: {receipt_id}</p>
+</div>
+</body></html>"#,
+        logo = branding.logo_text,
+        tagline = branding.tagline,
+        reference = req.reference,
+        approved_at = req.approved_at,
+        name = req.user_name,
+        tier = req.kyc_tier.to_uppercase(),
+        docs = docs_list,
+        daily = req.daily_limit,
+        monthly = req.monthly_limit,
+        currency = req.currency,
+        company = branding.company,
+        address = branding.address,
+        fca = branding.fca_reg,
+        emi = branding.emi_licence,
+        receipt_id = receipt_id,
+    );
+
+    let data = ReceiptData {
+        receipt_id: receipt_id.clone(),
+        receipt_type: "kyc".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        branding,
+        data: serde_json::to_value(&*req).unwrap_or_default(),
+        html_template: html,
+        print_ready: true,
+    };
+
+    HttpResponse::Ok().json(data)
+}
+
+#[post("/receipt/batch")]
+async fn batch_receipt(req: web::Json<BatchReceiptRequest>) -> impl Responder {
+    let receipt_id = format!("RFB-{}", Uuid::new_v4().to_string().to_uppercase().replace('-', "")[..12].to_string());
+    let branding = get_branding();
+    let success_rate = if req.total_payments > 0 {
+        (req.completed as f64 / req.total_payments as f64) * 100.0
+    } else { 0.0 };
+
+    let rows: String = req.payments.iter().map(|p| {
+        let status_color = match p.status.as_str() {
+            "completed" => "#10b981",
+            "failed" => "#ef4444",
+            _ => "#f59e0b",
+        };
+        format!(
+            r#"<tr><td>{}</td><td>{:.2} {}</td><td style="color:{}">{}</td><td>{}</td><td>{}</td></tr>"#,
+            p.recipient, p.amount, p.currency, status_color, p.status.to_uppercase(),
+            p.reference, p.error.as_deref().unwrap_or("")
+        )
+    }).collect();
+
+    let html = format!(r#"<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Batch Payment Receipt</title>
+<style>
+  body {{ font-family: Arial, sans-serif; font-size: 12px; color: #1e293b; }}
+  .header {{ background: #0f172a; color: white; padding: 24px; }}
+  .logo {{ font-size: 22px; font-weight: 800; color: #10b981; }}
+  .content {{ padding: 24px; }}
+  .stats {{ display: flex; gap: 16px; margin: 20px 0; }}
+  .stat {{ flex: 1; background: #f8fafc; padding: 16px; border-radius: 8px; text-align: center; }}
+  .stat-value {{ font-size: 24px; font-weight: 800; }}
+  .stat-label {{ font-size: 10px; color: #64748b; text-transform: uppercase; margin-top: 4px; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 16px; }}
+  th {{ background: #f1f5f9; padding: 8px; text-align: left; font-size: 11px; text-transform: uppercase; }}
+  td {{ padding: 8px; border-bottom: 1px solid #f1f5f9; }}
+  .footer {{ margin-top: 24px; font-size: 10px; color: #94a3b8; text-align: center; padding: 16px; border-top: 1px solid #f1f5f9; }}
+</style>
+</head>
+<body>
+<div class="header">
+  <div class="logo">{logo}</div>
+  <div style="font-size:11px;color:#94a3b8;margin-top:4px;">Batch Payment Receipt</div>
+</div>
+<div class="content">
+  <p><strong>Batch ID:</strong> {batch_id} &nbsp;|&nbsp; <strong>Initiated by:</strong> {initiator} &nbsp;|&nbsp; <strong>Date:</strong> {created_at}</p>
+  <div class="stats">
+    <div class="stat"><div class="stat-value">{total}</div><div class="stat-label">Total</div></div>
+    <div class="stat"><div class="stat-value" style="color:#10b981">{completed}</div><div class="stat-label">Completed</div></div>
+    <div class="stat"><div class="stat-value" style="color:#ef4444">{failed}</div><div class="stat-label">Failed</div></div>
+    <div class="stat"><div class="stat-value" style="color:#10b981">{rate:.1}%</div><div class="stat-label">Success Rate</div></div>
+    <div class="stat"><div class="stat-value">{amount:.2}</div><div class="stat-label">Total {currency}</div></div>
+  </div>
+  <table>
+    <thead><tr><th>Recipient</th><th>Amount</th><th>Status</th><th>Reference</th><th>Notes</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>
+<div class="footer"><p>{company} · {address} · {fca}</p><p>Receipt ID: {receipt_id}</p></div>
+</body></html>"#,
+        logo = branding.logo_text,
+        batch_id = req.batch_id,
+        initiator = req.initiator_name,
+        created_at = req.created_at,
+        total = req.total_payments,
+        completed = req.completed,
+        failed = req.failed,
+        rate = success_rate,
+        amount = req.total_amount,
+        currency = req.currency,
+        rows = rows,
+        company = branding.company,
+        address = branding.address,
+        fca = branding.fca_reg,
+        receipt_id = receipt_id,
+    );
+
+    let data = ReceiptData {
+        receipt_id,
+        receipt_type: "batch".to_string(),
+        generated_at: Utc::now().to_rfc3339(),
+        branding,
+        data: serde_json::to_value(&*req).unwrap_or_default(),
+        html_template: html,
+        print_ready: true,
+    };
+
+    HttpResponse::Ok().json(data)
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "rust_pdf_receipt=info,tower_http=info".into()),
-        )
-        .init();
 
-    let config = Config::from_env();
-
-    // Ensure storage directory exists
-    if let Err(e) = std::fs::create_dir_all(&config.storage_path) {
-        error!(path = %config.storage_path.display(), err = %e, "failed to create storage directory");
-        std::process::exit(1);
+/// constant_time_eq compares two byte strings without data-dependent early exit.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
     }
-
-    // Build Prometheus registry
-    let registry = Registry::new();
-    let receipts_generated =
-        IntCounter::new("pdf_receipts_generated_total", "Total PDF receipts generated")
-            .expect("metric can be created");
-    let receipts_errors =
-        IntCounter::new("pdf_receipts_errors_total", "Total PDF generation errors")
-            .expect("metric can be created");
-    let active_requests = IntGauge::new("pdf_active_requests", "Currently active requests")
-        .expect("metric can be created");
-    registry.register(Box::new(receipts_generated.clone())).unwrap();
-    registry.register(Box::new(receipts_errors.clone())).unwrap();
-    registry.register(Box::new(active_requests.clone())).unwrap();
-
-    let state = Arc::new(AppState {
-        config,
-        registry,
-        receipts_generated,
-        receipts_errors,
-        active_requests,
-        cache: RwLock::new(HashMap::new()),
-    });
-
-    let port = state.config.port;
-
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/metrics", get(metrics))
-        .route("/receipt", post(generate_receipt))
-        .route("/receipt/:txn_id", get(download_receipt))
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
-        .await
-        .unwrap_or_else(|e| {
-            error!(err = %e, "failed to bind port");
-            std::process::exit(1);
-        });
-
-    info!(port, "rust-pdf-receipt service started");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .unwrap_or_else(|e| {
-            error!(err = %e, "server error");
-            std::process::exit(1);
-        });
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info.payload().downcast_ref::<&str>().copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("unknown panic");
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default();
+        eprintln!("[PANIC] {} at {}", msg, location);
+    }));
 
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
+    let service_name = "rust-pdf-receipt";
+    let _ = db::init_db(service_name).await;
 
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+    tracing_subscriber::fmt::init();
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8096".to_string());
+    let addr = format!("0.0.0.0:{}", port);
+    tracing::info!("[rust-pdf-receipt] Starting on {}", addr);
 
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
+    // FAIL CLOSED: no default internal key — refuse to boot when unset.
+    let internal_key = std::env::var("INTERNAL_SERVICE_KEY")
+        .expect("INTERNAL_SERVICE_KEY is not set: refusing to fall back to a well-known default credential; configure the internal service key explicitly");
+    assert!(!internal_key.is_empty(), "INTERNAL_SERVICE_KEY must not be empty");
+    HttpServer::new(move || {
+        let internal_key = internal_key.clone();
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allow_any_header()
+            .max_age(3600);
 
-    info!("shutdown signal received, draining connections");
+        App::new()
+            .wrap(cors)
+            .service(health)
+            .service(
+                web::scope("")
+                    .wrap(actix_web::middleware::from_fn(move |req: actix_web::dev::ServiceRequest, next: actix_web::middleware::Next<actix_web::body::BoxBody>| {
+                        let key = internal_key.clone();
+                        async move {
+                            let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                            let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                            if constant_time_eq(api_key.as_bytes(), key.as_bytes())
+                                || (auth.starts_with("Bearer ") && constant_time_eq(&auth.as_bytes()[7..], key.as_bytes())) {
+                                return next.call(req).await;
+                            }
+                            Err(actix_web::error::ErrorUnauthorized("unauthorized"))
+                        }
+                    }))
+                    .service(transfer_receipt)
+                    .service(statement_receipt)
+                    .service(kyc_receipt)
+                    .service(batch_receipt)
+            )
+    })
+    .bind(&addr)?
+    .run()
+    .await
 }
