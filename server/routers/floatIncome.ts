@@ -121,6 +121,9 @@ export const floatIncomeRouter = router({
         totalYtdYield: Math.round(totalYtdYield * 100) / 100,
         projectedAnnualYield: Math.round(totalMonthlyYield * 12 * 100) / 100,
       },
+      // W7/B11: all figures above are estimated internal accruals, not realized yield.
+      accrualType: "estimated_internal_accrual",
+      realizedExternalYield: false,
       lastUpdated: new Date().toISOString(),
     };
   }),
@@ -145,7 +148,8 @@ export const floatIncomeRouter = router({
           : sql`SELECT currency, date::text, balance, rate, yield_amount FROM float_income_records WHERE date >= NOW() - (${input.days} || ' days')::interval ORDER BY date DESC LIMIT 500`;
         const rows = await db.execute(query);
         if ((rows as any[]).length > 0) {
-          return { records: rows as any[], total: (rows as any[]).length };
+          // W7/B11: stored rows are estimated internal accruals, not realized yield.
+          return { records: rows as any[], total: (rows as any[]).length, accrualType: "estimated_internal_accrual", realizedExternalYield: false };
         }
       } catch { /* table may not exist yet */ }
 
@@ -168,10 +172,14 @@ export const floatIncomeRouter = router({
             balance: Math.round(balance),
             rate,
             yieldAmount: Math.round(yieldAmount * 100) / 100,
+            accrualType: "estimated_internal_accrual",
+            realizedExternalYield: false,
           });
         }
       }
-      return { records, total: records.length };
+      // W7/B11: derived history is a backward projection of CURRENT balances —
+      // estimated internal accrual, never realized external yield.
+      return { records, total: records.length, accrualType: "estimated_internal_accrual", realizedExternalYield: false, derived: true };
     }),
 
   /**
@@ -242,16 +250,37 @@ export const floatIncomeRouter = router({
           );
         } catch { /* table may not exist yet */ }
 
-        results.push({ currency: pos.currency, date: today, balance, rate, yieldAmount: Math.round(yieldAmount * 100) / 100 });
+        // W7/B11: this is an ESTIMATED INTERNAL accrual — there is no external
+        // yield-generating placement behind it. Label it honestly; it must
+        // never be presented as realized external yield. (float_income_records
+        // has no status/description column and schema changes are out of scope,
+        // so the label travels in the API surface and audit trail.)
+        results.push({
+          currency: pos.currency,
+          date: today,
+          balance,
+          rate,
+          yieldAmount: Math.round(yieldAmount * 100) / 100,
+          accrualType: "estimated_internal_accrual",
+          realizedExternalYield: false,
+        });
       }
 
       await createAuditLog({
         userId: ctx.user.id,
         action: "floatIncome.accrueDaily",
         targetType: "float_income",
-        description: JSON.stringify({ date: today, currencies: results.length }),
+        description: JSON.stringify({ date: today, currencies: results.length, accrualType: "estimated_internal_accrual", realizedExternalYield: false }),
       });
 
-      return { success: true, verified: true, date: today, accruals: results };
+      return {
+        success: true,
+        verified: true,
+        date: today,
+        accruals: results,
+        accrualType: "estimated_internal_accrual",
+        realizedExternalYield: false,
+        note: "Estimated internal accrual only — no external yield-generating placement exists; these amounts are NOT realized income.",
+      };
     }),
 });
