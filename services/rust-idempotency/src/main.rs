@@ -253,6 +253,19 @@ async fn load_from_db(pool: &PgPool) {
     }
 }
 
+
+/// constant_time_eq compares two byte strings without data-dependent early exit.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     std::panic::set_hook(Box::new(|info| {
@@ -291,9 +304,12 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!(port = port, "Idempotency service starting");
 
+    // FAIL CLOSED: no default internal key — workers refuse to start when unset.
+    let internal_key = std::env::var("INTERNAL_SERVICE_KEY")
+        .expect("INTERNAL_SERVICE_KEY is not set: refusing to fall back to a well-known default credential; configure the internal service key explicitly");
+    assert!(!internal_key.is_empty(), "INTERNAL_SERVICE_KEY must not be empty");
     HttpServer::new(move || {
-        let auth_key = std::env::var("INTERNAL_SERVICE_KEY")
-            .unwrap_or_else(|_| "remitflow-internal-2026".to_string());
+        let auth_key = internal_key.clone();
         App::new()
             .app_data(state.clone())
             .app_data(web::Data::new(auth_key))
@@ -304,7 +320,8 @@ async fn main() -> std::io::Result<()> {
                         let key = req.app_data::<web::Data<String>>().map(|k| k.as_str().to_string()).unwrap_or_default();
                         let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
                         let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-                        if api_key == key || (auth.starts_with("Bearer ") && auth[7..] == key) {
+                        if constant_time_eq(api_key.as_bytes(), key.as_bytes())
+                            || (auth.starts_with("Bearer ") && constant_time_eq(&auth.as_bytes()[7..], key.as_bytes())) {
                             return next.call(req).await;
                         }
                         Err(actix_web::error::ErrorUnauthorized("unauthorized"))
