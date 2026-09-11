@@ -39,7 +39,38 @@ import {
   replayEvents, saveSnapshot, getProjection, updateProjection,
 } from "../middleware/eventSourcing.js";
 import { logger } from "../_core/logger.js";
+
+// ── W9/Q11 (F10-6/F10-7): PII vault key discipline ───────────────────────────
+// No repo-known static salt and no ephemeral per-process encryption key in
+// production. Tokenization FAILS CLOSED: if the salt/key is unavailable the
+// mutation throws — PII is never stored plaintext or with a known credential.
+let cachedPiiSalt: string | null = null;
+function getPiiSalt(): string {
+  if (cachedPiiSalt) return cachedPiiSalt;
+  const envSalt = process.env.PII_SALT;
+  if (envSalt) { cachedPiiSalt = envSalt; return envSalt; }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("PII_SALT is required in production — PII tokenization is disabled (fail closed)");
+  }
+  console.warn("[futureProofing] PII_SALT unset — using ephemeral random salt; tokens will NOT be stable across restarts (non-production only)");
+  cachedPiiSalt = randomBytes(32).toString("hex");
+  return cachedPiiSalt;
+}
+
+let cachedPiiKey: string | null = null;
+function getPiiEncryptionKey(): Buffer {
+  if (cachedPiiKey) return Buffer.from(cachedPiiKey, "hex").slice(0, 32);
+  const envKey = process.env.PII_ENCRYPTION_KEY;
+  if (envKey) { cachedPiiKey = envKey; return Buffer.from(envKey, "hex").slice(0, 32); }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("PII_ENCRYPTION_KEY is required in production — PII tokenization is disabled (fail closed)");
+  }
+  console.warn("[futureProofing] PII_ENCRYPTION_KEY unset — using ephemeral random key; tokens will NOT decrypt after restart (non-production only)");
+  cachedPiiKey = randomBytes(32).toString("hex");
+  return Buffer.from(cachedPiiKey, "hex");
+}
 import { safeParseAmount } from "../lib/safeDecimal";
+import { executeTransferPipeline, settleTransferHold } from "../_core/transferPipeline.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const genId = (prefix: string) => `${prefix}-${Date.now()}-${randomBytes(4).toString("hex").toUpperCase()}`;
@@ -113,9 +144,15 @@ const conversationalPaymentsRouter = router({
         currency: z.string().optional(),
         beneficiaryId: z.number().optional(),
       }).optional(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       if (!input.confirmed) return { status: "cancelled", message: "Payment cancelled by user" };
+
+      // W12: canonical TOTP step-up (fail-closed) — AI-initiated money movement
+      // still requires the human's second factor after explicit confirmation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "AI payment intent execution");
 
       const convState = await redis.hGetAll(`conv:${ctx.user.id}`);
       if (!convState.lastIntent) throw new TRPCError({ code: "BAD_REQUEST", message: "No pending intent found" });
@@ -134,19 +171,61 @@ const conversationalPaymentsRouter = router({
         { eventType: "TransferInitiated", payload: { userId: ctx.user.id, fromAmount: amount, fromCurrency: currency, toCurrency: intent.toCurrency || currency, beneficiaryName: intent.beneficiaryName, source: "conversational_ai" } },
       ], { correlationId: input.correlationId, source: "ai_agent", userId: ctx.user.id, schemaVersion: 1 });
 
-      // Debit wallet via TigerBeetle
-      try {
-        await tigerBeetle.createTransfer({
-          id: BigInt(Date.now()),
-          debitAccountId: BigInt(ctx.user.id),
-          creditAccountId: BigInt(intent.beneficiaryId || 0),
-          amount: BigInt(Math.round(amount * 100)),
-          ledger: 1,
-          code: 1,
-        });
-      } catch {
-        // TigerBeetle unavailable — use Postgres fallback
-        await db.execute(sql`UPDATE wallets SET balance = balance - ${String(amount)} WHERE user_id = ${ctx.user.id} AND currency = ${currency}`);
+      // FF-FIX: the old flow used fake TB accounts (BigInt(user.id) / account 0)
+      // with an UNGUARDED Postgres fallback debit and no recipient credit —
+      // funds could be destroyed. Now: require a resolvable beneficiary wallet,
+      // run the pipeline (compliance + ledger hold), and move money with a
+      // guarded debit + recipient credit in ONE transaction.
+      const beneficiaryUserId = typeof intent.beneficiaryId === "number" && intent.beneficiaryId > 0 ? intent.beneficiaryId : null;
+      if (!beneficiaryUserId) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "No beneficiary resolved — transfer rejected (fail closed, no funds moved)" });
+      }
+      const beneficiaryWallet = await db.execute(sql`
+        SELECT id FROM wallets WHERE "userId" = ${beneficiaryUserId} AND currency = ${currency} AND status = 'active' LIMIT 1
+      `);
+      const bwRows = (beneficiaryWallet as unknown as { rows?: Array<{ id: number }> }).rows ?? (beneficiaryWallet as unknown as Array<{ id: number }>);
+      if (bwRows.length === 0) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Beneficiary wallet unavailable — transfer rejected (fail closed, no funds moved)" });
+      }
+
+      const aiPipeline = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount,
+        fromCurrency: currency,
+        toCurrency: intent.toCurrency || currency,
+        recipientName: intent.beneficiaryName ?? `user:${beneficiaryUserId}`,
+        rail: "internal",
+        corridorCode: (intent.toCurrency || currency).slice(0, 2),
+        featureLabel: "conversational_ai_transfer",
+        transferId,
+        description: `Conversational AI transfer: ${amount} ${currency} to ${intent.beneficiaryName ?? beneficiaryUserId}`,
+        metadata: { correlationId: input.correlationId, beneficiaryId: beneficiaryUserId },
+        skipVelocity: true,
+      });
+
+      await db.transaction(async (tx: any) => {
+        const debitRows = (await tx.execute(sql`
+          UPDATE wallets SET balance = balance - ${amount.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
+          WHERE "userId" = ${ctx.user.id} AND currency = ${currency} AND status = 'active'
+            AND CAST(balance AS numeric) >= ${amount.toFixed(2)}
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (debitRows.length === 0) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient wallet balance" });
+        }
+        const creditRows = (await tx.execute(sql`
+          UPDATE wallets SET balance = balance + ${amount.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
+          WHERE "userId" = ${beneficiaryUserId} AND currency = ${currency} AND status = 'active'
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (creditRows.length === 0) {
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Beneficiary wallet unavailable — transfer aborted, no funds moved" });
+        }
+      });
+
+      // Settle the pipeline hold (PG debit already applied above).
+      if (aiPipeline.tigerBeetleRecorded) {
+        await settleTransferHold({ transferId, userId: ctx.user.id, amount, currency, skipPgDebit: true });
       }
 
       // Publish to Fluvio for real-time streaming
@@ -767,10 +846,19 @@ const cbdcFullRouter = router({
       amount: z.number().positive().max(5000000),
       narration: z.string().max(100).optional(),
       pin: z.string().length(4),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      // W12: canonical TOTP step-up (fail-closed) — money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "eNaira transfer");
+      // W12: direct CBDC wallet debit bypassing the transfer pipeline — apply
+      // the transferEngine-equivalent KYC tier check (fail-closed).
+      const { requireKycTierForAmount } = await import("../_core/totpStepUp");
+      await requireKycTierForAmount(ctx.user.id, input.amount, "eNaira transfer");
 
       // Verify sender wallet
       const [senderWallet] = await db.select().from(cbdcWallets)
@@ -780,48 +868,101 @@ const cbdcFullRouter = router({
 
       const txId = genId("eNGN-TXF");
 
-      // Execute via Dapr binding to eNaira service
+      // FF-FIX: ONLY the gateway call runs inside try. Previously a failure of
+      // the balance update / TB record / event store AFTER a successful
+      // gateway transfer fell into the catch, which debited the wallet a
+      // SECOND time.
+      let gatewayResult: unknown = null;
+      let gatewayOk = false;
       try {
-        const result = await dapr.invokeBinding("enaira-gateway", "transfer", {
+        gatewayResult = await dapr.invokeBinding("enaira-gateway", "transfer", {
           senderWalletId: senderWallet.walletAddress,
           recipientWalletId: input.recipientWalletId,
           amount: input.amount,
           narration: input.narration,
           transactionRef: txId,
         });
+        gatewayOk = true;
+      } catch {
+        gatewayOk = false; // gateway down/rejected — internal-ledger path below
+      }
 
-        // Update balances
-        await db.execute(sql`UPDATE cbdc_wallets SET balance = balance - ${String(input.amount)} WHERE id = ${senderWallet.id}`);
+      // FF-FIX: guarded debit (WHERE balance >= amount, row-count checked),
+      // atomic with the internal recipient credit in ONE transaction.
+      // Fallback path: the recipient MUST be a local RemitFlow eNaira wallet —
+      // otherwise fail closed with NO debit (previously funds were destroyed).
+      if (!gatewayOk) {
+        const [recipientWallet] = await db.select().from(cbdcWallets)
+          .where(and(eq(cbdcWallets.walletAddress, input.recipientWalletId), eq(cbdcWallets.currency, "eNGN"))).limit(1) as any[];
+        if (!recipientWallet) {
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: "eNaira gateway unavailable and recipient is not a RemitFlow wallet — transfer aborted, no funds moved" });
+        }
+        await db.transaction(async (tx: any) => {
+          const debitRows = (await tx.execute(sql`
+            UPDATE cbdc_wallets SET balance = balance - ${String(input.amount)}
+            WHERE id = ${senderWallet.id} AND CAST(balance AS numeric) >= ${String(input.amount)}
+            RETURNING id
+          `)) as unknown as { rows?: Array<{ id: number }> };
+          if (((debitRows.rows ?? (debitRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>).length === 0) {
+            throw new TRPCError({ code: "CONFLICT", message: "Insufficient eNaira balance (concurrent debit)" });
+          }
+          const creditRows = (await tx.execute(sql`
+            UPDATE cbdc_wallets SET balance = balance + ${String(input.amount)}
+            WHERE id = ${recipientWallet.id}
+            RETURNING id
+          `)) as unknown as { rows?: Array<{ id: number }> };
+          if (((creditRows.rows ?? (creditRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>).length === 0) {
+            throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Recipient credit failed — transfer aborted, sender NOT debited" });
+          }
+          await tx.execute(sql`
+            INSERT INTO cbdc_mint_burn_log (wallet_id, operation, amount, currency, operator_id, reason, metadata)
+            VALUES (${senderWallet.id}, 'transfer', ${String(input.amount)}, 'eNGN', ${ctx.user.id}, ${input.narration || 'eNaira P2P transfer'},
+                    ${JSON.stringify({ recipient: input.recipientWalletId, txId })}::jsonb)
+          `);
+        });
+        return { txId, status: "completed_internal", amount: input.amount, currency: "eNGN", note: "Processed via internal ledger" };
+      }
 
-        // Record in TigerBeetle for double-entry
+      // Gateway committed: mirror the external movement with a guarded debit
+      // (the gateway settles the recipient leg on the CBN rail).
+      await db.transaction(async (tx: any) => {
+        const debitRows = (await tx.execute(sql`
+          UPDATE cbdc_wallets SET balance = balance - ${String(input.amount)}
+          WHERE id = ${senderWallet.id} AND CAST(balance AS numeric) >= ${String(input.amount)}
+          RETURNING id
+        `)) as unknown as { rows?: Array<{ id: number }> };
+        if (((debitRows.rows ?? (debitRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>).length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Insufficient eNaira balance (concurrent debit) — gateway committed; MANUAL RECONCILIATION REQUIRED" });
+        }
+      });
+
+      // Record in TigerBeetle for double-entry (best-effort metadata; the PG
+      // debit above is authoritative — a TB outage must not throw here).
+      try {
         await tigerBeetle.createTransfer({
-          id: BigInt(Date.now()),  // eslint-disable-line
+          id: BigInt(`0x${createHash("sha256").update(`enaira-txf:${txId}`).digest("hex").slice(0, 15)}`),  // eslint-disable-line
           debitAccountId: BigInt(ctx.user.id),  // eslint-disable-line
           creditAccountId: BigInt(0),  // eslint-disable-line -- CBN settlement account
           amount: BigInt(Math.round(input.amount * 100)),  // eslint-disable-line
           ledger: 2, // CBDC ledger
           code: 10, // eNaira transfer
         });
+      } catch (tbErr) {
+        logger.warn({ txId, err: tbErr instanceof Error ? tbErr.message : String(tbErr) }, "[eNaira] TB record failed after gateway commit — reconcile via event store/audit log");
+      }
 
-        // Record in event store
+      // Record in event store (best-effort — never re-enter a debit path).
+      try {
         await initEventStore();
         await appendEvents(txId, "CBDC", [
           { eventType: "CBDCTransferInitiated", payload: { userId: ctx.user.id, amount: input.amount, currency: "eNGN", recipient: input.recipientWalletId } },
-          { eventType: "CBDCTransferCompleted", payload: { result } },
+          { eventType: "CBDCTransferCompleted", payload: { result: gatewayResult } },
         ], { correlationId: txId, source: "enaira_gateway", userId: ctx.user.id, schemaVersion: 1 });
-
-        return { txId, status: "completed", amount: input.amount, currency: "eNGN", gatewayResponse: result };
-      } catch (err) {
-        // Fallback: internal transfer between RemitFlow users
-        await db.execute(sql`UPDATE cbdc_wallets SET balance = balance - ${String(input.amount)} WHERE id = ${senderWallet.id}`);
-        await db.execute(sql`
-          INSERT INTO cbdc_mint_burn_log (wallet_id, operation, amount, currency, operator_id, reason, metadata)
-          VALUES (${senderWallet.id}, 'transfer', ${String(input.amount)}, 'eNGN', ${ctx.user.id}, ${input.narration || 'eNaira P2P transfer'},
-                  ${JSON.stringify({ recipient: input.recipientWalletId, txId })}::jsonb)
-        `);
-
-        return { txId, status: "completed_internal", amount: input.amount, currency: "eNGN", note: "Processed via internal ledger" };
+      } catch (esErr) {
+        logger.warn({ txId, err: esErr instanceof Error ? esErr.message : String(esErr) }, "[eNaira] Event-store append failed after gateway commit — reconcile via audit log");
       }
+
+      return { txId, status: "completed", amount: input.amount, currency: "eNGN", gatewayResponse: gatewayResult };
     }),
 
   /** 4.4 CBDC-Fiat Bridge */
@@ -831,10 +972,19 @@ const cbdcFullRouter = router({
       toCurrency: z.string().length(3),
       amount: z.number().positive().max(10_000_000),
       destinationAccount: z.string(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      // W12: canonical TOTP step-up (fail-closed) — burns CBDC and credits fiat.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "CBDC-to-fiat bridge");
+      // W12: direct CBDC burn + fiat credit bypassing the transfer pipeline —
+      // apply the transferEngine-equivalent KYC tier check (fail-closed).
+      const { requireKycTierForAmount } = await import("../_core/totpStepUp");
+      await requireKycTierForAmount(ctx.user.id, input.amount, "CBDC-to-fiat bridge");
 
       const bridgeId = genId("BRIDGE");
 
@@ -849,27 +999,65 @@ const cbdcFullRouter = router({
       const [rate] = await db.select().from(fxRateCache)
         .where(eq(fxRateCache.baseCurrency, input.fromCurrency.replace("e", ""))).limit(1) as any[];
       const fxRate = rate ? safeParseAmount(rate.rate) : 1;
+      if (input.fromCurrency !== input.toCurrency && (!Number.isFinite(fxRate) || fxRate <= 0)) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No FX rate available for this corridor — bridge aborted (fail closed)" });
+      }
       const fiatAmount = input.amount * fxRate;
-      const fee = input.amount * 0.005; // 0.5% bridge fee
+      // FF-FIX: fee in FIAT units (was CBDC units subtracted from a fiat amount
+      // — a unit mismatch whenever rate ≠ 1).
+      const feeFiat = fiatAmount * 0.005; // 0.5% bridge fee
+      const creditAmountFiat = fiatAmount - feeFiat;
 
-      // Burn CBDC
-      await db.execute(sql`UPDATE cbdc_wallets SET balance = balance - ${String(input.amount)} WHERE id = ${wallet.id}`);
+      // FF-FIX: guarded burn + ensured fiat wallet + row-count-checked credit
+      // in ONE transaction — no overdraft race, and the CBDC is never burned
+      // without the fiat landing.
+      await db.transaction(async (tx: any) => {
+        const burnRows = (await tx.execute(sql`
+          UPDATE cbdc_wallets SET balance = balance - ${String(input.amount)}
+          WHERE id = ${wallet.id} AND CAST(balance AS numeric) >= ${String(input.amount)}
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (burnRows.length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Insufficient CBDC balance (concurrent debit)" });
+        }
 
-      // Credit fiat wallet
-      await db.execute(sql`UPDATE wallets SET balance = balance + ${String(fiatAmount - fee)} WHERE user_id = ${ctx.user.id} AND currency = ${input.toCurrency}`);
-
-      // Record double-entry in TigerBeetle
-      await tigerBeetle.createTransfer({
-        id: BigInt(Date.now()),
-        debitAccountId: BigInt(ctx.user.id * 1000 + 2), // CBDC sub-account
-        creditAccountId: BigInt(ctx.user.id * 1000 + 1), // Fiat sub-account
-        amount: BigInt(Math.round(fiatAmount * 100)),
-        ledger: 3, // Bridge ledger
-        code: 20, // CBDC-fiat bridge
+        const fwRows = (await tx.execute(sql`
+          SELECT id FROM wallets WHERE "userId" = ${ctx.user.id} AND currency = ${input.toCurrency} LIMIT 1
+        `)) as unknown as Array<{ id: number }>;
+        let fiatWalletId = fwRows[0]?.id;
+        if (!fiatWalletId) {
+          const insRows = (await tx.execute(sql`
+            INSERT INTO wallets ("userId", currency, balance, status) VALUES (${ctx.user.id}, ${input.toCurrency}, '0.00', 'active') RETURNING id
+          `)) as unknown as Array<{ id: number }>;
+          fiatWalletId = insRows[0]?.id;
+        }
+        const creditRows = (await tx.execute(sql`
+          UPDATE wallets SET balance = balance + ${creditAmountFiat.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
+          WHERE id = ${fiatWalletId} AND status = 'active'
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (creditRows.length === 0) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Fiat wallet credit failed — bridge aborted, CBDC NOT burned" });
+        }
       });
 
+      // Record double-entry in TigerBeetle (best-effort metadata — the PG
+      // movement above is authoritative; a TB outage must not strand funds).
+      try {
+        await tigerBeetle.createTransfer({
+          id: BigInt(`0x${createHash("sha256").update(`cbdc-bridge:${bridgeId}`).digest("hex").slice(0, 15)}`),
+          debitAccountId: BigInt(ctx.user.id * 1000 + 2), // CBDC sub-account
+          creditAccountId: BigInt(ctx.user.id * 1000 + 1), // Fiat sub-account
+          amount: BigInt(Math.round(fiatAmount * 100)),
+          ledger: 3, // Bridge ledger
+          code: 20, // CBDC-fiat bridge
+        });
+      } catch (tbErr) {
+        logger.warn({ bridgeId, err: tbErr instanceof Error ? tbErr.message : String(tbErr) }, "[CBDCBridge] TB record failed — PG movement already committed; reconcile via audit log");
+      }
+
       await createAuditLog({ userId: ctx.user.id, action: "CBDC_FIAT_BRIDGE", metadata: { bridgeId, from: input.fromCurrency, to: input.toCurrency, amount: input.amount, fiatAmount } });
-      return { bridgeId, status: "completed", burned: input.amount, burnedCurrency: input.fromCurrency, credited: fiatAmount - fee, creditedCurrency: input.toCurrency, fee, fxRate };
+      return { bridgeId, status: "completed", burned: input.amount, burnedCurrency: input.fromCurrency, credited: creditAmountFiat, creditedCurrency: input.toCurrency, fee: feeFiat, fxRate };
     }),
 
   /** 4.7 Programmable Money (Smart Contracts) */
@@ -1501,11 +1689,11 @@ const securityFullRouter = router({
 
       const tokenId = genId("TOK");
       // Generate deterministic token for same value (allows dedup)
-      const hash = createHash("sha256").update(`${input.fieldType}:${input.value}:${process.env.PII_SALT || "remitflow-pii"}`).digest("hex");
+      const hash = createHash("sha256").update(`${input.fieldType}:${input.value}:${getPiiSalt()}`).digest("hex");
       const token = `TOK-${hash.slice(0, 32)}`;
 
       // Encrypt the actual value
-      const encKey = Buffer.from(process.env.PII_ENCRYPTION_KEY || randomBytes(32).toString("hex"), "hex").slice(0, 32);
+      const encKey = getPiiEncryptionKey(); // W9/Q11: fail closed when unconfigured (see module helper)
       const iv = randomBytes(12);
       const cipher = createCipheriv("aes-256-gcm", encKey, iv);
       let encrypted = cipher.update(input.value, "utf8", "hex");
@@ -1538,7 +1726,7 @@ const securityFullRouter = router({
       const [row] = await db.execute(sql`SELECT * FROM pii_tokens WHERE token = ${input.token}`) as any[];
       if (!row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
-      const encKey = Buffer.from(process.env.PII_ENCRYPTION_KEY || randomBytes(32).toString("hex"), "hex").slice(0, 32);
+      const encKey = getPiiEncryptionKey(); // W9/Q11: fail closed when unconfigured (see module helper)
       const decipher = createDecipheriv("aes-256-gcm", encKey, Buffer.from(row.iv, "hex"));
       decipher.setAuthTag(Buffer.from(row.auth_tag, "hex"));
       let decrypted = decipher.update(row.encrypted_value, "hex", "utf8");
