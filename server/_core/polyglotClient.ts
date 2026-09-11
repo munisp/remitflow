@@ -11,6 +11,34 @@
  * the function resolves with a safe default so the main flow continues.
  */
 
+import { context as otelContext, propagation, defaultTextMapSetter } from "@opentelemetry/api";
+import { getRequestTenantContext } from "./tenantGuc";
+
+// ── W3C trace-context + tenant propagation (W12-F) ────────────────────────────
+// The polyglot sidecars already EXTRACT W3C traceparent/tracestate and
+// X-Tenant-Id (Go otelMiddlewareRoute, Rust HeaderExtractor, Python
+// set_tenant) but the TS outbound clients previously injected nothing, so
+// cross-service traces and tenant attribution were severed here. Same
+// mechanism as server/middleware/kafka.ts injectTraceContext.
+// FAIL-SOFT: never throws, never blocks a money path — with no active span
+// or tenant the headers are simply omitted (receivers start a root span).
+
+/**
+ * Build W3C traceparent/tracestate + X-Tenant-Id headers from the active
+ * OTel context and request tenant context. Returns {} on any failure.
+ */
+function telemetryHeaders(): Record<string, string> {
+  try {
+    const carrier: Record<string, string> = {};
+    propagation.inject(otelContext.active(), carrier, defaultTextMapSetter);
+    const tenantId = getRequestTenantContext()?.tenantId;
+    if (tenantId) carrier["X-Tenant-Id"] = tenantId;
+    return carrier;
+  } catch {
+    return {}; // fail-soft: propagation must never break the request path
+  }
+}
+
 const GO_RATELIMIT_URL = process.env.GO_RATELIMIT_URL ?? "http://localhost:8084";
 const RUST_AUDIT_URL = process.env.RUST_AUDIT_URL ?? "http://localhost:8082";
 const PYTHON_COMPLIANCE_URL = process.env.PYTHON_COMPLIANCE_URL ?? "http://localhost:8083";
@@ -23,7 +51,13 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = S
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    // Inject trace/tenant context on EVERY outbound sidecar call (W12-F).
+    // Caller-supplied headers (e.g. Content-Type) win on conflict.
+    const headers: Record<string, string> = {
+      ...telemetryHeaders(),
+      ...((options.headers ?? {}) as Record<string, string>),
+    };
+    return await fetch(url, { ...options, headers, signal: controller.signal });
   } finally {
     clearTimeout(id);
   }
@@ -143,35 +177,42 @@ export interface AuditLogResult {
 }
 
 /**
- * Send an audit event to the Rust audit-log service.
- * Fire-and-forget: never throws.
+ * Send an audit event. Wave 7 (C12): the rust-audit-service target was a
+ * deleted Dockerfile-only scaffold — events posted to it vanished silently.
+ * Events are now written to the local TS audit trail (auditLogs table, same
+ * helper the routers use). Still fire-and-forget: never throws. Returns null
+ * because there is no external service id/checksum to report — callers must
+ * not expect one.
  */
 export async function sendAuditLog(payload: AuditLogPayload): Promise<AuditLogResult | null> {
   try {
-    const res = await fetchWithTimeout(`${RUST_AUDIT_URL}/audit/log`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+    if (typeof payload.userId !== "number") return null; // auditLogs.userId is NOT NULL — skip anonymous events honestly
+    const { createAuditLog } = await import("../db.js");
+    await createAuditLog({
+      userId: payload.userId,
+      action: payload.action,
+      description: [
+        payload.resource && `resource=${payload.resource}`,
+        payload.resourceId && `id=${payload.resourceId}`,
+        payload.success === false && "FAILED",
+        payload.errorMessage,
+      ].filter(Boolean).join(" ") || payload.action,
+      ipAddress: payload.ipAddress,
+      severity: payload.severity ?? "info",
+      metadata: payload.details === undefined ? undefined : { details: payload.details },
     });
-    if (!res.ok) return null;
-    return (await res.json()) as AuditLogResult;
-  } catch {
     return null;
+  } catch {
+    return null; // best-effort — audit failure must never break the request path
   }
 }
 
 /**
- * Send a batch of audit events to the Rust service.
+ * Send a batch of audit events (routed to the local TS audit trail, see sendAuditLog).
  */
 export async function sendAuditBatch(payloads: AuditLogPayload[]): Promise<void> {
-  try {
-    await fetchWithTimeout(`${RUST_AUDIT_URL}/audit/batch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payloads),
-    });
-  } catch {
-    // Non-critical
+  for (const payload of payloads) {
+    await sendAuditLog(payload);
   }
 }
 
@@ -206,20 +247,13 @@ export interface ComplianceCheckResult {
 
 /**
  * Run AML/KYC compliance check via the Python service.
- * Falls back to `decision: approved` if the service is unavailable.
+ * FAIL CLOSED (Wave 7 verification): any outage or non-OK response THROWS —
+ * never fabricates `decision: "approved"` (consumed in the transfer.send gate).
  */
 export async function runComplianceCheck(input: ComplianceCheckInput): Promise<ComplianceCheckResult> {
-  const fallback: ComplianceCheckResult = {
-    transferId: input.transferId,
-    decision: "approved",
-    rulesTriggered: [],
-    riskLevel: "low",
-    requiresEdd: false,
-    timestamp: new Date().toISOString(),
-    checksum: "",
-  };
+  let res: Response;
   try {
-    const res = await fetchWithTimeout(`${PYTHON_COMPLIANCE_URL}/compliance/check`, {
+    res = await fetchWithTimeout(`${PYTHON_COMPLIANCE_URL}/compliance/check`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -237,7 +271,13 @@ export async function runComplianceCheck(input: ComplianceCheckInput): Promise<C
         sender_name: input.senderName,
       }),
     });
-    if (!res.ok) return fallback;
+  } catch (err) {
+    throw new Error(`compliance check unavailable — failing closed (${err instanceof Error ? err.message : String(err)})`);
+  }
+  if (!res.ok) {
+    throw new Error(`compliance check failed: HTTP ${res.status} — failing closed`);
+  }
+  {
     const data = await res.json();
     return {
       transferId: data.transfer_id,
@@ -250,8 +290,6 @@ export async function runComplianceCheck(input: ComplianceCheckInput): Promise<C
       timestamp: data.timestamp,
       checksum: data.checksum,
     };
-  } catch {
-    return fallback;
   }
 }
 
@@ -282,19 +320,13 @@ export interface FraudScoreResult {
 
 /**
  * Get fraud risk score via the Python service.
- * Falls back to `decision: approve` if the service is unavailable.
+ * FAIL CLOSED (Wave 7 verification): any outage or non-OK response THROWS —
+ * never fabricates `decision: "approve"`.
  */
 export async function getFraudScore(input: FraudScoreInput): Promise<FraudScoreResult> {
-  const fallback: FraudScoreResult = {
-    transferId: input.transferId,
-    fraudScore: 0,
-    riskLevel: "low",
-    decision: "approve",
-    factors: [],
-    timestamp: new Date().toISOString(),
-  };
+  let res: Response;
   try {
-    const res = await fetchWithTimeout(`${PYTHON_COMPLIANCE_URL}/fraud/score`, {
+    res = await fetchWithTimeout(`${PYTHON_COMPLIANCE_URL}/fraud/score`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -313,19 +345,21 @@ export async function getFraudScore(input: FraudScoreInput): Promise<FraudScoreR
         velocity_score: input.velocityScore ?? 0,
       }),
     });
-    if (!res.ok) return fallback;
-    const data = await res.json();
-    return {
-      transferId: data.transfer_id,
-      fraudScore: data.fraud_score,
-      riskLevel: data.risk_level,
-      decision: data.decision,
-      factors: data.factors ?? [],
-      timestamp: data.timestamp,
-    };
-  } catch {
-    return fallback;
+  } catch (err) {
+    throw new Error(`fraud scoring unavailable — failing closed (${err instanceof Error ? err.message : String(err)})`);
   }
+  if (!res.ok) {
+    throw new Error(`fraud scoring failed: HTTP ${res.status} — failing closed`);
+  }
+  const data = await res.json();
+  return {
+    transferId: data.transfer_id,
+    fraudScore: data.fraud_score,
+    riskLevel: data.risk_level,
+    decision: data.decision,
+    factors: data.factors ?? [],
+    timestamp: data.timestamp,
+  };
 }
 
 export interface SanctionsScreenInput {
@@ -343,17 +377,22 @@ export interface SanctionsScreenResult {
 }
 
 /**
- * Screen a name against sanctions lists via the Python service.
+ * Screen a name against sanctions lists via the Python compliance service.
+ *
+ * Wave 7 verification round: this is the REAL sanctions gate in the live money
+ * path (p2pInstant, globalPayroll.disburseRun, transferPipeline, transfer.send,
+ * Wave-10 embeddedPayouts.requestPayout).
+ * FAIL CLOSED: any outage, non-OK response, OR an HTTP 200 with a malformed
+ * body (missing/invalid decision fields) THROWS — never fabricates
+ * `{isSanctioned:false, riskLevel:"low", action:"allow"}`. Only an explicit,
+ * well-formed negative clears. Every call site was verified to treat a throw
+ * as fail-closed (embeddedPayouts, globalPayroll, p2pInstant, smeTrade,
+ * kycProviderWebhook, transferPipeline, routers.ts).
  */
 export async function screenSanctions(input: SanctionsScreenInput): Promise<SanctionsScreenResult> {
-  const fallback: SanctionsScreenResult = {
-    name: input.name,
-    isSanctioned: false,
-    riskLevel: "low",
-    action: "allow",
-  };
+  let res: Response;
   try {
-    const res = await fetchWithTimeout(`${PYTHON_COMPLIANCE_URL}/sanctions/screen`, {
+    res = await fetchWithTimeout(`${PYTHON_COMPLIANCE_URL}/sanctions/screen`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -362,16 +401,30 @@ export async function screenSanctions(input: SanctionsScreenInput): Promise<Sanc
         entity_type: input.entityType ?? "individual",
       }),
     });
-    if (!res.ok) return fallback;
-    const data = await res.json();
-    return {
-      name: data.name,
-      isSanctioned: data.is_sanctioned,
-      matchType: data.match_type,
-      riskLevel: data.risk_level,
-      action: data.action,
-    };
-  } catch {
-    return fallback;
+  } catch (err) {
+    throw new Error(`sanctions screening unavailable — failing closed (${err instanceof Error ? err.message : String(err)})`);
   }
+  if (!res.ok) {
+    throw new Error(`sanctions screening failed: HTTP ${res.status} — failing closed`);
+  }
+  const data = await res.json().catch(() => null);
+  // FAIL CLOSED on malformed bodies (M10): an HTTP 200 without the expected
+  // decision fields is a screening ERROR, not a negative. An undefined
+  // is_sanctioned previously let screening PASS on a broken response.
+  if (
+    data === null || typeof data !== "object" ||
+    typeof (data as Record<string, unknown>).is_sanctioned !== "boolean" ||
+    !["allow", "block", "review"].includes(String((data as Record<string, unknown>).action)) ||
+    typeof (data as Record<string, unknown>).risk_level !== "string" ||
+    (data as Record<string, unknown>).risk_level === ""
+  ) {
+    throw new Error("sanctions screening returned a malformed response (missing decision fields) — failing closed");
+  }
+  return {
+    name: typeof data.name === "string" ? data.name : input.name,
+    isSanctioned: data.is_sanctioned,
+    matchType: typeof data.match_type === "string" ? data.match_type : undefined,
+    riskLevel: data.risk_level,
+    action: data.action,
+  };
 }
