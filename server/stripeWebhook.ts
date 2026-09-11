@@ -9,9 +9,11 @@ import {
   investmentOrders,
   userInvestments,
   users,
+  tenants,
   idempotencyKeys,
 } from "../drizzle/schema";
-import { eq, and } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { resolveTenantContext } from "./tenantMiddleware";
 import { broadcastUserEvent } from "./sse.service";
 import { notifyOwner } from "./_core/notification";
 import { sendPushToUser } from "./pushNotifications";
@@ -20,6 +22,7 @@ import { logger } from './_core/logger';
 import { safeParseAmount } from "./lib/safeDecimal";
 import { auditCoreOperation } from "./middleware/coreAtomicity";
 import { KAFKA_TOPICS } from "./middleware/kafka";
+import { processFundingWebhook } from "./routers/cardFunding";
 
 // ─── Transactional email helper (Resend) ──────────────────────────────────────
 async function sendTransactionalEmail(opts: {
@@ -193,6 +196,21 @@ export function registerStripeWebhook(app: Express) {
       logger.info(`[Stripe Webhook] Event: ${event.type} | ID: ${event.id} | ${new Date().toISOString()}`);
 
       // ── Idempotency: skip already-processed events ──────────────────────
+      // W9/F14-1 ordering fix: the event is only MARKED processed AFTER the
+      // business writes below succeed. The old order (mark first) meant a
+      // mid-handler failure left money collected with no audit trail AND the
+      // event recorded as processed, so Stripe never retried — fail closed
+      // instead: business inserts throw → event stays unprocessed → Stripe
+      // retries delivery.
+      //
+      // H1 fix: this SELECT is now only a FAST PATH. The correctness boundary
+      // for money-moving events (checkout.session.completed → top-up credit /
+      // investment fulfillment) is the atomic INSERT-guard INSIDE the credit
+      // db.transaction below (idempotencyGuardedTx): the guard row carries
+      // NON-NULL tenant_id + user_id, so the unique index
+      // idempotencyKeys_tenant_user_operation_key_uidx actually conflicts on
+      // replay (the old markEventProcessed inserted NULL tenant/user — NULLs
+      // never conflict, so the "unique backstop" was void).
       const db0 = await getDb();
       if (db0) {
         const existing = await db0
@@ -204,21 +222,33 @@ export function registerStripeWebhook(app: Express) {
           logger.info(`[Stripe Webhook] Duplicate event skipped: ${event.id}`);
           return res.json({ received: true, duplicate: true });
         }
-        // Record this event as processed (expires in 72h)
+      }
+      // Tracks whether the atomic in-tx guard row was inserted for this event
+      // (checkout.session.completed with a resolvable user). When it was, the
+      // guard row IS the processed marker and markEventProcessed must not run.
+      let guardInserted = false;
+      // Best-effort processed marker for NON-money events and terminal
+      // non-retryable conditions (e.g. checkout session without a userId).
+      // ON CONFLICT DO NOTHING makes it no-op-safe on replay; when a non-null
+      // tenant/user is supplied the unique index gives a real backstop.
+      const markEventProcessed = async (opts: { userId?: number; tenantId?: number } = {}): Promise<void> => {
+        if (!db0) return;
         const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000);
         try {
-          await db0.insert(idempotencyKeys).values({
-            key: event.id,
-            operation: `stripe_webhook:${event.type}`,
-            responseStatus: 200,
-            expiresAt,
-          });
+          await db0.execute(sql`
+            INSERT INTO idempotency_keys (key, tenant_id, user_id, operation, response_status, expires_at)
+            VALUES (${event.id}, ${opts.tenantId ?? null}, ${opts.userId ?? null}, ${`stripe_webhook:${event.type}`}, 200, ${expiresAt})
+            -- The unique index is PARTIAL (0078_durable_tenant_idempotency.sql:
+            -- WHERE tenant_id IS NOT NULL AND user_id IS NOT NULL); Postgres
+            -- arbiter inference throws 42P10 without the matching predicate
+            -- (precedent: middleware/durableIdempotency.ts:94).
+            ON CONFLICT (tenant_id, user_id, operation, key) WHERE tenant_id IS NOT NULL AND user_id IS NOT NULL DO NOTHING
+          `);
         } catch {
-          // Unique constraint violation means concurrent request already inserted — skip
-          logger.info(`[Stripe Webhook] Race condition on idempotency insert, skipping: ${event.id}`);
-          return res.json({ received: true, duplicate: true });
+          // A concurrent delivery already recorded the event — just log it.
+          logger.info(`[Stripe Webhook] Race condition on idempotency insert: ${event.id}`);
         }
-      }
+      };
 
       try {
         // ── checkout.session.completed ──────────────────────────────────────
@@ -229,6 +259,9 @@ export function registerStripeWebhook(app: Express) {
 
           if (!userId) {
             logger.warn("[Stripe Webhook] checkout.session.completed: no userId in metadata");
+            // Terminal, non-retryable condition (no user to credit) — mark
+            // processed so Stripe does not retry this event forever.
+            await markEventProcessed();
             return res.json({ received: true });
           }
 
@@ -242,6 +275,58 @@ export function registerStripeWebhook(app: Express) {
           const [userRow] = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
           const userName = userRow?.name ?? "User";
           const userEmail = userRow?.email;
+
+          // H1: resolve a NON-NULL tenant BEFORE the tx (existing tenant
+          // pattern: users-row tenantId via resolveTenantContext, falling back
+          // to the 'remitflow-default' tenant slug). The unique backstop index
+          // idempotencyKeys_tenant_user_operation_key_uidx is on
+          // (tenant_id, user_id, operation, key) — NULL tenant_id never
+          // conflicts, so crediting without a resolved tenant would have NO
+          // replay protection. Fail closed instead.
+          const tenantCtx = await resolveTenantContext(userId);
+          let tenantId: number | null = tenantCtx.tenantId;
+          if (tenantId == null) {
+            const [defTenant] = await db
+              .select({ id: tenants.id })
+              .from(tenants)
+              .where(eq(tenants.slug, "remitflow-default"))
+              .limit(1);
+            tenantId = defTenant?.id ?? null;
+          }
+          if (tenantId == null) {
+            logger.error("[Stripe Webhook] No tenant resolvable — refusing to credit without an idempotency backstop");
+            return res.status(500).json({ error: "Tenant context unavailable" });
+          }
+
+          // H1: atomic idempotency guard + business writes in ONE db.transaction.
+          // The INSERT-guard runs FIRST inside the tx; on replay (or a
+          // concurrent duplicate delivery) ON CONFLICT DO NOTHING returns 0
+          // rows → we skip every business write and report the duplicate. If
+          // any business write throws, the whole tx (guard row included) rolls
+          // back → the event stays unprocessed → Stripe retries → fail closed.
+          let guardDuplicate = false;
+          const idempotencyGuardedTx = async (fn: (tx: any) => Promise<void>): Promise<void> => {
+            await db.transaction(async (tx: any) => {
+              const expiresAt = new Date(Date.now() + 72 * 60 * 60 * 1000);
+              const guardRes = (await tx.execute(sql`
+                INSERT INTO idempotency_keys (key, tenant_id, user_id, operation, response_status, expires_at)
+                VALUES (${event.id}, ${tenantId}, ${userId}, ${`stripe_webhook:${event.type}`}, 200, ${expiresAt})
+                -- PARTIAL unique index (0078: WHERE tenant_id IS NOT NULL AND
+                -- user_id IS NOT NULL) — arbiter inference needs the matching
+                -- predicate or Postgres throws 42P10 (durableIdempotency.ts:94
+                -- precedent). tenantId/userId are guaranteed non-null above.
+                ON CONFLICT (tenant_id, user_id, operation, key) WHERE tenant_id IS NOT NULL AND user_id IS NOT NULL DO NOTHING
+                RETURNING id
+              `)) as any;
+              const guardRows = guardRes?.rows ?? guardRes ?? [];
+              if (!Array.isArray(guardRows) || guardRows.length === 0) {
+                guardDuplicate = true;
+                return;
+              }
+              guardInserted = true;
+              await fn(tx);
+            });
+          };
 
           // ── Investment purchase fulfillment ──────────────────────────────
           if (orderType === "investment_buy") {
@@ -261,52 +346,76 @@ export function registerStripeWebhook(app: Express) {
               if (asset) {
                 const fee = Math.max(0, amountPaid - priceAtOrder * quantity);
 
-                await db.insert(investmentOrders).values({
-                  userId,
-                  assetId,
-                  orderType: "buy",
-                  quantity: quantity.toString(),
-                  priceAtOrder: priceAtOrder.toString(),
-                  totalAmount: (priceAtOrder * quantity).toString(),
-                  currency,
-                  status: "completed",
-                  fee: fee.toFixed(6),
-                  stripeSessionId: session.id,
-                } as any);
-
-                await db.insert(userInvestments).values({
-                  userId,
-                  assetId,
-                  quantity: quantity.toString(),
-                  purchasePrice: priceAtOrder.toString(),
-                  currency,
-                  status: "active",
-                  purchasedAt: new Date(),
-                } as any);
-
-                await db.insert(transactions).values({
-                  userId,
-                  type: "investment_buy",
-                  status: "completed",
-                  fromCurrency: currency,
-                  fromAmount: amountPaid.toString(),
-                  toCurrency: currency,
-                  toAmount: amountPaid.toString(),
-                  fee: fee.toFixed(6),
-                  description: `Investment: Buy ${quantity} ${asset.symbol} @ $${priceAtOrder} | Stripe: ${session.id}`,
-                  reference: `INV_${asset.symbol}_${session.id}`,
-                } as any);
-
-                // SSE real-time notification
-                broadcastUserEvent(userId, {
-                  type: "transfer_received",
-                  payload: {
-                    title: "Investment Purchase Confirmed",
-                    message: `Successfully bought ${quantity} ${asset.symbol} for ${currency} ${amountPaid.toFixed(2)} via Stripe`,
-                    amount: amountPaid,
+                // H1: same atomic-guard treatment as the top-up branch — the
+                // guard row + ALL fulfillment inserts commit or roll back
+                // together. One guard row per event id covers both branches
+                // (a session is exactly one order_type).
+                await idempotencyGuardedTx(async (tx) => {
+                  await tx.insert(investmentOrders).values({
+                    userId,
+                    assetId,
+                    orderType: "buy",
+                    quantity: quantity.toString(),
+                    priceAtOrder: priceAtOrder.toString(),
+                    totalAmount: (priceAtOrder * quantity).toString(),
                     currency,
-                  },
+                    status: "completed",
+                    fee: fee.toFixed(6),
+                    stripeSessionId: session.id,
+                  } as any);
+
+                  await tx.insert(userInvestments).values({
+                    userId,
+                    assetId,
+                    quantity: quantity.toString(),
+                    purchasePrice: priceAtOrder.toString(),
+                    currency,
+                    status: "active",
+                    purchasedAt: new Date(),
+                  } as any);
+
+                  await tx.insert(transactions).values({
+                    userId,
+                    // W9/F14-1: "investment_buy" is NOT a member of the tx_type
+                    // pg enum (drizzle/schema.ts txTypeEnum — verified; there is
+                    // no shared/txnEnums.ts in this tree). Postgres rejected this
+                    // insert AFTER the event was marked processed — money
+                    // collected, audit trail absent, retry skipped. "withdrawal"
+                    // is the enum-valid honest money-out direction; the rail and
+                    // original semantic are preserved in description + metadata.
+                    type: "withdrawal",
+                    status: "completed",
+                    fromCurrency: currency,
+                    fromAmount: amountPaid.toString(),
+                    toCurrency: currency,
+                    toAmount: amountPaid.toString(),
+                    fee: fee.toFixed(6),
+                    description: `Investment buy: ${quantity} ${asset.symbol} @ $${priceAtOrder} | Stripe: ${session.id}`,
+                    reference: `INV_${asset.symbol}_${session.id}`,
+                    metadata: { rail: "stripe", semanticType: "investment_buy", assetId, symbol: asset.symbol, quantity, stripeSessionId: session.id },
+                  } as any);
                 });
+
+                if (guardDuplicate) {
+                  logger.info(`[Stripe Webhook] Duplicate investment event skipped: ${event.id}`);
+                  return res.json({ received: true, duplicate: true });
+                }
+
+                // SSE real-time notification — warn-soft: a post-commit throw
+                // must never become a 500 → Stripe retry → reprocessing path.
+                try {
+                  broadcastUserEvent(userId, {
+                    type: "transfer_received",
+                    payload: {
+                      title: "Investment Purchase Confirmed",
+                      message: `Successfully bought ${quantity} ${asset.symbol} for ${currency} ${amountPaid.toFixed(2)} via Stripe`,
+                      amount: amountPaid,
+                      currency,
+                    },
+                  });
+                } catch (sseErr: any) {
+                  logger.warn("[Stripe Webhook] Investment SSE broadcast failed (non-critical):", sseErr?.message);
+                }
 
                 logger.info(`[Stripe Webhook] Investment fulfilled: user=${userId} asset=${asset.symbol} qty=${quantity} price=${priceAtOrder}`);
               }
@@ -316,18 +425,36 @@ export function registerStripeWebhook(app: Express) {
             const walletCurrency = session.metadata?.wallet_currency ?? "USD";
             const amountPaid = (session.amount_total ?? 0) / 100;
             if (amountPaid > 0) {
-              // Atomic: balance update + transaction record in one DB transaction
-              await db.transaction(async (tx: any) => {
-                const walletRows = await tx
-                  .select()
-                  .from(wallets)
-                  .where(and(eq(wallets.userId, userId), eq(wallets.currency, walletCurrency)))
-                  .limit(1);
-                if (walletRows.length > 0) {
-                  const wallet = walletRows[0];
-                  const newBalance = (Number(wallet.balance) + amountPaid).toFixed(2);
-                  await tx.update(wallets).set({ balance: newBalance }).where(eq(wallets.id, wallet.id));
-                } else {
+              // H1: the idempotency INSERT-guard runs FIRST inside the SAME
+              // db.transaction as the credit — the guard is atomic with the
+              // money movement (the old SELECT pre-check + post-hoc NULL-keyed
+              // markEventProcessed had no atomicity and no unique backstop).
+              await idempotencyGuardedTx(async (tx: any) => {
+                // M1-residual: wallets has NO unique constraint on
+                // (userId, currency) and schema changes to existing tables are
+                // forbidden — concurrent first-time credits would both see 0
+                // UPDATE rows and both INSERT (duplicate wallets, split funds).
+                // Serialize per-wallet-identity creators with a
+                // transaction-scoped advisory lock BEFORE update/insert.
+                // hashtextextended(text, bigint) is a built-in PG10+ function.
+                await tx.execute(sql`
+                  SELECT pg_advisory_xact_lock(hashtextextended(${'wallet:' + String(userId) + ':' + walletCurrency}, 42))
+                `);
+                // H1-residual: RELATIVE guarded credit (balance = balance + x)
+                // — the old absolute read-modify-write (read balance in app,
+                // SET balance = computed) lost concurrent top-ups' value.
+                const creditRows = (await tx.execute(sql`
+                  UPDATE wallets
+                  SET balance = balance + ${amountPaid},
+                      "updatedAt" = NOW(),
+                      version = version + 1
+                  WHERE "userId" = ${userId}
+                    AND currency = ${walletCurrency}
+                  RETURNING id
+                `)) as unknown as Array<{ id: number }>;
+                if (creditRows.length === 0) {
+                  // No wallet row yet — the advisory lock above guarantees we
+                  // are the ONLY first-time creator for this user+currency.
                   await tx.insert(wallets).values({
                     userId,
                     currency: walletCurrency,
@@ -349,6 +476,11 @@ export function registerStripeWebhook(app: Express) {
                 } as any);
               });
 
+              if (guardDuplicate) {
+                logger.info(`[Stripe Webhook] Duplicate top-up event skipped: ${event.id}`);
+                return res.json({ received: true, duplicate: true });
+              }
+
               // Ledger + event backing for the top-up: record the funds entering
               // the platform in TigerBeetle (double-entry) and publish to Kafka so
               // the wallet credit is reconcilable, not just a bare balance mutation.
@@ -366,16 +498,23 @@ export function registerStripeWebhook(app: Express) {
                 logger.warn({ err: err?.message, sessionId: session.id }, "[Stripe Webhook] Top-up ledger/event recording failed")
               );
 
-              // SSE real-time notification
-              broadcastUserEvent(userId, {
-                type: "transfer_received",
-                payload: {
-                  title: "Wallet Top-up Successful",
-                  message: `Your ${walletCurrency} wallet has been credited with ${walletCurrency} ${amountPaid.toLocaleString("en-US", { minimumFractionDigits: 2 })} via Stripe`,
-                  amount: amountPaid,
-                  currency: walletCurrency,
-                },
-              });
+              // SSE real-time notification — warn-soft: a post-commit throw
+              // here must NEVER surface as a 500 → Stripe retry → the credit
+              // path runs again (it is guarded, but the retry noise/alerts are
+              // avoidable; correctness never depends on SSE).
+              try {
+                broadcastUserEvent(userId, {
+                  type: "transfer_received",
+                  payload: {
+                    title: "Wallet Top-up Successful",
+                    message: `Your ${walletCurrency} wallet has been credited with ${walletCurrency} ${amountPaid.toLocaleString("en-US", { minimumFractionDigits: 2 })} via Stripe`,
+                    amount: amountPaid,
+                    currency: walletCurrency,
+                  },
+                });
+              } catch (sseErr: any) {
+                logger.warn("[Stripe Webhook] Top-up SSE broadcast failed (non-critical):", sseErr?.message);
+              }
 
               // Email notification (non-blocking)
               if (userEmail) {
@@ -412,6 +551,15 @@ export function registerStripeWebhook(app: Express) {
           }
         }
 
+        // ── W10 card funding: payment_intent.* lifecycle ──────────────────
+        // Drives cardFundingIntents (capture → chargeback hold; failure →
+        // honest failed, no silent refund). Idempotent + guarded; returns
+        // {handled:false} for intents it does not own. Throws only when the
+        // DB is unavailable → outer catch → 500 → Stripe retries (fail closed).
+        if (event.type.startsWith("payment_intent.")) {
+          await processFundingWebhook(event);
+        }
+
         // ── payment_intent.payment_failed ──────────────────────────────────
         if (event.type === "payment_intent.payment_failed") {
           const pi = event.data.object as any;
@@ -419,13 +567,17 @@ export function registerStripeWebhook(app: Express) {
           const userId = parseInt(pi.metadata?.user_id ?? "0");
           logger.warn(`[Stripe Webhook] Payment failed PI=${pi.id}: ${failureMsg}`);
           if (userId) {
-            broadcastUserEvent(userId, {
-              type: "notification",
-              payload: {
-                title: "Payment Failed",
-                message: `Your Stripe payment could not be processed: ${failureMsg}`,
-              },
-            });
+            try {
+              broadcastUserEvent(userId, {
+                type: "notification",
+                payload: {
+                  title: "Payment Failed",
+                  message: `Your Stripe payment could not be processed: ${failureMsg}`,
+                },
+              });
+            } catch (sseErr: any) {
+              logger.warn("[Stripe Webhook] Payment-failed SSE broadcast failed (non-critical):", sseErr?.message);
+            }
           }
         }
 
@@ -454,10 +606,19 @@ export function registerStripeWebhook(app: Express) {
         }
 
       } catch (err) {
+        // Fail closed: the event is deliberately NOT marked processed, so
+        // Stripe retries the delivery and the business writes can complete.
         logger.error({ err: err }, '[Stripe Webhook] Processing error:');
         return res.status(500).json({ error: "Webhook processing failed" });
       }
 
+      // All business writes succeeded — only NOW record the event as processed.
+      // H1: when the atomic in-tx guard row was inserted (checkout.session.completed
+      // with a resolvable user), that guard row IS the processed marker — do not
+      // insert a second, NULL-keyed row (NULLs never conflict → void backstop).
+      if (!guardInserted) {
+        await markEventProcessed();
+      }
       res.json({ received: true });
     }
   );
