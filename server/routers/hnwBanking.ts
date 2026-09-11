@@ -9,7 +9,6 @@ import { notifyOwner } from "../_core/notification";
 import { getStripe } from "../stripe";
 import { safeParseAmount } from "../lib/safeDecimal";
 import { executeTransferPipeline } from "../_core/transferPipeline";
-import { logger } from "../_core/logger";
 
 const HNW_FX_URL = process.env.HNW_FX_ENGINE_URL ?? "http://rust-hnw-fx-engine:8100";
 const HNW_ROUTING_URL = process.env.HNW_ROUTING_URL ?? "http://go-hnw-routing:8098";
@@ -114,6 +113,7 @@ export const hnwBankingRouter = router({
       recipientName: z.string().min(2).max(100),
       recipientBankName: z.string().min(2).max(100).optional(),
       purposeCode: z.string().default("PER"),
+      totpCode: z.string().length(6),
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
@@ -133,12 +133,20 @@ export const hnwBankingRouter = router({
       const transferId = `HNW-${Date.now()}-${ctx.user.id}`;
 
       // 2FA enforcement — HNW transfers always require TOTP (high-value by definition)
-      // SEC-25: read enrollment from mfa_settings (with users.twoFactor* fallback)
-      const { getTotpEnrollment } = await import("../totp");
+      // SEC-25/HIGH: the previous code merely LOGGED "2FA verified at lock time" —
+      // no verification ever happened (createRateLock accepts no totpCode).
+      // Verify a live TOTP here; fail closed when the enrollment store is down.
+      const { getTotpEnrollment, verifyTOTP } = await import("../totp");
       const enrollment = await getTotpEnrollment(ctx.user.id);
-      if (enrollment.enabled) {
-        // For rate lock execution, 2FA was already verified at lock creation
-        logger.info({ userId: ctx.user.id, rateLockId: input.rateLockId }, "[HNW] Rate lock transfer — 2FA verified at lock time");
+      if (!enrollment.dbAvailable) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — transfer blocked" });
+      }
+      if (!enrollment.enabled || !enrollment.secret) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: enroll TOTP before executing HNW rate-locked transfers" });
+      }
+      const totpValid = await verifyTOTP(input.totpCode, enrollment.secret);
+      if (!totpValid) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code. Please check your authenticator app and try again." });
       }
 
       // Execute unified transfer pipeline (sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications)
