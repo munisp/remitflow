@@ -76,6 +76,19 @@ const KYC_TIER_LIMITS: Record<number, number> = {
   4: 500_000_00, // Institutional: $500,000/day
 };
 
+/**
+ * SEC (MEDIUM): users.kycTier is the STRING enum "tier0".."tier4"
+ * (drizzle/schema.ts kycTierEnum). Comparing it with `< 1` is always false and
+ * `KYC_TIER_LIMITS[tier]` is always undefined — the tier0 denial never fired
+ * and the limit lookup silently degraded. Parse numerically; anything
+ * unrecognized fails closed to tier 0.
+ */
+function parseKycTier(kycTier: unknown): number {
+  if (typeof kycTier === "number" && Number.isFinite(kycTier)) return Math.max(0, Math.floor(kycTier));
+  const n = Number(String(kycTier ?? "").replace(/^tier/i, ""));
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+}
+
 // ─── Redis-backed daily spend tracker (in-process fallback for dev) ─────────
 const _fallbackSpend = new Map<string, number>(); // fallback when Redis unavailable
 function getDailyRedisKey(userId: number): string {
@@ -109,11 +122,6 @@ async function getDailySpendAsync(userId: number): Promise<number> {
   }
   return _fallbackSpend.get(key) ?? 0;
 }
-function getDailySpend(userId: number): number {
-  // Sync fallback — used in non-async policy contexts
-  const key = getDailyRedisKey(userId);
-  return _fallbackSpend.get(key) ?? 0;
-}
 
 // ─── Policy Definitions ──────────────────────────────────────────────────────
 type PolicyFn = (ctx: PolicyContext) => PolicyDecision | Promise<PolicyDecision>;
@@ -123,16 +131,16 @@ const POLICIES: Record<string, PolicyFn[]> = {
   "transfer.send": [
     // DENY: unverified users
     (ctx) => {
-      const tier = (ctx.user as any).kycTier ?? 0;
+      const tier = parseKycTier((ctx.user as any).kycTier);
       if (tier < 1) return { allowed: false, reason: "KYC verification required before sending money (Tier 1 minimum)" };
       return { allowed: true, reason: "ok" };
     },
     // DENY: amount exceeds tier limit
-    (ctx) => {
-      const tier = (ctx.user as any).kycTier ?? 0;
+    async (ctx) => {
+      const tier = parseKycTier((ctx.user as any).kycTier);
       const limit = KYC_TIER_LIMITS[tier] ?? 0;
       const amountCents = (ctx.resource?.amount ?? 0) * 100;
-      const spent = getDailySpend(ctx.user!.id);
+      const spent = await getDailySpendAsync(ctx.user!.id);
       if (spent + amountCents > limit) {
         return {
           allowed: false,
@@ -169,7 +177,7 @@ const POLICIES: Record<string, PolicyFn[]> = {
   // ── Transfer: Bulk Send ─────────────────────────────────────────────────────
   "transfer.bulkSend": [
     (ctx) => {
-      const tier = (ctx.user as any).kycTier ?? 0;
+      const tier = parseKycTier((ctx.user as any).kycTier);
       if (tier < 2) return { allowed: false, reason: "Enhanced KYC (Tier 2) required for bulk transfers" };
       if (ctx.user!.role !== "admin" && (ctx.user as any).role !== "partner") {
         return { allowed: false, reason: "Bulk transfers require admin or partner role" };
@@ -180,12 +188,12 @@ const POLICIES: Record<string, PolicyFn[]> = {
 
   // ── Wallet: Withdraw ────────────────────────────────────────────────────────
   "wallet.withdraw": [
-    (ctx) => {
-      const tier = (ctx.user as any).kycTier ?? 0;
+    async (ctx) => {
+      const tier = parseKycTier((ctx.user as any).kycTier);
       if (tier < 1) return { allowed: false, reason: "KYC verification required before withdrawals" };
       const limit = KYC_TIER_LIMITS[tier] ?? 0;
       const amountCents = (ctx.resource?.amount ?? 0) * 100;
-      const spent = getDailySpend(ctx.user!.id);
+      const spent = await getDailySpendAsync(ctx.user!.id);
       if (spent + amountCents > limit) {
         return { allowed: false, reason: `Daily withdrawal limit exceeded ($${limit / 100})` };
       }
@@ -325,7 +333,7 @@ const POLICIES: Record<string, PolicyFn[]> = {
   // ── API Key: Create ─────────────────────────────────────────────────────────
   "apiKey.create": [
     (ctx) => {
-      const tier = (ctx.user as any).kycTier ?? 0;
+      const tier = parseKycTier((ctx.user as any).kycTier);
       if (tier < 2) return { allowed: false, reason: "Enhanced KYC (Tier 2) required to create API keys" };
       return { allowed: true, reason: "ok" };
     },
@@ -418,6 +426,30 @@ export function pbacMiddleware(
         code: "FORBIDDEN",
         message: decision.reason,
       });
+    }
+
+    // SEC (HIGH): requiresMFA was advisory metadata attached to ctx with no
+    // downstream consumer (grep-confirmed) — the "transfer.send → 2FA if
+    // amount > $1000" policy was decorative. Enforce it here: require and
+    // verify a live TOTP code before proceeding. Fail closed when the
+    // enrollment store is unavailable.
+    if (decision.requiresMFA) {
+      const totpCode = (input as any)?.totpCode ?? (input as any)?.otpCode;
+      const { getTotpEnrollment, verifyTOTP } = await import("./totp");
+      const enrollment = await getTotpEnrollment(ctx.user.id);
+      if (!enrollment.dbAvailable) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — request blocked (fail-closed)" });
+      }
+      if (!enrollment.enabled || !enrollment.secret) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: enroll TOTP in Security Settings to perform this action" });
+      }
+      if (typeof totpCode !== "string" || totpCode.length !== 6) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: provide your 6-digit TOTP code (totpCode) to proceed" });
+      }
+      const valid = await verifyTOTP(totpCode, enrollment.secret);
+      if (!valid) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code. Please check your authenticator app and try again." });
+      }
     }
 
     // Attach decision metadata to context for downstream use
@@ -561,9 +593,9 @@ export const pbacRouter = trpcRouter({
   /** Get all policies applicable to the current user */
   myPolicies: protectedProcedure.query(async ({ ctx }) => {
     const user = ctx.user as any;
-    const tier = user.kycTier ?? 0;
+    const tier = parseKycTier(user.kycTier);
     const limit = KYC_TIER_LIMITS[tier] ?? 0;
-    const spent = getDailySpend(ctx.user!.id);
+    const spent = await getDailySpendAsync(ctx.user!.id);
     return {
       kycTier: tier,
       dailyTransferLimit: limit / 100,
