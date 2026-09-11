@@ -7,17 +7,20 @@
  * Replaces ad-hoc, shallow integration with the deep 12-layer pipeline
  * that core transfer.send and p2p.sendByAlias already use.
  *
- * Layers:
- *   1. Fraud ML scoring (Python, port 8111)
- *   2. Sanctions screening (Go, port 8110)
- *   3. Velocity + structuring detection
- *   4. KYC tier limit enforcement
- *   5. TigerBeetle double-entry ledger
- *   6. Kafka event publishing (4+ topics per transfer)
- *   7. Temporal workflow orchestration
- *   8. Push notifications (SSE + email)
- *   9. Audit logging
- *  10. 2FA enforcement for high-value transfers
+ * Steps actually executed (in order):
+ *   1. Sanctions screening (fail-closed in production)
+ *   2. Fraud ML scoring (fail-closed in production unless ALLOW_DEGRADED_FRAUD_VELOCITY=1)
+ *   3. Velocity check (fail-closed in production unless ALLOW_DEGRADED_FRAUD_VELOCITY=1)
+ *   4. KYC tier limit enforcement — per-tx and daily limits from transferEngine
+ *      (skipKycTier=true opts out, e.g. pre-verified payroll employees)
+ *   5. TigerBeetle double-entry ledger hold (skipLedger=true opts out when the
+ *      caller already recorded its own ledger-backed hold)
+ *   6. Kafka event publishing (degraded-open)
+ *   7. Audit logging (degraded-open)
+ *   8. Push notifications (SSE + email, degraded-open)
+ *
+ * Note: 2FA step-up is enforced by the CALLERS (routers) before invoking the
+ * pipeline; it is not re-checked here.
  */
 import { createHash } from "node:crypto";
 import { TRPCError } from "@trpc/server";
@@ -187,6 +190,74 @@ async function fetchFraudScore(input: {
   }
 }
 
+// ─── KYC Tier Limits (step 4) ────────────────────────────────────────────────
+// EXACT mirror of server/lib/transferEngine.ts (KYC_LIMITS) and its
+// per-tx/daily enforcement (:88-128, :391-421). Keep in sync with that file.
+const KYC_TIER_LIMITS: Record<string, { singleTxnMax: number; dailyMax: number; monthlyMax: number }> = {
+  tier0: { singleTxnMax: 0, dailyMax: 0, monthlyMax: 0 },
+  tier1: { singleTxnMax: 500, dailyMax: 1000, monthlyMax: 5000 },
+  tier2: { singleTxnMax: 5000, dailyMax: 10000, monthlyMax: 50000 },
+  tier3: { singleTxnMax: 50000, dailyMax: 100000, monthlyMax: 500000 },
+};
+
+/**
+ * Enforce per-tier per-transaction and daily limits (A4 root-cause fix).
+ * Unrecognized tier => tier0 limits (fail closed). DB error => throw
+ * (fail closed). Throws FORBIDDEN when a limit would be exceeded.
+ */
+async function enforceKycTierLimits(userId: number, amount: number): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Transfer blocked: KYC verification is temporarily unavailable. Please try again." });
+  }
+
+  // Load the user's actual KYC tier — fail closed on lookup error (FF-026 parity).
+  let userTier = "tier0";
+  try {
+    const tierResult = await db.execute(sql`
+      SELECT "kycTier" FROM users WHERE id = ${userId}
+    `);
+    const tierRows = tierResult as unknown as Array<{ kycTier: string }>;
+    if (tierRows.length > 0 && tierRows[0].kycTier) userTier = tierRows[0].kycTier;
+  } catch (err) {
+    logger.error({ err: err instanceof Error ? err.message : String(err), userId },
+      "[Pipeline] FAIL-CLOSED: KYC tier lookup failed — blocking transfer");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Transfer blocked: KYC verification is temporarily unavailable. Please try again." });
+  }
+  const limits = KYC_TIER_LIMITS[userTier] ?? KYC_TIER_LIMITS.tier0;
+
+  // Daily cumulative limit (same query as transferEngine.checkKycLimits).
+  try {
+    const result = await db.execute(sql`
+      SELECT COALESCE(SUM(CAST("fromAmount" AS NUMERIC)), 0) AS daily_total
+      FROM transfers
+      WHERE "userId" = ${userId}
+        AND "createdAt" >= NOW() - INTERVAL '24 hours'
+        AND status != 'failed'
+    `);
+    const rows = result as unknown as Array<{ daily_total: string | number }>;
+    const dailyTotal = Number(rows[0]?.daily_total ?? 0);
+    if (dailyTotal + amount > limits.dailyMax) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: `Transfer would exceed daily limit of $${limits.dailyMax} for ${userTier}`,
+      });
+    }
+  } catch (err) {
+    if (err instanceof TRPCError) throw err;
+    logger.error({ err: err instanceof Error ? err.message : String(err), userId },
+      "[Pipeline] FAIL-CLOSED: KYC daily-limit check failed — blocking transfer");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Transfer blocked: KYC limit check is temporarily unavailable. Please try again." });
+  }
+
+  if (amount > limits.singleTxnMax) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: `Amount $${amount} exceeds single transaction limit of $${limits.singleTxnMax} for ${userTier}`,
+    });
+  }
+}
+
 // ─── Pipeline Execution ──────────────────────────────────────────────────────
 
 export async function executeTransferPipeline(input: TransferPipelineInput): Promise<TransferPipelineResult> {
@@ -303,7 +374,14 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
     }
   }
 
-  // 4. TigerBeetle double-entry ledger (FAIL-CLOSED in production)
+  // 4. KYC tier limit enforcement (A4 root-cause fix). Fails closed on DB
+  //    error; unrecognized tier => tier0. Skipped only when the caller has
+  //    pre-verified the user (e.g. payroll employees) via skipKycTier.
+  if (!input.skipKycTier) {
+    await enforceKycTierLimits(input.userId, input.amount);
+  }
+
+  // 5. TigerBeetle double-entry ledger (FAIL-CLOSED in production)
   // Uses two-phase transfer: create pending hold, then post after settlement.
   // Validates balance before creating the transfer.
   // Skipped when the caller already recorded a ledger-backed hold (e.g. escrow).
@@ -358,7 +436,7 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
     }
   }
 
-  // 5. Kafka event publishing
+  // 6. Kafka event publishing
   try {
     const txEvent: TransactionEvent = {
       eventType: "created",
@@ -388,7 +466,7 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
     logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Kafka publish degraded");
   }
 
-  // 6. Audit logging
+  // 7. Audit logging
   try {
     await createAuditLog({
       userId: input.userId,
@@ -408,7 +486,7 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
     logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Pipeline] Audit log failed");
   }
 
-  // 7. Push notification + SSE
+  // 8. Push notification + SSE
   try {
     broadcastUserEvent(input.userId, {
       type: "transfer_sent",
@@ -504,6 +582,9 @@ export async function settleTransferHold(input: {
   userId: number;
   amount: number;
   currency: string;
+  /** Set when the caller already debited the PG wallet atomically elsewhere
+   *  (e.g. transferEngine.executeTransfer) — only the TB hold post remains. */
+  skipPgDebit?: boolean;
 }): Promise<SettlementResult> {
   const db = await getDb();
   if (!db) {
@@ -515,36 +596,66 @@ export async function settleTransferHold(input: {
   const amountCents = BigInt(Math.round(input.amount * 100));
   const debitAmount = input.amount.toFixed(2);
 
-  // 1. Journal + guarded wallet debit. The journal row IS the idempotency
-  //    record: only the caller that inserts it may apply the PG debit.
-  const journalRows = (await db.execute(sql`
-    INSERT INTO settlement_journal (transfer_id, user_id, amount_minor, currency, status, tb_pending_id, created_at, updated_at)
-    VALUES (${input.transferId}, ${input.userId}, ${amountCents.toString()}, ${input.currency}, 'debited', ${pendingId.toString()}, NOW(), NOW())
-    ON CONFLICT (transfer_id) DO NOTHING
-    RETURNING transfer_id
-  `)) as unknown as Array<{ transfer_id: string }>;
+  // 1. Journal + guarded wallet debit IN ONE TRANSACTION. The journal row IS
+  //    the idempotency record: only the caller that inserts it may apply the
+  //    PG debit. A crash can no longer leave a 'debited' journal without the
+  //    debit (or vice versa).
+  let insufficientBalance = false;
+  const journalRows = await db.transaction(async (tx: any) => {
+    const inserted = (await tx.execute(sql`
+      INSERT INTO settlement_journal (transfer_id, user_id, amount_minor, currency, status, tb_pending_id, created_at, updated_at)
+      VALUES (${input.transferId}, ${input.userId}, ${amountCents.toString()}, ${input.currency}, 'debited', ${pendingId.toString()}, NOW(), NOW())
+      ON CONFLICT (transfer_id) DO NOTHING
+      RETURNING transfer_id
+    `)) as unknown as Array<{ transfer_id: string }>;
 
-  let replay = journalRows.length === 0;
-  if (!replay) {
-    const debitRows = (await db.execute(sql`
-      UPDATE wallets
-      SET balance = CAST(balance AS NUMERIC) - ${debitAmount}, "updatedAt" = NOW()
-      WHERE "userId" = ${input.userId}
-        AND currency = ${input.currency}
-        AND CAST(balance AS NUMERIC) >= ${debitAmount}
-      RETURNING id
-    `)) as unknown as Array<{ id: number }>;
-    if (debitRows.length === 0) {
-      await db.execute(sql`
-        UPDATE settlement_journal SET status = 'reconcile_required', updated_at = NOW()
-        WHERE transfer_id = ${input.transferId}
-      `);
-      logger.error({ ...input }, "[Settlement] Wallet debit failed at settlement — insufficient PG balance; MANUAL RECONCILIATION REQUIRED");
+    if (inserted.length > 0 && !input.skipPgDebit) {
+      const debitRows = (await tx.execute(sql`
+        UPDATE wallets
+        SET balance = CAST(balance AS NUMERIC) - ${debitAmount}, "updatedAt" = NOW()
+        WHERE "userId" = ${input.userId}
+          AND currency = ${input.currency}
+          AND CAST(balance AS NUMERIC) >= ${debitAmount}
+        RETURNING id
+      `)) as unknown as Array<{ id: number }>;
+      if (debitRows.length === 0) {
+        // Mark reconcile_required inside the same transaction so the journal
+        // never claims 'debited' without the money actually moving.
+        await tx.execute(sql`
+          UPDATE settlement_journal SET status = 'reconcile_required', updated_at = NOW()
+          WHERE transfer_id = ${input.transferId}
+        `);
+        insufficientBalance = true;
+      }
+    }
+    return inserted;
+  });
+  if (insufficientBalance) {
+    logger.error({ ...input }, "[Settlement] Wallet debit failed at settlement — insufficient PG balance; MANUAL RECONCILIATION REQUIRED");
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Settlement failed: insufficient wallet balance. Hold retained for reconciliation.",
+    });
+  }
+
+  const replay = journalRows.length === 0;
+  if (replay) {
+    // FF-FIX: branch on the recorded journal status instead of blindly
+    // re-posting. A refunded settlement must never re-post an expired hold.
+    const existing = (await db.execute(sql`
+      SELECT status FROM settlement_journal WHERE transfer_id = ${input.transferId} LIMIT 1
+    `)) as unknown as Array<{ status: string }>;
+    const journalStatus = existing[0]?.status;
+    if (journalStatus === "posted") {
+      return { settled: true, replay: true, tbPosted: true, pendingId: pendingId.toString() };
+    }
+    if (journalStatus === "refunded") {
       throw new TRPCError({
-        code: "BAD_REQUEST",
-        message: "Settlement failed: insufficient wallet balance. Hold retained for reconciliation.",
+        code: "PRECONDITION_FAILED",
+        message: "Settlement was already refunded — refusing to re-post a refunded hold.",
       });
     }
+    // 'debited'/'post_failed'/'reconcile_required' → fall through and (re)post.
   }
 
   // 2. Post the TB hold in full. Deterministic post id + exists(46) tolerance
