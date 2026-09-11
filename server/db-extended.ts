@@ -6,6 +6,7 @@
  * All functions are safe (no throws on empty result — return null/[]).
  */
 import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { TRPCError } from "@trpc/server";
 import { getDb } from "./db.js";
 import * as schema from "../drizzle/schema.js";
 
@@ -203,10 +204,19 @@ export async function createChatSession(data: typeof schema.chatSessions.$inferI
   const [row] = await db.insert(schema.chatSessions).values(data).returning();
   return row;
 }
+// W9/Q10 (F8-4): ownership lookup — callers must verify session.userId ===
+// ctx.user.id before reading/closing/posting to a chat session.
+export async function getChatSessionById(id: number) {
+  const db = await getDb();
+  const [row] = await db.select().from(schema.chatSessions)
+    .where(eq(schema.chatSessions.id, id));
+  return row ?? null;
+}
 export async function closeChatSession(id: number) {
   const db = await getDb();
+  // W9: chatSessions has no status/resolvedAt columns — only touch real columns.
   const [row] = await db.update(schema.chatSessions)
-    .set({ status: "resolved" as any, resolvedAt: new Date() })
+    .set({ updatedAt: new Date() })
     .where(eq(schema.chatSessions.id, id))
     .returning();
   return row;
@@ -272,6 +282,14 @@ export async function createMarketListing(data: typeof schema.marketListings.$in
   const db = await getDb();
   const [row] = await db.insert(schema.marketListings).values(data).returning();
   return row;
+}
+// W9/Q10 (F8-3): ownership lookup — callers must verify listing.sellerId ===
+// ctx.user.id before mutating a marketplace listing.
+export async function getMarketListingById(id: number) {
+  const db = await getDb();
+  const [row] = await db.select().from(schema.marketListings)
+    .where(eq(schema.marketListings.id, id));
+  return row ?? null;
 }
 export async function updateMarketListing(id: number, data: Partial<typeof schema.marketListings.$inferInsert>) {
   const db = await getDb();
@@ -390,6 +408,63 @@ export async function updateCommunityFundBalance(id: number, amount: number) {
     .where(eq(schema.communityFunds.id, id))
     .returning();
   return row;
+}
+
+/**
+ * A9: Contribute to a community fund with a REAL wallet debit.
+ * Guarded atomic debit FIRST (optimistic balance guard + row-count check,
+ * mirroring investment.ts/p2pInstant.ts), then the totalRaised increment —
+ * both in ONE db.transaction so a failed debit or failed increment rolls
+ * everything back. No debit, no totalRaised increment — contributions can no
+ * longer mint unbacked fund balances.
+ */
+export async function contributeToCommunityFund(userId: number, fundId: number, amount: number) {
+  const db = await getDb();
+  return db.transaction(async (tx) => {
+    const [fund] = await tx.select().from(schema.communityFunds)
+      .where(eq(schema.communityFunds.id, fundId))
+      .limit(1);
+    if (!fund) {
+      throw new TRPCError({ code: "NOT_FOUND", message: "Community fund not found" });
+    }
+    const currency = fund.currency ?? "USD";
+
+    const [wallet] = await tx.select({ id: schema.wallets.id }).from(schema.wallets)
+      .where(and(
+        eq(schema.wallets.userId, userId),
+        eq(schema.wallets.currency, currency),
+        eq(schema.wallets.status, "active"),
+      ))
+      .limit(1);
+    if (!wallet) {
+      throw new TRPCError({ code: "BAD_REQUEST", message: `No active ${currency} wallet — contribution blocked` });
+    }
+
+    // Guarded debit: the balance guard is INSIDE the UPDATE; a concurrent
+    // debit that drops the balance below `amount` affects 0 rows and aborts.
+    const debitRows = (await tx.execute(sql`
+      UPDATE wallets
+      SET balance = balance - ${amount},
+          "updatedAt" = NOW(),
+          version = version + 1
+      WHERE id = ${wallet.id}
+        AND CAST(balance AS DECIMAL(18,4)) >= ${amount}
+      RETURNING id
+    `)) as unknown as Array<{ id: number }>;
+    if (debitRows.length === 0) {
+      throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient wallet balance for this contribution" });
+    }
+
+    // Only after the debit succeeded: increment totalRaised (same transaction).
+    const [row] = await tx.update(schema.communityFunds)
+      .set({
+        totalRaised: sql`COALESCE(${schema.communityFunds.totalRaised}::numeric, 0) + ${amount}`,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.communityFunds.id, fundId))
+      .returning();
+    return row;
+  });
 }
 
 // ── Fund Proposals ────────────────────────────────────────────────────────────
@@ -680,6 +755,14 @@ export async function createPaymentRequest(data: typeof schema.paymentRequests.$
   const db = await getDb();
   const [row] = await db.insert(schema.paymentRequests).values(data).returning();
   return row;
+}
+// W9/Q10 (F8-3): ownership lookup — callers must verify
+// request.requesterId === ctx.user.id before mutating a payment request.
+export async function getPaymentRequestById(id: number) {
+  const db = await getDb();
+  const [row] = await db.select().from(schema.paymentRequests)
+    .where(eq(schema.paymentRequests.id, id));
+  return row ?? null;
 }
 export async function updatePaymentRequestStatus(id: number, status: string) {
   const db = await getDb();
