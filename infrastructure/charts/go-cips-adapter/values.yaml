@@ -48,17 +48,17 @@ dapr:
 # (os.Getenv / env::var / os.getenv across go-cips-adapter's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install go-cips-adapter infrastructure/charts/go-cips-adapter \
 #     -n 54remit -f infrastructure/values-secrets/go-cips-adapter.yaml
 # (a gitignored, per-environment file).
 secrets:
-  ALLOWED_ORIGIN: "CHANGE_ME"
-  CIPS_INTERNAL_API_KEY: "CHANGE_ME"
-  CIPS_PARTICIPANT_ID: "CHANGE_ME"
-  CIPS_WEBHOOK_SECRET: "CHANGE_ME"
-  CIPS_WEBHOOK_SECRET_FALLBACK: "CHANGE_ME"
-  CORE_WEBHOOK_URL: "CHANGE_ME"
-  DATABASE_URL: "CHANGE_ME"
-  GIN_MODE: "CHANGE_ME"
+  ALLOWED_ORIGIN: ""  # REQUIRED
+  CIPS_INTERNAL_API_KEY: ""  # REQUIRED
+  CIPS_PARTICIPANT_ID: ""  # REQUIRED
+  CIPS_WEBHOOK_SECRET: ""  # REQUIRED
+  CIPS_WEBHOOK_SECRET_FALLBACK: ""  # REQUIRED
+  CORE_WEBHOOK_URL: ""  # REQUIRED
+  DATABASE_URL: ""  # REQUIRED
+  GIN_MODE: ""  # REQUIRED
   PORT: "8091"

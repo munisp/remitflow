@@ -51,7 +51,7 @@ dapr:
 # (a gitignored, per-environment file — see infrastructure/.env.example for
 # what each of these maps to).
 secrets:
-  DATABASE_URI: "CHANGE_ME"
+  DATABASE_URI: ""  # REQUIRED
   AUDIT_SVC_URL: "http://audit-service:8000"
   DAPR_PUBSUB: "pubsub"
   KAFKA_BOOTSTRAP_SERVERS: "kafka-service:9092"
@@ -59,6 +59,6 @@ secrets:
   KAFKA_SASL_MECHANISM: ""
   KAFKA_SASL_USERNAME: ""
   KAFKA_SASL_PASSWORD: ""
-  INTERNAL_API_BASE_URL: "CHANGE_ME"
+  INTERNAL_API_BASE_URL: ""  # REQUIRED
   APP_ENV: "production"
   ROOT_PATH: "/"

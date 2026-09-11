@@ -48,12 +48,12 @@ dapr:
 # (os.Getenv / env::var / os.getenv across go-fx-aggregator's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install go-fx-aggregator infrastructure/charts/go-fx-aggregator \
 #     -n 54remit -f infrastructure/values-secrets/go-fx-aggregator.yaml
 # (a gitignored, per-environment file).
 secrets:
-  CURRENCYLAYER_API_KEY: "CHANGE_ME"
-  DATABASE_URL: "CHANGE_ME"
-  FX_AGGREGATOR_PORT: "CHANGE_ME"
-  OPENEXCHANGERATES_APP_ID: "CHANGE_ME"
+  CURRENCYLAYER_API_KEY: ""  # REQUIRED
+  DATABASE_URL: ""  # REQUIRED
+  FX_AGGREGATOR_PORT: ""  # REQUIRED
+  OPENEXCHANGERATES_APP_ID: ""  # REQUIRED
