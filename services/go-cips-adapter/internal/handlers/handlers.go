@@ -43,11 +43,33 @@ func generateID(prefix string) string {
 	return fmt.Sprintf("%s%d%s", prefix, time.Now().UnixMilli(), hex.EncodeToString(b)[:8])
 }
 
+// verifyHMAC FAILS CLOSED: an empty secret or empty signature NEVER verifies —
+// HMAC with an empty key is publicly computable.
 func verifyHMAC(payload, signature, secret string) bool {
+	if secret == "" || signature == "" {
+		return false
+	}
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))
 	expected := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(expected), []byte(signature))
+}
+
+// webhookSecret is resolved once at startup (package init). FAIL CLOSED: if
+// neither CIPS_WEBHOOK_SECRET nor its legacy fallback is set, the service
+// refuses to boot rather than accept forgeable pacs.002 status callbacks
+// (same guard as internal/middleware/middleware.go APIKeyAuth).
+var webhookSecret = mustWebhookSecret()
+
+func mustWebhookSecret() string {
+	secret := os.Getenv("CIPS_WEBHOOK_SECRET")
+	if secret == "" {
+		secret = os.Getenv("CIPS_WEBHOOK_SECRET_FALLBACK")
+	}
+	if secret == "" {
+		panic("CIPS_WEBHOOK_SECRET is not set: refusing to serve webhook callbacks with an empty (publicly computable) HMAC key; configure the webhook secret explicitly")
+	}
+	return secret
 }
 
 // ─── Health ────────────────────────────────────────────────────────────────────
@@ -438,13 +460,9 @@ func HandlePacs002Callback(c *gin.Context) {
 		return
 	}
 
-	// Verify HMAC signature from CIPS Switch
-	secret := os.Getenv("CIPS_WEBHOOK_SECRET")
-	if secret == "" {
-		secret = os.Getenv("CIPS_WEBHOOK_SECRET_FALLBACK")
-	}
+	// Verify HMAC signature from CIPS Switch (secret resolved fail-closed at startup)
 	payload := fmt.Sprintf("%s:%s:%s", cb.MsgID, cb.TransactionID, cb.Status)
-	if !verifyHMAC(payload, cb.Signature, secret) {
+	if !verifyHMAC(payload, cb.Signature, webhookSecret) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid HMAC signature"})
 		return
 	}
