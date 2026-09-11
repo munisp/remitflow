@@ -1,0 +1,142 @@
+# docker-compose.wave10.yml — Wave 10 (Melio features) service additions.
+#
+# EXTENDS docker-compose.yml (and optionally docker-compose.platform.yml):
+#   docker compose -f docker-compose.yml -f docker-compose.platform.yml \
+#                  -f docker-compose.wave10.yml --profile wave10 up -d
+#
+# Infra check (per SPEC-wave10 C6, "add opensearch + fluvio ONLY if absent"):
+#   * opensearch        — ALREADY in docker-compose.yml (:953). NOT redefined.
+#   * fluvio-sc/-spu    — ALREADY in docker-compose.platform.yml (:151-165).
+#                         NOT redefined here to avoid duplicate data planes.
+# Services below reference fluvio-sc:9003 / opensearch:9200 by DNS on the
+# shared default network when the full stack is composed.
+#
+# depends_on note: cross-file depends_on would break standalone
+# `docker compose -f docker-compose.wave10.yml config` validation, so these
+# services rely on `restart: unless-stopped` plus their own fail-closed /
+# retry behavior (e.g. rust-lakehouse-writer exits(1) when FLUVIO_ENDPOINT
+# or LAKE_DIR is unset; fluvio connect retries with bounded backoff).
+#
+# Host-port collisions avoided (repo convention): 8112/8113 are already bound
+# by ledger-service / mojaloop-connector in docker-compose.yml, so wave10
+# services publish on 8212-8214 while keeping their canonical container ports
+# (SPEC env names BILL_CAPTURE_URL :8112, ACCOUNTING_SYNC_URL :8113,
+# GEO_ANALYTICS_URL :8114 refer to in-network service URLs).
+
+services:
+  # ── C3: Bill capture OCR (:8112 in-network) ────────────────────────────────
+  python-bill-capture:
+    build: ./services/python-bill-capture
+    profiles: ["wave10", "full"]
+    restart: unless-stopped
+    ports:
+      - "8212:8112"  # host 8212 -> container 8112 (8112 taken by ledger-service)
+    environment:
+      BILL_CAPTURE_PORT: "8112"
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY:?INTERNAL_SERVICE_KEY is required}
+      FLUVIO_ENDPOINT: ${FLUVIO_ENDPOINT:-fluvio-sc:9003}
+      # OCR engine unset -> service answers {"status":"unconfigured"} (never fakes data)
+      OCR_ENGINE: ${OCR_ENGINE:-}
+      REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
+      # W11-C1: OTLP export to the observability collector (additive; SDK no-ops
+      # gracefully when the collector is absent — standard OTel env contract).
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      OTEL_SERVICE_NAME: bill-capture
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8112/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── C4: Accounting sync (:8113 in-network) ─────────────────────────────────
+  go-accounting-sync:
+    build: ./services/go-accounting-sync
+    profiles: ["wave10", "full"]
+    restart: unless-stopped
+    ports:
+      - "8213:8113"  # host 8213 -> container 8113 (8113 taken by mojaloop-connector)
+    environment:
+      # Go service reads PORT (services/go-accounting-sync/main.go:144); the
+      # earlier ACCOUNTING_SYNC_PORT assumption was reconciled at merge.
+      PORT: "8113"
+      ACCOUNTING_SYNC_PORT: "8113"
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY:?INTERNAL_SERVICE_KEY is required}
+      # Dapr sidecar is optional: service falls back to direct calls + warn.
+      DAPR_HTTP_PORT: ${DAPR_HTTP_PORT:-3500}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
+      # Provider OAuth unconfigured -> /auth/{provider}/start returns 503 (fail closed)
+      QBO_CLIENT_ID: ${QBO_CLIENT_ID:-}
+      QBO_CLIENT_SECRET: ${QBO_CLIENT_SECRET:-}
+      XERO_CLIENT_ID: ${XERO_CLIENT_ID:-}
+      XERO_CLIENT_SECRET: ${XERO_CLIENT_SECRET:-}
+      # Odoo (open source, self-hostable): deployment-wide default base URL.
+      # Tenants normally supply their own per-connection apiUrl via
+      # accountingSync.connectOdoo; empty default just means "no fallback".
+      ODOO_API_BASE: ${ODOO_API_BASE:-}
+      # W11-C1: OTLP export to the observability collector (additive).
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      OTEL_SERVICE_NAME: accounting-sync
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8113/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ── C6: Geo analytics (:8114 in-network) ───────────────────────────────────
+  python-geo-analytics:
+    build: ./services/python-geo-analytics
+    profiles: ["wave10", "full"]
+    restart: unless-stopped
+    ports:
+      - "8214:8114"  # host 8214 -> container 8114
+    environment:
+      GEO_PORT: "8114"
+      # Unset -> every POST answers 503 (fail closed); X-Service-Key compared
+      # in constant time by the service.
+      INTERNAL_SERVICE_KEY: ${INTERNAL_SERVICE_KEY:?INTERNAL_SERVICE_KEY is required}
+      # W11-C1: OTLP export to the observability collector (additive).
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      OTEL_SERVICE_NAME: geo-analytics
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8114/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── C6: Bronze lakehouse writer (metrics :9115) ────────────────────────────
+  rust-lakehouse-writer:
+    build: ./services/rust-lakehouse-writer
+    profiles: ["wave10", "full"]
+    restart: unless-stopped
+    ports:
+      - "9115:9115"
+    environment:
+      # Service exits(1) if either is unset — fail closed by design.
+      FLUVIO_ENDPOINT: ${FLUVIO_ENDPOINT:-fluvio-sc:9003}
+      LAKE_DIR: /data/lakehouse
+      METRICS_PORT: "9115"
+      FLUSH_MAX_MESSAGES: ${FLUSH_MAX_MESSAGES:-500}
+      FLUSH_MAX_SECS: ${FLUSH_MAX_SECS:-30}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      # Shares the existing lakehouse-data volume (docker-compose.yml:1181)
+      # with lakehouse-etl (:8089) so DuckDB/Sedona jobs read bronze parquet
+      # directly. Declared below for standalone-file validity; identical
+      # driver, so merging with the base file is a no-op.
+      - lakehouse-data:/data/lakehouse
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9115/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  # Lakehouse named volume (bronze/silver/gold medallion root). Same name and
+  # local driver as docker-compose.yml — merged, not redefined.
+  lakehouse-data:
+    driver: local
