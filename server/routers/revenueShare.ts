@@ -301,7 +301,7 @@ export const revenueShareRouter = router({
     .input(z.object({
       tenantId: z.number().optional(),
       agreementId: z.number().optional(),
-      status: z.enum(["pending", "paid", "disputed", "all"]).default("all"),
+      status: z.enum(["pending", "approved_for_payout", "paid", "disputed", "all"]).default("all"),
       limit: z.number().default(20),
       offset: z.number().default(0),
     }))
@@ -334,11 +334,50 @@ export const revenueShareRouter = router({
     .mutation(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      // W7/B9: NEVER mark a report `paid` without money actually moving.
+      // Without a verified payout reference the report is only approved for
+      // payout — no paidAt, no payoutId, status `approved_for_payout`.
+      if (input.payoutId == null) {
+        const [_row] = await db.update(revenueShareReports)
+          .set({ status: "approved_for_payout" })
+          .where(eq(revenueShareReports.id, input.reportId)).returning();
+        if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+        return {
+          success: true, id: (_row as any).id, status: "approved_for_payout",
+          payoutExecuted: false,
+          note: "Report approved for payout — NOT paid. No payout was executed; provide a payoutId referencing a completed partner payout to mark it paid.",
+          updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true,
+        };
+      }
+
+      // A payoutId was supplied — it must reference a REAL payout record whose
+      // funds actually moved (status `completed`), for the same tenant as the
+      // report. Anything else fails closed.
+      const [report] = await db.select().from(revenueShareReports)
+        .where(eq(revenueShareReports.id, input.reportId));
+      if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      const [payout] = await db.select().from(partnerPayouts)
+        .where(eq(partnerPayouts.id, input.payoutId));
+      if (!payout) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: `Payout ${input.payoutId} does not exist — refusing to mark report paid without a real payout record` });
+      }
+      if (payout.tenantId !== report.tenantId) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: `Payout ${input.payoutId} belongs to a different tenant — refusing to mark report paid` });
+      }
+      if (payout.status !== "completed") {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: `Payout ${input.payoutId} is '${payout.status}', not completed — money has not moved; refusing to mark report paid` });
+      }
+
       const [_row] = await db.update(revenueShareReports)
-        .set({ status: "paid", paidAt: new Date(), ...(input.payoutId ? { payoutId: input.payoutId } : {}) })
+        .set({ status: "paid", paidAt: new Date(), payoutId: input.payoutId })
         .where(eq(revenueShareReports.id, input.reportId)).returning();
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
-      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      return {
+        success: true, id: (_row as any).id, status: "paid",
+        payoutExecuted: true, payoutId: input.payoutId,
+        updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true,
+      };
     }),
 
   // ── Analytics ─────────────────────────────────────────────────────────────────
