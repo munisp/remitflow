@@ -237,11 +237,25 @@ export function requirePermission(permission: Permission) {
 
 // ── 7. Audit Log Tamper Detection ────────────────────────────────────────────
 
-const AUDIT_HMAC_KEY = process.env.AUDIT_HMAC_KEY ?? process.env.JWT_SECRET ?? "audit-hmac-key";
+// W9/Q11 (F10-3): no repo-known static fallback. Production: missing key =>
+// throw at use (fail closed). Non-production: ephemeral random key + warn
+// (audit signatures invalid across restarts; never a known/static credential).
+let cachedAuditKey: string | null = null;
+function getAuditHmacKey(): string {
+  if (cachedAuditKey) return cachedAuditKey;
+  const envKey = process.env.AUDIT_HMAC_KEY ?? process.env.JWT_SECRET;
+  if (envKey) { cachedAuditKey = envKey; return envKey; }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("AUDIT_HMAC_KEY (or JWT_SECRET) is required in production — refusing to sign audit entries");
+  }
+  console.warn("[security] AUDIT_HMAC_KEY unset — using ephemeral random key (non-production only)");
+  cachedAuditKey = randomBytes(32).toString("hex");
+  return cachedAuditKey;
+}
 
 export function signAuditEntry(entry: Record<string, unknown>): string {
   const payload = JSON.stringify(entry, Object.keys(entry).sort());
-  return createHmac("sha256", AUDIT_HMAC_KEY).update(payload).digest("hex");
+  return createHmac("sha256", getAuditHmacKey()).update(payload).digest("hex");
 }
 
 export function verifyAuditEntry(entry: Record<string, unknown>, signature: string): boolean {
