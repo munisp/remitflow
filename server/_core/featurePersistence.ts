@@ -180,6 +180,7 @@ export async function persistFeatureRecord(
   if (!db) return;
 
   try {
+    assertSafeTableName(tableName);
     const columns = Object.keys(data);
     const values = Object.values(data);
     const columnList = columns.map(c => `"${camelToSnake(c)}"`).join(", ");
@@ -203,8 +204,23 @@ export async function persistFeatureRecord(
   }
 }
 
+// W9/Q10 (F9-10): identifiers produced here are interpolated into raw SQL —
+// allowlist [a-z0-9_] and reject anything else (a quote in a key would break
+// out of the identifier and inject SQL). Fail closed: throw.
 function camelToSnake(str: string): string {
-  return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+  const snake = str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+  if (!/^[a-z0-9_]+$/.test(snake)) {
+    throw new Error(`Unsafe SQL identifier rejected: ${JSON.stringify(str)}`);
+  }
+  return snake;
+}
+
+// Same guard for table names interpolated into raw SQL.
+function assertSafeTableName(tableName: string): string {
+  if (!/^[a-z0-9_]+$/.test(tableName)) {
+    throw new Error(`Unsafe SQL table name rejected: ${JSON.stringify(tableName)}`);
+  }
+  return tableName;
 }
 
 function snakeToCamel(str: string): string {
@@ -223,6 +239,7 @@ export async function loadFeatureRecords(
   if (!db) return [];
 
   try {
+    assertSafeTableName(tableName);
     let query = `SELECT * FROM "${tableName}"`;
     if (filter?.userId) {
       query += ` WHERE user_id = ${filter.userId}`;
@@ -257,6 +274,7 @@ export async function loadFeatureRecord(
   if (!db) return null;
 
   try {
+    assertSafeTableName(tableName);
     // Use parameterized query to prevent SQL injection
     const rows = await (db as any).execute(
       sql`SELECT * FROM ${sql.raw(`"${tableName}"`)} WHERE id = ${id} LIMIT 1`
@@ -284,6 +302,7 @@ export async function deleteFeatureRecord(
   if (!db) return;
 
   try {
+    assertSafeTableName(tableName);
     await (db as any).execute(
       sql`DELETE FROM ${sql.raw(`"${tableName}"`)} WHERE id = ${id}`
     );
@@ -304,6 +323,7 @@ export async function updateFeatureRecord(
   if (!db) return;
 
   try {
+    assertSafeTableName(tableName);
     const entries = Object.entries(data);
     const setClauses = entries.map(([key], i) => `"${camelToSnake(key)}" = $${i + 1}`).join(", ");
     const values = entries.map(([, val]) => {
@@ -557,7 +577,23 @@ async function processWebhookQueue(): Promise<void> {
           },
           body: webhook.payload,
           signal: AbortSignal.timeout(10_000),
+          // W9/Q10 (F9-6): never follow redirects — the SSRF guard validated
+          // only the initial URL, so a 3xx would silently re-target the
+          // request (with our signature header) at an unvalidated host.
+          redirect: "manual",
         });
+
+        // Reject redirects outright (fail closed — do not retry what will
+        // keep redirecting, and never treat a redirect as delivered).
+        if (res.status >= 300 && res.status < 400) {
+          webhook.status = "failed";
+          logger.warn({ url: webhook.url, status: res.status }, "[Webhook] Redirect response rejected (SSRF guard)");
+          emitFeatureEvent("feature.webhooks", webhook.url, {
+            event: "webhook.redirect_rejected",
+            attempts: webhook.attempts,
+          });
+          continue;
+        }
 
         if (res.ok || res.status < 500) {
           webhook.status = "delivered";
