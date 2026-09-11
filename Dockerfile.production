@@ -9,16 +9,19 @@ LABEL org.opencontainers.image.vendor="RemitFlow" \
       security.cve-2024-32650="mitigated"
 
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# pnpm repo (packageManager: pnpm@10.4.1) — no package-lock.json exists.
+RUN corepack enable && corepack prepare pnpm@latest --activate
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --prod && pnpm store prune
 
 # Stage 2: Build
 FROM node:26-alpine AS builder
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
+RUN corepack enable && corepack prepare pnpm@latest --activate
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY . .
-RUN npm run build
+RUN pnpm run build
 
 # Stage 3: Production
 FROM node:26-alpine AS runner
