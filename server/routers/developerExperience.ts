@@ -101,9 +101,17 @@ async function deliverWebhook(
       },
       body,
       signal: AbortSignal.timeout(10_000),
+      // W9/Q10 (F9-6): never follow redirects — the SSRF guard validated only
+      // the initial URL; a 3xx would re-target the signed payload elsewhere.
+      redirect: "manual",
     });
     statusCode = res.status;
-    success = res.status >= 200 && res.status < 300;
+    if (res.status >= 300 && res.status < 400) {
+      success = false;
+      error = "Redirect response rejected (SSRF policy: redirects are not followed)";
+    } else {
+      success = res.status >= 200 && res.status < 300;
+    }
   } catch (e: any) {
     error = e.message;
   }
