@@ -31,7 +31,6 @@ var db *sql.DB
 
 var (
 	port           = getEnv("PORT", "8110")
-	jwtSecret      = getEnv("JWT_SECRET", "remitflow-dev-secret-change-in-production")
 	maxRequestsMin = 100 // per IP per minute
 	maxBurstSize   = 20  // burst allowance
 )
