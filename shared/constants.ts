@@ -183,7 +183,8 @@ export const MOBILE_MONEY_PROVIDERS = [
 export const MOJALOOP = {
   BASE_URL: process.env.MOJALOOP_URL || "https://sandbox.mojaloop.io",
   FSP_ID: process.env.MOJALOOP_FSP_ID || "remitflow",
-  API_KEY: process.env.MOJALOOP_API_KEY || "default-api-key",
+  // W9/Q11 (F10-12): no repo-known default API key — env only (guarded below).
+  API_KEY: process.env.MOJALOOP_API_KEY ?? "",
   SUPPORTED_SCHEMES: ["MSISDN", "ACCOUNT_ID", "IBAN", "ALIAS"],
   TRANSFER_TIMEOUT_SECONDS: 30,
 } as const;
@@ -394,7 +395,8 @@ export const OBSERVABILITY = {
   // Grafana
   GRAFANA_URL: process.env.GRAFANA_URL || "http://localhost:3001",
   GRAFANA_USER: process.env.GRAFANA_USER || "admin",
-  GRAFANA_PASSWORD: process.env.GRAFANA_PASSWORD || "remitflow-grafana-2025",
+  // W9/Q11 (F10-8): no repo-known default password — env only (guarded below).
+  GRAFANA_PASSWORD: process.env.GRAFANA_PASSWORD ?? "",
   // Prometheus
   PROMETHEUS_URL: process.env.PROMETHEUS_URL || "http://localhost:9090",
   // Alertmanager
@@ -412,9 +414,11 @@ export const APISIX = {
   GATEWAY_URL: process.env.APISIX_GATEWAY_URL || "http://localhost:9080",
   DASHBOARD_URL: process.env.APISIX_DASHBOARD_URL || "http://localhost:9000",
   ADMIN_URL: process.env.APISIX_ADMIN_URL || "http://localhost:9180",
-  ADMIN_KEY: process.env.APISIX_ADMIN_KEY || "remitflow-apisix-admin-2025",
+  // W9/Q11 (F10-8): no repo-known default admin key — env only (guarded below).
+  ADMIN_KEY: process.env.APISIX_ADMIN_KEY ?? "",
   DASHBOARD_USER: process.env.APISIX_DASHBOARD_USER || "admin",
-  DASHBOARD_PASSWORD: process.env.APISIX_DASHBOARD_PASSWORD || "remitflow-apisix-2025",
+  // W9/Q11 (F10-8): no repo-known default password — env only (guarded below).
+  DASHBOARD_PASSWORD: process.env.APISIX_DASHBOARD_PASSWORD ?? "",
   // open-appsec WAF
   OPENAPPSEC_CENTRAL_URL: process.env.OPENAPPSEC_CENTRAL_URL || "https://my.openappsec.io",
   OPENAPPSEC_TOKEN: process.env.OPENAPPSEC_TOKEN || "",
@@ -466,7 +470,8 @@ export const INFRA = {
   OCR_TIMEOUT_MS: 30000,
   // Redis (for rate limiting, sessions, caching)
   REDIS_URL: process.env.REDIS_URL || "redis://localhost:6379",
-  REDIS_PASSWORD: process.env.REDIS_PASSWORD || "remitflow-redis-2025",
+  // W9/Q11 (F10-8): no repo-known default password — env only (guarded below).
+  REDIS_PASSWORD: process.env.REDIS_PASSWORD ?? "",
   // Database
   DB_POOL_MIN: 2,
   DB_POOL_MAX: 20,
@@ -475,3 +480,28 @@ export const INFRA = {
   PORT: parseInt(process.env.PORT || "3000"),
   NODE_ENV: process.env.NODE_ENV || "development",
 } as const;
+
+// ─── W9/Q11: Infrastructure secret guard (F10-8, F10-12) ─────────────────────
+// The constants above intentionally carry NO repo-known default credentials.
+// Production: any missing infra secret throws at module load (fail closed at
+// boot — the feature can never run with a known/static credential).
+// Non-production: structured warn once; the empty value disables that
+// integration's authenticated path.
+const REQUIRED_INFRA_SECRETS: ReadonlyArray<readonly [string, string]> = [
+  ["MOJALOOP_API_KEY", MOJALOOP.API_KEY],
+  ["GRAFANA_PASSWORD", OBSERVABILITY.GRAFANA_PASSWORD],
+  ["APISIX_ADMIN_KEY", APISIX.ADMIN_KEY],
+  ["APISIX_DASHBOARD_PASSWORD", APISIX.DASHBOARD_PASSWORD],
+  ["REDIS_PASSWORD", INFRA.REDIS_PASSWORD],
+];
+const missingInfraSecrets = REQUIRED_INFRA_SECRETS.filter(([, v]) => !v).map(([k]) => k);
+if (missingInfraSecrets.length > 0) {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      `[constants] Missing required infrastructure secrets in production: ${missingInfraSecrets.join(", ")} — refusing to boot with default/static credentials`
+    );
+  }
+  console.warn(
+    `[constants] Infra secrets unset: ${missingInfraSecrets.join(", ")} — those integrations are disabled (non-production only)`
+  );
+}

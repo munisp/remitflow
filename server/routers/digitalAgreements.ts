@@ -21,6 +21,19 @@ async function _db() {
   return db;
 }
 
+// W9-FIX2: mirror of routers.ts sanitizeStorageKeyPart — a client-supplied
+// fileName is interpolated into a storage key, so strip path components
+// (traversal), whitelist characters, collapse "..", and cap length.
+function sanitizeStorageKeyPart(raw: string, maxLen = 80): string {
+  const base = raw.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? "file";
+  const cleaned = base
+    .replace(/\.{2,}/g, ".")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/^\.+/, "")
+    .slice(0, maxLen);
+  return cleaned || "file";
+}
+
 // ─── Default platform-favorable agreement template ──────────────────────────
 const DEFAULT_AGREEMENT_TEMPLATE = `REVENUE SHARE PARTNERSHIP AGREEMENT
 
@@ -438,7 +451,7 @@ export const digitalAgreementsRouter = router({
       }
 
       const suffix = crypto.randomBytes(8).toString("hex");
-      const fileKey = `agreements/${input.id}/physical-${suffix}-${input.fileName}`;
+      const fileKey = `agreements/${input.id}/physical-${suffix}-${sanitizeStorageKeyPart(input.fileName)}`;
       const { url } = await storagePut(fileKey, buffer, input.mimeType);
 
       const now = new Date();
