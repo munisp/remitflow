@@ -216,8 +216,12 @@ export const transferCoreRouter = router({
 
   /** Cancel a pending transfer */
   cancel: protectedProcedure
-    .input(z.object({ referenceId: z.string(), reason: z.string().max(2000).optional() }))
+    .input(z.object({ referenceId: z.string(), reason: z.string().max(2000).optional(), totpCode: z.string().regex(/^\d{6}$/).optional() }))
     .mutation(async ({ input, ctx }) => {
+      // W12: cancel credits the wallet refund — money-moving mutation, gate it
+      // with the canonical TOTP step-up (fail-closed).
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "transfer cancellation");
       const db = await getDb();
       if (!db) return { success: false, reason: "Database unavailable" };
 
@@ -350,8 +354,13 @@ export const transferCoreRouter = router({
       referenceId: z.string().min(1).max(128),
       amount: z.number().positive().max(10_000_000),
       currency: z.string().length(3),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      // W12: settle posts the TB hold + PG debit — money-moving mutation, gate
+      // it with the canonical TOTP step-up (fail-closed).
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "transfer settlement");
       // FF-FIX: never let a caller-supplied amount desynchronize PG from TB —
       // when a transfers row exists for this reference, the settle amount and
       // currency must match the original transfer.

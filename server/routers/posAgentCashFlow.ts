@@ -126,9 +126,14 @@ export const posAgentCashFlowRouter = router({
       customerPhone: z.string().min(7, "Phone required"),
       customerName: z.string().optional(),
       reference: z.string().optional(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
+
+      // W12: canonical TOTP step-up (fail-closed) — credits a customer wallet.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "agent cash-in");
 
       // Check agent account exists and is active
       const [agent] = await db
