@@ -1,6 +1,6 @@
 replicaCount: 1
 image:
-  repository: registry.digitalocean.com/talentgraph-services/54remit-lakehouse-etl
+  repository: registry.digitalocean.com/talentgraph-auth/54remit-lakehouse-etl
   pullPolicy: IfNotPresent
   tag: 0.1.0
 nameOverride: ''
@@ -14,15 +14,15 @@ podSecurityContext: {}
 securityContext: {}
 service:
   type: ClusterIP
-  port: 8102
-  targetPort: 8102
+  port: 80
+  targetPort: 8089
 resources:
   requests:
     cpu: 100m
-    memory: 250Mi
+    memory: 128Mi
   limits:
-    cpu: 500m
-    memory: 1000Mi
+    cpu: 250m
+    memory: 500Mi
 autoscaling:
   enabled: false
   minReplicas: 1
@@ -35,7 +35,7 @@ tolerations: []
 affinity: {}
 dapr:
   appId: lakehouse-etl
-  appPort: 8102
+  appPort: 8089
   enableMetrics: true
   enabled: true
   metricsPort: 9099
@@ -44,13 +44,28 @@ dapr:
   cpu-limit: 300m
   memory-request: 250Mi
   memory-limit: 1000Mi
-# ⚠️ Do not commit real values here — see admin-service/values.yaml's comment
-# for the override convention. This service holds the most sensitive
-# credentials of the three (Keycloak admin password, superadmin bootstrap
-# secret) — treat its override file with extra care (e.g. sealed-secrets or
-# a secrets manager, not a plain gitignored yaml, once one is adopted).
+# Auto-generated: env var names below were discovered via source grep
+# (os.Getenv / env::var / os.getenv across lakehouse-etl's codebase), so this list
+# reflects what the service actually reads — not a guess. Known non-secret
+# infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
+#   helm upgrade --install lakehouse-etl infrastructure/charts/lakehouse-etl \
+#     -n 54remit -f infrastructure/values-secrets/lakehouse-etl.yaml
+# (a gitignored, per-environment file).
 secrets:
-  S3_ENDPOINT: ""  # REQUIRED — set via --set or secrets manager
-  S3_BUCKET: ""  # REQUIRED — set via --set or secrets manager
-  AWS_ACCESS_KEY_ID: ""  # REQUIRED — set via --set or secrets manager
-  AWS_SECRET_ACCESS_KEY: ""  # REQUIRED — set via --set or secrets manager
+  CDC_ENABLED: ""  # REQUIRED
+  CDC_SLOT_NAME: ""  # REQUIRED
+  DATABASE_URL: ""  # REQUIRED
+  DB_COMMAND_TIMEOUT: ""  # REQUIRED
+  DB_MAX_INACTIVE_LIFETIME: ""  # REQUIRED
+  DB_MAX_QUERIES: ""  # REQUIRED
+  DB_POOL_MAX_SIZE: ""  # REQUIRED
+  DB_POOL_MIN_SIZE: ""  # REQUIRED
+  LAKEHOUSE_PATH: ""  # REQUIRED
+  LOG_LEVEL: "info"
+  PIPELINE_INTERVAL_SECS: ""  # REQUIRED
+  PORT: "8089"
+  S3_ACCESS_KEY: ""  # REQUIRED
+  S3_BUCKET: ""  # REQUIRED
+  S3_ENDPOINT: ""  # REQUIRED
+  S3_SECRET_KEY: ""  # REQUIRED
