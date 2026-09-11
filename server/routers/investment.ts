@@ -952,7 +952,7 @@ export const startupRouter = router({
   getDeal: publicProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .query(async ({ input }) => {
-      const [deal] = await (await getDbConn()).select().from(startupDeals).where(eq(startupDeals.id, input.dealId));
+      const [deal] = await (await getDbConn()).select().from(startupDeals).where(eq(startupDeals.id, input.id));
       if (!deal) throw new TRPCError({ code: "NOT_FOUND", message: "Deal not found" });
       return deal;
     }),
