@@ -240,7 +240,7 @@ export const posAgentCashFlowRouter = router({
       };
     }),
 
-  // ── Cash Out: customer requests cash, agent disburses ─────────────────────
+  // ── Cash Out: customer requests cash, agent disburses ──────────────────────
   cashOut: protectedProcedure
     .input(z.object({
       amount: z.number().positive("Amount must be positive"),

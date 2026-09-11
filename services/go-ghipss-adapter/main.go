@@ -243,7 +243,6 @@ func routeViaMojaloop(cfg Config, req GhIPSSTransferRequest) bool {
 		"transferId": req.TransferID,
 		"payerFsp":   "remitflow",
 		"payeeFsp":   "gh-bank-" + req.ReceiverBank,
-
 		"amount":     fmt.Sprintf("%.2f", req.SendAmount),
 		"currency":   req.SendCurrency,
 		"ilpPacket":  "GHIPSS_ROUTED",
