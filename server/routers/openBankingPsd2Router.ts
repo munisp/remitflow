@@ -148,6 +148,11 @@ export const openBankingPsd2Router = router({
       });
 
       if (!result) {
+        // W9-FIX1: never fabricate an authorisationUrl in production — a fake
+        // redirect would send the customer to a bogus bank URL.
+        if (process.env.NODE_ENV === "production") {
+          throw new TRPCError({ code: "UNAVAILABLE", message: "Open Banking service unavailable — cannot create consent" });
+        }
         // Return a mock consent for development/testing
         const mockConsentId = `consent_${Date.now()}_${userId}`;
         logger.warn({ userId, institutionId: input.institutionId }, "[OpenBanking] Service unavailable — returning mock consent");
@@ -163,17 +168,37 @@ export const openBankingPsd2Router = router({
       }
 
       // Store consent reference in DB
+      // W9/Q9 (F14-4): real columns are bank_id/bank_name (no institution_id);
+      // the open_banking_consent_status enum is lowercase snake_case while the
+      // OBIE service returns CamelCase — map explicitly. A failed persist must
+      // THROW (never swallowed): an untracked live consent is a security hole.
+      const OBIE_STATUS_MAP: Record<string, "awaiting_authorisation" | "authorised" | "rejected" | "revoked" | "expired"> = {
+        AwaitingAuthorisation: "awaiting_authorisation",
+        Authorised: "authorised",
+        Rejected: "rejected",
+        Revoked: "revoked",
+        Expired: "expired",
+      };
+      const mappedStatus = OBIE_STATUS_MAP[result.status] ?? "awaiting_authorisation";
+      if (!OBIE_STATUS_MAP[result.status]) {
+        logger.warn({ rawStatus: result.status, consentId: result.consentId }, "[OpenBanking] Unknown consent status from service — stored as awaiting_authorisation");
+      }
       try {
         await db.insert(openBankingConsents).values({
           userId,
           consentId: result.consentId,
-          institutionId: input.institutionId,
-          status: result.status,
+          bankId: input.institutionId,
+          bankName: input.institutionId,
+          status: mappedStatus,
           permissions: input.permissions,
           expiresAt: result.expiresAt ? new Date(result.expiresAt) : null,
-        } as any);
+        });
       } catch (e) {
-        logger.warn({ err: e }, "[OpenBanking] Failed to persist consent");
+        logger.error({ err: e, consentId: result.consentId, userId }, "[OpenBanking] Failed to persist consent");
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Consent was created at the institution but could not be recorded locally. Please retry or revoke the consent.",
+        });
       }
 
       await publishEvent("open_banking.consent.created", {
@@ -218,10 +243,13 @@ export const openBankingPsd2Router = router({
 
       await callObService(`/v1/aisp/consents/${input.consentId}`, "DELETE");
 
-      // Update DB
+      // Update DB — W9/Q9 (F14-4): open_banking_consent_status enum is lowercase
+      // ("revoked", not "Revoked"). The consent update MUST NOT be swallowed:
+      // a failed update previously left the DB row "authorised" while telling
+      // the user the consent was revoked. Fail closed — throw.
       try {
         await db.update(openBankingConsents)
-          .set({ status: "Revoked" } as any)
+          .set({ status: "revoked" })
           .where(
             and(
               eq(openBankingConsents.consentId, input.consentId),
@@ -229,7 +257,11 @@ export const openBankingPsd2Router = router({
             )
           );
       } catch (e) {
-        logger.warn({ err: e }, "[OpenBanking] Failed to update consent status");
+        logger.error({ err: e, consentId: input.consentId, userId }, "[OpenBanking] Failed to persist consent revocation");
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Consent revocation could not be recorded — the consent may still be active. Please retry.",
+        });
       }
 
       await redis.del(`ob:consents:${userId}`);

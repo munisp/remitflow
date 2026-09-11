@@ -164,10 +164,11 @@ export const posAgentCashFlowRouter = router({
         .insert(transactions)
         .values({
           userId: ctx.user.id,
-          type: "deposit" as any,
-          amount: input.amount.toFixed(2) as any,
-          currency: input.currency,
-          status: "completed" as any,
+          // W9/Q9: tx_type enum has no "deposit" — cash-in maps to "topup"; semantics kept in description/metadata.txType
+          type: "topup",
+          fromAmount: input.amount.toFixed(2),
+          fromCurrency: input.currency,
+          status: "completed",
           description: `Cash-in via agent ${agent.agentCode} — ${input.customerPhone}`,
           reference: ref,
           recipientName: input.customerName ?? input.customerPhone,
@@ -184,10 +185,10 @@ export const posAgentCashFlowRouter = router({
           // Fallback: insert without returning
           await db.insert(transactions).values({
             userId: ctx.user.id,
-            type: "deposit" as any,
-            amount: input.amount.toFixed(2) as any,
-            currency: input.currency,
-            status: "completed" as any,
+            type: "topup",
+            fromAmount: input.amount.toFixed(2),
+            fromCurrency: input.currency,
+            status: "completed",
             description: `Cash-in via agent ${agent.agentCode}`,
             reference: ref,
           }).returning();
@@ -239,7 +240,7 @@ export const posAgentCashFlowRouter = router({
       };
     }),
 
-  // ── Cash Out: customer requests cash, agent disburses ──────────────────────
+  // ── Cash Out: customer requests cash, agent disburses ─────────────────────
   cashOut: protectedProcedure
     .input(z.object({
       amount: z.number().positive("Amount must be positive"),
@@ -247,8 +248,28 @@ export const posAgentCashFlowRouter = router({
       customerPhone: z.string().min(7, "Phone required"),
       customerName: z.string().optional(),
       reference: z.string().optional(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // D11: TOTP step-up (Contract 2) — cash-out disburses physical cash from
+      // the agent's float; enrolled users MUST pass 2FA; fail closed on
+      // enrollment-lookup errors.
+      {
+        const { getTotpEnrollment, verifyTOTP } = await import("../totp.js");
+        const enrollment = await getTotpEnrollment(ctx.user.id);
+        if (!enrollment.dbAvailable) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — cash-out blocked" });
+        }
+        if (enrollment.enabled && enrollment.secret) {
+          if (!input.totpCode) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+          }
+          const valid = await verifyTOTP(input.totpCode, enrollment.secret);
+          if (!valid) {
+            throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+          }
+        }
+      }
       const db = await getDb();
 
       const [agent] = await db
@@ -283,10 +304,10 @@ export const posAgentCashFlowRouter = router({
         .insert(transactions)
         .values({
           userId: ctx.user.id,
-          type: "withdrawal" as any,
-          amount: input.amount.toFixed(2) as any,
-          currency: input.currency,
-          status: "completed" as any,
+          type: "withdrawal",
+          fromAmount: input.amount.toFixed(2),
+          fromCurrency: input.currency,
+          status: "completed",
           description: `Cash-out via agent ${agent.agentCode} — ${input.customerPhone}`,
           reference: ref,
           recipientName: input.customerName ?? input.customerPhone,
@@ -301,10 +322,10 @@ export const posAgentCashFlowRouter = router({
         .catch(async () => {
           await db.insert(transactions).values({
             userId: ctx.user.id,
-            type: "withdrawal" as any,
-            amount: input.amount.toFixed(2) as any,
-            currency: input.currency,
-            status: "completed" as any,
+            type: "withdrawal",
+            fromAmount: input.amount.toFixed(2),
+            fromCurrency: input.currency,
+            status: "completed",
             description: `Cash-out via agent ${agent.agentCode}`,
             reference: ref,
           }).returning();
