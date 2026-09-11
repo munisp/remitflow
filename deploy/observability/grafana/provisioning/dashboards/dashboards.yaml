@@ -1,0 +1,17 @@
+# RemitFlow — Grafana dashboard provisioning (W11-C1)
+# Loads every *.json in deploy/observability/dashboards (mounted at the
+# path below) into the "RemitFlow" folder. Grafana 11.3.0, provider API v1.
+apiVersion: 1
+
+providers:
+  - name: remitflow
+    orgId: 1
+    folder: RemitFlow
+    folderUid: remitflow
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

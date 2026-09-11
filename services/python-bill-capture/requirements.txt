@@ -1,0 +1,25 @@
+# RemitFlow Bill Capture (Wave 10 C3)
+#
+# The HTTP service itself is stdlib-only (http.server). The packages below are
+# the OPTIONAL OCR engines selected via OCR_ENGINE — when the chosen engine is
+# not installed the service reports {"status":"unconfigured"} and never
+# fabricates extraction output. Deps mirror the existing KYC OCR pipeline
+# (services/python-kyc-pipeline/requirements.txt).
+
+# ── OCR engines (choose via OCR_ENGINE=paddleocr|docling) ────────────────────
+paddlepaddle>=3.0.0
+paddleocr>=2.9.1
+docling>=2.14.0
+docling-core>=2.14.0
+
+# ── Image handling for PaddleOCR ──────────────────────────────────────────────
+numpy>=1.26.0
+pillow>=10.4.0
+
+# ── OpenTelemetry (Wave 11, fail-soft) ────────────────────────────────────────
+# Used only through the guarded shared helper (services/_shared/otel_helper.py).
+# If these packages are ever missing the service still boots and serves
+# normally, logs one WARN, and /health reports telemetry="disabled-no-sdk".
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0

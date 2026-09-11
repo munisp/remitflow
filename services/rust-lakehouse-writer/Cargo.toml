@@ -1,0 +1,25 @@
+[package]
+name = "rust-lakehouse-writer"
+version = "0.1.0"
+edition = "2021"
+description = "RemitFlow Wave-10 C6: Fluvio consumer group -> Parquet bronze lakehouse writer"
+license = "Proprietary"
+
+# Pinned versions (Wave-10 SPEC: declare exact deps; compile verification is R1 —
+# no Rust toolchain in the authoring environment).
+[dependencies]
+tokio = { version = "=1.44.2", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+fluvio = "=0.23.0"
+arrow2 = { version = "=0.17.2", features = ["io_parquet", "io_parquet_compression"] }
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.140"
+anyhow = "=1.0.98"
+chrono = { version = "=0.4.40", default-features = false, features = ["std", "clock"] }
+futures-util = "=0.3.31"
+tracing = "=0.1.41"
+tracing-subscriber = { version = "=0.3.19", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

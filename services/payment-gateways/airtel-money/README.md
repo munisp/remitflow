@@ -4,7 +4,7 @@
 
 Set environment variable:
 ```
-AIRTEL-MONEY_API_KEY=your_api_key_here
+AIRTEL_MONEY_API_KEY=your_api_key_here
 ```
 
 ## Usage

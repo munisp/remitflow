@@ -1,26 +1,30 @@
-FROM golang:1.21-alpine AS builder
+# ─── Build Stage ──────────────────────────────────────────────────────────────
+FROM golang:1.22-alpine AS builder
 
 LABEL org.opencontainers.image.vendor="RemitFlow" \
       org.opencontainers.image.licenses="Proprietary" \
-      security.non-root="true" \
-      security.cve-2025-49844="mitigated" \
-      security.cve-2024-32650="mitigated"
+      security.non-root="true"
 
 WORKDIR /app
+
+# Zero third-party dependencies — no go.sum / go mod download needed.
 COPY go.mod ./
-RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o investment-feed .
 
-FROM alpine:3.19
-RUN apk --no-cache add ca-certificates tzdata
-WORKDIR /app
-COPY --from=builder /app/investment-feed .
-EXPOSE 8087
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-  CMD wget -qO- http://localhost:8087/health || exit 1
-RUN addgroup --system --gid 1001 appgroup && \
-    adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
-USER appuser
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w" -o investment-feed .
 
-CMD ["./investment-feed"]
+# ─── Runtime Stage ────────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+COPY --from=builder /app/investment-feed /investment-feed
+
+EXPOSE 8080
+
+USER nonroot:nonroot
+
+# No HEALTHCHECK: distroless has no shell/wget. The orchestrator
+# (Kubernetes livenessProbe / Docker healthcheck via sidecar) must probe
+# GET /health on port 8080.
+
+ENTRYPOINT ["/investment-feed"]
