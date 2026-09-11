@@ -48,11 +48,11 @@ dapr:
 # (os.Getenv / env::var / os.getenv across python-refund-engine's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install python-refund-engine infrastructure/charts/python-refund-engine \
 #     -n 54remit -f infrastructure/values-secrets/python-refund-engine.yaml
 # (a gitignored, per-environment file).
 secrets:
-  DATABASE_URL: "CHANGE_ME"
-  REFUND_ENGINE_PORT: "CHANGE_ME"
-  STRIPE_SECRET_KEY: "CHANGE_ME"
+  DATABASE_URL: ""  # REQUIRED
+  REFUND_ENGINE_PORT: ""  # REQUIRED
+  STRIPE_SECRET_KEY: ""  # REQUIRED
