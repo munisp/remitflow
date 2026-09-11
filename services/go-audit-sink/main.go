@@ -77,7 +77,19 @@ type AuditStore struct {
 
 var store = &AuditStore{
 	entries: make([]AuditEntry, 0, 10000),
-	hmacKey: []byte(getEnvOrDefault("AUDIT_HMAC_KEY", "dev-audit-key-change-in-production")),
+	// FAIL CLOSED: no default HMAC key — refuse to boot when unset rather
+	// than ship a publicly known audit-trail key.
+	hmacKey: []byte(mustGetEnv("AUDIT_HMAC_KEY")),
+}
+
+// mustGetEnv returns the env var or panics at startup; there is no fallback
+// credential (see go-cips-adapter/internal/middleware/middleware.go:57).
+func mustGetEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		panic(key + " is not set: refusing to fall back to a well-known default credential; configure it explicitly")
+	}
+	return v
 }
 
 func getEnvOrDefault(key, defaultVal string) string {
