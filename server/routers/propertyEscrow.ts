@@ -391,10 +391,13 @@ const escrowPlanRouter = router({
     }),
 
   payDeposit: protectedProcedure
-    .input(z.object({ planId: z.string().min(1) }))
+    .input(z.object({ planId: z.string().min(1), totpCode: z.string().regex(/^\d{6}$/).optional() }))
     .mutation(async ({ ctx, input }) => {
       // A6: real estate escrow is a declared tier-2 investments feature.
       await assertFeatureEligible(ctx, { flag: "investments", minKycTier: 2, featureName: "Property escrow deposit" });
+      // W12: canonical TOTP step-up (fail-closed) — debits buyer wallet.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "escrow deposit");
       const db = await getDbConn();
       const [plan] = await db.select().from(propertyEscrowPlans).where(and(eq(propertyEscrowPlans.planId, input.planId), eq(propertyEscrowPlans.buyerId, ctx.user.id))).limit(1);
       if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Escrow plan not found" });
@@ -535,8 +538,11 @@ const escrowPlanRouter = router({
     }),
 
   payInstallment: protectedProcedure
-    .input(z.object({ planId: z.string().min(1) }))
+    .input(z.object({ planId: z.string().min(1), totpCode: z.string().regex(/^\d{6}$/).optional() }))
     .mutation(async ({ ctx, input }) => {
+      // W12: canonical TOTP step-up (fail-closed) — debits buyer wallet.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "escrow installment payment");
       const db = await getDbConn();
       const [plan] = await db.select().from(propertyEscrowPlans).where(and(eq(propertyEscrowPlans.planId, input.planId), eq(propertyEscrowPlans.buyerId, ctx.user.id))).limit(1);
       if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
@@ -549,6 +555,12 @@ const escrowPlanRouter = router({
       if (!nextInstallment) throw new TRPCError({ code: "BAD_REQUEST", message: "All installments already paid" });
 
       const amount = Number(nextInstallment.amountUsd);
+
+      // W12: direct wallet debit bypassing the transfer pipeline and (unlike
+      // payDeposit) without an assertFeatureEligible tier gate — apply the
+      // transferEngine-equivalent KYC tier check (fail-closed).
+      const { requireKycTierForAmount } = await import("../_core/totpStepUp");
+      await requireKycTierForAmount(ctx.user.id, amount, "escrow installment payment");
 
       // Debit wallet
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
