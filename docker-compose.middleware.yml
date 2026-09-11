@@ -138,8 +138,8 @@ services:
       LAKEHOUSE_URL: "${LAKEHOUSE_URL:-http://python-lakehouse:8130}"
       KEYCLOAK_URL: "${KEYCLOAK_URL:-http://keycloak:8080}"
       KEYCLOAK_REALM: "${KEYCLOAK_REALM:-remitflow}"
-      KEYCLOAK_ADMIN_USER: "${KEYCLOAK_ADMIN_USER:-admin}"
-      KEYCLOAK_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:-admin}"
+      KEYCLOAK_ADMIN_USER: "${KEYCLOAK_ADMIN_USER:?KEYCLOAK_ADMIN_USER is required}"
+      KEYCLOAK_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is required}"
       PERMIFY_URL: "${PERMIFY_URL:-http://permify:3476}"
       DATABASE_URL: "${DATABASE_URL}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
@@ -323,6 +323,35 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # ── Keycloak telemetry extension (W11-C1) ─────────────────────────────────
+  # The keycloak service itself is DEFINED in docker-compose.platform.yml:53
+  # (image quay.io/keycloak/keycloak:26.0.7). Compose merges these blocks when
+  # this file is used as an overlay — additive env only, nothing redefined.
+  # Keycloak 26 serves /metrics and /health on the MANAGEMENT interface
+  # (container port 9000) when these are on; the OTel collector scrapes
+  # keycloak:9000 (deploy/observability/otel-collector.yaml) and Prometheus
+  # scrapes it directly (deploy/observability/prometheus.yml, job=keycloak).
+  keycloak:
+    environment:
+      KC_METRICS_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      # Management port defaults to 9000 in KC 26 (KC_HTTP_MANAGEMENT_PORT) —
+      # not re-set here; in-network scrape only, no host binding added.
+
+  # ── OpenSearch telemetry note (W11-C1) ────────────────────────────────────
+  # The opensearch service is DEFINED in docker-compose.yml:953
+  # (opensearchproject/opensearch:2.13.0). There is no env toggle for
+  # Prometheus metrics: OpenSearch 2.13 requires the
+  # `prometheus-exporter` plugin (plugins-prom-exporter), which exposes
+  # /_prometheus/metrics. Install on a derived image, e.g.:
+  #     FROM opensearchproject/opensearch:2.13.0
+  #     RUN bin/opensearch-plugin install --batch \
+  #         https://github.com/aiven/prometheus-exporter-plugin-for-opensearch/releases/download/2.13.0.0/prometheus-exporter-2.13.0.0.zip
+  # (plugin version MUST match the OpenSearch minor version: 2.13.0.0).
+  # The collector and Prometheus jobs (job=opensearch) stay DOWN until the
+  # plugin is installed — fail-visible, not silently absent. No functional
+  # env change is made here so existing behavior is untouched.
 
 networks:
   remitflow-internal:
