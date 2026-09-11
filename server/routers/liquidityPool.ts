@@ -188,10 +188,15 @@ export const liquidityPoolRouter = router({
       stablecoin: z.enum(SUPPORTED_STABLECOINS),
       fiatAmount: z.number().positive().max(10_000_000),
       fiatCurrency: z.enum(SUPPORTED_FIAT),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      // W12: canonical TOTP step-up (fail-closed) — money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "stablecoin purchase");
 
       // A3: enforce the declared stablecoin gate (flag + KYC tier >= 1 + growth plan).
       await assertFeatureEligible(ctx, { flag: "stablecoin", minKycTier: 1, minPlan: "growth", featureName: "Stablecoin on-ramp" });
@@ -315,10 +320,15 @@ export const liquidityPoolRouter = router({
       stablecoin: z.enum(SUPPORTED_STABLECOINS),
       stablecoinAmount: z.number().positive().max(10_000_000),
       fiatCurrency: z.enum(SUPPORTED_FIAT),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      // W12: canonical TOTP step-up (fail-closed) — money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "stablecoin sale");
 
       // A3: enforce the declared stablecoin gate (flag + KYC tier >= 1 + growth plan).
       await assertFeatureEligible(ctx, { flag: "stablecoin", minKycTier: 1, minPlan: "growth", featureName: "Stablecoin off-ramp" });
