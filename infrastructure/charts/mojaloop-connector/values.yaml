@@ -1,6 +1,6 @@
 replicaCount: 1
 image:
-  repository: registry.digitalocean.com/talentgraph-services/54remit-mojaloop-connector
+  repository: registry.digitalocean.com/talentgraph-auth/54remit-mojaloop-connector
   pullPolicy: IfNotPresent
   tag: 0.1.0
 nameOverride: ''
@@ -14,15 +14,15 @@ podSecurityContext: {}
 securityContext: {}
 service:
   type: ClusterIP
-  port: 8101
-  targetPort: 8101
+  port: 80
+  targetPort: 8085
 resources:
   requests:
     cpu: 100m
-    memory: 250Mi
+    memory: 128Mi
   limits:
-    cpu: 500m
-    memory: 1000Mi
+    cpu: 250m
+    memory: 500Mi
 autoscaling:
   enabled: false
   minReplicas: 1
@@ -35,7 +35,7 @@ tolerations: []
 affinity: {}
 dapr:
   appId: mojaloop-connector
-  appPort: 8101
+  appPort: 8085
   enableMetrics: true
   enabled: true
   metricsPort: 9099
@@ -44,12 +44,28 @@ dapr:
   cpu-limit: 300m
   memory-request: 250Mi
   memory-limit: 1000Mi
-# ⚠️ Do not commit real values here — see admin-service/values.yaml's comment
-# for the override convention. This service holds the most sensitive
-# credentials of the three (Keycloak admin password, superadmin bootstrap
-# secret) — treat its override file with extra care (e.g. sealed-secrets or
-# a secrets manager, not a plain gitignored yaml, once one is adopted).
+# Auto-generated: env var names below were discovered via source grep
+# (os.Getenv / env::var / os.getenv across mojaloop-connector's codebase), so this list
+# reflects what the service actually reads — not a guess. Known non-secret
+# infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
+#   helm upgrade --install mojaloop-connector infrastructure/charts/mojaloop-connector \
+#     -n 54remit -f infrastructure/values-secrets/mojaloop-connector.yaml
+# (a gitignored, per-environment file).
 secrets:
-  MOJALOOP_ENDPOINT: ""  # REQUIRED — set via --set or secrets manager
-  MOJALOOP_DFSP_ID: ""  # REQUIRED — set via --set or secrets manager
-  KAFKA_BROKERS: kafka:9092
+  CORE_API_URL: ""  # REQUIRED
+  DAPR_HTTP_PORT: "3500"
+  DATABASE_URL: ""  # REQUIRED
+  FLUVIO_GATEWAY_URL: ""  # REQUIRED
+  FSPIOP_SOURCE: ""  # REQUIRED
+  KAFKA_BROKERS: "kafka-service:9092"
+  LAKEHOUSE_URL: ""  # REQUIRED
+  LOG_LEVEL: "info"
+  MOJALOOP_HUB_URL: ""  # REQUIRED
+  NODE_ENV: "production"
+  OPENSEARCH_URL: ""  # REQUIRED
+  PORT: "8085"
+  REDIS_ADDR: ""  # REQUIRED
+  TEMPORAL_HOST_PORT: ""  # REQUIRED
+  TIGERBEETLE_ADDR: ""  # REQUIRED
+  WEBHOOK_SECRET_MOJALOOP: ""  # REQUIRED

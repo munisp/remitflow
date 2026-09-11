@@ -1,43 +1,65 @@
-# Dapr — RemitFlow Middleware Integration
+# Dapr components — Wave 10 (W10-C4)
 
-## Why Dapr is in this stack
+`go-accounting-sync` (:8113) uses two Dapr building blocks via its sidecar:
 
-Dapr (`docker-compose.middleware.yml: dapr-placement`, plus one `daprd`
-sidecar per participating app via `dapr-sidecar-creator.sh`) is our
-**portable middleware facade**. It is NOT a new broker or database — it sits
-in front of the infra we already run (Kafka, Redis, PostgreSQL) and exposes
-the three primitives the polyglot services (Go / Rust / Python / TS) consume
-through a single sidecar API (`http://localhost:3500` by default):
+| Component      | Type          | Used for                                                        |
+| -------------- | ------------- | --------------------------------------------------------------- |
+| `kafka-pubsub` | `pubsub.kafka` | Publishing `remitflow.accounting-sync` sync/connect/error events |
+| `redis-state`  | `state.redis`  | OAuth state nonces (single-use, TTL) + sync cursors (idempotency) |
 
-| Primitive   | Backing component (see `components/`) | Used for |
-|-------------|----------------------------------------|----------|
-| **Pub/Sub** | `pubsub.kafka` (`components/kafka-pubsub.yaml`) | Domain events — Kafka stays the broker; services publish/subscribe via the sidecar instead of embedding Kafka clients |
-| **State**   | `statestore.redis` (`components/redis-state.yaml`) | Ephemeral workflow/service state with TTL — Redis stays the store |
-| **Secrets** | `secretstores.local.env` (dev) / `kubernetes` (prod) (`components/local-secrets.yaml`, `kubernetes-secrets.yaml`) | Uniform secret retrieval for services |
+Both manifests are scoped to the Dapr app id `accounting-sync`.
 
-`dapr-placement` (port 50005) only exists to track **actor** placement —
-required infrastructure even when actors are lightly used, and harmless
-otherwise. The **Dapr dashboard** (`:8099`) is the read-only topology view
-scoped to `network_mode: service:dapr-placement` so it shares the
-placement network and requires no port of its own.
+## Sidecar annotations
 
-## How services opt in
+Add these annotations to the `go-accounting-sync` Deployment pod template so
+the Dapr injector attaches the sidecar:
 
-A service gets a sidecar only if it is listed in
-`dapr-sidecar-creator.sh` — sidecars are **created on demand**, not globally.
-Health probes for Dapr-enabled apps should hit the sidecar health endpoint
-(`:3500/v1.0/healthz`) in addition to app `/health`.
+```yaml
+metadata:
+  annotations:
+    dapr.io/enabled: "true"
+    dapr.io/app-id: "accounting-sync"
+    dapr.io/app-port: "8113"
+    dapr.io/app-protocol: "http"
+    dapr.io/enable-api-logging: "false"
+```
 
-## Observability
+The service discovers the sidecar through the injected `DAPR_HTTP_PORT` env
+var (default 3500). When `DAPR_HTTP_PORT` is **unset** the service still runs,
+but logs a warning and falls back to:
 
-`configuration.yaml` enables **Zipkin** tracing and **Prometheus** metrics
-on the sidecars (`:9090/metrics`). The dashboard is inventory/topology only
-and is not a metrics source.
+- in-memory OAuth state nonces (TTL-bounded; single replica only), and
+- a local cursor file (`CURSOR_FILE`, default
+  `$TMPDIR/go-accounting-sync-cursors.json`), and
+- direct event emit to `TS_EVENT_URL` (TS core → Kafka) instead of Dapr
+  pub/sub.
 
-## What to check when debugging
+## Rendering the manifests
 
-1. Is the app's sidecar created? (`dapr-sidecar-creator.sh` allowlist)
-2. Are component YAMLs loaded? (mounted under `/components`)
-3. Is `dapr-placement` healthy? (required for any actor workload)
-4. For pub/sub issues: check Kafka reachability first — Dapr is a facade,
-   the broker is still authoritative.
+Broker/host values are environment placeholders — render before applying:
+
+```bash
+export KAFKA_BROKERS="kafka-0.kafka-headless:9092,kafka-1.kafka-headless:9092"
+export REDIS_HOST="redis-master:6379"
+envsubst < deploy/dapr/components/kafka-pubsub.yaml | kubectl apply -f -
+envsubst < deploy/dapr/components/redis-state.yaml | kubectl apply -f -
+```
+
+Secrets are resolved from Kubernetes secrets via `secretKeyRef`
+(`remitflow-kafka`, `remitflow-redis`) — no credentials live in these files.
+
+## Event contract
+
+Published to topic `remitflow.accounting-sync` on component `kafka-pubsub`:
+
+```json
+{
+  "type": "connect | push_complete | pull_complete | error",
+  "provider": "quickbooks_online | xero",
+  "connectionId": "<accounting_connections.id>",
+  "detail": "human-readable summary",
+  "at": "RFC3339Nano"
+}
+```
+
+Events never carry OAuth tokens or provider payload bodies.
