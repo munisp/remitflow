@@ -16,9 +16,11 @@
  *   TIGERBEETLE_TIMEOUT_MS   e.g. 5000
  */
 import axios, { AxiosInstance } from "axios";
+import { context as otelContext, propagation, defaultTextMapSetter } from "@opentelemetry/api";
 import { logger } from "./logger";
 import { getDb } from "../db";
 import { eq, sql } from "drizzle-orm";
+import { getRequestTenantContext } from "./tenantGuc";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 const BRIDGE_URL = process.env.TIGERBEETLE_BRIDGE_URL || "http://localhost:8080";
@@ -160,6 +162,26 @@ function getClient(): AxiosInstance {
         "Content-Type": "application/json",
         "X-Cluster-ID": CLUSTER_ID.toString(),
       },
+    });
+    // W12-F: inject W3C traceparent/tracestate + X-Tenant-Id on EVERY outbound
+    // bridge request. The bridge already extracts them (HeaderExtractor /
+    // otel_request_span in rust-tigerbeetle-bridge/src/main.rs) but the TS
+    // side previously sent nothing, severing cross-service traces. Runs
+    // per-request because both contexts are request-scoped. FAIL-SOFT: never
+    // throws; with no active span/tenant the headers are simply omitted.
+    _client.interceptors.request.use((config) => {
+      try {
+        const carrier: Record<string, string> = {};
+        propagation.inject(otelContext.active(), carrier, defaultTextMapSetter);
+        for (const [key, value] of Object.entries(carrier)) {
+          config.headers.set(key, value);
+        }
+        const tenantId = getRequestTenantContext()?.tenantId;
+        if (tenantId) config.headers.set("X-Tenant-Id", tenantId);
+      } catch {
+        // fail-soft: telemetry injection must never block the money path
+      }
+      return config;
     });
     _client.interceptors.response.use(
       (res) => res,
@@ -565,6 +587,32 @@ export async function provisionPlatformAccounts(
 }
 
 // ─── Reconciliation ───────────────────────────────────────────────────────────
+
+/**
+ * W9-Q7 (F13-5): exact decimal-string → minor-units (cents) conversion.
+ * Pure string manipulation — NO float math (`parseFloat(x) * 100` loses
+ * precision, e.g. 19.99 * 100 = 1998.9999999999998).
+ *
+ * Accepts an unsigned decimal with up to 4 fractional digits. Rejects
+ * (throws — fail closed) negative values, NaN, malformed strings, and
+ * sub-cent precision that cannot be represented exactly in minor units.
+ */
+export function toMinorUnits(amount: string | number): bigint {
+  const raw = (typeof amount === "number" ? String(amount) : amount).trim();
+  if (!/^\d+(\.\d{1,4})?$/.test(raw)) {
+    throw new Error(`[TigerBeetle] toMinorUnits: malformed/unsupported amount ${JSON.stringify(amount)}`);
+  }
+  const dot = raw.indexOf(".");
+  const intPart = dot === -1 ? raw : raw.slice(0, dot);
+  const fracPart = dot === -1 ? "" : raw.slice(dot + 1);
+  const frac4 = (fracPart + "0000").slice(0, 4); // pad/right-pad to exactly 4dp
+  const tenThousandths = BigInt(intPart) * 10_000n + BigInt(frac4);
+  if (tenThousandths % 100n !== 0n) {
+    throw new Error(`[TigerBeetle] toMinorUnits: sub-cent precision in ${JSON.stringify(amount)} is not representable in minor units`);
+  }
+  return tenThousandths / 100n;
+}
+
 export async function reconcileWithPostgres(userId: number, currency: string): Promise<{
   tbBalance: bigint;
   pgBalance: bigint;
@@ -584,8 +632,11 @@ export async function reconcileWithPostgres(userId: number, currency: string): P
   const pgResult = await (db as any).execute(sql`
     SELECT balance FROM wallets WHERE user_id = ${userId} AND currency = ${currency}
   `);
+  // W9-Q7 (F13-5): exact decimal→minor-units conversion (no float math).
+  // A malformed/sub-cent PG balance throws here — recon fails loudly instead
+  // of silently comparing rounded numbers.
   const pgBalance = pgResult.rows?.[0]?.balance
-    ? BigInt(Math.round(parseFloat(pgResult.rows[0].balance) * 100))
+    ? toMinorUnits(pgResult.rows[0].balance)
     : 0n;
   const discrepancy = tbBalance.balance - pgBalance;
   const inSync = discrepancy === 0n;
