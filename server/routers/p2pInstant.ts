@@ -36,7 +36,7 @@ import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { paymentAliases, p2pPaymentRequests, p2pTransfers, wallets, transactions, users } from "../../drizzle/schema";
 import { logger } from "../_core/logger";
-import { lookupParty, requestQuote, initiateTransfer, generateIlpConditionPair } from "../mojaloop.service";
+import { lookupParty, requestQuote, initiateTransfer, getTransferStatus, generateIlpConditionPair } from "../mojaloop.service";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { amlCheck, fraudScore } from "../_core/serviceRegistry";
 import { screenSanctions } from "../_core/polyglotClient";
@@ -45,6 +45,12 @@ import crypto from "crypto";
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const REMITFLOW_FSP_ID = process.env.MOJALOOP_FSP_ID ?? "remitflow-fsp";
+// Parked-rail-reconciliation marker (mirrors FIX-B's PAYOUT_RECON_PREFIX in
+// embeddedPayouts.ts): p2p_transfers has no metadata column and schema
+// changes are out of scope, so UNCERTAIN-park state is encoded in
+// failure_reason. A row with status='settling' whose failure_reason starts
+// with this prefix is PARKED pending rail reconciliation — NOT failed.
+const P2P_RECON_PREFIX = "RECON:";
 const REQUEST_EXPIRY_HOURS = 72;
 const MAX_ALIASES_PER_USER = 5;
 const P2P_DAILY_LIMIT_USD = 5000;
@@ -139,53 +145,78 @@ function selectRail(senderCurrency: string, receiverCurrency: string): { rail: s
   return { rail: selectedRail, feeRate: RAIL_FEES[selectedRail] ?? 0.025, speedMinutes: RAIL_SPEED_MINUTES[selectedRail] ?? 1440, fallbackUsed };
 }
 
-// #5: Rate limit check via Go service
+// #5: Rate limit check via Go service — FAIL CLOSED (W12): this gate fronts
+// money-moving sends; previously any sidecar outage/non-200 silently ALLOWED
+// the send. Throw a retryable error instead — no transfer is created while
+// the limiter is unreachable.
 async function checkP2PRateLimit(userId: number): Promise<boolean> {
+  let res: Awaited<ReturnType<typeof fetch>>;
   try {
-    const res = await fetch(`${P2P_SANCTIONS_URL}/rate-limit`, {
+    res = await fetch(`${P2P_SANCTIONS_URL}/rate-limit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user_id: String(userId), max_requests: 10, window_sec: 60 }),
       signal: AbortSignal.timeout(3000),
     });
-    if (!res.ok) return true; // Fail open
-    const data = await res.json() as { allowed: boolean };
-    return data.allowed;
-  } catch {
-    return true; // Fail open if service unavailable
+  } catch (err) {
+    logger.error({ userId, err: err instanceof Error ? err.message : String(err) }, "[P2P] Rate-limit sidecar unreachable — send BLOCKED (fail closed)");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Rate-limit service unavailable — transfer blocked. Please try again later." });
   }
+  if (!res.ok) {
+    logger.error({ userId, status: res.status }, "[P2P] Rate-limit sidecar error — send BLOCKED (fail closed)");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Rate-limit service unavailable — transfer blocked. Please try again later." });
+  }
+  const data = await res.json() as { allowed: boolean };
+  return data.allowed;
 }
 
-// #1: KYC tier limit enforcement via Go service
+// #1: KYC tier limit enforcement via Go service — FAIL CLOSED (W12): tier
+// limits are a regulatory gate, not advisory. Previously a sidecar outage
+// returned allowed:true and waived every daily/monthly/single limit. Throw a
+// retryable error instead — no transfer is created while limits cannot be
+// verified.
 async function checkKYCTierLimits(kycTier: string, amount: number, dailyTotal: number, monthlyTotal: number): Promise<{ allowed: boolean; violations: string[]; requiresOTP: boolean }> {
+  let res: Awaited<ReturnType<typeof fetch>>;
   try {
-    const res = await fetch(`${P2P_SANCTIONS_URL}/kyc-tier`, {
+    res = await fetch(`${P2P_SANCTIONS_URL}/kyc-tier`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kyc_tier: kycTier, amount, daily_total: dailyTotal, monthly_total: monthlyTotal }),
       signal: AbortSignal.timeout(3000),
     });
-    if (!res.ok) return { allowed: true, violations: [], requiresOTP: amount >= OTP_THRESHOLD_USD };
-    return await res.json() as { allowed: boolean; violations: string[]; requiresOTP: boolean };
-  } catch {
-    return { allowed: true, violations: [], requiresOTP: amount >= OTP_THRESHOLD_USD };
+  } catch (err) {
+    logger.error({ kycTier, err: err instanceof Error ? err.message : String(err) }, "[P2P] KYC-tier sidecar unreachable — send BLOCKED (fail closed)");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "KYC limit verification unavailable — transfer blocked. Please try again later." });
   }
+  if (!res.ok) {
+    logger.error({ kycTier, status: res.status }, "[P2P] KYC-tier sidecar error — send BLOCKED (fail closed)");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "KYC limit verification unavailable — transfer blocked. Please try again later." });
+  }
+  return await res.json() as { allowed: boolean; violations: string[]; requiresOTP: boolean };
 }
 
-// #8: Travel Rule compliance check via Go service
+// #8: Travel Rule compliance check via Go service — FAIL CLOSED (W12): the
+// travel rule is a regulatory gate for cross-border transfers, not advisory.
+// Previously a sidecar outage returned required:false/compliant:true and the
+// transfer sailed through unscreened. Throw a retryable error instead.
 async function checkTravelRule(payload: Record<string, unknown>): Promise<{ required: boolean; compliant: boolean; missingData?: string[] }> {
+  let res: Awaited<ReturnType<typeof fetch>>;
   try {
-    const res = await fetch(`${P2P_SANCTIONS_URL}/travel-rule`, {
+    res = await fetch(`${P2P_SANCTIONS_URL}/travel-rule`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(3000),
     });
-    if (!res.ok) return { required: false, compliant: true };
-    return await res.json() as { required: boolean; compliant: boolean; missingData?: string[] };
-  } catch {
-    return { required: false, compliant: true };
+  } catch (err) {
+    logger.error({ err: err instanceof Error ? err.message : String(err) }, "[P2P] Travel-rule sidecar unreachable — cross-border send BLOCKED (fail closed)");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Travel-rule compliance check unavailable — transfer blocked. Please try again later." });
   }
+  if (!res.ok) {
+    logger.error({ status: res.status }, "[P2P] Travel-rule sidecar error — cross-border send BLOCKED (fail closed)");
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Travel-rule compliance check unavailable — transfer blocked. Please try again later." });
+  }
+  return await res.json() as { required: boolean; compliant: boolean; missingData?: string[] };
 }
 
 // Helper: fetch from P2P intelligence (Python) service
@@ -458,8 +489,16 @@ export const p2pInstantRouter = router({
         }
       }
 
-      // #2: Fraud ML scoring via Python service
-      const fraudResult = await fraudScore({ userId: ctx.user.id, amount: input.amount });
+      // #2: Fraud ML scoring via Python service — FAIL CLOSED (Wave 7 / C2):
+      // fraudScore throws when fraud-ml is unreachable; an outage must block
+      // the transfer, never silently pass with a fabricated low score.
+      let fraudResult: Awaited<ReturnType<typeof fraudScore>>;
+      try {
+        fraudResult = await fraudScore({ userId: ctx.user.id, amount: input.amount });
+      } catch (fraudErr) {
+        logger.error({ userId: ctx.user.id, err: fraudErr instanceof Error ? fraudErr.message : String(fraudErr) }, "[P2P] Fraud scoring unavailable — transfer BLOCKED (fail closed)");
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Fraud screening unavailable — transfer blocked. Please try again later." });
+      }
       if (fraudResult.label === "critical") {
         logger.warn({ userId: ctx.user.id, amount: input.amount, fraudScore: fraudResult.score }, "[P2P] Transfer blocked by fraud ML");
         await publishEvent(KAFKA_TOPICS.FRAUD_ALERT, String(ctx.user.id), {
@@ -505,12 +544,21 @@ export const p2pInstantRouter = router({
       isCrossBorder = input.currency !== receiverCurrency;
       const corridorCode = isCrossBorder ? `${input.currency}-${receiverCurrency}` : "internal";
 
-      // #3: Sanctions screening via Go service (OFAC/UN/EU)
+      // #3: Sanctions screening via Python compliance service (OFAC/UN/EU/HMT) —
+      // FAIL CLOSED (Wave 7 verification): screenSanctions throws when the
+      // screener is unreachable; an outage must block the transfer, never
+      // silently pass with a fabricated "allow".
       const [senderUser] = await db.select({ name: users.name }).from(users).where(eq(users.id, ctx.user.id));
-      const sanctionsResult = await screenSanctions({
-        name: senderUser?.name ?? `user:${ctx.user.id}`,
-        country: isCrossBorder ? receiverCountry : "NG",
-      });
+      let sanctionsResult: Awaited<ReturnType<typeof screenSanctions>>;
+      try {
+        sanctionsResult = await screenSanctions({
+          name: senderUser?.name ?? `user:${ctx.user.id}`,
+          country: isCrossBorder ? receiverCountry : "NG",
+        });
+      } catch (sanctionsErr) {
+        logger.error({ userId: ctx.user.id, err: sanctionsErr instanceof Error ? sanctionsErr.message : String(sanctionsErr) }, "[P2P] Sanctions screening unavailable — transfer BLOCKED (fail closed)");
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Sanctions screening unavailable — transfer blocked. Please try again later." });
+      }
       if (sanctionsResult.isSanctioned) {
         logger.warn({ userId: ctx.user.id, sanctionsList: sanctionsResult.matchType }, "[P2P] Transfer blocked — sanctions match");
         await publishEvent(KAFKA_TOPICS.COMPLIANCE_ALERT, `sanctions:${corridorCode}`, {
@@ -520,11 +568,19 @@ export const p2pInstantRouter = router({
         throw new TRPCError({ code: "FORBIDDEN", message: "Transfer blocked — compliance review required" });
       }
 
-      // #2: AML check via Rust service
-      const amlResult = await amlCheck({
-        userId: ctx.user.id, amount: input.amount, currency: input.currency,
-        destinationCountry: receiverCountry, beneficiaryName: normalized,
-      });
+      // #2: AML check via Rust service — FAIL CLOSED (Wave 7 / C1): amlCheck
+      // throws when aml-engine is unreachable; an outage must block the
+      // transfer, never silently pass with a fabricated clean result.
+      let amlResult: Awaited<ReturnType<typeof amlCheck>>;
+      try {
+        amlResult = await amlCheck({
+          userId: ctx.user.id, amount: input.amount, currency: input.currency,
+          destinationCountry: receiverCountry, beneficiaryName: normalized,
+        });
+      } catch (amlErr) {
+        logger.error({ userId: ctx.user.id, err: amlErr instanceof Error ? amlErr.message : String(amlErr) }, "[P2P] AML screening unavailable — transfer BLOCKED (fail closed)");
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "AML screening unavailable — transfer blocked. Please try again later." });
+      }
       if (amlResult.flagged) {
         logger.warn({ userId: ctx.user.id, amlReasons: amlResult.reasons }, "[P2P] AML flag raised");
         if (amlResult.requiresReview) {
@@ -658,10 +714,26 @@ export const p2pInstantRouter = router({
               .set({ status: "completed", completedAt: new Date(), updatedAt: new Date() })
               .where(eq(p2pTransfers.id, t.id));
 
-            // Record ledger entries for both sides
+            // Record ledger entries for both sides — schema-real columns
+            // (fromCurrency/fromAmount/toCurrency/toAmount; from* NOT NULL,
+            // schema.ts:96-121). Deterministic references per transfer+leg.
             await tx.insert(transactions).values([
-              { userId: ctx.user.id, type: "send", amount: `-${totalDebit.toFixed(2)}`, currency: input.currency, status: "completed", description: `P2P send to ${normalized}`, metadata: { p2pTransferId: t.id, rail: "internal" } },
-              { userId: receiverId, type: "receive", amount: receiveAmount.toFixed(2), currency: receiverCurrency, status: "completed", description: `P2P received from ${senderAlias}`, metadata: { p2pTransferId: t.id, rail: "internal" } },
+              {
+                userId: ctx.user.id, type: "send", status: "completed",
+                fromCurrency: input.currency, fromAmount: totalDebit.toFixed(2),
+                toCurrency: receiverCurrency, toAmount: receiveAmount.toFixed(2),
+                fee: fee.toFixed(2), reference: `P2P_${t.id}_SEND`,
+                description: `P2P send to ${normalized}`,
+                metadata: { p2pTransferId: t.id, rail: "internal", leg: "sender_debit", sendAmount: input.amount.toFixed(2), sendCurrency: input.currency },
+              } as any,
+              {
+                userId: receiverId, type: "receive", status: "completed",
+                fromCurrency: input.currency, fromAmount: input.amount.toFixed(2),
+                toCurrency: receiverCurrency, toAmount: receiveAmount.toFixed(2),
+                fee: "0", reference: `P2P_${t.id}_RECV`,
+                description: `P2P received from ${senderAlias}`,
+                metadata: { p2pTransferId: t.id, rail: "internal", leg: "receiver_credit", senderAlias },
+              } as any,
             ]);
 
             (t as { status: string }).status = "completed";
@@ -684,17 +756,23 @@ export const p2pInstantRouter = router({
         throw err;
       }
 
+      let externalOutcome: "completed" | "failed" | "uncertain" | null = null;
       if (receiverId && receiverFspId === REMITFLOW_FSP_ID) {
         // Internal transfer fully settled inside the transaction above.
       } else {
-        // External: initiate Mojaloop/PAPSS settlement
+        // External: initiate Mojaloop/PAPSS settlement.
+        // Guarded transition: only a 'debited' transfer can enter 'settling'.
         await db.update(p2pTransfers)
           .set({ status: "settling", updatedAt: new Date() })
-          .where(eq(p2pTransfers.id, transfer.id))
+          .where(and(eq(p2pTransfers.id, transfer.id), eq(p2pTransfers.status, "debited")))
           .returning({ id: p2pTransfers.id });
 
+        // FF-FIX: ONLY the rail call runs inside try. A DB error AFTER the rail
+        // committed must never fall into a refund path (double-pay).
+        let mojResult: Awaited<ReturnType<typeof initiateTransfer>> | null = null;
+        let settleErr: Error | null = null;
         try {
-          const mojResult = await initiateTransfer({
+          mojResult = await initiateTransfer({
             payerFspId: REMITFLOW_FSP_ID,
             payeeFspId: receiverFspId,
             amount: receiveAmount.toFixed(2),
@@ -703,65 +781,155 @@ export const p2pInstantRouter = router({
             expirationSeconds: 300,
             ilpPacket: Buffer.from(JSON.stringify({ p2pTransferId: transfer.id, amount: receiveAmount, currency: receiverCurrency })).toString("base64"),
           });
+        } catch (err: any) {
+          settleErr = err instanceof Error ? err : new Error(String(err));
+        }
 
-          const isAborted = mojResult.transferState === "ABORTED";
-          const errorMsg = mojResult.errorInformation?.errorDescription ?? null;
+        // W10-FIX-A (cross-scope from FIX-B H3): the rail now reports
+        // "UNCERTAIN" for network/circuit/timeout/5xx-no-body outcomes instead
+        // of "ABORTED". Success is therefore gated on an EXPLICIT positive
+        // state ONLY — "not ABORTED" is NOT success. `completed` may only ever
+        // be set on COMMITTED; UNCERTAIN is parked (never completed, never
+        // refunded); only a DEFINITIVE ABORTED takes the refund path.
+        let resolvedResult = mojResult;
+        let resolvedState: string | null = mojResult?.transferState ?? null;
+        if (mojResult && resolvedState !== "COMMITTED" && resolvedState !== "ABORTED") {
+          // UNCERTAIN / RESERVED / RECEIVED: reconcile ONCE inline against the
+          // switch before deciding (FIX-B pattern in vendorBills/embeddedPayouts).
+          // COMMITTED → success path; definitive ABORTED → refund path;
+          // anything else stays unresolved → park below.
+          try {
+            const recon = await getTransferStatus(mojResult.transferId);
+            if (recon.transferState === "COMMITTED" || recon.transferState === "ABORTED") {
+              resolvedResult = { ...mojResult, ...recon };
+              resolvedState = recon.transferState;
+            }
+          } catch (reconErr: any) {
+            logger.warn({ transferId: transfer.id, err: reconErr?.message }, "[P2P] Inline rail reconciliation failed — treating outcome as UNCERTAIN");
+          }
+        }
 
+        if (resolvedResult && resolvedState === "COMMITTED") {
           await db.update(p2pTransfers)
             .set({
-              mojaloopTransferId: mojResult.transferId ?? null,
-              status: isAborted ? "failed" : "completed",
-              completedAt: isAborted ? null : new Date(),
-              failedAt: isAborted ? new Date() : null,
-              failureReason: errorMsg,
+              mojaloopTransferId: resolvedResult.transferId ?? null,
+              status: "completed",
+              completedAt: new Date(),
               updatedAt: new Date(),
             })
-            .where(eq(p2pTransfers.id, transfer.id))
-            .returning({ id: p2pTransfers.id });
+            .where(eq(p2pTransfers.id, transfer.id));
 
-          if (isAborted) {
-            // Compensation: re-credit sender
-            await db.execute(sql`
+          await db.insert(transactions).values({
+            userId: ctx.user.id, type: "send", status: "completed",
+            fromCurrency: input.currency, fromAmount: totalDebit.toFixed(2),
+            toCurrency: receiverCurrency, toAmount: receiveAmount.toFixed(2),
+            fee: fee.toFixed(2), reference: `P2P_${transfer.id}_SEND`,
+            description: `P2P cross-border to ${normalized} via ${rail}`,
+            metadata: { p2pTransferId: transfer.id, rail, mojaloopTransferId: resolvedResult.transferId, leg: "sender_debit", sendAmount: input.amount.toFixed(2), sendCurrency: input.currency },
+          } as any);
+
+          logger.info({ transferId: transfer.id, rail, mojaloopTransferId: resolvedResult.transferId }, "[P2P] Cross-border transfer initiated");
+          externalOutcome = "completed";
+        } else if (resolvedResult && resolvedState === "ABORTED") {
+          // DEFINITIVE ABORTED (switch-provided terminal state): compensate
+          // AT MOST ONCE via a guarded single-winner transition +
+          // row-count-checked credit, atomically. If the row already reached
+          // 'completed' (or was refunded by a dispute/admin path), the claim
+          // matches 0 rows and NO refund occurs.
+          const reason = resolvedResult.errorInformation?.errorDescription ?? "Transfer aborted by rail";
+          const wonCompensation = await db.transaction(async (tx: any) => {
+            const claimRows = (await tx.execute(sql`
+              UPDATE p2p_transfers
+              SET status = 'compensated',
+                  failed_at = NOW(),
+                  failure_reason = ${reason.slice(0, 500)},
+                  mojaloop_transfer_id = COALESCE(${resolvedResult?.transferId ?? null}, mojaloop_transfer_id),
+                  updated_at = NOW()
+              WHERE id = ${transfer.id}
+                AND status IN ('settling', 'debited', 'failed')
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (claimRows.length === 0) return false;
+            const creditRows = (await tx.execute(sql`
               UPDATE wallets SET balance = balance + ${totalDebit.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
               WHERE "userId" = ${ctx.user.id} AND currency = ${input.currency} AND status = 'active'
               RETURNING id
-            `);
-            await db.update(p2pTransfers)
-              .set({ status: "compensated", updatedAt: new Date() })
-              .where(eq(p2pTransfers.id, transfer.id))
-              .returning({ id: p2pTransfers.id });
+            `)) as unknown as Array<{ id: number }>;
+            if (creditRows.length === 0) {
+              // Roll back BOTH the claim and the credit attempt: never mark a
+              // transfer 'compensated' without the money actually returning.
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Compensation credit failed — sender wallet unavailable; left for manual recovery" });
+            }
+            return true;
+          });
+          if (wonCompensation) {
+            await db.insert(transactions).values({
+              userId: ctx.user.id, type: "send", status: "failed",
+              fromCurrency: input.currency, fromAmount: totalDebit.toFixed(2),
+              toCurrency: receiverCurrency, toAmount: receiveAmount.toFixed(2),
+              fee: fee.toFixed(2), reference: `P2P_${transfer.id}_SEND`,
+              description: `P2P cross-border to ${normalized} via ${rail} — FAILED (sender compensated)`,
+              metadata: { p2pTransferId: transfer.id, rail, mojaloopTransferId: resolvedResult.transferId, leg: "sender_debit", compensated: true, sendAmount: input.amount.toFixed(2), sendCurrency: input.currency },
+            } as any);
           }
-
-          await db.insert(transactions).values({
-            userId: ctx.user.id, type: "send", amount: `-${totalDebit.toFixed(2)}`, currency: input.currency, status: isAborted ? "failed" : "completed",
-            description: `P2P cross-border to ${normalized} via ${rail}`, metadata: { p2pTransferId: transfer.id, rail, mojaloopTransferId: mojResult.transferId },
-          }).returning();
-
-          logger.info({ transferId: transfer.id, rail, mojaloopTransferId: mojResult.transferId }, "[P2P] Cross-border transfer initiated");
-        } catch (err: any) {
-          // Compensation on settlement failure
+          externalOutcome = "failed";
+        } else {
+          // UNCERTAIN (or the rail call itself threw): the transfer MAY have
+          // committed on the rail. PARK HONESTLY — do NOT mark completed
+          // (fabricated success) and do NOT refund (a committed rail payout +
+          // refund = double-pay). The row stays in the pending/processing
+          // state 'settling' with a RECON marker (mirrors the FIX-B
+          // embeddedPayouts PAYOUT_RECON_PREFIX pattern — p2p_transfers has no
+          // metadata column and schema changes are out of scope, so the marker
+          // is encoded in failure_reason; status='settling' + this prefix =
+          // PARKED, not failed). Guarded: only a row still in flight can be
+          // parked — a concurrently completed/compensated row is never
+          // clobbered.
+          const parkReason = resolvedResult
+            ? (resolvedResult.errorInformation?.errorDescription ?? `Rail outcome uncertain (state=${resolvedState ?? "unknown"})`)
+            : `Settlement call failed: ${settleErr?.message ?? "unknown error"}`;
+          const reconMarker = P2P_RECON_PREFIX + JSON.stringify({
+            railUncertain: true,
+            transferId: resolvedResult?.transferId ?? null,
+            railState: resolvedState,
+            reason: parkReason.slice(0, 300),
+            detectedAt: new Date().toISOString(),
+          });
+          logger.error(
+            { transferId: transfer.id, rail, mojaloopTransferId: resolvedResult?.transferId ?? null, railState: resolvedState, settleErr: settleErr?.message },
+            "[P2P] CRITICAL: cross-border settlement outcome UNCERTAIN — transfer PARKED in 'settling' with RECON marker; funds remain debited; MUST be reconciled against rail state (GET /transfers/{id}) before any completion or refund",
+          );
           await db.execute(sql`
-            UPDATE wallets SET balance = balance + ${totalDebit.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
-            WHERE "userId" = ${ctx.user.id} AND currency = ${input.currency} AND status = 'active'
-            RETURNING id
+            UPDATE p2p_transfers
+            SET status = 'settling',
+                failure_reason = ${reconMarker.slice(0, 500)},
+                mojaloop_transfer_id = COALESCE(${resolvedResult?.transferId ?? null}, mojaloop_transfer_id),
+                updated_at = NOW()
+            WHERE id = ${transfer.id}
+              AND status IN ('settling', 'debited')
           `);
-          await db.update(p2pTransfers)
-            .set({ status: "compensated", failedAt: new Date(), failureReason: err.message, updatedAt: new Date() })
-            .where(eq(p2pTransfers.id, transfer.id))
-            .returning({ id: p2pTransfers.id });
-          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Settlement failed — funds returned to wallet: ${err.message}` });
+          externalOutcome = "uncertain";
         }
       }
 
       // #6: Push notifications via Kafka → notification service
-      const transferStatus = transfer.status === "debited" ? "completed" : "settling";
+      // FF-FIX: report the DB-truth outcome, never "completed" for a transfer
+      // whose external settlement failed or is still in flight.
+      // W10-FIX-A: an UNCERTAIN (parked) transfer must not announce success —
+      // the sender gets an honest "reconciliation in progress" notice and the
+      // receiver is NOT told they received money that may never arrive.
+      const transferStatus = externalOutcome ?? (transfer.status === "debited" ? "completed" : transfer.status);
       await publishEvent(KAFKA_TOPICS.NOTIFICATIONS, String(ctx.user.id), {
         userId: ctx.user.id, type: "p2p_sent",
-        title: "Payment Sent",
-        message: `You sent ${input.currency} ${input.amount.toLocaleString()} to ${normalized}`,
+        title: externalOutcome === "uncertain" ? "Payment Pending" : externalOutcome === "failed" ? "Payment Failed" : "Payment Sent",
+        message: externalOutcome === "uncertain"
+          ? `Your payment of ${input.currency} ${input.amount.toLocaleString()} to ${normalized} is being confirmed with the receiving network — reconciliation in progress; your funds remain safe.`
+          : externalOutcome === "failed"
+            ? `Your payment of ${input.currency} ${input.amount.toLocaleString()} to ${normalized} could not be completed — funds were returned to your wallet.`
+            : `You sent ${input.currency} ${input.amount.toLocaleString()} to ${normalized}`,
         timestamp: new Date().toISOString(),
       });
-      if (receiverId) {
+      if (receiverId && transferStatus === "completed") {
         await publishEvent(KAFKA_TOPICS.NOTIFICATIONS, String(receiverId), {
           userId: receiverId, type: "p2p_received",
           title: "Payment Received",
@@ -781,6 +949,11 @@ export const p2pInstantRouter = router({
       return {
         transferId: transfer.id,
         status: transferStatus,
+        // Honest client signal for a parked (UNCERTAIN) rail outcome.
+        railUncertain: externalOutcome === "uncertain" ? true : undefined,
+        ...(externalOutcome === "uncertain"
+          ? { honest: "Payment state uncertain — the receiving network did not confirm the outcome. Reconciliation is in progress; funds remain debited pending rail confirmation. Do not retry as a new payment." }
+          : {}),
         rail,
         corridorCode,
         sendAmount: input.amount,
@@ -1262,11 +1435,17 @@ export const p2pInstantRouter = router({
       if (transfer.status === "compensated") throw new TRPCError({ code: "BAD_REQUEST", message: "Transfer already reversed" });
 
       const disputeId = crypto.randomUUID();
-      const [updated] = await db.update(p2pTransfers)
+      // FF-FIX: guarded single-winner transition — a concurrent openDispute /
+      // resolveDispute can no longer both flip the row, and terminal states
+      // (compensated/failed/cancelled) are never re-disputed.
+      const updated = await db.update(p2pTransfers)
         .set({ status: "disputed", note: `DISPUTE:${disputeId}:${input.type}:${input.description}`, updatedAt: new Date() })
-        .where(eq(p2pTransfers.id, input.transferId))
+        .where(and(
+          eq(p2pTransfers.id, input.transferId),
+          sql`status IN ('completed', 'escrowed', 'debited', 'settling')`,
+        ))
         .returning({ id: p2pTransfers.id });
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Dispute update failed" });
+      if (updated.length === 0) throw new TRPCError({ code: "CONFLICT", message: "Transfer is not in a disputable state" });
 
       // Get AI recommendation from Python service
       const recommendation = await fetchIntelligence("/dispute/recommend", {
@@ -1314,6 +1493,13 @@ export const p2pInstantRouter = router({
           // credit can be clawed back (internal + completed) or funds are
           // still with us (debited/settling).
           const isInternalCompleted = transfer.status === "completed" && !!transfer.receiverId && transfer.receiverFspId === REMITFLOW_FSP_ID;
+          // FF-FIX: never refund an in-flight EXTERNAL transfer — the rail may
+          // still complete the payout, which would leave both sides holding
+          // the money. Require rail recall/abort confirmation first.
+          const isExternal = !!transfer.rail && transfer.rail !== "internal" && transfer.rail !== "escrow" && transfer.receiverFspId !== REMITFLOW_FSP_ID;
+          if ((transfer.status === "settling" || transfer.status === "debited") && isExternal) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "External settlement in flight — refund requires rail recall/abort confirmation (manual process)" });
+          }
           if (transfer.status === "completed" && !isInternalCompleted) {
             // Completed via an external rail — the recipient was paid out.
             // Refunding here creates money; requires rail recovery first.
@@ -1339,11 +1525,15 @@ export const p2pInstantRouter = router({
               throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Receiver no longer holds the funds — manual recovery required; sender NOT refunded" });
             }
           }
-          await tx.execute(sql`
+          const refundRows = (await tx.execute(sql`
             UPDATE wallets SET balance = balance + ${refundAmt.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
             WHERE "userId" = ${transfer.senderId} AND currency = ${transfer.sendCurrency} AND status = 'active'
             RETURNING id
-          `);
+          `)) as unknown as Array<{ id: number }>;
+          if (refundRows.length === 0) {
+            // Roll back the claim — never mark compensated without paying.
+            throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Refund credit failed — sender wallet unavailable; left for manual recovery" });
+          }
         } else {
           // reject: restore to its pre-dispute state, never force "completed".
           const restored = transfer.status === "disputed" ? "completed" : transfer.status;
@@ -1381,13 +1571,25 @@ export const p2pInstantRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [existing] = await db.select({ id: wallets.id }).from(wallets)
-        .where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency)));
+        .where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency)))
+        .limit(1);
       if (existing) return { walletId: existing.id, currency: input.currency, created: false };
-      const [newWallet] = await db.insert(wallets).values({
-        userId: ctx.user.id, currency: input.currency, balance: "0.00", status: "active",
-      }).returning({ id: wallets.id }).returning();
-      logger.info({ userId: ctx.user.id, currency: input.currency }, "[P2P] Auto-created wallet for cross-border receive");
-      return { walletId: newWallet.id, currency: input.currency, created: true };
+      // NOTE: wallets has NO unique constraint on ("userId", currency) — a
+      // UNIQUE constraint + dedupe migration is required (schema follow-up).
+      // Until then, fall back to the concurrently-created row on conflict.
+      try {
+        const [newWallet] = await db.insert(wallets).values({
+          userId: ctx.user.id, currency: input.currency, balance: "0.00", status: "active",
+        }).returning({ id: wallets.id });
+        logger.info({ userId: ctx.user.id, currency: input.currency }, "[P2P] Auto-created wallet for cross-border receive");
+        return { walletId: newWallet.id, currency: input.currency, created: true };
+      } catch (err) {
+        const [w] = await db.select({ id: wallets.id }).from(wallets)
+          .where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency)))
+          .limit(1);
+        if (w) return { walletId: w.id, currency: input.currency, created: false };
+        throw err;
+      }
     }),
 
   // #19: Webhook notifications for merchants
@@ -1659,47 +1861,151 @@ export const p2pInstantRouter = router({
       currency: z.string().length(3).default("NGN"),
       conditions: z.array(z.string().max(500)).min(1).max(5),
       arbiterAlias: z.string().max(320).optional(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W12: canonical TOTP step-up (fail-closed) — direct wallet debit.
+      const { requireTotpStepUp, requireKycTierForAmount } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "escrow creation");
+      // W12: this rail debits the wallet directly and bypasses the transfer
+      // pipeline — apply the transferEngine-equivalent KYC tier check.
+      await requireKycTierForAmount(ctx.user.id, input.amount, "escrow creation");
       const escrowId = crypto.randomUUID();
       const sellerNorm = normalizeAlias(input.sellerAliasType, input.sellerAlias);
-      // Debit buyer wallet
-      const debitResult = await db.execute(sql`
-        UPDATE wallets SET balance = balance - ${input.amount.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
-        WHERE "userId" = ${ctx.user.id} AND currency = ${input.currency} AND status = 'active'
-          AND CAST(balance AS numeric) >= ${input.amount.toFixed(2)}
-        RETURNING id
-      `);
-      if (!debitResult || (debitResult as unknown[]).length === 0) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance for escrow" });
-      }
-      const [transfer] = await db.insert(p2pTransfers).values({
-        senderId: ctx.user.id, receiverId: null, receiverAlias: sellerNorm,
-        sendAmount: input.amount.toFixed(2), sendCurrency: input.currency, receiveCurrency: input.currency,
-        rail: "escrow" as any, corridorCode: "internal", status: "escrowed" as any,
-        note: `Escrow: ${input.conditions.join(" | ")}. Seller: ${sellerNorm}`,
-        idempotencyKey: escrowId,
-      }).returning();
+      // FF-FIX: debit + escrow record in ONE transaction — an insert failure
+      // rolls the debit back (funds can no longer vanish without a record).
+      const transfer = await db.transaction(async (tx: any) => {
+        const debitResult = (await tx.execute(sql`
+          UPDATE wallets SET balance = balance - ${input.amount.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
+          WHERE "userId" = ${ctx.user.id} AND currency = ${input.currency} AND status = 'active'
+            AND CAST(balance AS numeric) >= ${input.amount.toFixed(2)}
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (debitResult.length === 0) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance for escrow" });
+        }
+        const [t] = await tx.insert(p2pTransfers).values({
+          senderId: ctx.user.id, receiverId: null, receiverAlias: sellerNorm,
+          sendAmount: input.amount.toFixed(2), sendCurrency: input.currency, receiveCurrency: input.currency,
+          rail: "escrow" as any, corridorCode: "internal", status: "escrowed" as any,
+          note: `Escrow: ${input.conditions.join(" | ")}. Seller: ${sellerNorm}`,
+          idempotencyKey: escrowId,
+        }).returning();
+        return t;
+      });
       logger.info({ escrowId, buyerId: ctx.user.id, amount: input.amount }, "[P2P] Escrow created");
       return { escrowId, transferId: transfer.id, amount: input.amount, currency: input.currency, conditions: input.conditions, status: "funded" };
     }),
 
   releaseEscrow: protectedProcedure
-    .input(z.object({ escrowId: z.string().uuid() }))
+    .input(z.object({ escrowId: z.string().uuid(), totpCode: z.string().regex(/^\d{6}$/).optional() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W12: canonical TOTP step-up (fail-closed) — releases escrowed funds.
+      const { requireTotpStepUp, requireKycTierForAmount } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "escrow release");
       const [escrow] = await db.select().from(p2pTransfers)
         .where(and(eq(p2pTransfers.idempotencyKey, input.escrowId), eq(p2pTransfers.senderId, ctx.user.id)));
       if (!escrow) throw new TRPCError({ code: "NOT_FOUND", message: "Escrow not found" });
       if (escrow.status !== "escrowed") throw new TRPCError({ code: "BAD_REQUEST", message: `Cannot release — status is ${escrow.status}` });
-      const [updated] = await db.update(p2pTransfers)
-        .set({ status: "completed", completedAt: new Date(), updatedAt: new Date() })
-        .where(eq(p2pTransfers.id, escrow.id))
-        .returning({ id: p2pTransfers.id });
-      if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Release failed" });
+
+      const amount = Number(escrow.sendAmount);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Corrupt escrow amount — manual review required" });
+      }
+      // W12: escrow release credits the seller off-pipeline — apply the
+      // transferEngine-equivalent KYC tier check on the released amount.
+      await requireKycTierForAmount(ctx.user.id, amount, "escrow release");
+
+      // Resolve the seller alias to a local user (escrow is an internal rail).
+      const [sellerAliasRow] = await db.select()
+        .from(paymentAliases)
+        .where(and(eq(paymentAliases.normalizedValue, escrow.receiverAlias), eq(paymentAliases.status, "active")))
+        .limit(1);
+      const sellerCurrency = sellerAliasRow?.currency ?? escrow.sendCurrency;
+
+      // FF-FIX: guarded single-winner status transition + seller wallet credit
+      // in ONE transaction. Previously the escrow was marked completed and the
+      // seller was NEVER credited — buyer funds vanished from circulation.
+      try {
+        await db.transaction(async (tx: any) => {
+          const claimRows = (await tx.execute(sql`
+            UPDATE p2p_transfers
+            SET status = 'completed', completed_at = NOW(), updated_at = NOW(),
+                receiver_id = ${sellerAliasRow?.userId ?? null}
+            WHERE id = ${escrow.id} AND status = 'escrowed'
+            RETURNING id
+          `)) as unknown as Array<{ id: number }>;
+          if (claimRows.length === 0) {
+            throw new TRPCError({ code: "CONFLICT", message: "Escrow already released or refunded" });
+          }
+          if (!sellerAliasRow) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "SELLER_WALLET_UNAVAILABLE" });
+          }
+          const creditRows = (await tx.execute(sql`
+            UPDATE wallets
+            SET balance = balance + ${amount.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
+            WHERE "userId" = ${sellerAliasRow.userId} AND currency = ${sellerCurrency} AND status = 'active'
+            RETURNING id
+          `)) as unknown as Array<{ id: number }>;
+          if (creditRows.length === 0) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "SELLER_WALLET_UNAVAILABLE" });
+          }
+          await tx.insert(transactions).values([
+            {
+              userId: ctx.user.id, type: "send", status: "completed",
+              fromCurrency: escrow.sendCurrency, fromAmount: amount.toFixed(2),
+              toCurrency: sellerCurrency, toAmount: amount.toFixed(2),
+              fee: "0", reference: `P2P_ESCROW_${escrow.id}_SEND`,
+              description: `Escrow released to ${escrow.receiverAlias}`,
+              metadata: { p2pTransferId: escrow.id, rail: "escrow", leg: "buyer_debit" },
+            } as any,
+            {
+              userId: sellerAliasRow.userId, type: "receive", status: "completed",
+              fromCurrency: escrow.sendCurrency, fromAmount: amount.toFixed(2),
+              toCurrency: sellerCurrency, toAmount: amount.toFixed(2),
+              fee: "0", reference: `P2P_ESCROW_${escrow.id}_RECV`,
+              description: `Escrow payment received`,
+              metadata: { p2pTransferId: escrow.id, rail: "escrow", leg: "seller_credit" },
+            } as any,
+          ]);
+        });
+      } catch (err: any) {
+        // Seller wallet unresolvable — NEVER leave the buyer's funds trapped:
+        // refund the buyer via a guarded single-winner transition.
+        if (err instanceof TRPCError && err.code === "PRECONDITION_FAILED") {
+          const refunded = await db.transaction(async (tx: any) => {
+            const refundClaim = (await tx.execute(sql`
+              UPDATE p2p_transfers
+              SET status = 'compensated', failed_at = NOW(),
+                  failure_reason = 'Seller wallet unavailable — escrow refunded to buyer',
+                  updated_at = NOW()
+              WHERE id = ${escrow.id} AND status = 'escrowed'
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (refundClaim.length === 0) return false;
+            const creditRows = (await tx.execute(sql`
+              UPDATE wallets
+              SET balance = balance + ${amount.toFixed(2)}, "updatedAt" = NOW(), version = version + 1
+              WHERE "userId" = ${ctx.user.id} AND currency = ${escrow.sendCurrency} AND status = 'active'
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (creditRows.length === 0) {
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Refund credit failed — buyer wallet unavailable; left for manual recovery" });
+            }
+            return true;
+          });
+          if (refunded) {
+            logger.warn({ escrowId: input.escrowId, buyerId: ctx.user.id, amount }, "[P2P] Escrow refunded — seller wallet unavailable");
+            return { released: false, refunded: true, escrowId: input.escrowId, amount: escrow.sendAmount };
+          }
+        }
+        throw err;
+      }
+      logger.info({ escrowId: input.escrowId, buyerId: ctx.user.id, sellerId: sellerAliasRow?.userId, amount }, "[P2P] Escrow released — seller credited");
       return { released: true, escrowId: input.escrowId, amount: escrow.sendAmount };
     }),
 
