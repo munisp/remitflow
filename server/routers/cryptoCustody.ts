@@ -27,7 +27,7 @@
  */
 
 import { z } from "zod";
-import { protectedProcedure, publicProcedure } from "../_core/trpc";
+import { protectedProcedure, publicProcedure, adminProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
 import crypto from "crypto";
 import { logger } from '../_core/logger';
@@ -46,6 +46,8 @@ interface CustodyBalance {
   available: number;
   total: number;
   address: string;
+  /** true when the balance/address is a sandbox simulation (never in production). */
+  simulated?: boolean;
 }
 
 interface CustodyTransferResult {
@@ -53,6 +55,8 @@ interface CustodyTransferResult {
   status: "submitted" | "pending_approval" | "confirmed" | "failed";
   fee?: number;
   estimatedConfirmationMs?: number;
+  /** true when the tx artifact is a sandbox simulation (never in production). */
+  simulated?: boolean;
 }
 
 interface CustodyProvider {
@@ -69,6 +73,8 @@ interface CustodyProvider {
     status: string;
     confirmations: number;
     blockHash?: string;
+    /** true when the status is a sandbox simulation (never in production). */
+    simulated?: boolean;
   }>;
   getDepositAddress(asset: string): Promise<string>;
   isHealthy(): Promise<boolean>;
@@ -92,6 +98,7 @@ class SandboxCustody implements CustodyProvider {
       available: balance,
       total: balance,
       address: `sandbox-addr-${asset.toLowerCase()}-${crypto.randomBytes(4).toString("hex")}`,
+      simulated: true,
     };
   }
 
@@ -109,11 +116,14 @@ class SandboxCustody implements CustodyProvider {
       status: "submitted",
       fee: params.amount * 0.001,
       estimatedConfirmationMs: 30000,
+      simulated: true,
     };
   }
 
-  async getTransactionStatus(txId: string) {
-    return { status: "confirmed", confirmations: 6, blockHash: `sandbox-block-${txId}` };
+  async getTransactionStatus(_txId: string) {
+    // W7/B3 (Contract 4): the sandbox has no chain to poll — it must NEVER
+    // fabricate { status: "confirmed", confirmations: 6 }. Report "unknown".
+    return { status: "unknown", confirmations: 0, simulated: true };
   }
 
   async getDepositAddress(asset: string): Promise<string> {
@@ -327,6 +337,13 @@ class BitGoCustody implements CustodyProvider {
 // ─── Provider factory ──────────────────────────────────────────────────────────
 function getCustodyProvider(): CustodyProvider {
   const provider = process.env.CUSTODY_PROVIDER ?? "mock";
+  // W7/B3 (Contract 4) kill-switch: a real guarded USD debit followed by a
+  // simulated payout is acceptable in dev/test ONLY. In production, selecting
+  // the mock/sandbox custody provider (explicitly or via an unknown value
+  // falling through to the default) is a hard startup failure — fail closed.
+  if (process.env.NODE_ENV === "production" && provider !== "fireblocks" && provider !== "bitgo") {
+    throw new Error(`cryptoCustody refuses to run with mock provider in production (CUSTODY_PROVIDER=${provider})`);
+  }
   switch (provider) {
     case "fireblocks": return new FireblocksCustody();
     case "bitgo": return new BitGoCustody();
@@ -335,6 +352,100 @@ function getCustodyProvider(): CustodyProvider {
 }
 
 const custody = getCustodyProvider();
+
+// ─── Shared security controls ──────────────────────────────────────────────────
+// SEC (CRITICAL): custody payouts move omnibus-wallet funds — every payout path
+// must pass USD-equivalent caps, the sanctions/fraud pipeline, TOTP, and a
+// guarded debit of the user's internal balance. `send` previously had NONE of
+// these; the helpers below are shared by initiateTransfer and send.
+
+/** Static USD estimates for gating/caps (not settlement — settlement uses provider quotes). */
+const ASSET_USD_RATES: Record<string, number> = {
+  USDT: 1, USDC: 1, DAI: 1, BUSD: 1,
+  BTC: 65000, ETH: 3200, BNB: 580, SOL: 150, MATIC: 0.8, XRP: 0.55,
+};
+
+/** Dual-approval threshold: transfers at/above this USD value are refused here and routed to compliance. */
+const CUSTODY_DUAL_APPROVAL_THRESHOLD_USD = 10_000;
+/** Hard per-call ceiling in USD equivalent (defense against raw-unit zod caps: 10,000,000 BTC is not a sane cap). */
+const CUSTODY_MAX_USD_PER_CALL = 250_000;
+
+function usdEquivalentOf(asset: string, amount: number): number {
+  const rate = ASSET_USD_RATES[asset.toUpperCase()] ?? 1;
+  return amount * rate;
+}
+
+/**
+ * Server-side idempotency dedupe. A replayed idempotencyKey must NEVER execute
+ * a second custody payout — return the in-flight/completed result instead.
+ * In-process cache keyed by user+key with a 24h TTL (provider-side keys —
+ * Fireblocks externalTxId / BitGo comment — provide the durable layer).
+ */
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
+const custodyIdempotencyCache = new Map<string, { promise: Promise<unknown>; expiresAt: number }>();
+
+function dedupeCustodyCall<T>(userId: number, idempotencyKey: string, fn: () => Promise<T>): Promise<T> {
+  const cacheKey = `${userId}:${idempotencyKey}`;
+  const now = Date.now();
+  const existing = custodyIdempotencyCache.get(cacheKey);
+  if (existing && existing.expiresAt > now) return existing.promise as Promise<T>;
+  const promise = fn();
+  custodyIdempotencyCache.set(cacheKey, { promise, expiresAt: now + IDEMPOTENCY_TTL_MS });
+  if (custodyIdempotencyCache.size > 5000) {
+    for (const [k, v] of custodyIdempotencyCache) {
+      if (v.expiresAt <= now) custodyIdempotencyCache.delete(k);
+    }
+  }
+  return promise;
+}
+
+/**
+ * Guarded debit of the user's internal USD balance before a custody payout
+ * (optimistic balance guard + row-count check, mirroring p2pInstant.ts).
+ * Without this, custody paid out omnibus funds with no corresponding debit of
+ * the user's internal balance. Fail-closed when the DB is unavailable.
+ */
+async function debitInternalBalanceGuarded(userId: number, usdAmount: number): Promise<void> {
+  const { getDb } = await import("../db");
+  const db = await getDb();
+  if (!db) {
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable — custody transfer blocked (fail-closed)" });
+  }
+  const { sql } = await import("drizzle-orm");
+  const debitResult = (await db.execute(sql`
+    UPDATE wallets
+    SET balance = balance - ${usdAmount.toFixed(2)},
+        "updatedAt" = NOW(),
+        version = version + 1
+    WHERE "userId" = ${userId}
+      AND currency = 'USD'
+      AND status = 'active'
+      AND CAST(balance AS numeric) >= ${usdAmount.toFixed(2)}
+    RETURNING id
+  `)) as unknown as Array<{ id: number }>;
+  if (debitResult.length === 0) {
+    throw new TRPCError({ code: "BAD_REQUEST", message: `Insufficient internal USD balance (~$${usdAmount.toFixed(2)} required) for this custody payout` });
+  }
+}
+
+/** Compensating credit when the custody payout fails after a successful debit. */
+async function refundInternalBalance(userId: number, usdAmount: number): Promise<void> {
+  try {
+    const { getDb } = await import("../db");
+    const db = await getDb();
+    if (!db) return;
+    const { sql } = await import("drizzle-orm");
+    await db.execute(sql`
+      UPDATE wallets
+      SET balance = balance + ${usdAmount.toFixed(2)},
+          "updatedAt" = NOW(),
+          version = version + 1
+      WHERE "userId" = ${userId} AND currency = 'USD'
+    `);
+  } catch (err) {
+    logger.error({ err: err instanceof Error ? err.message : String(err), userId, usdAmount }, "[Custody] CRITICAL: compensating refund failed — manual reconciliation required");
+  }
+}
 
 // ─── tRPC Router ───────────────────────────────────────────────────────────────
 export const cryptoCustodyRouter = {
@@ -366,25 +477,30 @@ export const cryptoCustodyRouter = {
         amount: z.number().positive().max(1_000_000),
         memo: z.string().max(200).optional(),
         idempotencyKey: z.string().min(8).max(64),
+        totpCode: z.string().regex(/^\d{6}$/).optional(),
       })
     )
     .mutation(async ({ input, ctx }) => {
+      return dedupeCustodyCall(ctx.user.id, input.idempotencyKey, async () => {
+      // W12: canonical TOTP step-up (fail-closed) — money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "crypto custody transfer");
       // Dual-approval gate for large transfers — USD equivalent lookup
-      const HIGH_VALUE_THRESHOLD_USD = 10_000;
-      const ASSET_USD_RATES: Record<string, number> = {
-        USDT: 1, USDC: 1, DAI: 1, BUSD: 1,
-        BTC: 65000, ETH: 3200, BNB: 580, SOL: 150, MATIC: 0.8, XRP: 0.55,
-      };
-      const usdRate = ASSET_USD_RATES[input.asset.toUpperCase()] ?? 1;
-      const usdEquivalent = input.amount * usdRate;
-      if (usdEquivalent >= HIGH_VALUE_THRESHOLD_USD) {
+      const usdEquivalent = usdEquivalentOf(input.asset, input.amount);
+      if (usdEquivalent > CUSTODY_MAX_USD_PER_CALL) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: `Transfer of ${input.amount} ${input.asset} (~$${usdEquivalent.toFixed(0)} USD) exceeds the per-call ceiling of $${CUSTODY_MAX_USD_PER_CALL.toLocaleString()} USD.`,
+        });
+      }
+      if (usdEquivalent >= CUSTODY_DUAL_APPROVAL_THRESHOLD_USD) {
         logCustodyAction(ctx.user.id, "CRYPTO_DUAL_APPROVAL_REQUIRED", {
           asset: input.asset, amount: input.amount, usdEquivalent,
           toAddress: input.toAddress, idempotencyKey: input.idempotencyKey,
         });
         throw new TRPCError({
           code: "FORBIDDEN",
-          message: `Transfer of ${input.amount} ${input.asset} (~$${usdEquivalent.toFixed(0)} USD) exceeds the $${HIGH_VALUE_THRESHOLD_USD.toLocaleString()} dual-approval threshold. A compliance officer must approve this transfer. Reference: ${input.idempotencyKey}`,
+          message: `Transfer of ${input.amount} ${input.asset} (~$${usdEquivalent.toFixed(0)} USD) exceeds the $${CUSTODY_DUAL_APPROVAL_THRESHOLD_USD.toLocaleString()} dual-approval threshold. A compliance officer must approve this transfer. Reference: ${input.idempotencyKey}`,
         });
       }
 
@@ -404,6 +520,11 @@ export const cryptoCustodyRouter = {
         metadata: { asset: input.asset, usdEquivalent, memo: input.memo },
       });
 
+      // SEC: guarded debit of the user's internal USD balance BEFORE the
+      // custody payout — previously the omnibus wallet paid out with no
+      // corresponding internal debit.
+      await debitInternalBalanceGuarded(ctx.user.id, usdEquivalent);
+
       try {
         const result = await custody.initiateTransfer({
           asset: input.asset.toUpperCase(),
@@ -414,11 +535,14 @@ export const cryptoCustodyRouter = {
         });
         return { ...result, verified: true, fraudScore: pipelineResult.fraudScore };
       } catch (err: any) {
+        // Compensating credit so a failed payout never strands the debit.
+        await refundInternalBalance(ctx.user.id, usdEquivalent);
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: `Transfer failed: ${err.message}`,
         });
       }
+      });
     }),
 
   /**
@@ -455,28 +579,103 @@ export const cryptoCustodyRouter = {
     }),
 
   /**
-   * Get custody provider health and configuration status.
+   * Direct custody payout. SEC (CRITICAL): this endpoint previously moved
+   * omnibus custody funds with zero controls (any authenticated user, raw-unit
+   * zod cap up to 10,000,000 BTC/ETH, no 2FA/approval/pipeline). It is now
+   * admin-only and gated identically to initiateTransfer: TOTP (fail-closed),
+   * USD-equivalent caps + dual-approval threshold, executeTransferPipeline,
+   * guarded internal-balance debit, and server-side idempotency dedupe.
    */
-  send: protectedProcedure
+  send: adminProcedure
     .input(z.object({
-      asset: z.string(),
-      toAddress: z.string(),
+      asset: z.string().min(2).max(10),
+      toAddress: z.string().min(10).max(200),
       amount: z.number().positive().max(10_000_000),
-      idempotencyKey: z.string(),
-      memo: z.string().optional(),
+      idempotencyKey: z.string().min(8).max(64),
+      memo: z.string().max(200).optional(),
+      totpCode: z.string().length(6),
     }))
     .mutation(async ({ ctx, input }) => {
-      const provider = getCustodyProvider();
-      const result = await provider.initiateTransfer({
-        asset: input.asset,
-        toAddress: input.toAddress,
-        amount: input.amount,
-        idempotencyKey: input.idempotencyKey,
-        memo: input.memo,
+      return dedupeCustodyCall(ctx.user.id, input.idempotencyKey, async () => {
+      const asset = input.asset.toUpperCase();
+      const usdEquivalent = usdEquivalentOf(asset, input.amount);
+      if (usdEquivalent > CUSTODY_MAX_USD_PER_CALL) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: `Transfer of ${input.amount} ${asset} (~$${usdEquivalent.toFixed(0)} USD) exceeds the per-call ceiling of $${CUSTODY_MAX_USD_PER_CALL.toLocaleString()} USD.`,
+        });
+      }
+      if (usdEquivalent >= CUSTODY_DUAL_APPROVAL_THRESHOLD_USD) {
+        logCustodyAction(ctx.user.id, "CRYPTO_DUAL_APPROVAL_REQUIRED", {
+          asset, amount: input.amount, usdEquivalent,
+          toAddress: input.toAddress, idempotencyKey: input.idempotencyKey,
+        });
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: `Transfer of ${input.amount} ${asset} (~$${usdEquivalent.toFixed(0)} USD) exceeds the $${CUSTODY_DUAL_APPROVAL_THRESHOLD_USD.toLocaleString()} dual-approval threshold. A compliance officer must approve this transfer. Reference: ${input.idempotencyKey}`,
+        });
+      }
+
+      // TOTP step-up for custody payouts — fail closed when the enrollment
+      // store is unavailable; admins must be enrolled (mirrors p2pInstant.ts).
+      const { getTotpEnrollment, verifyTOTP } = await import("../totp");
+      const enrollment = await getTotpEnrollment(ctx.user.id);
+      if (!enrollment.dbAvailable) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — custody transfer blocked" });
+      }
+      if (!enrollment.enabled || !enrollment.secret) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: enroll TOTP before custody payouts" });
+      }
+      const totpValid = await verifyTOTP(input.totpCode, enrollment.secret);
+      if (!totpValid) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code" });
+      }
+
+      // Unified transfer pipeline (sanctions, fraud ML, velocity, notifications)
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount: usdEquivalent,
+        fromCurrency: asset,
+        toCurrency: asset,
+        recipientName: `Crypto address: ${input.toAddress.slice(0, 10)}...`,
+        recipientAccount: input.toAddress,
+        rail: "crypto",
+        corridorCode: "CRYPTO",
+        featureLabel: "crypto_custody",
+        transferId: input.idempotencyKey,
+        description: `${input.amount} ${asset} → ${input.toAddress}`,
+        metadata: { asset, usdEquivalent, memo: input.memo, adminInitiated: true },
       });
-      return result;
+
+      // Guarded debit of the initiating account's internal USD balance.
+      await debitInternalBalanceGuarded(ctx.user.id, usdEquivalent);
+
+      try {
+        const result = await custody.initiateTransfer({
+          asset,
+          toAddress: input.toAddress,
+          amount: input.amount,
+          idempotencyKey: input.idempotencyKey,
+          memo: input.memo,
+        });
+        logCustodyAction(ctx.user.id, "CRYPTO_CUSTODY_SEND", {
+          asset, amount: input.amount, usdEquivalent,
+          toAddress: input.toAddress, idempotencyKey: input.idempotencyKey, txId: result.txId,
+        });
+        return { ...result, verified: true, fraudScore: pipelineResult.fraudScore };
+      } catch (err: any) {
+        await refundInternalBalance(ctx.user.id, usdEquivalent);
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: `Transfer failed: ${err.message}`,
+        });
+      }
+      });
     }),
-    getProviderStatus: publicProcedure.query(async () => {
+  /**
+   * Get custody provider health and configuration status.
+   */
+  getProviderStatus: publicProcedure.query(async () => {
     const provider = process.env.CUSTODY_PROVIDER ?? "mock";
     const healthy = await custody.isHealthy().catch(() => false);
     return {
