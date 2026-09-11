@@ -952,7 +952,7 @@ export const startupRouter = router({
   getDeal: publicProcedure
     .input(z.object({ id: z.number().int().positive() }))
     .query(async ({ input }) => {
-      const [deal] = await (await getDbConn()).select().from(startupDeals).where(eq(startupDeals.id, input.id));
+      const [deal] = await (await getDbConn()).select().from(startupDeals).where(eq(startupDeals.id, input.dealId));
       if (!deal) throw new TRPCError({ code: "NOT_FOUND", message: "Deal not found" });
       return deal;
     }),
@@ -1345,7 +1345,7 @@ export const paypalTopupRouter = router({
 
       const captureRes = await fetch(`${baseUrl}/v2/checkout/orders/${input.orderId}/capture`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${accessToken}` },
+        headers: { Authorization: `Bearer ${access_token}`, "Content-Type": "application/json" },
       });
       const captureData = (await captureRes.json()) as {
         status?: string;
