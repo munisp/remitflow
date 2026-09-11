@@ -106,7 +106,12 @@ export interface MojaloopTransferRequest {
 
 export interface MojaloopTransferResult {
   transferId: string;
-  transferState: "RECEIVED" | "RESERVED" | "COMMITTED" | "ABORTED";
+  // H3 (audit): "UNCERTAIN" = the switch's response never reached us intact
+  // (network error, timeout, circuit open, 5xx with no body, or a 200 without
+  // an explicit transferState). The transfer MAY have committed — callers
+  // MUST reconcile via getTransferStatus before any refund/void. Terminal
+  // states (COMMITTED/ABORTED) are only ever switch-provided, never invented.
+  transferState: "RECEIVED" | "RESERVED" | "COMMITTED" | "ABORTED" | "UNCERTAIN";
   completedTimestamp?: string;
   fulfilment?: string;
   errorInformation?: {
@@ -542,11 +547,28 @@ export async function initiateTransfer(params: {
 
     if (resp.status === 200) {
       const body = await resp.json() as any;
+      // H4 (audit): NEVER invent a terminal state. A bare HTTP 200 without an
+      // explicit switch-provided transferState is NOT rail confirmation of
+      // settlement — COMMITTED may only ever come from the switch's own field.
+      // (transferId is client-generated per the Mojaloop protocol — correct —
+      // but it identifies the transfer; it is never evidence of settlement.)
+      const explicit = typeof body.transferState === "string" ? body.transferState.toUpperCase() : "";
+      if (explicit === "COMMITTED" || explicit === "ABORTED" || explicit === "RESERVED" || explicit === "RECEIVED") {
+        return {
+          transferId: body.transferId ?? transferId,
+          transferState: explicit,
+          completedTimestamp: body.completedTimestamp,
+          fulfilment: body.fulfilment,
+          errorInformation: body.errorInformation,
+        };
+      }
+      // No explicit state — reconcile ONCE against the switch before answering.
+      const recon = await getTransferStatus(transferId);
+      if (recon.transferState !== "UNCERTAIN") return recon;
       return {
-        transferId: body.transferId ?? transferId,
-        transferState: body.transferState ?? "COMMITTED",
-        completedTimestamp: body.completedTimestamp ?? new Date().toISOString(),
-        fulfilment: body.fulfilment,
+        transferId,
+        transferState: "UNCERTAIN",
+        errorInformation: { errorCode: "2000", errorDescription: "Switch HTTP 200 carried no explicit transferState and status reconciliation was inconclusive — outcome unknown" },
       };
     }
     if (resp.status === 202) {
@@ -558,24 +580,48 @@ export async function initiateTransfer(params: {
       };
     }
     const errBody = await resp.json().catch(() => ({})) as any;
-    return {
-      transferId,
-      transferState: "ABORTED",
-      errorInformation: {
-        errorCode: errBody.errorInformation?.errorCode ?? String(resp.status),
-        errorDescription: errBody.errorInformation?.errorDescription ?? `Transfer failed: ${resp.status}`,
-      },
-    };
-  } catch (err: any) {
-    if (err instanceof CircuitOpenError) {
-      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — transfer unavailable');
-    } else {
-      logger.warn({ data: err.message }, '[Mojaloop] Transfer initiation failed');
+    // H3 (audit): a DEFINITIVE abort requires a switch-provided terminal state
+    // (completedTransferState/transferState ABORTED) or structured
+    // errorInformation FROM THE SWITCH. A bare HTTP error — especially 5xx
+    // with no body — means the switch may have committed: that is UNCERTAIN,
+    // never ABORTED, and must be reconciled before any refund/void.
+    const switchState = typeof errBody.transferState === "string" ? errBody.transferState.toUpperCase()
+      : typeof errBody.completedTransferState === "string" ? errBody.completedTransferState.toUpperCase() : "";
+    const switchError = errBody.errorInformation && typeof errBody.errorInformation.errorCode !== "undefined"
+      ? {
+          errorCode: String(errBody.errorInformation.errorCode),
+          errorDescription: String(errBody.errorInformation.errorDescription ?? "Transfer rejected by switch"),
+        }
+      : null;
+    if (switchState === "ABORTED" || switchError) {
+      return {
+        transferId,
+        transferState: "ABORTED",
+        errorInformation: switchError ?? { errorCode: String(resp.status), errorDescription: "Transfer aborted by switch" },
+      };
+    }
+    if (switchState === "COMMITTED" || switchState === "RESERVED" || switchState === "RECEIVED") {
+      return { transferId, transferState: switchState };
     }
     return {
       transferId,
-      transferState: "ABORTED",
-      errorInformation: { errorCode: "5000", errorDescription: `Mojaloop transfer failed: ${err.message}` },
+      transferState: "UNCERTAIN",
+      errorInformation: { errorCode: String(resp.status), errorDescription: `Transfer outcome uncertain: HTTP ${resp.status} without a definitive switch state — reconcile via GET /transfers/{id} before refunding` },
+    };
+  } catch (err: any) {
+    if (err instanceof CircuitOpenError) {
+      logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — transfer outcome UNKNOWN (may have committed)');
+    } else {
+      logger.warn({ data: err.message }, '[Mojaloop] Transfer initiation failed — outcome UNKNOWN (may have committed)');
+    }
+    // H3 (audit): network error / timeout / circuit open around the transfer
+    // POST — the switch may have received and committed the transfer. Report
+    // UNCERTAIN (never ABORTED): callers must reconcile via getTransferStatus
+    // before any refund/void.
+    return {
+      transferId,
+      transferState: "UNCERTAIN",
+      errorInformation: { errorCode: "5000", errorDescription: `Mojaloop transfer outcome uncertain (network/circuit failure): ${err.message} — reconcile via GET /transfers/{id} before refunding` },
     };
   }
 }
@@ -591,19 +637,28 @@ export async function getTransferStatus(transferId: string): Promise<MojaloopTra
     }));
     if (resp.status === 200) {
       const body = await resp.json() as any;
-      return {
-        transferId: body.transferId ?? transferId,
-        transferState: body.transferState ?? "COMMITTED",
-        completedTimestamp: body.completedTimestamp,
-        fulfilment: body.fulfilment,
-      };
+      // H4 (audit): reconciliation is only meaningful when the switch provides
+      // an explicit state — never default a 200 to COMMITTED.
+      const explicit = typeof body.transferState === "string" ? body.transferState.toUpperCase() : "";
+      if (explicit === "COMMITTED" || explicit === "ABORTED" || explicit === "RESERVED" || explicit === "RECEIVED") {
+        return {
+          transferId: body.transferId ?? transferId,
+          transferState: explicit,
+          completedTimestamp: body.completedTimestamp,
+          fulfilment: body.fulfilment,
+          errorInformation: body.errorInformation,
+        };
+      }
+      return { transferId, transferState: "UNCERTAIN", errorInformation: { errorCode: "2000", errorDescription: "Status response carried no explicit transferState" } };
     }
-    return { transferId, transferState: "ABORTED", errorInformation: { errorCode: String(resp.status), errorDescription: "Status check failed" } };
+    // Non-200 (404 unknown transfer, 5xx, …): the QUERY failed to produce a
+    // state. That is UNCERTAIN — never a fabricated ABORTED/COMMITTED.
+    return { transferId, transferState: "UNCERTAIN", errorInformation: { errorCode: String(resp.status), errorDescription: `Status check inconclusive (HTTP ${resp.status})` } };
   } catch (err: any) {
     if (err instanceof CircuitOpenError) {
       logger.warn({ data: err.message }, '[Mojaloop] Circuit OPEN — status unavailable');
     }
-    return { transferId, transferState: "ABORTED", errorInformation: { errorCode: "5000", errorDescription: `Status check failed: ${err.message}` } };
+    return { transferId, transferState: "UNCERTAIN", errorInformation: { errorCode: "5000", errorDescription: `Status check failed (outcome unknown): ${err.message}` } };
   }
 }
 
