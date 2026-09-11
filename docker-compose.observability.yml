@@ -1,0 +1,301 @@
+##############################################################################
+# docker-compose.observability.yml — RemitFlow OTel + LGTM + alerting (W11-C1)
+#
+# Full telemetry stack: OpenTelemetry Collector → Tempo (traces),
+# Prometheus (metrics, remote-write receiver), Loki (logs), Grafana (UI),
+# Alertmanager (alert routing). Backend decision: Grafana LGTM.
+#
+# Usage (overlay on the core stack):
+#   docker compose -f docker-compose.yml -f docker-compose.middleware.yml \
+#                  -f docker-compose.observability.yml \
+#                  --profile full --profile observability up -d
+#
+# Profiles: ["observability", "full"] on every service below.
+#
+# PORT POLICY: this stack does NOT reuse host ports 9090/3001/4318 from the
+# legacy "monitoring" profile in docker-compose.yml (old prometheus/grafana/
+# jaeger). Host bindings here are distinct (19090/13001/19093/13100/13200)
+# EXCEPT 4317/4318 which the observability profile owns going forward —
+# do NOT run the legacy `monitoring` and `observability` profiles together
+# (jaeger also binds 4318). The observability profile supersedes it.
+#
+# HEALTHCHECK COVERAGE (honest): healthchecks are declared only where the
+# image ships a shell+wget (prom/*, grafana, loki/tempo are busybox/alpine
+# based). otel-collector (distroless) and the *-exporter images ship no
+# shell — their liveness is asserted via their Prometheus scrape `up` series
+# and the collector's health_check extension (:13133) instead of a fake
+# compose healthcheck.
+##############################################################################
+
+services:
+
+  # ── OpenTelemetry Collector (contrib — REQUIRED for loki exporter and the
+  #    postgresql/redis/kafkametrics receivers; see config header) ──────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: remitflow-otel-collector
+    profiles: ["observability", "full"]
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./deploy/observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    environment:
+      # Listen endpoints (defaults documented in otel-collector.yaml header).
+      OTEL_GRPC_ENDPOINT: ${OTEL_GRPC_ENDPOINT:-0.0.0.0:4317}
+      OTEL_HTTP_ENDPOINT: ${OTEL_HTTP_ENDPOINT:-0.0.0.0:4318}
+      OTEL_HEALTH_ENDPOINT: ${OTEL_HEALTH_ENDPOINT:-0.0.0.0:13133}
+      # Receiver targets.
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-remitflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-remitflow}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      # redis/users.acl disables the default user; remitflow_admin carries
+      # +INFO/+CLIENT/+MEMORY which the receiver needs. CROSS-TRACK GAP:
+      # docker-compose.yml's redis boot renders ONLY remitflow_app's password
+      # placeholder — remitflow_admin's ACL password is currently the literal
+      # placeholder string. Default below matches today's rendered ACL; the
+      # core-services track should render REMITFLOW_ADMIN_PASSWORD_PLACEHOLDER
+      # (or add a dedicated remitflow_metrics user) and this default removed.
+      REDIS_MONITOR_USER: ${REDIS_MONITOR_USER:-remitflow_admin}
+      REDIS_MONITOR_PASSWORD: ${REDIS_MONITOR_PASSWORD:-REMITFLOW_ADMIN_PASSWORD_PLACEHOLDER}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      APISIX_HOST: ${APISIX_HOST:-apisix:9091}
+      KEYCLOAK_HOST: ${KEYCLOAK_HOST:-keycloak:9000}
+      PERMIFY_HOST: ${PERMIFY_HOST:-permify:3476}
+      TEMPORAL_HOST: ${TEMPORAL_METRICS_HOST:-temporal:9090}
+      MOJALOOP_CONNECTOR_HOST: ${MOJALOOP_CONNECTOR_HOST:-mojaloop-connector:8113}
+      TB_BRIDGE_HOST: ${TB_BRIDGE_HOST:-tb-bridge:8200}
+      OPENSEARCH_HOST: ${OPENSEARCH_METRICS_HOST:-opensearch:9200}
+      OPENSEARCH_USER: ${OPENSEARCH_USERNAME:-admin}
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:?OPENSEARCH_PASSWORD is required}
+      # Exporter targets.
+      TEMPO_ENDPOINT: ${TEMPO_ENDPOINT:-tempo:4317}
+      PROMETHEUS_RW_ENDPOINT: ${PROMETHEUS_RW_ENDPOINT:-http://prometheus:9090/api/v1/write}
+      LOKI_ENDPOINT: ${LOKI_ENDPOINT:-http://loki:3100/loki/api/v1/push}
+    ports:
+      - "4317:4317"     # OTLP/gRPC (Dapr, Go services, Tempo-facing SDKs)
+      - "4318:4318"     # OTLP/HTTP (TS core default, APISIX opentelemetry plugin)
+      - "127.0.0.1:13133:13133"  # health_check extension (loopback)
+      - "127.0.0.1:8888:8888"    # collector self-metrics (loopback)
+    depends_on:
+      tempo:
+        condition: service_started
+      prometheus:
+        condition: service_started
+      loki:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 512M        # matches memory_limiter limit_mib 400 + headroom
+
+  # ── Tempo (traces) ────────────────────────────────────────────────────────
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: remitflow-tempo
+    profiles: ["observability", "full"]
+    restart: unless-stopped
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./deploy/observability/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "127.0.0.1:13200:3200"   # query API (Grafana reaches it in-network)
+    # grafana/tempo is alpine-based (busybox wget available).
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3200/ready >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── Prometheus (metrics; remote-write receiver enabled) ───────────────────
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: remitflow-prometheus
+    profiles: ["observability", "full"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver          # collector prometheusremotewrite target
+      - --config.expand-env                         # expands ${OPENSEARCH_*} in prometheus.yml
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=8GB
+      - --web.enable-lifecycle                      # POST /-/reload for config updates
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    environment:
+      OPENSEARCH_USER: ${OPENSEARCH_USERNAME:-admin}
+      OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:?OPENSEARCH_PASSWORD is required}
+    ports:
+      - "127.0.0.1:19090:9090"   # 9090 is taken by the legacy monitoring profile
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # ── Loki (logs) ───────────────────────────────────────────────────────────
+  loki:
+    image: grafana/loki:3.2.1
+    container_name: remitflow-loki
+    profiles: ["observability", "full"]
+    restart: unless-stopped
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./deploy/observability/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/var/loki
+    ports:
+      - "127.0.0.1:13100:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3100/ready >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── Grafana (UI; datasources + dashboards provisioned) ────────────────────
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: remitflow-observability-grafana
+    profiles: ["observability", "full"]
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:?GF_SECURITY_ADMIN_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/dashboards:/var/lib/grafana/dashboards:ro
+      - observability-grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:13001:3000"   # 3001 is taken by the legacy monitoring grafana
+    depends_on:
+      prometheus:
+        condition: service_started
+      tempo:
+        condition: service_started
+      loki:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ── Alertmanager (routing; template rendered at start — image is busybox) ──
+  # alertmanager.yml in this directory contains ${ENV} placeholders and NO
+  # secrets; the entrypoint sed-renders it into a tmpfs and amtool-validates
+  # before starting. Fail-closed: container refuses to boot on a bad render.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: remitflow-alertmanager
+    profiles: ["observability", "full"]
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        esc() { printf '%s' "$$1" | sed -e 's/[&|\\]/\\&/g'; }
+        cp /etc/alertmanager/alertmanager.yml.template /tmp/alertmanager.yml
+        for V in ALERT_WEBHOOK_URL ALERT_WEBHOOK_URL_ACME ALERT_EMAIL_TO ALERT_EMAIL_FROM ALERT_SMTP_HOST ALERT_SMTP_USER ALERT_SMTP_PASSWORD; do
+          eval "val=\"\$$$$V\""
+          sed -i "s|[$$]{$${V}}|$$(esc "$${val}")|g" /tmp/alertmanager.yml
+        done
+        if grep -q '[$$]{ALERT_' /tmp/alertmanager.yml; then
+          echo "FATAL: unrendered placeholder in alertmanager.yml" >&2; exit 1
+        fi
+        amtool check-config /tmp/alertmanager.yml
+        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager
+    environment:
+      # Default webhook points at a placeholder loopback sink — set
+      # ALERT_WEBHOOK_URL to the real incident bridge in .env. No secrets here.
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-http://localhost:5001/alerts}
+      ALERT_WEBHOOK_URL_ACME: ${ALERT_WEBHOOK_URL_ACME:-http://localhost:5001/tenants/acme/alerts}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-ops@remitflow.local}
+      ALERT_EMAIL_FROM: ${ALERT_EMAIL_FROM:-alertmanager@remitflow.local}
+      ALERT_SMTP_HOST: ${ALERT_SMTP_HOST:-localhost:25}
+      ALERT_SMTP_USER: ${ALERT_SMTP_USER:-}
+      ALERT_SMTP_PASSWORD: ${ALERT_SMTP_PASSWORD:-}
+    volumes:
+      - ./deploy/observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml.template:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "127.0.0.1:19093:9093"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9093/-/healthy >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ── Exporter sidecars: honest adapters for middleware with no native
+  #    /metrics. Their `up` series back the MiddlewareDown alerts. ───────────
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: remitflow-postgres-exporter
+    profiles: ["observability", "full"]
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: postgresql://${POSTGRES_USER:-remitflow}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-remitflow}?sslmode=disable
+    # No shell in this image — liveness via its own scrape target (job=postgres).
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.66.0
+    container_name: remitflow-redis-exporter
+    profiles: ["observability", "full"]
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}
+      # Same ACL story as the collector redis receiver (see otel-collector env).
+      REDIS_USER: ${REDIS_MONITOR_USER:-remitflow_admin}
+      REDIS_PASSWORD: ${REDIS_MONITOR_PASSWORD:-REMITFLOW_ADMIN_PASSWORD_PLACEHOLDER}
+    # No shell in this image — liveness via its own scrape target (job=redis).
+
+  kafka-exporter:
+    image: danielqsj/kafka_exporter:v1.8.0
+    container_name: remitflow-kafka-exporter
+    profiles: ["observability", "full"]
+    restart: unless-stopped
+    command:
+      - --kafka.server=${KAFKA_BROKERS:-kafka:9092}
+      # In-compose bitnami listener is PLAINTEXT (docker-compose.yml:151-153);
+      # no SASL flags needed here. Enable --tls.enabled etc. for external Kafka.
+    # No shell in this image — liveness via its own scrape target (job=kafka).
+
+volumes:
+  tempo-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  loki-data:
+    driver: local
+  observability-grafana-data:
+    driver: local
+  alertmanager-data:
+    driver: local
