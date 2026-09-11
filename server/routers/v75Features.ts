@@ -16,6 +16,7 @@ import crypto, { randomBytes } from "crypto";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { broadcastUserEvent } from "../sse.service";
 import { logger } from "../_core/logger";
+import { assertFeatureEligible } from "../_core/featureGuard";
 
 // ─── Helper: get user by openId ───────────────────────────────────────────────
 async function getDb() {
@@ -235,9 +236,28 @@ export const cardsRouter = router({
       currency: z.enum(["USD", "EUR", "GBP"]).default("USD"),
       network: z.enum(["visa", "mastercard"]).default("visa"),
       spendingLimit: z.number().min(10).max(10000).optional(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const user = await getUser(ctx.user.openId);
+      // D12: TOTP step-up (Contract 2) — card issuance creates a new spending
+      // instrument; enrolled users MUST pass 2FA; fail closed on lookup errors.
+      {
+        const { getTotpEnrollment, verifyTOTP } = await import("../totp");
+        const enrollment = await getTotpEnrollment(user.id);
+        if (!enrollment.dbAvailable) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — card creation blocked" });
+        }
+        if (enrollment.enabled && enrollment.secret) {
+          if (!input.totpCode) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+          }
+          const valid = await verifyTOTP(input.totpCode, enrollment.secret);
+          if (!valid) {
+            throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+          }
+        }
+      }
       const db = await getDb();
       // Check KYC tier
       if ((user.kycTier ?? "tier0") === "tier0") {
@@ -297,17 +317,31 @@ export const cardsRouter = router({
       `);
       const wallet = walletRows.rows[0] as { id: number; balance: string } | undefined;
       if (!wallet || Number(wallet.balance) < input.amountUsd) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient USD wallet balance" });
-      await db.execute(sql`
-        UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) - ${input.amountUsd} AS VARCHAR)
-        WHERE id = ${wallet.id} AND CAST(balance AS DECIMAL(18,4)) >= ${input.amountUsd}
-      `);
-      await db.execute(sql`
-        UPDATE virtual_cards SET balance = balance + ${input.amountUsd} WHERE id = ${input.cardId} AND user_id = ${user.id}
-      `);
-      await db.execute(sql`
-        INSERT INTO card_transactions (card_id, user_id, merchant_name, amount, currency, transaction_type, status)
-        VALUES (${input.cardId}, ${user.id}, 'Wallet Top-up', ${input.amountUsd}, 'USD', 'topup', 'completed')
-      `);
+      // FF-FIX: debit + card credit + record in ONE transaction with row-count
+      // checks — a concurrent-debit loss (0 rows) previously still credited
+      // the card, minting unbacked card balance.
+      await db.transaction(async (tx: any) => {
+        const debitRows = (await tx.execute(sql`
+          UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) - ${input.amountUsd} AS VARCHAR)
+          WHERE id = ${wallet.id} AND CAST(balance AS DECIMAL(18,4)) >= ${input.amountUsd}
+          RETURNING id
+        `)) as unknown as { rows?: Array<{ id: number }> };
+        if (((debitRows.rows ?? (debitRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>).length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Insufficient USD wallet balance (concurrent debit)" });
+        }
+        const cardRows = (await tx.execute(sql`
+          UPDATE virtual_cards SET balance = balance + ${input.amountUsd}
+          WHERE id = ${input.cardId} AND user_id = ${user.id} AND status != 'cancelled'
+          RETURNING id
+        `)) as unknown as { rows?: Array<{ id: number }> };
+        if (((cardRows.rows ?? (cardRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>).length === 0) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Card not found or cancelled — top-up aborted, wallet NOT debited" });
+        }
+        await tx.execute(sql`
+          INSERT INTO card_transactions (card_id, user_id, merchant_name, amount, currency, transaction_type, status)
+          VALUES (${input.cardId}, ${user.id}, 'Wallet Top-up', ${input.amountUsd}, 'USD', 'topup', 'completed')
+        `);
+      });
       // Kafka event for virtual card topup
       publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `card-topup:${input.cardId}:${Date.now()}`, {
         eventType: "virtual_card_topup",
@@ -368,10 +402,10 @@ export const bnplFullRouter = router({
       purpose: z.string().max(500).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // A7: declared gate — bnpl flag + KYC tier 2 (replaces the tier0-only
+      // check that let tier1 draw up to ₦5M unsecured credit).
+      await assertFeatureEligible(ctx, { flag: "bnpl", minKycTier: 2, featureName: "BNPL credit" });
       const user = await getUser(ctx.user.openId);
-      if ((user.kycTier ?? "tier0") === "tier0") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Complete KYC to access BNPL" });
-      }
       const db = await getDb();
       const installmentAmount = Math.ceil(input.totalAmountNgn * 1.025 / input.installmentCount);
       const firstPaymentDate = new Date();
@@ -440,14 +474,27 @@ export const bnplFullRouter = router({
       `);
       const wallet = walletRows.rows[0] as { id: number; balance: string } | undefined;
       if (!wallet || Number(wallet.balance) < amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient NGN wallet balance" });
-      await db.execute(sql`
-        UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) - ${amount} AS VARCHAR)
-        WHERE id = ${wallet.id} AND CAST(balance AS DECIMAL(18,4)) >= ${amount}
-      `);
-      await db.execute(sql`
-        UPDATE bnpl_installments SET status = 'paid', paid_at = NOW()
-        WHERE id = ${input.installmentId} AND user_id = ${user.id} AND status IN ('pending', 'overdue')
-      `);
+      // FF-FIX: installment claim + wallet debit in ONE transaction, both
+      // row-count checked — a concurrent payer previously lost the claim race
+      // yet kept the debit (double payment for one installment).
+      await db.transaction(async (tx: any) => {
+        const claimRows = (await tx.execute(sql`
+          UPDATE bnpl_installments SET status = 'paid', paid_at = NOW()
+          WHERE id = ${input.installmentId} AND user_id = ${user.id} AND status IN ('pending', 'overdue')
+          RETURNING id
+        `)) as unknown as { rows?: Array<{ id: number }> };
+        if (((claimRows.rows ?? (claimRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>).length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Installment already paid concurrently" });
+        }
+        const debitRows = (await tx.execute(sql`
+          UPDATE wallets SET balance = CAST(CAST(balance AS DECIMAL(18,4)) - ${amount} AS VARCHAR)
+          WHERE id = ${wallet.id} AND CAST(balance AS DECIMAL(18,4)) >= ${amount}
+          RETURNING id
+        `)) as unknown as { rows?: Array<{ id: number }> };
+        if (((debitRows.rows ?? (debitRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>).length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Insufficient NGN wallet balance (concurrent debit)" });
+        }
+      });
       // Kafka event for BNPL installment payment
       publishEvent(KAFKA_TOPICS.PAYMENT_COMPLETED, `bnpl:${input.installmentId}:${Date.now()}`, {
         eventType: "bnpl_installment_paid",
