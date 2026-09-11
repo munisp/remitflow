@@ -18,6 +18,42 @@ import { Worker, NativeConnection } from "@temporalio/worker";
 import * as activities from "./activities";
 import http from "http";
 import { logger } from '../_core/logger';
+// W11-C2: hand-rolled OTel activity interceptors (worker/client side only —
+// NEVER import into workflow sandbox files). One span per activity execution,
+// traceparent extracted from activity headers, tenant.id when forwarded.
+import { makeTemporalOtelActivityInterceptors } from "./interceptors";
+// W10: additional task queues (SPEC-wave10)
+import {
+  AP_APPROVAL_TASK_QUEUE,
+  apApprovalActivities,
+} from "./apApprovalWorkflow";
+import {
+  arAgingTaskQueue,
+  runArAgingSweepActivity,
+} from "./arAgingWorkflow";
+
+// V2-R2: modules dynamically import()ed inside the W10 activity/schedule
+// bodies (enumerated from server/temporal/apApprovalWorkflow.ts and
+// server/temporal/arAgingWorkflow.ts). webpack would otherwise try to pull
+// them into the workflow isolate bundle; ignoreModules stubs them in the
+// BUNDLE ONLY — activities still run in the normal worker process, unaffected.
+const AP_WORKFLOW_IGNORE_MODULES = [
+  "../db.js",
+  "../../drizzle/schema.js",
+  "drizzle-orm",
+  "../middleware/kafka.js",
+  "../_core/logger.js",
+  "../services/approvalEngine.js",
+  "./temporalClient.js",
+];
+const AR_WORKFLOW_IGNORE_MODULES = [
+  "../db.js",
+  "drizzle-orm",
+  "../../drizzle/schema.js",
+  "../middleware/kafka.js",
+  "../_core/logger.js",
+  "@temporalio/client",
+];
 
 const TEMPORAL_ADDRESS = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
 const TASK_QUEUE = process.env.TEMPORAL_TASK_QUEUE ?? "remitflow-main";
@@ -79,18 +115,55 @@ async function run(): Promise<void> {
 
     // Graceful shutdown
     shutdownGraceTime: "30 seconds",
+
+    // W11-C2: per-activity OTel spans + traceparent extraction from headers
+    interceptors: { activity: [makeTemporalOtelActivityInterceptors()] },
+  });
+
+  // ── W10 workers: ap-approvals + ar-aging (SPEC-wave10) ────────────────────
+  // Each queue gets its own Worker with its own workflow bundle. The W10
+  // workflow files are sandbox-disciplined: top-level imports are limited to
+  // @temporalio/workflow (+ the repo logger); every side-effecting dependency
+  // is dynamically imported inside the activity bodies.
+  const apWorker = await Worker.create({
+    connection,
+    namespace: NAMESPACE,
+    taskQueue: AP_APPROVAL_TASK_QUEUE,
+    workflowsPath: new URL("./apApprovalWorkflow.js", import.meta.url).pathname,
+    bundlerOptions: { ignoreModules: AP_WORKFLOW_IGNORE_MODULES },
+    activities: apApprovalActivities,
+    maxConcurrentActivityTaskExecutions: 10,
+    maxConcurrentWorkflowTaskExecutions: 5,
+    maxCachedWorkflows: 100,
+    shutdownGraceTime: "30 seconds",
+    interceptors: { activity: [makeTemporalOtelActivityInterceptors()] },
+  });
+
+  const arWorker = await Worker.create({
+    connection,
+    namespace: NAMESPACE,
+    taskQueue: arAgingTaskQueue(),
+    workflowsPath: new URL("./arAgingWorkflow.js", import.meta.url).pathname,
+    bundlerOptions: { ignoreModules: AR_WORKFLOW_IGNORE_MODULES },
+    activities: { runArAgingSweepActivity },
+    maxConcurrentActivityTaskExecutions: 5,
+    maxConcurrentWorkflowTaskExecutions: 2,
+    maxCachedWorkflows: 50,
+    shutdownGraceTime: "30 seconds",
+    interceptors: { activity: [makeTemporalOtelActivityInterceptors()] },
   });
 
   logger.info(`[Temporal Worker] Worker started on task queue: ${TASK_QUEUE}`);
   logger.info("[Temporal Worker] Registered workflows: TransferWorkflow, KYCVerificationWorkflow, RecurringPaymentWorkflow");
   logger.info(`[Temporal Worker] Registered activities: ${Object.keys(activities).join(", ")}`);
+  logger.info(`[Temporal Worker] W10 workers started on queues: ${AP_APPROVAL_TASK_QUEUE} (apApprovalExpiryWorkflow), ${arAgingTaskQueue()} (arAgingWorkflow)`);
   workerReady = true; // Signal health endpoint that worker is ready
 
   // Handle graceful shutdown
   const shutdown = async () => {
     logger.info("[Temporal Worker] Shutting down gracefully...");
     workerReady = false;
-    await worker.shutdown();
+    await Promise.all([worker.shutdown(), apWorker.shutdown(), arWorker.shutdown()]);
     await connection.close();
     healthServer.close();
     logger.info("[Temporal Worker] Shutdown complete");
@@ -100,7 +173,7 @@ async function run(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  await worker.run();
+  await Promise.all([worker.run(), apWorker.run(), arWorker.run()]);
 }
 
 run().catch(err => {
