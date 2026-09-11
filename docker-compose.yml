@@ -16,10 +16,11 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: remitflow
       POSTGRES_USER: remitflow
-      POSTGRES_PASSWORD: remitflow_dev
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -32,6 +33,7 @@ services:
 
   redis:
     image: redis:7.4.2-alpine  # CVE-2025-49844 patched version
+    restart: unless-stopped
     ports:
       - "127.0.0.1:6379:6379"
     # Hardened config + ACL users (Lua gated per-user). The ACL file carries
@@ -64,7 +66,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
       # ACL user remitflow_app (see redis/users.acl); anonymous access is disabled.
       REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
       NODE_ENV: development
@@ -129,23 +131,9 @@ services:
       timeout: 10s
       retries: 3
 
-  health-aggregator:
-    build: ./services/go-health-aggregator
-    profiles: ["full", "monitoring"]
-    # Host port remapped to 8204: tb-bridge owns 8200 (8201/8202 are taken by
-    # synthetic-monitor and crypto-utils). Container still listens on 8200.
-    ports:
-      - "8204:8200"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8200/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-    environment:
-      API_SERVER_URL: http://api:3000
-      FX_AGGREGATOR_URL: http://fx-aggregator:8100
-      FEE_ENGINE_URL: http://fee-engine:8101
-      REFUND_ENGINE_URL: http://refund-engine:8102
+  # BROKEN-SCAFFOLD removed: health-aggregator (services/go-health-aggregator
+  # is a Dockerfile-only scaffold — no go.mod/sources; image cannot build).
+  # The service directory is being deleted; re-add when a real service exists.
 
   kafka:
     image: bitnami/kafka:3.6
@@ -219,27 +207,9 @@ services:
 
   # ═══ ADDITIONAL SERVICES (profile: full) ════════════════════════════════════
 
-  go-community-feed:
-    build: ./services/go-community-feed
-    profiles: ["full", "monitoring"]
-    ports:
-      - "8110:8110"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8110/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  go-ratelimit-sidecar:
-    build: ./services/go-ratelimit-sidecar
-    profiles: ["full", "monitoring"]
-    ports:
-      - "8111:8111"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8111/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+  # BROKEN-SCAFFOLD removed: go-community-feed and go-ratelimit-sidecar
+  # (Dockerfile-only scaffolds — no go.mod/sources; images cannot build).
+  # The service directories are being deleted; re-add when real services exist.
 
   kafka-processor:
     build: ./services/kafka-processor
@@ -250,6 +220,7 @@ services:
   ledger-service:
     build: ./services/ledger-service
     profiles: ["full", "monitoring"]
+    restart: unless-stopped
     ports:
       - "8112:8112"
     healthcheck:
@@ -283,16 +254,8 @@ services:
       timeout: 10s
       retries: 3
 
-  python-nav-analytics:
-    build: ./services/python-nav-analytics
-    profiles: ["full", "monitoring"]
-    ports:
-      - "8114:8114"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8114/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+  # BROKEN-SCAFFOLD removed: python-nav-analytics (Dockerfile-only scaffold —
+  # no requirements.txt/main.py; image cannot build). Directory being deleted.
 
   rate-limiter:
     image: redis:7.4.2-alpine  # CVE-2025-49844 patched version
@@ -318,16 +281,8 @@ services:
       timeout: 10s
       retries: 3
 
-  rust-audit-service:
-    build: ./services/rust-audit-service
-    profiles: ["full", "monitoring"]
-    ports:
-      - "8116:8116"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8116/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+  # BROKEN-SCAFFOLD removed: rust-audit-service (no src/ or Cargo.lock —
+  # image cannot build). Directory being deleted.
 
   search-indexer:
     build: ./services/search-indexer
@@ -380,6 +335,7 @@ services:
   tigerbeetle:
     image: ghcr.io/tigerbeetle/tigerbeetle:0.16.63
     profiles: ["full", "monitoring"]
+    restart: unless-stopped
     command: ["start", "--addresses=0.0.0.0:3000", "--cluster=${TIGERBEETLE_CLUSTER_ID:-0}", "--replica=0", "/data/0_0.tigerbeetle"]
     # Host 3002 -> container 3000 (host 3000 = API, 3001 = Grafana). Matches
     # TIGERBEETLE_ADDRESS=localhost:3002 in .env.example.
@@ -388,7 +344,12 @@ services:
     volumes:
       - tigerbeetle-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "test -f /data/0_0.tigerbeetle"]
+      # Probe the actual listener, not just the data file (the old
+      # `test -f` check passed even when the tigerbeetle process was dead).
+      # Port 3000 = 0x0BB8; /proc/net/tcp state 0A = LISTEN.
+      test:
+        - CMD-SHELL
+        - test -f /data/0_0.tigerbeetle && while read -r sl la ra st rest; do [ "$$la" = "00000000:0BB8" ] && [ "$$st" = "0A" ] && exit 0; done < /proc/net/tcp; exit 1
       interval: 10s
       timeout: 5s
       retries: 10
@@ -429,7 +390,7 @@ services:
       TB_BRIDGE_PORT: "8200"
       TIGERBEETLE_ADDRESSES: tigerbeetle:3000
       TIGERBEETLE_CLUSTER_ID: ${TIGERBEETLE_CLUSTER_ID:-0}
-      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
       RUST_LOG: info
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8200/health"]
@@ -451,7 +412,7 @@ services:
       - "8300:8300"
     environment:
       FLUVIO_HTTP_BRIDGE_PORT: "8300"
-      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
       REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
       RUST_LOG: info
     healthcheck:
@@ -474,8 +435,8 @@ services:
       - "8202:8202"
     environment:
       CRYPTO_UTILS_PORT: "8202"
-      MASTER_KEY: ${CRYPTO_MASTER_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
-      HMAC_KEY: ${CRYPTO_HMAC_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      MASTER_KEY: ${CRYPTO_MASTER_KEY:?CRYPTO_MASTER_KEY is required}
+      HMAC_KEY: ${CRYPTO_HMAC_KEY:?CRYPTO_HMAC_KEY is required}
       RUST_LOG: info
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8202/health"]
@@ -489,13 +450,14 @@ services:
     build: ./services/go-apisix-manager
     profiles: ["full", "monitoring"]
     ports:
-      - "8100:8100"
+      # Host port moved 8100 → 8118 (collision with fx-aggregator host port).
+      - "8118:8100"
     environment:
       APISIX_MANAGER_PORT: "8100"
       APISIX_ADMIN_URL: http://apisix:9180
       # Required — must match the admin key rendered into services/gateway-config/apisix.yaml.
       APISIX_ADMIN_KEY: ${APISIX_ADMIN_KEY:?APISIX_ADMIN_KEY is required}
-      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
     networks:
       # default: reach postgres/redis; remitflow-internal: reach apisix:9180.
       # Static IP is the ONLY workload IP allowed by APISIX allow_admin
@@ -521,7 +483,7 @@ services:
       - "8099:8099"
     environment:
       HEALTH_PROBE_PORT: "8099"
-      POSTGRES_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      POSTGRES_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
       REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
       TB_BRIDGE_URL: http://tb-bridge:8200
       TEMPORAL_ADDRESS: temporal:7233
@@ -543,9 +505,10 @@ services:
     build: ./services/python-lakehouse
     profiles: ["full", "monitoring"]
     ports:
-      - "8102:8102"
+      # Host port moved 8102 → 8119 (collision with refund-engine host port).
+      - "8119:8102"
     environment:
-      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
       S3_ENDPOINT: http://minio:9000
       # Must match the MinIO root credentials (no minioadmin defaults).
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
@@ -572,7 +535,7 @@ services:
       - "8089:8089"
     environment:
       PORT: "8089"
-      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:?MINIO_ROOT_USER is required}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD is required}
@@ -596,9 +559,10 @@ services:
     build: ./services/python-aml-scorer
     profiles: ["full", "monitoring"]
     ports:
-      - "8103:8103"
+      # Host port moved 8103 → 8105 (collision with idempotency-service host port).
+      - "8105:8103"
     environment:
-      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
       AML_SCORER_PORT: "8103"
       AML_MODEL_VERSION: "1.0.0"
       AML_THRESHOLD_CRITICAL: "81"
@@ -619,7 +583,7 @@ services:
     ports:
       - "8104:8104"
     environment:
-      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
       COMPLIANCE_REPORTER_PORT: "8104"
       INSTITUTION_NAME: ${INSTITUTION_NAME:-RemitFlow Financial Services}
     healthcheck:
@@ -665,7 +629,7 @@ services:
       DB: postgresql
       DB_PORT: 5432
       POSTGRES_USER: remitflow
-      POSTGRES_PWD: remitflow_dev
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
       POSTGRES_SEEDS: postgres
       DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
     depends_on:
@@ -691,7 +655,7 @@ services:
     environment:
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_TASK_QUEUE: remitflow-main
-      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
       REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379
       NODE_ENV: production
       WORKER_HEALTH_PORT: "8080"
@@ -713,7 +677,7 @@ services:
     ports:
       - "6432:6432"
     environment:
-      DATABASE_URL: postgresql://remitflow:remitflow_dev@postgres:5432/remitflow
+      DATABASE_URL: postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow
       POOL_MODE: transaction
       MAX_CLIENT_CONN: 1000
       DEFAULT_POOL_SIZE: 50
@@ -798,7 +762,8 @@ services:
       context: ./services/python-ml-feature-pipeline
       dockerfile: Dockerfile
     ports:
-      - "8092:8092"
+      # Host port moved 8092 → 8093 (collision with python-compliance-service host port).
+      - "8093:8092"
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://remitflow_app:${REDIS_APP_PASSWORD:?REDIS_APP_PASSWORD is required}@redis:6379/0
@@ -1039,7 +1004,7 @@ services:
       - "3478:3478"
     environment:
       PERMIFY_DATABASE_ENGINE: postgres
-      PERMIFY_DATABASE_URI: "postgresql://remitflow:remitflow_dev@postgres:5432/remitflow"
+      PERMIFY_DATABASE_URI: "postgresql://remitflow:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/remitflow"
       PERMIFY_DATABASE_AUTO_MIGRATE: "true"
       PERMIFY_LOG_LEVEL: info
       PERMIFY_GRPC_PORT: "3478"
