@@ -24,9 +24,8 @@ scrape_configs:
     static_configs:
       - targets: ["refund-engine:8102"]
 
-  - job_name: "health-aggregator"
-    static_configs:
-      - targets: ["health-aggregator:8200"]
+  # BROKEN-SCAFFOLD removed: health-aggregator scrape job — service deleted
+  # from docker-compose.yml (Dockerfile-only scaffold, image unbuildable).
 
   - job_name: "synthetic-monitor"
     static_configs:
