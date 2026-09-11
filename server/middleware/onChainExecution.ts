@@ -75,6 +75,11 @@ interface BridgeExecution {
   quoteId: string;
   txHash: string;
   status: "pending" | "confirmed" | "failed";
+  /**
+   * true ONLY in non-production simulation mode: no on-chain transaction was
+   * broadcast and txHash is empty. Never set on a real execution.
+   */
+  simulated?: boolean;
   fromChainTxHash?: string;
   toChainTxHash?: string;
   confirmedAt?: number;
@@ -192,19 +197,41 @@ export async function getBridgeQuote(params: {
 }
 
 export async function executeBridge(quoteId: string, signedTx: string): Promise<BridgeExecution> {
-  if (!LIFI_API_KEY && IS_PRODUCTION) {
+  // FAIL-CLOSED (honesty audit): this path previously returned a fabricated
+  // txHash — derived from Date.now() or echoing the signedTx payload back as
+  // if it were a transaction hash. A hash that did not come from a chain RPC
+  // is not evidence of execution and must never be produced. There is no real
+  // broadcast adapter wired for this path (no chain-aware raw-tx submission),
+  // so bridge execution is UNAVAILABLE until one is implemented.
+  if (!signedTx) {
     throw new TRPCError({
-      code: "INTERNAL_SERVER_ERROR",
-      message: "[OnChain] FAIL-CLOSED: Cannot execute bridge without LIFI_API_KEY",
+      code: "BAD_REQUEST",
+      message: "[OnChain] signedTx is required for bridge execution",
     });
   }
 
-  logger.info(`[OnChain] Executing bridge for quote ${quoteId}`);
-  // In production, this submits the signed transaction to the chain
+  if (IS_PRODUCTION) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message:
+        "[OnChain] FAIL-CLOSED: bridge broadcast is UNAVAILABLE — no on-chain execution provider is configured/implemented " +
+        `(LIFI_API_KEY ${LIFI_API_KEY ? "present" : "missing"}, broadcast adapter not implemented). ` +
+        "No transaction was submitted and no hash was fabricated.",
+    });
+  }
+
+  // Non-production only: explicitly simulated response. txHash is empty so no
+  // caller can mistake this for an on-chain artifact; `simulated: true` makes
+  // the marker unmistakable. Nothing may persist this as a real execution.
+  logger.warn(
+    `[OnChain] SIMULATED bridge execution for quote ${quoteId} (NODE_ENV=${process.env.NODE_ENV ?? "unset"}) — ` +
+    "no on-chain transaction was broadcast; txHash intentionally empty",
+  );
   return {
     quoteId,
-    txHash: signedTx || `0x${Date.now().toString(16)}${"0".repeat(40)}`,
+    txHash: "",
     status: "pending",
+    simulated: true,
   };
 }
 
@@ -349,14 +376,34 @@ export async function submitUserOperation(
 
     if (response.ok) {
       const data = await response.json();
-      return { userOpHash: data.result, status: "pending" };
+      if (typeof data.result === "string" && data.result.startsWith("0x")) {
+        return { userOpHash: data.result, status: "pending" };
+      }
+      if (IS_PRODUCTION) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "[OnChain] FAIL-CLOSED: bundler did not return a userOpHash",
+        });
+      }
+      logger.warn(`[OnChain] Bundler returned no userOpHash (dev): ${JSON.stringify(data)}`);
     }
   }
 
-  // Dev fallback
+  if (IS_PRODUCTION) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message:
+        "[OnChain] FAIL-CLOSED: UserOp submission UNAVAILABLE — ERC4337_BUNDLER_URL not configured. " +
+        "No operation was submitted and no hash was fabricated.",
+    });
+  }
+
+  // Non-production only: explicitly simulated; empty hash so nothing can
+  // mistake this for a real bundler artifact.
+  logger.warn("[OnChain] SIMULATED UserOp submission — bundler not configured; no operation was broadcast");
   return {
-    userOpHash: `0x${Date.now().toString(16)}${"0".repeat(48)}`,
-    status: "pending",
+    userOpHash: "",
+    status: "simulated",
   };
 }
 

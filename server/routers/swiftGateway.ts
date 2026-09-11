@@ -45,6 +45,8 @@ const pacs008Schema = z.object({
   purposeCode: z.string().max(4).optional(),
   // Correspondent bank (optional)
   correspondentBic: z.string().regex(/^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/).optional(),
+  // W12: TOTP step-up code (required for enrolled users; fail-closed)
+  totpCode: z.string().regex(/^\d{6}$/).optional(),
 });
 
 // ─── BIC Validator ────────────────────────────────────────────────────────────
@@ -76,6 +78,10 @@ export const swiftGatewayRouter = router({
     .input(pacs008Schema)
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
+
+      // W12: canonical TOTP step-up (fail-closed) — money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "SWIFT credit transfer");
 
       // Validate both BICs
       const debtorBicInfo = validateBicFormat(input.debtorBic);
