@@ -6,6 +6,7 @@
  * compliance, security, chat, POS/agent, KYB, consent, metrics, and more.
  */
 import { randomBytes } from "crypto";
+import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { router, publicProcedure, adminProcedure, protectedProcedure, auditedProcedure } from "../_core/trpc.js";
 // createAuditLog — audit coverage satisfied via auditedProcedure middleware
@@ -20,16 +21,16 @@ import {
   getIdempotencyKey, createIdempotencyKey,
   getPendingOutboxEvents, createOutboxEvent, markOutboxEventProcessed,
   getErasureRequests, createErasureRequest, processErasureRequest,
-  getChatSessions, createChatSession, closeChatSession,
+  getChatSessions, createChatSession, closeChatSession, getChatSessionById,
   getChatMessages, createChatMessage,
   getFraudAlerts, createFraudAlert, resolveFraudAlert,
   getAnalyticsThresholds, upsertAnalyticsThreshold,
-  getMarketListings, createMarketListing, updateMarketListing, deleteMarketListing,
+  getMarketListings, createMarketListing, updateMarketListing, deleteMarketListing, getMarketListingById,
   getMarketOrders, createMarketOrder, updateMarketOrderStatus,
   getTalentProfiles, getTalentProfileByUserId, upsertTalentProfile,
   getTalentOpportunities, createTalentOpportunity, updateTalentOpportunity,
   getTalentBookings, createTalentBooking, updateTalentBookingStatus,
-  getCommunityFunds, createCommunityFund, updateCommunityFundBalance,
+  getCommunityFunds, createCommunityFund, updateCommunityFundBalance, contributeToCommunityFund,
   getFundProposals, createFundProposal, updateFundProposalStatus,
   getFundVotes, castFundVote,
   getDiasporaCollectives, createDiasporaCollective,
@@ -45,9 +46,8 @@ import {
   getInvestmentPriceHistory, createPriceHistoryEntry,
   getSecurityIncidents, createSecurityIncident, resolveSecurityIncident,
   getCronJobs, upsertCronJob, updateCronJobStatus,
-  getPaymentRequests, createPaymentRequest, updatePaymentRequestStatus,
+  getPaymentRequests, createPaymentRequest, updatePaymentRequestStatus, getPaymentRequestById,
   getPushNotifPrefs, upsertPushNotifPrefs,
-  createImpersonationToken, getImpersonationToken, revokeImpersonationToken,
 } from "../db-extended.js";
 
 export const extendedCrudRouter = router({
@@ -97,7 +97,9 @@ export const extendedCrudRouter = router({
       .query(({ input }) => getPosTerminals(input.agentId)),
     create: protectedProcedure
       .input(z.object({ agentId: z.number(), serialNumber: z.string(), model: z.string().optional() }))
-      .mutation(({ input }) => createPosTerminal({ userId: input.agentId, terminalId: input.serialNumber, merchantName: input.model ?? input.serialNumber })),
+      // W9/Q10 (F8-3): terminals are registered under the CALLER — a
+      // client-supplied agentId must not become the terminal owner.
+      .mutation(({ input, ctx }) => createPosTerminal({ userId: ctx.user.id, terminalId: input.serialNumber, merchantName: input.model ?? input.serialNumber })),
     updateStatus: adminProcedure
       .input(z.object({ id: z.number(), status: z.string() }))
       .mutation(({ input }) => updatePosTerminalStatus(input.id, input.status)),
@@ -127,7 +129,9 @@ export const extendedCrudRouter = router({
     pending: adminProcedure
       .input(z.object({ limit: z.number().default(100) }))
       .query(({ input }) => getPendingOutboxEvents(input.limit)),
-    create: protectedProcedure
+    // W9/Q10 (F9-12): outbox event injection pollutes the durable event
+    // stream / DLQ — admin-only.
+    create: adminProcedure
       .input(z.object({ eventType: z.string(), payload: z.record(z.string(), z.unknown()) }))
       .mutation(({ input }) => createOutboxEvent({ eventType: input.eventType, payload: JSON.stringify(input.payload), aggregateType: 'app', aggregateId: String(Date.now()), status: 'pending' })),
     markProcessed: adminProcedure
@@ -154,13 +158,30 @@ export const extendedCrudRouter = router({
       .mutation(({ input, ctx }) => createChatSession({ userId: ctx.user.id, title: input.subject })),
     close: protectedProcedure
       .input(z.object({ id: z.number() }))
-      .mutation(({ input }) => closeChatSession(input.id)),
+      // W9/Q10 (F8-4): only the session owner may close it.
+      .mutation(async ({ input, ctx }) => {
+        const session = await getChatSessionById(input.id);
+        if (!session || session.userId !== ctx.user.id) throw new TRPCError({ code: "NOT_FOUND", message: "Chat session not found" });
+        return closeChatSession(input.id);
+      }),
     messages: protectedProcedure
       .input(z.object({ sessionId: z.number() }))
-      .query(({ input }) => getChatMessages(input.sessionId)),
+      // W9/Q10 (F8-4): only the session owner may read its messages.
+      .query(async ({ input, ctx }) => {
+        const session = await getChatSessionById(input.sessionId);
+        if (!session || session.userId !== ctx.user.id) throw new TRPCError({ code: "NOT_FOUND", message: "Chat session not found" });
+        return getChatMessages(input.sessionId);
+      }),
     sendMessage: protectedProcedure
       .input(z.object({ sessionId: z.number(), content: z.string().max(2000), senderType: z.enum(["user", "agent", "bot"]).default("user") }))
-      .mutation(({ input, ctx }) => createChatMessage({ sessionId: input.sessionId, role: input.senderType === 'user' ? 'user' : 'assistant', content: input.content })),
+      // W9/Q10 (F8-4): messages may only be posted into the caller's OWN
+      // session; the sender identity is the session owner (ctx.user.id) —
+      // client-supplied sender identity is ignored.
+      .mutation(async ({ input, ctx }) => {
+        const session = await getChatSessionById(input.sessionId);
+        if (!session || session.userId !== ctx.user.id) throw new TRPCError({ code: "NOT_FOUND", message: "Chat session not found" });
+        return createChatMessage({ sessionId: input.sessionId, role: input.senderType === 'user' ? 'user' : 'assistant', content: input.content });
+      }),
   }),
 
   // ── Fraud Alerts ────────────────────────────────────────────────────────────
@@ -194,8 +215,11 @@ export const extendedCrudRouter = router({
       .mutation(({ input, ctx }) => createMarketListing({ title: input.title, description: input.description, price: String(input.price), currency: input.currency, category: (input.category as any) ?? 'other', imageUrl: input.imageUrl, sellerId: ctx.user.id, country: 'US' })),
     updateListing: protectedProcedure
       .input(z.object({ id: z.number(), title: z.string().max(2000).optional(), description: z.string().max(2000).optional(), price: z.number().optional(), status: z.string().optional() }))
-      .mutation(({ input, ctx }) => {
+      // W9/Q10 (F8-3): only the seller who owns the listing may edit it.
+      .mutation(async ({ input, ctx }) => {
         const { id, ...data } = input;
+        const listing = await getMarketListingById(id);
+        if (!listing || listing.sellerId !== ctx.user.id) throw new TRPCError({ code: "NOT_FOUND", message: "Listing not found" });
         return updateMarketListing(id, { ...data, ...(data.price !== undefined ? { price: String(data.price) } : {}) } as any);
       }),
     deleteListing: protectedProcedure
@@ -266,7 +290,9 @@ export const extendedCrudRouter = router({
       .mutation(({ input, ctx }) => createCommunityFund({ ...input, createdByUserId: ctx.user.id })),
     contribute: protectedProcedure
       .input(z.object({ fundId: z.number(), amount: z.number().positive().max(10_000_000) }))
-      .mutation(({ input }) => updateCommunityFundBalance(input.fundId, input.amount)),
+      // A9: guarded atomic wallet debit FIRST, then totalRaised increment — no
+      // debit, no increment (previously minted unbacked fund balances).
+      .mutation(({ input, ctx }) => contributeToCommunityFund(ctx.user.id, input.fundId, input.amount)),
     proposals: publicProcedure
       .input(z.object({ fundId: z.number() }))
       .query(({ input }) => getFundProposals(input.fundId)),
@@ -400,7 +426,13 @@ export const extendedCrudRouter = router({
       .mutation(({ input, ctx }) => createPaymentRequest({ requesterId: ctx.user.id, token: `req-${Date.now()}-${randomBytes(4).toString("hex")}`, amount: String(input.amount), currency: input.currency, description: input.description, expiresAt: input.expiresAt ? new Date(input.expiresAt) : undefined })),
     updateStatus: protectedProcedure
       .input(z.object({ id: z.number(), status: z.string() }))
-      .mutation(({ input }) => updatePaymentRequestStatus(input.id, input.status)),
+      // W9/Q10 (F8-3): only the requester may change their payment request's
+      // status (previously any user could mark a stranger's request "paid").
+      .mutation(async ({ input, ctx }) => {
+        const request = await getPaymentRequestById(input.id);
+        if (!request || request.requesterId !== ctx.user.id) throw new TRPCError({ code: "NOT_FOUND", message: "Payment request not found" });
+        return updatePaymentRequestStatus(input.id, input.status);
+      }),
   }),
 
   // ── Push Notification Preferences ──────────────────────────────────────────
@@ -434,20 +466,7 @@ export const extendedCrudRouter = router({
         }),
   }),
 
-  // ── Impersonation (admin only) ──────────────────────────────────────────────
-  impersonation: router({
-    create: adminProcedure
-      .input(z.object({ targetUserId: z.number(), reason: z.string().max(2000), expiresInMinutes: z.number().default(60) }))
-      .mutation(({ input, ctx }) => {
-        const token = `imp-${Date.now()}-${randomBytes(4).toString("hex")}`;
-        const expiresAt = new Date(Date.now() + input.expiresInMinutes * 60000);
-        return createImpersonationToken({ token, adminId: ctx.user.id, targetUserId: input.targetUserId, expiresAt });
-      }),
-    verify: adminProcedure
-      .input(z.object({ token: z.string() }))
-      .query(({ input }) => getImpersonationToken(input.token)),
-    revoke: adminProcedure
-      .input(z.object({ token: z.string() }))
-      .mutation(({ input }) => revokeImpersonationToken(input.token)),
-  }),
+  // W9/Q10 (F8-11): the unhardened impersonation-token mint that lived here
+  // was DELETED. The canonical, step-up-gated impersonation flow is the pbac
+  // one in routers.ts — do not reintroduce a second mint path.
 });
