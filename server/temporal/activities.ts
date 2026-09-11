@@ -285,8 +285,14 @@ export async function fraudCheckActivity(
     toCountry: destCountry,
     recipientAccount: input.recipientAccount ?? "",
   }).catch(err => {
-    log.warn("gRPC fraud check failed, using local ML only", { error: err?.message });
-    return { riskScore: 0.1, riskLevel: "LOW" as const, decision: "APPROVE" as const, reasons: ["grpc-fallback"] };
+    // W12-FIX: FAIL CLOSED. Previously this fabricated a LOW 0.1 risk score
+    // ("grpc-fallback") and APPROVED while the primary fraud engine was
+    // unreachable — a fabricated clearance for money movement. Throw instead:
+    // Temporal's retry policy (3 attempts, backoff — workflows.ts) absorbs
+    // transient outages; after max attempts the workflow's catch runs the
+    // compensation stack (releaseFundsActivity releases the reservation).
+    log.error("gRPC fraud engine unreachable — failing closed (Temporal retry; saga compensates after max attempts)", { error: err?.message });
+    throw err;
   });
 
   // ── Local ML scorer (secondary — always runs) ─────────────────────────────
@@ -338,8 +344,14 @@ export async function executeTransferActivity(
     reference: input.idempotencyKey,
     description: input.description ?? `Transfer to ${input.recipientName}`,
   }).catch(err => {
-    log.warn("gRPC ledger write failed, continuing with DB only", { error: err?.message });
-    return { transferId: `db-only-${input.idempotencyKey}`, status: "COMPLETED" as const, timestamp: new Date().toISOString() };
+    // W12-FIX: FAIL CLOSED. Previously this continued "DB-only" with a
+    // fabricated `db-only-…` COMPLETED transfer id — the DB recorded a
+    // settled transfer the ledger never saw (books diverge; replay/
+    // reconciliation keyed on a phantom id). Throw instead: Temporal retries
+    // transient outages; after max attempts the saga compensates. A
+    // completion id is only ever the REAL ledger transfer id.
+    log.error("gRPC ledger write failed — failing closed; no DB-only completion, no fabricated transfer id (Temporal retry)", { error: err?.message, idempotencyKey: input.idempotencyKey });
+    throw err;
   });
 
   // Write to PostgreSQL.
