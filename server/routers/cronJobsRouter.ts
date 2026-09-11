@@ -155,9 +155,26 @@ export const cronJobsRouter = router({
           case "archival-pipeline":
             await db.execute(sql`UPDATE transactions SET status = 'archived' WHERE status = 'completed' AND created_at < NOW() - INTERVAL '90 days' AND status != 'archived'`);
             break;
-          case "recurring-payments":
-            await db.execute(sql`UPDATE scheduled_transfers SET status = 'processing' WHERE status = 'active' AND next_run <= NOW()`);
+          case "recurring-payments": {
+            // W12 CRIT V-B-1: the old leg only flipped scheduled_transfers to
+            // 'processing' (and referenced a non-existent `next_run` column) —
+            // a fabricated state in a live money path. The real executor does
+            // guarded claim → single-tx debit/credit → ledger idempotency →
+            // recurrence advancement, plus a stuck-claim sweeper. It is a
+            // SYSTEM actor executing user-authorized (TOTP-gated) schedules.
+            const { executeDueScheduledTransfers, recoverStuckScheduledTransfers } =
+              await import("../services/scheduledPaymentExecutor.js");
+            const recovery = await recoverStuckScheduledTransfers(db);
+            const result = await executeDueScheduledTransfers(db);
+            if (result.failed > 0) {
+              // Honest surfacing: any occurrence failure marks the run as error
+              // with the full breakdown — never report success over failures.
+              throw new Error(
+                `scheduled transfers: ${result.executed} executed, ${result.failed} failed, ${result.skipped} skipped of ${result.due} due (sweeper: ${recovery.completed} completed, ${recovery.reclaimed} reclaimed)`
+              );
+            }
             break;
+          }
           case "fx-alert-checker":
             await db.execute(sql`SELECT id FROM fx_alerts WHERE active = true AND triggered_at IS NULL LIMIT 100`);
             break;
@@ -223,3 +240,15 @@ export const cronJobsRouter = router({
     return stats[0] ?? { total: 0, active: 0, paused: 0, error: 0, totalRuns: 0 };
   }),
 });
+
+// W12 CRIT V-B-1: boot-register the scheduled-transfer executor (node-cron,
+// idempotent, overlap-guarded). This router is imported by server/routers.ts
+// at boot, so the recurring-payments job actually runs on its "* * * * *"
+// schedule instead of existing only as an admin-triggerable stub. Guarded so
+// a registration failure can never break router import; hot-reload safe.
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  void import("../services/scheduledPaymentExecutor.js").then((m) => m.startScheduledPaymentExecutor());
+} catch {
+  /* executor self-registers on first triggerNow if module load failed here */
+}
