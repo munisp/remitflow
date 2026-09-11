@@ -2,8 +2,12 @@
  * blockchainClient.ts — Multi-chain RPC integration layer
  *
  * Provides a unified interface for interacting with multiple blockchains:
- *   - Ethereum, Polygon, BSC, Arbitrum, Optimism, Base, Avalanche (EVM)
- *   - Solana, Tron (non-EVM)
+ *   - Ethereum, Polygon, BSC, Arbitrum, Optimism, Base, Avalanche (EVM only)
+ *
+ * HONESTY GATE: Solana and Tron are NOT enabled. They previously sat in the
+ * chain registry while every read returned mock zero/empty data. They have
+ * been removed from the registry, and any non-EVM chain added without a real
+ * adapter fails closed with an explicit "chain not enabled" error.
  *
  * Functions:
  *   - getBalance: Query ERC-20 token balance on any chain
@@ -158,38 +162,10 @@ export const CHAINS: Record<string, ChainConfig> = {
       DAI: "0xd586E7F844cEa2F87f50152665BCbc2C279D8d70",
     },
   },
-  solana: {
-    chainId: -1, // non-EVM
-    name: "Solana",
-    nativeCurrency: "SOL",
-    rpcPrimary: process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com",
-    rpcFallback: "https://rpc.ankr.com/solana",
-    explorerUrl: "https://solscan.io",
-    avgBlockTime: 0.4,
-    confirmations: 32,
-    gasMultiplier: 1.0,
-    evm: false,
-    stablecoins: {
-      USDT: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-      USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-    },
-  },
-  tron: {
-    chainId: -2, // non-EVM
-    name: "Tron",
-    nativeCurrency: "TRX",
-    rpcPrimary: process.env.TRON_RPC_URL || "https://api.trongrid.io",
-    rpcFallback: "https://rpc.ankr.com/tron_jsonrpc",
-    explorerUrl: "https://tronscan.org",
-    avgBlockTime: 3,
-    confirmations: 20,
-    gasMultiplier: 1.0,
-    evm: false,
-    stablecoins: {
-      USDT: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-      USDC: "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8",
-    },
-  },
+  // NOTE: Solana and Tron were removed from this registry (honesty audit).
+  // They were declared "supported" but every balance/status/gas read returned
+  // fabricated zero/empty data. They must not be re-added without a real
+  // RPC adapter; the non-EVM code paths below fail closed if they are.
 };
 
 // ── ERC20 ABI (minimal for balance + transfer) ─────────────────────────────
@@ -293,9 +269,26 @@ async function rpcCall(
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
+/**
+ * Fail-closed guard for non-EVM chains. A chain without a real adapter must
+ * never return fabricated data; every read/write path errors explicitly.
+ */
+function assertChainEnabled(chain: ChainConfig, operation: string): void {
+  if (!chain.evm) {
+    throw new Error(
+      `Chain not enabled: ${chain.name} has no real adapter implemented — ` +
+      `${operation} is unavailable (refusing to return mock data)`,
+    );
+  }
+}
+
 export function getChain(chainName: string): ChainConfig {
   const chain = CHAINS[chainName];
-  if (!chain) throw new Error(`Unsupported chain: ${chainName}`);
+  if (!chain) {
+    throw new Error(
+      `Unsupported chain: ${chainName}. Enabled chains: ${Object.keys(CHAINS).join(", ")}`,
+    );
+  }
   return chain;
 }
 
@@ -315,13 +308,9 @@ export async function getTokenBalance(
   const contractAddress = chain.stablecoins[token];
   if (!contractAddress) throw new Error(`${token} not on ${chain.name}`);
 
-  if (!chain.evm) {
-    // Non-EVM chains: return mock for now
-    return {
-      chain: chainName, token, contractAddress,
-      balance: "0", decimals: 6, balanceFormatted: 0,
-    };
-  }
+  // FAIL-CLOSED: non-EVM chains have no balance adapter — never return a
+  // mock zero balance.
+  assertChainEnabled(chain, "balance read");
 
   // Encode balanceOf(walletAddress)
   const paddedAddress = walletAddress.toLowerCase().replace("0x", "").padStart(64, "0");
@@ -353,12 +342,8 @@ export async function estimateGas(
 ): Promise<GasEstimate> {
   const chain = getChain(chainName);
 
-  if (!chain.evm) {
-    return {
-      chain: chainName, gasLimit: 0, gasPriceGwei: 0,
-      totalCostNative: 0.001, totalCostUsd: 0.001, nativeCurrency: chain.nativeCurrency,
-    };
-  }
+  // FAIL-CLOSED: no gas-estimation adapter for non-EVM chains.
+  assertChainEnabled(chain, "gas estimation");
 
   const contractAddress = chain.stablecoins[token];
   if (!contractAddress) throw new Error(`${token} not on ${chain.name}`);
@@ -397,14 +382,9 @@ export async function getTransactionStatus(
 ): Promise<TransactionStatus> {
   const chain = getChain(chainName);
 
-  if (!chain.evm) {
-    return {
-      chain: chainName, txHash, status: "pending",
-      blockNumber: null, confirmations: 0,
-      requiredConfirmations: chain.confirmations,
-      from: "", to: "", value: "0", timestamp: null,
-    };
-  }
+  // FAIL-CLOSED: no transaction-status adapter for non-EVM chains — never
+  // fabricate a "pending" status for a tx we cannot query.
+  assertChainEnabled(chain, "transaction status");
 
   const receipt = (await rpcCall(chain, "eth_getTransactionReceipt", [txHash])) as {
     status: string;
@@ -445,7 +425,8 @@ export async function getTransactionStatus(
 
 export async function getBlockHeight(chainName: string): Promise<number> {
   const chain = getChain(chainName);
-  if (!chain.evm) return 0;
+  // FAIL-CLOSED: no block-height adapter for non-EVM chains.
+  assertChainEnabled(chain, "block height");
   const result = (await rpcCall(chain, "eth_blockNumber", [])) as string;
   return Number(BigInt(result));
 }
