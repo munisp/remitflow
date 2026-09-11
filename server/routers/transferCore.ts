@@ -14,7 +14,7 @@ import { sql } from "drizzle-orm";
 import { router, protectedProcedure, publicProcedure } from "../_core/trpc";
 import { getDb } from "../db";
 import { createAuditLog } from "../db";
-import { executeTransfer, calculateFee, getFxRate, validateCompliance } from "../lib/transferEngine";
+import { executeTransfer, calculateFee, getIndicativeFxRate, validateCompliance } from "../lib/transferEngine";
 import { executeTransferPipeline, settleTransferHold, compensateFailedTransfer } from "../_core/transferPipeline";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { broadcastUserEvent } from "../sse.service";
@@ -32,26 +32,34 @@ export const transferCoreRouter = router({
     .query(async ({ input }) => {
       const corridor = `${input.fromCurrency}-${input.toCurrency}`;
       const fee = calculateFee(input.amount, corridor);
-      const fxRate = await getFxRate(input.fromCurrency, input.toCurrency);
-      const creditAmount = input.amount * fxRate;
+      const fx = await getIndicativeFxRate(input.fromCurrency, input.toCurrency);
+      const creditAmount = input.amount * fx.rate;
       const deliveryMap: Record<string, string> = {
         wallet: "Instant",
         mobile_money: "5 minutes",
         bank_transfer: "1-2 business days",
         cash_pickup: "30 minutes",
       };
+      // W9-Q6 (F13-3): quote honesty. This quote is NOT bound to an enforced
+      // rate lock (send recomputes the rate), so it must not promise
+      // validForSeconds/expiresAt. It is indicative-only; when the rate came
+      // from the static fallback table it is additionally tagged
+      // { stale: true, executable: false } (W9-Q5, Wave 7 C7 pattern) and
+      // send will refuse to execute until a live rate is available.
       return {
         sendAmount: input.amount,
         fee: fee.totalFee,
         feeBreakdown: fee.feeBreakdown,
         totalCharged: input.amount + fee.totalFee,
-        fxRate,
+        fxRate: fx.rate,
         receiveAmount: creditAmount,
         fromCurrency: input.fromCurrency,
         toCurrency: input.toCurrency,
         estimatedDelivery: deliveryMap[input.payoutMethod] || "1-3 business days",
-        validForSeconds: 300,
-        expiresAt: new Date(Date.now() + 300_000).toISOString(),
+        indicative: true,
+        source: fx.source,
+        stale: fx.stale,
+        executable: fx.executable,
       };
     }),
 
@@ -67,8 +75,28 @@ export const transferCoreRouter = router({
       beneficiaryAccount: z.string().min(1).max(50),
       purpose: z.string().min(1).max(100),
       sourceOfFunds: z.string().min(1).max(100),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      // D3: TOTP step-up gate (Contract 2) — enrolled users MUST pass 2FA to
+      // move money on this rail; fail closed when the enrollment lookup is
+      // unavailable.
+      {
+        const { getTotpEnrollment, verifyTOTP } = await import("../totp");
+        const enrollment = await getTotpEnrollment(ctx.user.id);
+        if (!enrollment.dbAvailable) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — transfer blocked" });
+        }
+        if (enrollment.enabled && enrollment.secret) {
+          if (!input.totpCode) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+          }
+          const valid = await verifyTOTP(input.totpCode, enrollment.secret);
+          if (!valid) {
+            throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+          }
+        }
+      }
       // Pipeline: sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications
       const transferRef = `CORE-${Date.now()}-${ctx.user.id}`;
       const pipelineResult = await executeTransferPipeline({
@@ -87,48 +115,62 @@ export const transferCoreRouter = router({
         metadata: { payoutMethod: input.payoutMethod, purpose: input.purpose, sourceOfFunds: input.sourceOfFunds },
       });
 
-      const result = await executeTransfer({
-        senderId: ctx.user.id,
-        recipientId: input.recipientId,
-        amount: input.amount,
-        fromCurrency: input.fromCurrency,
-        toCurrency: input.toCurrency,
-        corridor: `${input.fromCurrency}-${input.toCurrency}`,
-        beneficiaryName: input.beneficiaryName,
-        beneficiaryAccount: input.beneficiaryAccount,
-        payoutMethod: input.payoutMethod,
-        purpose: input.purpose,
-        sourceOfFunds: input.sourceOfFunds,
-      });
+      // FF-FIX (CRITICAL): one reference everywhere — the pipeline hold, the
+      // transfers row, and the ledger entries all share transferRef (the old
+      // CORE-/TXN- split broke cancel/track/compensation). The engine now
+      // performs the sender debit (amount+fee), recipient credit, and fee
+      // record ATOMICALLY in one DB transaction.
+      // W9-Q5: the engine now THROWS (e.g. UNAVAILABLE when no live FX rate)
+      // instead of executing on a static fallback rate. Nothing was debited,
+      // but the pipeline may have created a TB hold — compensate it before
+      // rethrowing so no orphan hold is left behind.
+      let result: Awaited<ReturnType<typeof executeTransfer>>;
+      try {
+        result = await executeTransfer({
+          senderId: ctx.user.id,
+          recipientId: input.recipientId,
+          amount: input.amount,
+          fromCurrency: input.fromCurrency,
+          toCurrency: input.toCurrency,
+          corridor: `${input.fromCurrency}-${input.toCurrency}`,
+          beneficiaryName: input.beneficiaryName,
+          beneficiaryAccount: input.beneficiaryAccount,
+          payoutMethod: input.payoutMethod,
+          purpose: input.purpose,
+          sourceOfFunds: input.sourceOfFunds,
+          referenceId: transferRef,
+        });
+      } catch (err) {
+        if (pipelineResult.tigerBeetleRecorded) {
+          const compensation = await compensateFailedTransfer({
+            transferId: transferRef,
+            userId: ctx.user.id,
+            amount: input.amount,
+            currency: input.fromCurrency,
+            reason: err instanceof Error ? err.message : "Transfer engine threw",
+            stage: "settlement",
+          }).catch(() => ({ compensated: false }));
+          if (!compensation.compensated) {
+            logger.error({ transferRef }, "[TransferCore] Compensation failed after engine throw — manual reconciliation required");
+          }
+        }
+        throw err;
+      }
 
-      // FF-001 settlement wiring: the pipeline created a TB pending hold under
-      // transferRef. On success, settle it — post the TB hold in full AND debit
-      // the PG wallet atomically (journaled in settlement_journal, replay-safe).
-      // On failure, compensate — void the hold (state-aware, no blind refunds).
-      if (result.status === "completed") {
+      // Settlement wiring: the pipeline created a TB pending hold under
+      // transferRef. On success (completed or pending-rail), post the hold —
+      // skipPgDebit because the engine already debited the PG wallet
+      // atomically. On failure, compensate — void the hold (state-aware, no
+      // blind refunds; the engine's failed status means NO PG debit happened).
+      if (result.status !== "failed") {
         if (pipelineResult.tigerBeetleRecorded) {
           await settleTransferHold({
             transferId: transferRef,
             userId: ctx.user.id,
             amount: input.amount,
             currency: input.fromCurrency,
+            skipPgDebit: true,
           });
-        } else {
-          // No TB hold (dev/no-ledger mode): PG-only guarded debit.
-          const db = await getDb();
-          if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-          const debitAmount = input.amount.toFixed(2);
-          const debitRows = (await db.execute(sql`
-            UPDATE wallets
-            SET balance = CAST(balance AS NUMERIC) - ${debitAmount}, "updatedAt" = NOW()
-            WHERE "userId" = ${ctx.user.id}
-              AND currency = ${input.fromCurrency}
-              AND CAST(balance AS NUMERIC) >= ${debitAmount}
-            RETURNING id
-          `)) as unknown as Array<{ id: number }>;
-          if (debitRows.length === 0) {
-            throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient wallet balance" });
-          }
         }
       } else if (pipelineResult.tigerBeetleRecorded) {
         const compensation = await compensateFailedTransfer({
@@ -178,26 +220,63 @@ export const transferCoreRouter = router({
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) return { success: false, reason: "Database unavailable" };
-      const result = await db.execute(sql`
-        UPDATE transactions 
-        SET status = 'cancelled', "updatedAt" = NOW()
-        WHERE reference = ${input.referenceId} 
-        AND "userId" = ${ctx.user.id} 
-        AND status IN ('pending', 'processing')
-        RETURNING id, amount, currency
-      `);
-      const rows = result as unknown as { id: number; amount: string; currency: string }[];
-      if (rows.length === 0) return { success: false, reason: "Transfer not found or not cancellable" };
+
+      // FF-FIX: cancel against the `transfers` table (where the engine writes,
+      // under the unified reference) with a guarded single-winner transition,
+      // refunding the original debit (amount + fee) atomically. The old code
+      // updated `transactions` — a no-op against real transfers.
+      let refundAmount = 0;
+      let refundCurrency: string | null = null;
+      const cancelled = await db.transaction(async (tx: any) => {
+        const rows = (await tx.execute(sql`
+          UPDATE transfers
+          SET status = 'cancelled', "updatedAt" = NOW()
+          WHERE "referenceId" = ${input.referenceId}
+            AND "userId" = ${ctx.user.id}
+            AND status = 'pending'
+          RETURNING id, "fromAmount", fee, "fromCurrency"
+        `)) as unknown as Array<{ id: number; fromAmount: string; fee: string | null; fromCurrency: string }>;
+        if (rows.length === 0) return null;
+        const refund = (Number(rows[0].fromAmount) + Number(rows[0].fee ?? 0)).toFixed(2);
+        const creditRows = (await tx.execute(sql`
+          UPDATE wallets
+          SET balance = CAST(balance AS NUMERIC) + ${refund}, "updatedAt" = NOW(), version = version + 1
+          WHERE "userId" = ${ctx.user.id} AND currency = ${rows[0].fromCurrency} AND status = 'active'
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (creditRows.length === 0) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Refund credit failed — transfer NOT cancelled; manual recovery required" });
+        }
+        refundAmount = Number(rows[0].fromAmount);
+        refundCurrency = rows[0].fromCurrency;
+        return rows[0];
+      });
+
+      if (!cancelled) {
+        // Legacy fallback: pre-unification rows in `transactions`.
+        const result = await db.execute(sql`
+          UPDATE transactions
+          SET status = 'cancelled', "updatedAt" = NOW()
+          WHERE reference = ${input.referenceId}
+          AND "userId" = ${ctx.user.id}
+          AND status IN ('pending', 'processing')
+          RETURNING id, amount, currency
+        `);
+        const rows = result as unknown as { id: number; amount: string; currency: string }[];
+        if (rows.length === 0) return { success: false, reason: "Transfer not found or not cancellable" };
+        refundAmount = Math.abs(Number(rows[0].amount));
+        refundCurrency = rows[0].currency;
+      }
+
       // FF-001: release any TigerBeetle hold created for this reference.
       // State-aware: no-op when no hold exists; never blind-refunds.
-      const txAmount = Number(rows[0].amount);
-      if (txAmount > 0 && rows[0].currency) {
+      if (refundAmount > 0 && refundCurrency) {
         try {
           await compensateFailedTransfer({
             transferId: input.referenceId,
             userId: ctx.user.id,
-            amount: Math.abs(txAmount),
-            currency: rows[0].currency,
+            amount: refundAmount,
+            currency: refundCurrency,
             reason: input.reason ?? "Transfer cancelled by user",
             stage: "settlement",
           });
@@ -273,6 +352,26 @@ export const transferCoreRouter = router({
       currency: z.string().length(3),
     }))
     .mutation(async ({ input, ctx }) => {
+      // FF-FIX: never let a caller-supplied amount desynchronize PG from TB —
+      // when a transfers row exists for this reference, the settle amount and
+      // currency must match the original transfer.
+      const db = await getDb();
+      if (db) {
+        const rows = (await db.execute(sql`
+          SELECT "fromAmount", "fromCurrency" FROM transfers
+          WHERE "referenceId" = ${input.referenceId} AND "userId" = ${ctx.user.id}
+          LIMIT 1
+        `)) as unknown as Array<{ fromAmount: string; fromCurrency: string }>;
+        if (rows.length > 0) {
+          const orig = rows[0];
+          if (Math.abs(Number(orig.fromAmount) - input.amount) > 0.005 || orig.fromCurrency !== input.currency) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: `Settle amount/currency must match the original transfer (${orig.fromAmount} ${orig.fromCurrency})`,
+            });
+          }
+        }
+      }
       const result = await settleTransferHold({
         transferId: input.referenceId,
         userId: ctx.user.id,
