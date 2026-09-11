@@ -30,9 +30,28 @@ export const scheduledTransfersV117Router = router({
         maxRuns: z.number().int().positive().optional(),
         description: z.string().max(200).optional(),
         promoCode: z.string().max(50).optional(),
+        totpCode: z.string().regex(/^\d{6}$/).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
+      // Contract 2 TOTP step-up: scheduled transfers authorize FUTURE money
+      // movement — enrolled users MUST pass 2FA; fail closed on lookup errors.
+      {
+        const { getTotpEnrollment, verifyTOTP } = await import("../totp.js");
+        const enrollment = await getTotpEnrollment(ctx.user.id);
+        if (!enrollment.dbAvailable) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — scheduled transfer blocked" });
+        }
+        if (enrollment.enabled && enrollment.secret) {
+          if (!input.totpCode) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+          }
+          const valid = await verifyTOTP(input.totpCode, enrollment.secret);
+          if (!valid) {
+            throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+          }
+        }
+      }
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -146,9 +165,32 @@ export const scheduledTransfersV117Router = router({
         nextRunAt: z.string().datetime().optional(),
         maxRuns: z.number().int().positive().nullable().optional(),
         description: z.string().max(200).optional(),
+        totpCode: z.string().regex(/^\d{6}$/).optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
+      // W12 (V-B-1d) TOTP step-up: updates change FUTURE money movement
+      // (amount/frequency/destination timing) authorized under the creation
+      // gate, so changes require the same 2FA step-up. Fail closed on lookup
+      // errors — mirrors the create gate above. The automated executor is a
+      // system actor and never bypasses this gate (it cannot create/modify
+      // schedules at all — see scheduledPaymentExecutor.ts header).
+      {
+        const { getTotpEnrollment, verifyTOTP } = await import("../totp.js");
+        const enrollment = await getTotpEnrollment(ctx.user.id);
+        if (!enrollment.dbAvailable) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — scheduled transfer update blocked" });
+        }
+        if (enrollment.enabled && enrollment.secret) {
+          if (!input.totpCode) {
+            throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+          }
+          const valid = await verifyTOTP(input.totpCode, enrollment.secret);
+          if (!valid) {
+            throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+          }
+        }
+      }
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const updates: Record<string, unknown> = {};
