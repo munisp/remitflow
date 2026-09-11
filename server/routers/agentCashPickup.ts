@@ -208,6 +208,7 @@ export const agentCashPickupRouter = router({
       pickupCode: z.string().length(6, "Pickup code must be 6 digits"),
       recipientIdType: z.enum(["national_id", "passport", "drivers_license", "voter_card"]),
       recipientIdNumber: z.string().min(3).max(30),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       // Acquire distributed lock to prevent concurrent reversal + disbursement
@@ -225,6 +226,11 @@ export const agentCashPickupRouter = router({
       if (!agent || agent.status === "suspended") {
         throw new TRPCError({ code: "FORBIDDEN", message: "Agent account not active or not found." });
       }
+
+      // W12: canonical TOTP step-up (fail-closed) — the agent disburses cash
+      // against their float; money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "cash pickup disbursement");
 
       // Verify the transfer hasn't been reversed while we were waiting for the lock
       const txStateRows = await db.execute(sql`
@@ -299,6 +305,30 @@ export const agentCashPickupRouter = router({
         });
       }
 
+      // W12 (CRITICAL reorder): sanctions/fraud screening MUST complete
+      // (fail-closed) BEFORE any money moves or the assignment is marked
+      // disbursed. Previously the pipeline ran AFTER the float debit, the
+      // disbursement record and the completion update — a sanctions hit could
+      // not un-disburse cash already handed over.
+      const ref = `CP-${Date.now()}-${randomBytes(3).toString("hex").toUpperCase()}`;
+      const commissionRate = Number(agent.commissionRate ?? 1.5);
+      const commission = amount * commissionRate / 100;
+
+      // Run pipeline (sanctions, fraud ML, TigerBeetle, Kafka) — throws on rejection
+      const pipelineResult = await executeTransferPipeline({
+        userId: ctx.user.id,
+        amount,
+        fromCurrency: assignment.currency,
+        toCurrency: assignment.currency,
+        recipientName: assignment.recipient_name,
+        rail: "cash_pickup",
+        corridorCode: "NG",
+        featureLabel: "cash_pickup_disbursement",
+        transferId: ref,
+        description: `Cash pickup via agent ${agent.agentCode}`,
+        metadata: { agentCode: agent.agentCode, originalRef: input.transferReference, commission },
+      });
+
       // Deduct from agent wallet with pessimistic balance check (prevents negative balance)
       if (wallet) {
         const [updated] = await db
@@ -315,10 +345,6 @@ export const agentCashPickupRouter = router({
       }
 
       // Record the disbursement transaction
-      const ref = `CP-${Date.now()}-${randomBytes(3).toString("hex").toUpperCase()}`;
-      const commissionRate = Number(agent.commissionRate ?? 1.5);
-      const commission = amount * commissionRate / 100;
-
       await db.insert(transactions).values({
         userId: ctx.user.id,
         type: "withdrawal" as any,
@@ -362,21 +388,6 @@ export const agentCashPickupRouter = router({
             updated_at = NOW()
         WHERE id = ${assignment.id}
       `);
-
-      // Run pipeline (sanctions, fraud ML, TigerBeetle, Kafka)
-      const pipelineResult = await executeTransferPipeline({
-        userId: ctx.user.id,
-        amount,
-        fromCurrency: assignment.currency,
-        toCurrency: assignment.currency,
-        recipientName: assignment.recipient_name,
-        rail: "cash_pickup",
-        corridorCode: "NG",
-        featureLabel: "cash_pickup_disbursement",
-        transferId: ref,
-        description: `Cash pickup via agent ${agent.agentCode}`,
-        metadata: { agentCode: agent.agentCode, originalRef: input.transferReference, commission },
-      });
 
       // Notify the sender that pickup was completed
       const txRows = await db.execute(sql`
@@ -623,43 +634,68 @@ export const floatReplenishmentRouter = router({
 
       const creditAmount = input.verifiedAmount ?? Number(request.amount);
 
-      // Credit agent wallet
-      await db.execute(sql`
-        INSERT INTO wallets ("userId", currency, balance, "createdAt", "updatedAt")
-        VALUES (${request.user_id}, ${request.currency}, 0, NOW(), NOW())
-        ON CONFLICT ("userId", currency) DO NOTHING
-      `);
-      await db.execute(sql`
-        UPDATE wallets
-        SET balance = CAST(CAST(balance AS DECIMAL(18,2)) + ${creditAmount} AS VARCHAR),
-            "updatedAt" = NOW()
-        WHERE "userId" = ${request.user_id} AND currency = ${request.currency}
-      `);
-
-      // Record deposit transaction
+      // NOTE (schema follow-up REQUIRED): wallets has NO unique constraint on
+      // ("userId", currency) — the previous `ON CONFLICT ("userId", currency)`
+      // clause threw 42P10 at runtime. A UNIQUE constraint + duplicate-dedupe
+      // migration must be added by the schema owner. Until then the wallet is
+      // ensured with an existence check and credited by primary key.
       const depositRef = `FD-${Date.now()}-${randomBytes(3).toString("hex").toUpperCase()}`;
-      await db.insert(transactions).values({
-        userId: request.user_id,
-        type: "deposit" as any,
-        status: "completed" as any,
-        fromCurrency: request.currency,
-        fromAmount: creditAmount.toFixed(2) as any,
-        description: `Float top-up approved — ${input.reference}`,
-        reference: depositRef,
-        metadata: JSON.stringify({
-          txType: "float_topup",
-          topUpReference: input.reference,
-          approvedBy: ctx.user.id,
-        }),
-      } as any);
 
-      // Update request status
-      await db.execute(sql`
-        UPDATE float_topup_requests
-        SET status = 'approved', verified_amount = ${creditAmount},
-            approved_by = ${ctx.user.id}, approved_at = NOW(), updated_at = NOW()
-        WHERE id = ${request.id}
-      `);
+      // FF-FIX: single-winner claim + wallet credit + deposit record in ONE
+      // transaction — concurrent admin approvals can no longer double-credit.
+      await db.transaction(async (tx: any) => {
+        const claimRows = (await tx.execute(sql`
+          UPDATE float_topup_requests
+          SET status = 'approved', verified_amount = ${creditAmount},
+              approved_by = ${ctx.user.id}, approved_at = NOW(), updated_at = NOW()
+          WHERE reference = ${input.reference} AND status = 'pending_verification'
+          RETURNING id
+        `)) as unknown as { rows?: Array<{ id: number }> };
+        if (((claimRows.rows ?? (claimRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>).length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Top-up request already processed" });
+        }
+
+        // Ensure wallet, then credit by primary key with a row-count check.
+        const wRows = (await tx.execute(sql`
+          SELECT id FROM wallets WHERE "userId" = ${request.user_id} AND currency = ${request.currency} LIMIT 1
+        `)) as unknown as { rows?: Array<{ id: number }> };
+        let walletId = ((wRows.rows ?? (wRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>)[0]?.id;
+        if (!walletId) {
+          const insRows = (await tx.execute(sql`
+            INSERT INTO wallets ("userId", currency, balance, "createdAt", "updatedAt")
+            VALUES (${request.user_id}, ${request.currency}, 0, NOW(), NOW())
+            RETURNING id
+          `)) as unknown as { rows?: Array<{ id: number }> };
+          walletId = ((insRows.rows ?? (insRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>)[0]?.id;
+        }
+        const creditRows = (await tx.execute(sql`
+          UPDATE wallets
+          SET balance = CAST(CAST(balance AS DECIMAL(18,2)) + ${creditAmount} AS VARCHAR),
+              "updatedAt" = NOW()
+          WHERE id = ${walletId}
+          RETURNING id
+        `)) as unknown as { rows?: Array<{ id: number }> };
+        if (((creditRows.rows ?? (creditRows as unknown as Array<{ id: number }>)) as Array<{ id: number }>).length === 0) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Float credit failed — approval rolled back" });
+        }
+
+        // Record deposit transaction
+        // W9/Q9: tx_type enum has no "deposit" — float top-up maps to "topup"; semantics kept in description/metadata.txType
+        await tx.insert(transactions).values({
+          userId: request.user_id,
+          type: "topup",
+          status: "completed" as any,
+          fromCurrency: request.currency,
+          fromAmount: creditAmount.toFixed(2) as any,
+          description: `Float top-up approved — ${input.reference}`,
+          reference: depositRef,
+          metadata: JSON.stringify({
+            txType: "float_topup",
+            topUpReference: input.reference,
+            approvedBy: ctx.user.id,
+          }),
+        } as any);
+      });
 
       // Notify agent
       broadcastUserEvent(request.user_id, {
