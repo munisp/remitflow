@@ -32,6 +32,7 @@ import {
 import { eq, desc, and, or, ilike, gte, lte, sql, isNull } from "drizzle-orm";
 import { notifyOwner } from "../_core/notification";
 import { randomBytes } from "crypto";
+import { encryptField, decryptField } from "../_core/secretBox";
 import { broadcastAdminEvent } from "../sse.service";
 import { safeParseAmount } from "../lib/safeDecimal";
 
@@ -780,14 +781,17 @@ export const mfaRouter = router({
     const issuer = "RemitFlow";
     const accountName = ctx.user.email ?? ctx.user.name ?? "user";
     const otpAuthUrl = `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(accountName)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
-    // Upsert MFA settings with new secret (not yet enabled)
+    // Upsert MFA settings with new secret (not yet enabled).
+    // W9/Q3: TOTP secret is encrypted at rest (AES-256-GCM via secretBox); the
+    // plaintext secret is only returned here for enrolment QR/display.
+    const storedSecret = encryptField(secret);
     await db.insert(mfaSettings).values({
       userId: ctx.user.id,
-      totpSecret: secret,
+      totpSecret: storedSecret,
       totpEnabled: false,
     }).onConflictDoUpdate({
       target: mfaSettings.userId,
-      set: { totpSecret: secret, totpEnabled: false },
+      set: { totpSecret: storedSecret, totpEnabled: false },
     }).returning();
     return { secret, otpAuthUrl, qrCodeUrl: `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(otpAuthUrl)}` };
   }),
@@ -799,8 +803,10 @@ export const mfaRouter = router({
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [setting] = await db.select().from(mfaSettings).where(eq(mfaSettings.userId, ctx.user.id));
       if (!setting?.totpSecret) throw new TRPCError({ code: "BAD_REQUEST", message: "MFA not enrolled" });
-      // Validate TOTP code (simplified: accept any 6-digit code in sandbox)
-      const isValid = /^\d{6}$/.test(input.code);
+      // D2: actually verify the TOTP against the enrolled secret — never a regex-only pass.
+      const { verifyTOTP } = await import("../totp");
+      // W9/Q3: secret may be encrypted at rest — decryptField is dual-read (legacy plaintext passes through).
+      const isValid = await verifyTOTP(input.code, decryptField(setting.totpSecret));
       if (!isValid) {
         await db.update(mfaSettings).set({ failedAttempts: (setting.failedAttempts ?? 0) + 1 }).where(eq(mfaSettings.userId, ctx.user.id)).returning();
         throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid TOTP code" });
@@ -826,6 +832,20 @@ export const mfaRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // D2: disabling MFA is an account-security mutation — a valid TOTP code
+      // is MANDATORY whenever an enrollment exists (fail closed on lookup
+      // failure and on invalid codes). Never silently skip verification.
+      const { getTotpEnrollment, verifyTOTP } = await import("../totp");
+      const enrollment = await getTotpEnrollment(ctx.user.id);
+      if (!enrollment.dbAvailable) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — disable blocked" });
+      }
+      if (enrollment.enabled && enrollment.secret) {
+        const valid = await verifyTOTP(input.code, enrollment.secret);
+        if (!valid) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+        }
+      }
       const [_row] = await db.update(mfaSettings).set({ totpEnabled: false }).where(eq(mfaSettings.userId, ctx.user.id)).returning();
       await db.insert(securityEvents).values({
         userId: ctx.user.id,
