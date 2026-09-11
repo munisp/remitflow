@@ -2,6 +2,7 @@ import { randomBytes, timingSafeEqual } from "crypto";
 import { createHmac } from "crypto";
 import { generateSecret, generateURI } from "otplib";
 import QRCode from "qrcode";
+import { decryptField } from "./_core/secretBox";
 
 export interface TOTPResult {
   secret: string;
@@ -89,11 +90,12 @@ export async function getTotpEnrollment(userId: number): Promise<TotpEnrollment>
   const { mfaSettings, users } = await import("../drizzle/schema");
   const [mfa] = await db.select().from(mfaSettings).where(eq(mfaSettings.userId, userId)).limit(1);
   if (mfa?.totpEnabled && mfa.totpSecret) {
-    return { enabled: true, secret: mfa.totpSecret, dbAvailable: true };
+    // W9/Q3: secrets are encrypted at rest; decryptField is dual-read (legacy plaintext passes through).
+    return { enabled: true, secret: decryptField(mfa.totpSecret), dbAvailable: true };
   }
   const [userRow] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
   if (userRow?.twoFactorEnabled && userRow.twoFactorSecret) {
-    return { enabled: true, secret: userRow.twoFactorSecret, dbAvailable: true };
+    return { enabled: true, secret: decryptField(userRow.twoFactorSecret), dbAvailable: true };
   }
   return { enabled: false, secret: null, dbAvailable: true };
 }
