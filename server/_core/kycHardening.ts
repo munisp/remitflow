@@ -15,7 +15,7 @@
  *  11. KYC portability (W3C Verifiable Credentials)
  */
 
-import { createHmac, randomUUID, randomBytes, sign, createPrivateKey, createPublicKey, generateKeyPairSync, KeyObject } from "crypto";
+import { createHmac, timingSafeEqual, randomUUID, randomBytes, sign, createPrivateKey, createPublicKey, generateKeyPairSync, KeyObject } from "crypto";
 import { logger } from "./logger";
 
 // ── Fail-Closed Mock Guard ──────────────────────────────────────────────────
@@ -34,6 +34,14 @@ export function assertNotMockInProduction(provider: string, apiKey: string): voi
 const ONFIDO_WEBHOOK_SECRET = process.env.ONFIDO_WEBHOOK_SECRET || "";
 const SMILE_WEBHOOK_SECRET = process.env.SMILE_WEBHOOK_SECRET || "";
 
+// W9/Q11: constant-time signature compare — length mismatch is invalid, never throws.
+function safeCompareHex(a: string, b: string): boolean {
+  const ba = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ba.length !== bb.length) return false;
+  return timingSafeEqual(ba, bb);
+}
+
 export function verifyOnfidoWebhook(payload: string, signature: string): boolean {
   if (!ONFIDO_WEBHOOK_SECRET) {
     if (process.env.NODE_ENV === "production") {
@@ -42,7 +50,7 @@ export function verifyOnfidoWebhook(payload: string, signature: string): boolean
     return true; // Dev mode
   }
   const expected = createHmac("sha256", ONFIDO_WEBHOOK_SECRET).update(payload).digest("hex");
-  return signature === expected;
+  return safeCompareHex(signature, expected);
 }
 
 export function verifySmileWebhook(payload: string, signature: string): boolean {
@@ -53,7 +61,7 @@ export function verifySmileWebhook(payload: string, signature: string): boolean 
     return true;
   }
   const expected = createHmac("sha256", SMILE_WEBHOOK_SECRET).update(payload).digest("hex");
-  return signature === expected;
+  return safeCompareHex(signature, expected);
 }
 
 // ── Document Expiry Tracking ────────────────────────────────────────────────
