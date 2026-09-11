@@ -102,9 +102,27 @@ const EXT_SERVICES = {
   rateLimiter:       process.env.RATE_LIMITER_URL        || "http://localhost:8108",
 };
 
+// W9/Q11 (F10-3): no repo-known static service key. Production: missing env =>
+// throw at use (fail closed). Non-production: warn once and disable the call
+// path (never silently proceed with a known/static credential).
+let warnedMissingServiceKey = false;
+function getInternalServiceKey(serviceName: string): string {
+  const key = process.env.INTERNAL_SERVICE_KEY;
+  if (key) return key;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("INTERNAL_SERVICE_KEY is required in production — refusing unauthenticated service call");
+  }
+  if (!warnedMissingServiceKey) {
+    warnedMissingServiceKey = true;
+    logger.warn({}, "INTERNAL_SERVICE_KEY unset — inter-service calls disabled (non-production only)");
+  }
+  throw new TRPCError({ code: "SERVICE_UNAVAILABLE" as "INTERNAL_SERVER_ERROR", message: `Service calls disabled: INTERNAL_SERVICE_KEY is not configured (refusing to call ${serviceName}).` });
+}
+
 // ─── HTTP Helper with Circuit Breaker ─────────────────────────────────────────
 async function callExtService<T>(url: string, body?: object, timeoutMs = 5000): Promise<T> {
   const serviceName = new URL(url).host;
+  const serviceKey = getInternalServiceKey(serviceName);
   const circuit = getCircuit(serviceName);
   if (circuit.open) {
     logger.warn({ service: serviceName, url }, "Circuit breaker is OPEN — request rejected");
@@ -115,7 +133,7 @@ async function callExtService<T>(url: string, body?: object, timeoutMs = 5000): 
   try {
     const res = await fetch(url, {
       method: body ? "POST" : "GET",
-      headers: { "Content-Type": "application/json", "X-Service-Key": process.env.INTERNAL_SERVICE_KEY || "remitflow-internal-2024" },
+      headers: { "Content-Type": "application/json", "X-Service-Key": serviceKey },
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });

@@ -768,10 +768,24 @@ export function checkUserLockout(userId: number): { locked: boolean; retryAfter?
 export function clearUserLockout(userId: number): void { userLockouts.delete(userId); }
 
 // ─── 30. HMAC Request Signing for Service-to-Service Calls (v146) ─────────────
-const SERVICE_SIGNING_SECRET = process.env.SERVICE_SIGNING_SECRET || "remitflow-internal-svc-secret-v146";
+// W9/Q11 (F10-3): no repo-known static fallback. Production: missing env =>
+// throw at use (fail closed). Non-production: ephemeral random secret + warn
+// (signatures invalid across restarts; never a known/static credential).
+let cachedServiceSecret: string | null = null;
+function getServiceSigningSecret(): string {
+  if (cachedServiceSecret) return cachedServiceSecret;
+  const envSecret = process.env.SERVICE_SIGNING_SECRET;
+  if (envSecret) { cachedServiceSecret = envSecret; return envSecret; }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("SERVICE_SIGNING_SECRET is required in production — refusing to sign/verify service requests");
+  }
+  console.warn("[security] SERVICE_SIGNING_SECRET unset — using ephemeral random secret (non-production only)");
+  cachedServiceSecret = crypto.randomBytes(32).toString("hex");
+  return cachedServiceSecret;
+}
 const SIGNATURE_WINDOW_MS = 30_000;
 export function signServiceRequest(payload: string, timestamp: number): string {
-  return crypto.createHmac("sha256", SERVICE_SIGNING_SECRET).update(`${timestamp}:${payload}`).digest("hex");
+  return crypto.createHmac("sha256", getServiceSigningSecret()).update(`${timestamp}:${payload}`).digest("hex");
 }
 export function verifyServiceSignature(payload: string, timestamp: number, signature: string): boolean {
   const now = Date.now();

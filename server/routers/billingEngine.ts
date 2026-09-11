@@ -33,6 +33,40 @@ import {
 import { eq, desc, and, gte, lte, sql } from "drizzle-orm";
 import { logger } from '../_core/logger';
 import { safeParseAmount } from "../lib/safeDecimal";
+import { resolveTenantContext } from "../tenantMiddleware";
+import { tenants } from "../../drizzle/schema";
+
+// ─── Tenant scoping (W9/Q10, F9-9) ────────────────────────────────────────────
+// The billing tenant is derived from the caller's SESSION, never from a bare
+// client-supplied tenantId. A client-supplied tenantId is honored only when the
+// caller is an admin AND the target tenant is verified to exist (fail closed).
+async function resolveBillingTenantId(
+  ctx: { user: { id: number; role?: string | null } },
+  requestedTenantId: string | undefined,
+): Promise<string> {
+  const session = await resolveTenantContext(ctx.user.id);
+  const sessionTenant = session.tenantId != null ? String(session.tenantId) : "default";
+  if (!requestedTenantId || requestedTenantId === "default" || requestedTenantId === sessionTenant) {
+    return sessionTenant;
+  }
+  if (ctx.user.role !== "admin") {
+    // Not the caller's tenant and not an admin — ignore the client-supplied
+    // tenantId and scope to the session tenant.
+    logger.warn({ userId: ctx.user.id, requestedTenantId, sessionTenant }, "[Billing] Cross-tenant tenantId ignored (non-admin)");
+    return sessionTenant;
+  }
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(sql`${tenants.id}::text = ${requestedTenantId} OR ${tenants.slug} = ${requestedTenantId}`)
+    .limit(1);
+  if (!tenant) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Requested tenant does not exist" });
+  }
+  return requestedTenantId;
+}
 
 // ─── Billing Engine HTTP client ───────────────────────────────────────────────
 
@@ -173,11 +207,15 @@ export const billingEngineRouter = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
 
+      // W9-FIX2 (F9-9 residual): scope to the session-derived tenant exactly like
+      // the other call sites — never trust a bare client-supplied tenantId.
+      const tenantId = await resolveBillingTenantId(ctx, input.tenantId);
+
       // 1. Get active billing config for tenant
       const config = await db
         .select()
         .from(billingConfigs)
-        .where(and(eq(billingConfigs.tenantId, input.tenantId), eq(billingConfigs.isActive, true)))
+        .where(and(eq(billingConfigs.tenantId, tenantId), eq(billingConfigs.isActive, true)))
         .limit(1);
 
       const cfg = config[0] ?? {
@@ -196,7 +234,7 @@ export const billingEngineRouter = router({
 
       // 2. Try Go billing engine first, fall back to local computation
       const engineResult = await callBillingEngine("/v1/billing/events/compute", "POST", {
-        tenant_id: input.tenantId,
+        tenant_id: tenantId,
         transaction_id: input.transactionId,
         corridor: input.corridor,
         send_currency: input.sendCurrency,
@@ -249,7 +287,7 @@ export const billingEngineRouter = router({
 
       await db.insert(billingEvents).values({
         eventId,
-        tenantId: input.tenantId,
+        tenantId,
         transactionId: input.transactionId,
         corridor: input.corridor,
         sendCurrency: input.sendCurrency,
@@ -294,10 +332,11 @@ export const billingEngineRouter = router({
     .query(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const tenantId = await resolveBillingTenantId(ctx, input.tenantId);
       const configs = await db
         .select()
         .from(billingConfigs)
-        .where(and(eq(billingConfigs.tenantId, input.tenantId), eq(billingConfigs.isActive, true)))
+        .where(and(eq(billingConfigs.tenantId, tenantId), eq(billingConfigs.isActive, true)))
         .limit(1);
       return configs[0] ?? null;
     }),
@@ -385,11 +424,11 @@ export const billingEngineRouter = router({
       limit: z.number().int().min(1).max(200).default(50),
       offset: z.number().int().min(0).default(0),
     }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      const conditions = [eq(billingEvents.tenantId, input.tenantId)];
+      const conditions = [eq(billingEvents.tenantId, await resolveBillingTenantId(ctx, input.tenantId))];
       if (input.corridor) conditions.push(eq(billingEvents.corridor, input.corridor));
       if (input.fromMs) conditions.push(gte(billingEvents.eventTimestampMs, input.fromMs));
       if (input.toMs) conditions.push(lte(billingEvents.eventTimestampMs, input.toMs));
@@ -413,10 +452,11 @@ export const billingEngineRouter = router({
       tenantId: z.string().default("default"),
       periodDays: z.number().int().min(1).max(365).default(30),
     }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
+      const tenantId = await resolveBillingTenantId(ctx, input.tenantId);
       const fromMs = Date.now() - input.periodDays * 24 * 60 * 60 * 1000;
 
       const result = await db
@@ -436,14 +476,14 @@ export const billingEngineRouter = router({
         .from(billingEvents)
         .where(
           and(
-            eq(billingEvents.tenantId, input.tenantId),
+            eq(billingEvents.tenantId, tenantId),
             gte(billingEvents.eventTimestampMs, fromMs)
           )
         );
 
       const r = result[0];
       return {
-        tenantId: input.tenantId,
+        tenantId,
         periodDays: input.periodDays,
         totalTransactions: Number(r?.totalTransactions ?? 0),
         totalSendVolumeMinor: Number(r?.totalSendVolumeMinor ?? 0),
@@ -466,10 +506,11 @@ export const billingEngineRouter = router({
       tenantId: z.string().default("default"),
       periodDays: z.number().int().min(1).max(365).default(30),
     }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
+      const tenantId = await resolveBillingTenantId(ctx, input.tenantId);
       const fromMs = Date.now() - input.periodDays * 24 * 60 * 60 * 1000;
 
       return db
@@ -486,7 +527,7 @@ export const billingEngineRouter = router({
         .from(billingEvents)
         .where(
           and(
-            eq(billingEvents.tenantId, input.tenantId),
+            eq(billingEvents.tenantId, tenantId),
             gte(billingEvents.eventTimestampMs, fromMs)
           )
         )
@@ -500,13 +541,14 @@ export const billingEngineRouter = router({
       tenantId: z.string().default("default"),
       limit: z.number().int().min(1).max(100).default(20),
     }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const tenantId = await resolveBillingTenantId(ctx, input.tenantId);
       return db
         .select()
         .from(billingConfigHistory)
-        .where(eq(billingConfigHistory.tenantId, input.tenantId))
+        .where(eq(billingConfigHistory.tenantId, tenantId))
         .orderBy(desc(billingConfigHistory.changedAtMs))
         .limit(input.limit);
     }),
