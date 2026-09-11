@@ -28,6 +28,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"log/slog"
 	_ "github.com/lib/pq"
@@ -242,6 +243,7 @@ func routeViaMojaloop(cfg Config, req GhIPSSTransferRequest) bool {
 		"transferId": req.TransferID,
 		"payerFsp":   "remitflow",
 		"payeeFsp":   "gh-bank-" + req.ReceiverBank,
+
 		"amount":     fmt.Sprintf("%.2f", req.SendAmount),
 		"currency":   req.SendCurrency,
 		"ilpPacket":  "GHIPSS_ROUTED",
@@ -523,21 +525,23 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
+	// FAIL CLOSED: resolve INTERNAL_SERVICE_KEY once at startup — there is no
+	// well-known default internal credential. Comparison is constant-time.
+	internalKey := os.Getenv("INTERNAL_SERVICE_KEY")
+	if internalKey == "" {
+		log.Fatal("INTERNAL_SERVICE_KEY is not set: refusing to fall back to a well-known default credential; configure the internal service key explicitly")
+	}
 	r.Use(func(c *gin.Context) {
 		if c.Request.URL.Path == "/health" || c.Request.URL.Path == "/healthz" || c.Request.URL.Path == "/metrics" {
 			c.Next()
 			return
 		}
-		key := os.Getenv("INTERNAL_SERVICE_KEY")
-		if key == "" {
-			key = "remitflow-internal-2026"
-		}
-		if apiKey := c.GetHeader("X-API-Key"); apiKey == key {
+		if apiKey := c.GetHeader("X-API-Key"); subtle.ConstantTimeCompare([]byte(apiKey), []byte(internalKey)) == 1 {
 			c.Next()
 			return
 		}
 		auth := c.GetHeader("Authorization")
-		if len(auth) > 7 && auth[:7] == "Bearer " && auth[7:] == key {
+		if len(auth) > 7 && auth[:7] == "Bearer " && subtle.ConstantTimeCompare([]byte(auth[7:]), []byte(internalKey)) == 1 {
 			c.Next()
 			return
 		}
