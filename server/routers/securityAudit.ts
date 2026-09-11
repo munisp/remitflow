@@ -371,7 +371,8 @@ export const securityAuditRouter = router({
     .mutation(async ({ input }) => {
       const result = await db.requestSelfUnlock(input.userId);
       if (!result.ok) throw new TRPCError({ code: "BAD_REQUEST", message: result.error });
-      return { ok: true, message: "Unlock email sent. Check your inbox — the link expires in 1 hour." };
+      // Uniform response — does not reveal whether the account exists or is locked.
+      return { ok: true, message: "If this account is locked, an unlock link has been sent to its registered email address. The link expires in 1 hour." };
     }),
 
   verifySelfUnlock: publicProcedure
