@@ -40,6 +40,7 @@ import {
   kycDocuments,
   kycLifecycle,
   kycLifecycleHistory,
+  ledgerTransfers,
   systemConfig,
   systemConfigAuditLog,
   tenantFeatureFlags,
@@ -49,12 +50,14 @@ import {
   velocityOverrides,
   velocityRules,
   velocityWhitelist,
+  wallets,
   webhookDeliveries,
   webhookEndpoints,
   webhookRetryQueue,
 } from "../../drizzle/schema.js";
 import { sendAuditLog, runComplianceCheck, getFraudScore } from "../_core/polyglotClient.js";
 import { auditCoreOperation } from "../middleware/coreAtomicity.js";
+import { resolveTenantContext } from "../tenantMiddleware.js";
 import { KAFKA_TOPICS } from "../middleware/kafka.js";
 import { BACKOFF_DELAYS_SECONDS, processPendingWebhookRetries } from "../lib/webhookRetryQueue.js";
 
@@ -907,6 +910,41 @@ export const apiKeyRotationRouter = router({
 });
 
 // ─── Batch Payment Partial Failure Handler ───────────────────────────────────
+
+// W12 (V-B-2d): tenant scoping for batch queries. batchPayments has no
+// tenantId column and the schema is read-only here, so scope through the
+// existing tenant_users membership relation: the batch owner must be a member
+// of the caller's resolved tenant. Owners with NO membership resolve to the
+// default tenant (same fallback as resolveTenantContext), so legacy rows only
+// match when the caller's tenant IS the default. Deployments with no tenant
+// rows at all keep userId as the isolation key (single-tenant — honest).
+async function batchTenantScope(userId: number) {
+  const tenant = await resolveTenantContext(userId);
+  if (tenant.tenantId == null) return sql`TRUE`;
+  const isDefault = tenant.tenantSlug === "remitflow-default";
+  return sql`(
+    EXISTS (SELECT 1 FROM tenant_users tu WHERE tu.user_id = ${batchPayments.userId} AND tu.tenant_id = ${tenant.tenantId})
+    OR (${isDefault} AND NOT EXISTS (SELECT 1 FROM tenant_users t0 WHERE t0.user_id = ${batchPayments.userId}))
+  )`;
+}
+
+// W12 (V-B-2b): deterministic per-item idempotency key. Recorded in
+// ledger_transfers.idempotency_key (unique index — the durable exactly-once
+// tripwire) and transactions.idempotency_key before any money movement.
+function batchItemKey(batchId: number, itemId: number): string {
+  return `BATCH-${batchId}-${itemId}`;
+}
+
+// W12 (V-B-2e): thrown when the batch aggregate derived from live item rows
+// contradicts the processing counters — the batch is failed closed for ops
+// reconciliation instead of being marked complete over a lie.
+class BatchCompensationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BatchCompensationError";
+  }
+}
+
 export const batchPaymentV97Router = router({
   // Create batch with line items
   createWithItems: strictRateLimitedProcedure
@@ -925,28 +963,31 @@ export const batchPaymentV97Router = router({
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const totalAmount = input.recipients.reduce((sum, r) => sum + r.amount, 0);
-      // Create batch header
-      const [batch] = await db.insert(batchPayments).values({
-        userId: ctx.user.id,
-        name: input.name,
-        currency: input.currency,
-        totalAmount: String(totalAmount),
-        totalRecipients: input.recipients.length,
-        status: "draft",
-        payments: input.recipients,
-      }).returning();
-      // Create line items
-      await db.insert(batchPaymentItems).values(
-        input.recipients.map(r => ({
-          batchId: batch.id,
-          recipientName: r.recipientName,
-          recipientAccount: r.recipientAccount,
-          recipientBank: r.recipientBank,
-          recipientCountry: r.recipientCountry,
-          amount: String(r.amount),
+      // W12 (V-B-2c): header + line items in ONE transaction — a partial
+      // insert (header without items, or vice versa) rolls back completely.
+      const batch = await db.transaction(async (tx) => {
+        const [b] = await tx.insert(batchPayments).values({
+          userId: ctx.user.id,
+          name: input.name,
           currency: input.currency,
-        }))
-      ).returning();
+          totalAmount: String(totalAmount),
+          totalRecipients: input.recipients.length,
+          status: "draft",
+          payments: input.recipients,
+        }).returning();
+        await tx.insert(batchPaymentItems).values(
+          input.recipients.map(r => ({
+            batchId: b.id,
+            recipientName: r.recipientName,
+            recipientAccount: r.recipientAccount,
+            recipientBank: r.recipientBank,
+            recipientCountry: r.recipientCountry,
+            amount: String(r.amount),
+            currency: input.currency,
+          }))
+        ).returning();
+        return b;
+      });
       await sendAuditLog({ userId: ctx.user.id, action: "batch_payment.create", resource: "batch_payment", resourceId: String(batch.id), severity: "info", details: { totalAmount, count: input.recipients.length } });
       return batch;
     }),
@@ -957,82 +998,237 @@ export const batchPaymentV97Router = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const scope = await batchTenantScope(ctx.user.id);
       const [batch] = await db.select().from(batchPayments)
-        .where(and(eq(batchPayments.id, input.batchId), eq(batchPayments.userId, ctx.user.id))).limit(1);
+        .where(and(eq(batchPayments.id, input.batchId), eq(batchPayments.userId, ctx.user.id), scope)).limit(1);
       if (!batch) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       if (batch.status !== "draft") throw new TRPCError({ code: "BAD_REQUEST", message: "Batch already processed" });
 
-      // Mark as processing
-      await db.update(batchPayments).set({ status: "processing", updatedAt: new Date() }).where(eq(batchPayments.id, input.batchId));
+      // W12 (V-B-2a): guarded single-winner batch claim (draft→processing,
+      // affected-rows==1) — concurrent process calls can never both drive the
+      // same batch.
+      const claimedBatch = await db.update(batchPayments)
+        .set({ status: "processing", updatedAt: new Date() })
+        .where(and(eq(batchPayments.id, input.batchId), eq(batchPayments.status, "draft")))
+        .returning({ id: batchPayments.id });
+      if (claimedBatch.length !== 1) {
+        throw new TRPCError({ code: "CONFLICT", message: "Batch is already being processed by another request" });
+      }
 
       const items = await db.select().from(batchPaymentItems).where(eq(batchPaymentItems.batchId, input.batchId));
       let successCount = 0;
       let failedCount = 0;
+      let skippedCount = 0;
 
       // Process each item independently (partial failure = continue on error)
       for (const item of items) {
+        // W12 (V-B-2a): guarded per-item claim — ONLY 'pending' items are
+        // claimed (pending→processing, affected-rows==1). Submitted/settled/
+        // failed items are never re-executed by this loop, so a re-driven
+        // batch (after retryFailed) can never pay an executed item twice.
+        const claim = await db.update(batchPaymentItems)
+          .set({ status: "processing", processedAt: new Date() })
+          .where(and(
+            eq(batchPaymentItems.id, item.id),
+            eq(batchPaymentItems.batchId, input.batchId),
+            eq(batchPaymentItems.status, "pending")
+          ))
+          .returning();
+        if (claim.length !== 1) {
+          skippedCount++; // already settled/failed/claimed elsewhere
+          continue;
+        }
+        const claimedItem = claim[0];
+        const idemKey = batchItemKey(input.batchId, claimedItem.id);
+
         try {
-          // Fraud check via Python sidecar
-          const fraudResult = await getFraudScore({ transferId: `batch-${item.id}-${Date.now()}`, userId: ctx.user.id, amount: Number(item.amount), fromCountry: "NG", toCountry: item.recipientCountry ?? "US" }).catch(() => ({ fraudScore: 0, riskLevel: 'low', decision: 'approve', factors: [], transferId: '', timestamp: '' }));
-          if (fraudResult.fraudScore > 85) {
-            await db.update(batchPaymentItems)
-              .set({ status: "failed", errorMessage: `Fraud score too high: ${fraudResult.fraudScore}`, processedAt: new Date() })
-              .where(eq(batchPaymentItems.id, item.id)).returning();
-            failedCount++;
-            continue;
+          // Fraud check via Python sidecar — FAIL CLOSED (Wave 7 verification):
+          // a screening outage marks the item failed, never auto-approves.
+          let fraudResult: Awaited<ReturnType<typeof getFraudScore>>;
+          try {
+            fraudResult = await getFraudScore({ transferId: `batch-${claimedItem.id}-${input.batchId}`, userId: ctx.user.id, amount: Number(claimedItem.amount), fromCountry: "NG", toCountry: claimedItem.recipientCountry ?? "US" });
+          } catch (fraudErr) {
+            throw new Error(`Fraud screening unavailable — item blocked (fail closed): ${fraudErr instanceof Error ? fraudErr.message : String(fraudErr)}`);
           }
-          // Create transaction record
-          const [tx] = await db.insert(transactions).values({
-            userId: ctx.user.id,
-            type: "send",
-            status: "completed",
-            fromCurrency: item.currency,
-            fromAmount: item.amount,
-            toCurrency: item.currency,
-            toAmount: item.amount,
-            fee: "0",
-            recipientName: item.recipientName,
-            recipientAccount: item.recipientAccount ?? null,
-            recipientBank: item.recipientBank ?? null,
-            recipientCountry: item.recipientCountry ?? null,
-            reference: `BATCH-${input.batchId}-${item.id}`,
-            description: `Batch payment: ${batch.name}`,
-          }).returning();
-          await db.update(batchPaymentItems)
-            .set({ status: "completed", transactionId: tx.id, processedAt: new Date() })
-            .where(eq(batchPaymentItems.id, item.id)).returning();
+          if (fraudResult.fraudScore > 85) {
+            throw new Error(`Fraud score too high: ${fraudResult.fraudScore}`);
+          }
+
+          // W12 (V-B-2b + gate follow-up): per-item execution is ONE
+          // transaction keyed by the deterministic idempotency key.
+          //   1. Idempotency pre-check — an item with an existing ledger entry
+          //      is skipped (already executed), never re-debited.
+          //   2. ledger_transfers.idempotency_key UNIQUE tripwire inserted
+          //      BEFORE any money movement — a raced duplicate throws on
+          //      conflict and rolls back.
+          //   3. GUARDED WALLET DEBIT — the `wallets` DB table is the
+          //      user-visible system of record (balance endpoints read it:
+          //      db.ts getWalletsByUserId → routers.ts wallet.balance), and
+          //      every real payment path debits it (canonical send:
+          //      routers.ts:1462-1485; p2pInstant.ts:635). A batch item that
+          //      recorded "completed" without debiting was a dishonest
+          //      terminal state; now balance >= amount, affected-rows == 1,
+          //      or the item FAILS honestly (INSUFFICIENT_FUNDS).
+          //   4. EXTERNAL RAIL honesty — the recipient is a bank account, so
+          //      the transaction row is created in status 'pending' (exactly
+          //      like the canonical send path) and the item becomes
+          //      'submitted' — debited, payout instruction recorded, awaiting
+          //      settlement. Settlement ownership: the existing transfer
+          //      settlement pipeline that processes pending `transactions`
+          //      rows (rail confirmations/webhooks — same owner as canonical
+          //      sends, incl. its refund/compensation duty on rail failure)
+          //      flips the transaction to completed/failed; ops
+          //      reconciliation then flips the item to 'completed'/'failed'.
+          //      This executor NEVER fabricates settlement.
+          const execResult = await db.transaction(async (tx) => {
+            const [existingLedger] = await tx
+              .select({ id: ledgerTransfers.id })
+              .from(ledgerTransfers)
+              .where(eq(ledgerTransfers.idempotencyKey, idemKey))
+              .limit(1);
+            if (existingLedger) {
+              const [existingTx] = await tx
+                .select({ id: transactions.id })
+                .from(transactions)
+                .where(eq(transactions.idempotencyKey, idemKey))
+                .limit(1);
+              await tx.update(batchPaymentItems)
+                .set({ status: "submitted", transactionId: existingTx?.id ?? null, errorMessage: null, processedAt: new Date() })
+                .where(and(eq(batchPaymentItems.id, claimedItem.id), eq(batchPaymentItems.status, "processing")));
+              return { replayed: true, txId: existingTx?.id ?? null as number | null };
+            }
+
+            await tx.insert(ledgerTransfers).values({
+              id: idemKey,
+              debitAccountId: `wallet-user:${ctx.user.id}:${claimedItem.currency}`,
+              creditAccountId: `batch-payout-float:${claimedItem.id}`,
+              amount: String(Math.round(Number(claimedItem.amount) * 100)),
+              status: "posted", // the DB debit leg below is real and atomic with this row
+              idempotencyKey: idemKey,
+              code: 1,
+            });
+
+            // Guarded debit of the funding wallet — fail closed.
+            const [wallet] = await tx
+              .select()
+              .from(wallets)
+              .where(and(
+                eq(wallets.userId, ctx.user.id),
+                eq(wallets.currency, claimedItem.currency),
+                eq(wallets.status, "active")
+              ))
+              .limit(1);
+            if (!wallet) {
+              throw new Error(`No active ${claimedItem.currency} funding wallet for batch item ${claimedItem.id}`);
+            }
+            const debited = await tx
+              .update(wallets)
+              .set({ balance: sql`${wallets.balance} - ${claimedItem.amount}`, updatedAt: new Date() })
+              .where(and(
+                eq(wallets.id, wallet.id),
+                sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= CAST(${claimedItem.amount} AS DECIMAL(18,2))`
+              ))
+              .returning({ id: wallets.id });
+            if (debited.length !== 1) {
+              throw new Error(`INSUFFICIENT_FUNDS: wallet ${wallet.id} cannot cover ${claimedItem.amount} ${claimedItem.currency} for batch item ${claimedItem.id}`);
+            }
+
+            // Payout instruction — PENDING until real rail settlement.
+            const [txRow] = await tx.insert(transactions).values({
+              userId: ctx.user.id,
+              type: "send",
+              status: "pending",
+              fromCurrency: claimedItem.currency,
+              fromAmount: claimedItem.amount,
+              toCurrency: claimedItem.currency,
+              toAmount: claimedItem.amount,
+              fee: "0",
+              recipientName: claimedItem.recipientName,
+              recipientAccount: claimedItem.recipientAccount ?? null,
+              recipientBank: claimedItem.recipientBank ?? null,
+              recipientCountry: claimedItem.recipientCountry ?? null,
+              reference: idemKey.slice(0, 64),
+              idempotencyKey: idemKey,
+              description: `Batch payment (awaiting external settlement): ${batch.name}`,
+              metadata: { batchId: input.batchId, itemId: claimedItem.id, awaitingSettlement: true, settlementOwner: "transfer-settlement-pipeline" },
+            }).returning();
+            const settled = await tx.update(batchPaymentItems)
+              .set({ status: "submitted", transactionId: txRow.id, errorMessage: null, processedAt: new Date() })
+              .where(and(eq(batchPaymentItems.id, claimedItem.id), eq(batchPaymentItems.status, "processing")))
+              .returning({ id: batchPaymentItems.id });
+            if (settled.length !== 1) {
+              throw new Error(`Item ${claimedItem.id} ownership lost mid-execution — rolling back before completion`);
+            }
+            return { replayed: false, txId: txRow.id as number | null };
+          });
 
           // Ledger + event backing per settled item: record the double-entry in
           // TigerBeetle and publish to Kafka so each batch payout is reconcilable.
-          await auditCoreOperation({
-            userId: ctx.user.id,
-            action: "batch_payment.item",
-            description: `Batch payment item ${item.id} (${batch.name}): ${item.amount} ${item.currency}`,
-            amount: Number(item.amount),
-            currency: item.currency,
-            featureLabel: "batch_payment",
-            operationRef: `BATCH-${input.batchId}-${item.id}`,
-            kafkaTopic: KAFKA_TOPICS.TRANSACTIONS,
-            metadata: { batchId: input.batchId, itemId: item.id, transactionId: tx.id },
-          }).catch(() => {});
+          // Telemetry only — never blocks or falsifies the money path.
+          if (!execResult.replayed) {
+            await auditCoreOperation({
+              userId: ctx.user.id,
+              action: "batch_payment.item",
+              description: `Batch payment item ${claimedItem.id} (${batch.name}): ${claimedItem.amount} ${claimedItem.currency}`,
+              amount: Number(claimedItem.amount),
+              currency: claimedItem.currency,
+              featureLabel: "batch_payment",
+              operationRef: idemKey,
+              kafkaTopic: KAFKA_TOPICS.TRANSACTIONS,
+              metadata: { batchId: input.batchId, itemId: claimedItem.id, transactionId: execResult.txId },
+            }).catch(() => {});
+          }
           successCount++;
         } catch (err: any) {
           await db.update(batchPaymentItems)
             .set({ status: "failed", errorMessage: err.message?.substring(0, 500) ?? "Unknown error", processedAt: new Date() })
-            .where(eq(batchPaymentItems.id, item.id)).returning();
+            .where(and(eq(batchPaymentItems.id, claimedItem.id), eq(batchPaymentItems.status, "processing"))).returning();
           failedCount++;
         }
       }
 
-      // Update batch status
-      const finalStatus = failedCount === 0 ? "completed" : successCount === 0 ? "failed" : "partial";
+      // W12 (V-B-2e + gate follow-up): derive the batch aggregate from LIVE
+      // item rows and verify it matches the processing counters before
+      // marking the batch complete. 'submitted' items are debited but NOT
+      // settled (external rail pending) — they count as executed, never as
+      // settled. Any mismatch fails closed with a CompensationError.
+      const liveItems = await db.select({ status: batchPaymentItems.status })
+        .from(batchPaymentItems).where(eq(batchPaymentItems.batchId, input.batchId));
+      const liveSettled = liveItems.filter(i => i.status === "completed").length; // settled by rail confirmation
+      const liveSubmitted = liveItems.filter(i => i.status === "submitted").length; // debited, awaiting settlement
+      const liveFailed = liveItems.filter(i => i.status === "failed").length;
+      const liveOpen = liveItems.length - liveSettled - liveSubmitted - liveFailed; // pending/processing leftovers
+      if (liveSettled + liveSubmitted !== successCount || liveFailed !== failedCount) {
+        const compensationError = new BatchCompensationError(
+          `Batch ${input.batchId} aggregate mismatch: counters executed=${successCount} failed=${failedCount} but live items settled=${liveSettled} submitted=${liveSubmitted} failed=${liveFailed} open=${liveOpen} — batch failed closed for ops reconciliation`
+        );
+        await db.update(batchPayments)
+          .set({ status: "failed", successCount: liveSettled + liveSubmitted, failedCount: liveFailed, updatedAt: new Date() })
+          .where(eq(batchPayments.id, input.batchId)).returning();
+        await sendAuditLog({ userId: ctx.user.id, action: "batch_payment.compensation", resource: "batch_payment", resourceId: String(input.batchId), severity: "critical", details: { message: compensationError.message } });
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: compensationError.message });
+      }
+
+      // Batch status from verified reality — 'completed' ONLY when every item
+      // has a real settlement confirmation. Any submitted/open items keep the
+      // batch out of 'completed' (honest pending — see item-level comment for
+      // settlement ownership).
+      const finalStatus = liveOpen > 0
+        ? "partial" // items left unclaimed (e.g. crash recovery pending) — never "completed"
+        : liveFailed === liveItems.length
+          ? "failed"
+          : liveSubmitted > 0
+            ? "partial" // executed but awaiting external settlement — not complete
+            : liveSettled === liveItems.length
+              ? "completed"
+              : "partial"; // mix of settled/failed
       await db.update(batchPayments)
-        .set({ status: finalStatus, successCount, failedCount, updatedAt: new Date() })
+        .set({ status: finalStatus, successCount: liveSettled + liveSubmitted, failedCount: liveFailed, updatedAt: new Date() })
         .where(eq(batchPayments.id, input.batchId)).returning();
 
-      await sendAuditLog({ userId: ctx.user.id, action: "batch_payment.process", resource: "batch_payment", resourceId: String(input.batchId), severity: "info", details: { successCount, failedCount, status: finalStatus } });
+      await sendAuditLog({ userId: ctx.user.id, action: "batch_payment.process", resource: "batch_payment", resourceId: String(input.batchId), severity: "info", details: { settledCount: liveSettled, submittedCount: liveSubmitted, failedCount: liveFailed, skippedCount, status: finalStatus } });
 
-      return { batchId: input.batchId, status: finalStatus, successCount, failedCount, total: items.length };
+      return { batchId: input.batchId, status: finalStatus, settledCount: liveSettled, submittedCount: liveSubmitted, failedCount: liveFailed, skippedCount, total: items.length };
     }),
 
   // Get batch with items
@@ -1041,8 +1237,9 @@ export const batchPaymentV97Router = router({
     .query(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const scope = await batchTenantScope(ctx.user.id);
       const [batch] = await db.select().from(batchPayments)
-        .where(and(eq(batchPayments.id, input.batchId), eq(batchPayments.userId, ctx.user.id))).limit(1);
+        .where(and(eq(batchPayments.id, input.batchId), eq(batchPayments.userId, ctx.user.id), scope)).limit(1);
       if (!batch) return null;
       const items = await db.select().from(batchPaymentItems)
         .where(eq(batchPaymentItems.batchId, input.batchId))
@@ -1056,17 +1253,58 @@ export const batchPaymentV97Router = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const scope = await batchTenantScope(ctx.user.id);
       const [batch] = await db.select().from(batchPayments)
-        .where(and(eq(batchPayments.id, input.batchId), eq(batchPayments.userId, ctx.user.id))).limit(1);
+        .where(and(eq(batchPayments.id, input.batchId), eq(batchPayments.userId, ctx.user.id), scope)).limit(1);
       if (!batch) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
-      // Reset failed items to pending
-      await db.update(batchPaymentItems)
+      // W12 (V-B-2a): only a finished batch may be re-driven; a batch still in
+      // 'processing' is owned by a live (or crashed) process run.
+      if (batch.status === "processing") {
+        throw new TRPCError({ code: "CONFLICT", message: "Batch is currently processing — retry is only allowed on a finished batch" });
+      }
+
+      // W12 (V-B-2a/b): reclaim items stuck in 'processing' honestly — inspect
+      // the per-item idempotency ledger key. A stuck item WITH a ledger entry
+      // already had its debit recorded → mark 'submitted' (executed, awaiting
+      // settlement), never re-execute. A stuck item WITHOUT one rolled back →
+      // reset to pending. 'submitted'/'completed' items are NEVER touched —
+      // their money already moved.
+      const stuckItems = await db.select().from(batchPaymentItems)
+        .where(and(eq(batchPaymentItems.batchId, input.batchId), eq(batchPaymentItems.status, "processing")));
+      let reclaimedCount = 0;
+      for (const stuck of stuckItems) {
+        const idemKey = batchItemKey(input.batchId, stuck.id);
+        const [ledger] = await db.select({ id: ledgerTransfers.id })
+          .from(ledgerTransfers).where(eq(ledgerTransfers.idempotencyKey, idemKey)).limit(1);
+        if (ledger) {
+          const [existingTx] = await db.select({ id: transactions.id })
+            .from(transactions).where(eq(transactions.idempotencyKey, idemKey)).limit(1);
+          await db.update(batchPaymentItems)
+            .set({ status: "submitted", transactionId: existingTx?.id ?? null, errorMessage: null, processedAt: new Date() })
+            .where(and(eq(batchPaymentItems.id, stuck.id), eq(batchPaymentItems.status, "processing")));
+        } else {
+          await db.update(batchPaymentItems)
+            .set({ status: "pending", errorMessage: "Reclaimed from stuck processing — verified no ledger entry, safe to retry", processedAt: null })
+            .where(and(eq(batchPaymentItems.id, stuck.id), eq(batchPaymentItems.status, "processing")));
+          reclaimedCount++;
+        }
+      }
+
+      // Reset ONLY failed items to pending — completed/settled items are
+      // never touched, so re-processing can never pay them twice.
+      const reset = await db.update(batchPaymentItems)
         .set({ status: "pending", errorMessage: null, processedAt: null })
-        .where(and(eq(batchPaymentItems.batchId, input.batchId), eq(batchPaymentItems.status, "failed")));
+        .where(and(eq(batchPaymentItems.batchId, input.batchId), eq(batchPaymentItems.status, "failed")))
+        .returning({ id: batchPaymentItems.id });
+
+      if (reset.length === 0 && reclaimedCount === 0) {
+        return { success: true, verified: true, message: "No failed or stuck items to retry — batch left unchanged.", resetCount: 0 };
+      }
+
       await db.update(batchPayments)
         .set({ status: "draft", updatedAt: new Date() })
         .where(eq(batchPayments.id, input.batchId)).returning();
-      return { success: true, verified: true, message: "Failed items reset to pending. Re-process to retry." };
+      return { success: true, verified: true, message: `${reset.length} failed item(s) reset to pending. Re-process to retry.`, resetCount: reset.length };
     }),
 });
 
