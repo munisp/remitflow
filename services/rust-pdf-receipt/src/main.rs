@@ -656,6 +656,19 @@ async fn batch_receipt(req: web::Json<BatchReceiptRequest>) -> impl Responder {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+
+/// constant_time_eq compares two byte strings without data-dependent early exit.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     std::panic::set_hook(Box::new(|info| {
@@ -674,7 +687,12 @@ async fn main() -> std::io::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     tracing::info!("[rust-pdf-receipt] Starting on {}", addr);
 
-    HttpServer::new(|| {
+    // FAIL CLOSED: no default internal key — refuse to boot when unset.
+    let internal_key = std::env::var("INTERNAL_SERVICE_KEY")
+        .expect("INTERNAL_SERVICE_KEY is not set: refusing to fall back to a well-known default credential; configure the internal service key explicitly");
+    assert!(!internal_key.is_empty(), "INTERNAL_SERVICE_KEY must not be empty");
+    HttpServer::new(move || {
+        let internal_key = internal_key.clone();
         let cors = Cors::default()
             .allow_any_origin()
             .allow_any_method()
@@ -686,14 +704,17 @@ async fn main() -> std::io::Result<()> {
             .service(health)
             .service(
                 web::scope("")
-                    .wrap(actix_web::middleware::from_fn(|req: actix_web::dev::ServiceRequest, next: actix_web::middleware::Next<actix_web::body::BoxBody>| async move {
-                        let key = std::env::var("INTERNAL_SERVICE_KEY").unwrap_or_else(|_| "remitflow-internal-2026".to_string());
-                        let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-                        let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-                        if api_key == key || (auth.starts_with("Bearer ") && auth[7..] == key) {
-                            return next.call(req).await;
+                    .wrap(actix_web::middleware::from_fn(move |req: actix_web::dev::ServiceRequest, next: actix_web::middleware::Next<actix_web::body::BoxBody>| {
+                        let key = internal_key.clone();
+                        async move {
+                            let api_key = req.headers().get("x-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                            let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                            if constant_time_eq(api_key.as_bytes(), key.as_bytes())
+                                || (auth.starts_with("Bearer ") && constant_time_eq(&auth.as_bytes()[7..], key.as_bytes())) {
+                                return next.call(req).await;
+                            }
+                            Err(actix_web::error::ErrorUnauthorized("unauthorized"))
                         }
-                        Err(actix_web::error::ErrorUnauthorized("unauthorized"))
                     }))
                     .service(transfer_receipt)
                     .service(statement_receipt)
