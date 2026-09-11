@@ -16,6 +16,8 @@ import { adminProcedure, protectedProcedure, publicProcedure, router } from "../
 import { getDb } from "../db.js";
 import { sql } from "drizzle-orm";
 import { logger } from '../_core/logger';
+import { validateFile, type FileValidationResult } from "../_core/serviceRegistry";
+import { resolveTenantContext } from "../tenantMiddleware";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function generateApiKey(env: "sandbox" | "production"): { fullKey: string; prefix: string; hash: string } {
@@ -157,6 +159,20 @@ export const partnerApplicationsRouter = router({
       };
       const col = colMap[input.docType];
       if (!col) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid document type" });
+      // W9/Q10 (F9-3): the document must pass the file scanner BEFORE its URL
+      // is stored. validateFile fails closed (throws when the scanner is
+      // unavailable) — any scan failure/unsafe verdict REJECTS the upload.
+      let scan: FileValidationResult;
+      try {
+        scan = await validateFile(input.fileUrl);
+      } catch (scanErr: any) {
+        logger.warn({ err: scanErr?.message, applicationId: input.applicationId, docType: input.docType }, "[Partner] Document scan failed — upload rejected (fail closed)");
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Document could not be scanned for threats — upload rejected. Please retry later." });
+      }
+      if (!scan.safe) {
+        logger.warn({ applicationId: input.applicationId, docType: input.docType, threats: scan.threats }, "[Partner] Unsafe document rejected");
+        throw new TRPCError({ code: "BAD_REQUEST", message: `Document rejected by security scan: ${scan.threats.join(", ") || "unsafe content"}` });
+      }
       const result = await db.execute(sql`
         UPDATE partner_applications
         SET ${sql.raw(col)} = ${input.fileUrl}, submitted_by_user_id = ${ctx.user.id}, updated_at = NOW()
@@ -320,7 +336,6 @@ export const partnerApplicationsRouter = router({
 
       // Update application
       await db.execute(sql`
-        UPDATE partner_applications
         SET status = 'approved', reviewed_by = ${ctx.user.id}, reviewed_at = NOW(),
             approved_at = NOW(), review_notes = ${input.reviewNotes ?? null},
             tenant_id = ${tenantId}, updated_at = NOW()
@@ -482,12 +497,20 @@ export const partnerApiKeysRouter = router({
 export const partnerWebhooksRouter = router({
   list: protectedProcedure
     .input(z.object({ tenantId: z.number().int() }))
-    .query(async ({ input }) => {
+    .query(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W9/Q10 (F9-7): tenant scoping comes from the session, not the client.
+      const session = await resolveTenantContext(ctx.user.id);
+      if (session.tenantId == null) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No tenant associated with your account." });
+      }
+      if (input.tenantId !== session.tenantId && ctx.user.role !== "admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Cannot list webhooks for another tenant" });
+      }
       const rows = await db.execute(sql`
         SELECT id, url, events, is_active, last_delivered_at, failure_count, created_at
-        FROM partner_webhooks WHERE tenant_id = ${input.tenantId} ORDER BY created_at DESC
+        FROM partner_webhooks WHERE tenant_id = ${session.tenantId} ORDER BY created_at DESC
       `);
       return rows as any[];
     }),
@@ -501,10 +524,21 @@ export const partnerWebhooksRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W9/Q10 (F9-7): the webhook tenant comes from the caller's session —
+      // a client-supplied tenantId would register webhooks (and leak signed
+      // events) under another tenant.
+      const session = await resolveTenantContext(ctx.user.id);
+      if (session.tenantId == null) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No tenant associated with your account — cannot register webhooks." });
+      }
+      if (input.tenantId !== session.tenantId && ctx.user.role !== "admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Cannot register webhooks for another tenant" });
+      }
+      const tenantId = session.tenantId;
       const signingSecret = generateWebhookSecret();
       const whInserted = await db.execute(sql`
         INSERT INTO partner_webhooks (tenant_id, url, events, signing_secret, is_active, failure_count, created_by, created_at, updated_at)
-        VALUES (${input.tenantId}, ${input.url}, ${JSON.stringify(input.events)}, ${signingSecret}, true, 0, ${ctx.user.id}, NOW(), NOW())
+        VALUES (${tenantId}, ${input.url}, ${JSON.stringify(input.events)}, ${signingSecret}, true, 0, ${ctx.user.id}, NOW(), NOW())
         RETURNING id
       `);
       const webhookId = (whInserted as any)[0]?.id ?? 0;
