@@ -16,7 +16,6 @@
  */
 
 import { z } from "zod";
-import { randomBytes } from "crypto";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { logger } from "./logger";
 import { FeatureEvents, createLedgerEntry, sanitizeHtml, persistFeatureRecord, updateFeatureRecord } from "./featurePersistence";
@@ -94,47 +93,14 @@ interface SwapExecution {
 
 // ── Pricing Engine ──────────────────────────────────────────────────────────
 
-const SWAP_FEE_SAME_CHAIN = 0.0001;   // 0.01%
-const SWAP_FEE_CROSS_CHAIN = 0.0005;  // 0.05%
+// Wave 7 (C11): there is NO liquidity pool, bridge, or DEX aggregation behind
+// this router. The old pricing engine invented a `1 - Math.random()*3bps` rate
+// and issued executable-looking quotes (quoteId + 30s expiry) that executeSwap
+// then "settled" with a fabricated txHash. That is phantom execution — removed.
+// Quotes are refused with a PRECONDITION-style error until a real pool exists.
 
-function calculateSwap(
-  fromCoin: string, toCoin: string,
-  fromChain: string, toChain: string,
-  amount: number,
-): SwapQuote {
-  const isCrossChain = fromChain !== toChain;
-  const feePercent = isCrossChain ? SWAP_FEE_CROSS_CHAIN : SWAP_FEE_SAME_CHAIN;
-  const fee = amount * feePercent;
-  const outputAmount = amount - fee;
-
-  // For pegged stablecoins, exchange rate is ~1:1
-  // Small deviation based on market depth simulation
-  const deviationBps = Math.random() * 3; // 0-3 bps
-  const exchangeRate = 1 - deviationBps / 10000;
-
-  const route: string[] = [];
-  if (isCrossChain) {
-    route.push(`${fromCoin}@${fromChain}`, `bridge:${fromChain}→${toChain}`, `${toCoin}@${toChain}`);
-  } else if (fromCoin !== toCoin) {
-    route.push(`${fromCoin}@${fromChain}`, `curve:${fromCoin}/${toCoin}`, `${toCoin}@${toChain}`);
-  } else {
-    route.push(`${fromCoin}@${fromChain}`);
-  }
-
-  return {
-    quoteId: `quote-${randomBytes(8).toString("hex")}`,
-    fromCoin, toCoin, fromChain, toChain,
-    inputAmount: amount,
-    outputAmount: Math.round(outputAmount * exchangeRate * 1e6) / 1e6,
-    fee: Math.round(fee * 1e6) / 1e6,
-    feePercent: feePercent * 100,
-    exchangeRate,
-    priceImpact: deviationBps / 100,
-    route,
-    expiresAt: new Date(Date.now() + 30_000).toISOString(), // 30s validity
-    estimatedTime: isCrossChain ? "2-5 minutes" : "< 15 seconds",
-  };
-}
+const SWAP_UNAVAILABLE =
+  "PRECONDITION_FAILED: cross-currency swap unavailable — no liquidity pool is deployed; executable quotes cannot be provided";
 
 // ── Store ───────────────────────────────────────────────────────────────────
 
@@ -157,11 +123,8 @@ export const crossCurrencySwapRouter = router({
       if (input.fromCoin === input.toCoin && input.fromChain === input.toChain) {
         throw new Error("Cannot swap same coin on same chain");
       }
-      const quote = calculateSwap(input.fromCoin, input.toCoin, input.fromChain, input.toChain, input.amount);
-      quotes.set(quote.quoteId, quote);
-      _writeThrough("feature_swap_quotes", String(quote.quoteId), quote).catch(() => {});
-      persistFeatureRecord("feature_swap_quotes", quote.quoteId, { id: quote.quoteId, ...(typeof quote === 'object' ? quote : {}) }).catch(() => {});
-      return quote;
+      // C11: refuse to issue executable quotes — no pool exists to fill them.
+      throw new Error(SWAP_UNAVAILABLE);
     }),
 
   // Execute swap
@@ -169,47 +132,10 @@ export const crossCurrencySwapRouter = router({
     .input(z.object({
       quoteId: z.string(),
     }))
-    .mutation(async ({ input, ctx }) => {
-      const quote = quotes.get(input.quoteId);
-      if (!quote) throw new Error("Quote not found or expired");
-      if (new Date(quote.expiresAt) < new Date()) throw new Error("Quote expired");
-
-      const swapId = `swap-${randomBytes(8).toString("hex")}`;
-      const execution: SwapExecution = {
-        swapId,
-        quoteId: quote.quoteId,
-        userId: ctx.user.id,
-        fromCoin: quote.fromCoin,
-        toCoin: quote.toCoin,
-        fromChain: quote.fromChain,
-        toChain: quote.toChain,
-        inputAmount: quote.inputAmount,
-        outputAmount: quote.outputAmount,
-        fee: quote.fee,
-        status: "completed",
-        txHash: `0x${randomBytes(32).toString("hex")}`,
-        createdAt: new Date().toISOString(),
-        completedAt: new Date().toISOString(),
-      };
-
-      swaps.set(swapId, execution);
-      _writeThrough("feature_swap_executions", String(swapId), execution).catch(() => {});
-      persistFeatureRecord("feature_swap_executions", swapId, { id: swapId, ...(typeof execution === 'object' ? execution : {}) }).catch(() => {});
-      quotes.delete(input.quoteId);
-      _deleteFromDb("feature_swap_quotes", String(input.quoteId)).catch(() => {});
-      logger.info({ swapId, from: quote.fromCoin, to: quote.toCoin, amount: quote.inputAmount }, "Swap executed");
-
-      createLedgerEntry({
-        debitAccountId: `user-${ctx.user.id}-${quote.fromCoin}`,
-        creditAccountId: `user-${ctx.user.id}-${quote.toCoin}`,
-        amount: quote.inputAmount,
-        currency: quote.fromCoin,
-        reference: `swap-${swapId}`,
-        code: 200,
-      }).catch(() => {});
-      FeatureEvents.swapExecuted({ swapId, userId: ctx.user.id, fromCoin: quote.fromCoin, toCoin: quote.toCoin, amount: quote.inputAmount });
-
-      return execution;
+    .mutation(async () => {
+      // C11: refuse execution — no pool exists; never fabricate a txHash or a
+      // "completed" execution again.
+      throw new Error(SWAP_UNAVAILABLE);
     }),
 
   // Swap history

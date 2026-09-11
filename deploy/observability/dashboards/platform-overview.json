@@ -1,0 +1,131 @@
+{
+  "uid": "remitflow-platform-overview",
+  "title": "RemitFlow — Platform Overview",
+  "description": "Middleware health, request rates, error rates, and trace volume. Metrics provenance: server/telemetry/otel.ts (remitflow_* app metrics), deploy/observability/prometheus.yml (up/job liveness), Tempo distributor self-metrics (trace volume).",
+  "tags": ["remitflow", "platform"],
+  "timezone": "utc",
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "schemaVersion": 39,
+  "version": 1,
+  "annotations": { "list": [] },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Middleware Up",
+      "description": "up==1 across middleware scrape jobs (deploy/observability/prometheus.yml).",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } } }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "textMode": "value_and_name" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=~\"postgres|redis|kafka|temporal|apisix|keycloak|opensearch|tigerbeetle\"}",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "API-Reported Middleware Health (REQUIRES-METRIC)",
+      "description": "REQUIRES-METRIC: remitflow.middleware.health gauge emitter exists (recordMiddlewareHealth, server/telemetry/otel.ts:248-265) but has NO production call path — needs wiring into the health-check scheduler. This panel shows No Data until wired; it is kept so the wiring is the only step needed.",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "UNHEALTHY", "color": "red" }, "1": { "text": "OK", "color": "green" } } }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "orientation": "auto", "textMode": "value_and_name" },
+      "targets": [
+        { "refId": "A", "expr": "remitflow_middleware_health", "legendFormat": "{{service}}" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "OTel Collector: Spans Accepted",
+      "description": "Collector self-metrics (job=otel-collector) — accepted vs refused spans.",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "orientation": "auto" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(otelcol_receiver_accepted_spans[5m]))", "legendFormat": "accepted/s" },
+        { "refId": "B", "expr": "sum(rate(otelcol_receiver_refused_spans[5m]))", "legendFormat": "refused/s" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "API Request Rate by Procedure Type",
+      "description": "REAL series: remitflow_requests_total by rpc_type (recordTenantRequest, server/telemetry/tenantContext.ts:91-107, wired at server/_core/trpc.ts:100). Transfer-domain volumes await recordTransferMetric wiring (REQUIRES-METRIC — see alerts.yml TransferFailureRateHigh).",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum by (rpc_type) (rate(remitflow_requests_total[5m]))", "legendFormat": "{{rpc_type}}" },
+        { "refId": "B", "expr": "sum(rate(remitflow_requests_total{ok=\"false\"}[5m]))", "legendFormat": "errors (ok=false)" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "API Error Rate (5xx share of requests)",
+      "description": "From remitflow.api.request.duration_ms histogram count (otel.ts:239). Name regex covers the UCUM unit-suffix translation variant.",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate({__name__=~\"remitflow_api_request_duration_ms(_milliseconds)?_count\", status_code=~\"5..\"}[5m])) / sum(rate({__name__=~\"remitflow_api_request_duration_ms(_milliseconds)?_count\"}[5m]))",
+          "legendFormat": "5xx share"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Trace Volume (Tempo distributor)",
+      "description": "Spans received by Tempo — the collector is the only writer, so this is end-to-end trace pipeline throughput.",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(tempo_distributor_spans_received_total[5m]))", "legendFormat": "spans/s received" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Log Ingest Volume (Loki distributor)",
+      "description": "Bytes received by Loki — log pipeline throughput.",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(loki_distributor_bytes_received_total[5m]))", "legendFormat": "bytes/s received" }
+      ]
+    }
+  ]
+}
