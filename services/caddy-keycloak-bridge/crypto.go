@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -62,6 +63,10 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 
 // ── Token Introspection (for opaque/reference tokens) ─────────────────────────
 
+// introspectClient has an explicit timeout: a hung Keycloak must not stall the
+// gateway's auth path indefinitely (F11).
+var introspectClient = &http.Client{Timeout: 5 * time.Second}
+
 // introspectToken calls Keycloak's token introspection endpoint for opaque tokens.
 // This is a fallback when the token is not a standard JWT.
 func introspectToken(token, clientID, clientSecret string) (*jwtClaims, error) {
@@ -72,7 +77,7 @@ func introspectToken(token, clientID, clientSecret string) (*jwtClaims, error) {
 		"token=%s&client_id=%s&client_secret=%s",
 		token, clientID, clientSecret))
 
-	resp, err := http.Post(introspectURL, "application/x-www-form-urlencoded", body)
+	resp, err := introspectClient.Post(introspectURL, "application/x-www-form-urlencoded", body)
 	if err != nil {
 		return nil, fmt.Errorf("introspection request failed: %w", err)
 	}
