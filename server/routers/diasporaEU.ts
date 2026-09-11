@@ -6,7 +6,7 @@ import { getDb } from "../db";
 import { diasporaProfiles, diasporaOfferClaims, transfers, users } from "../../drizzle/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { safeParseAmount } from "../lib/safeDecimal";
-import { executeTransferPipeline } from "../_core/transferPipeline";
+import { executeTransferPipeline, settleTransferHold, compensateFailedTransfer } from "../_core/transferPipeline";
 import { logger } from "../_core/logger";
 import { KYC_TIER_LIMITS, type KycTier } from "../business-rules";
 
@@ -141,19 +141,40 @@ export const diasporaEURouter = router({
         metadata: { recipientBic: input.recipientBic },
       });
 
-      await db.insert(transfers).values({
-        userId: ctx.user.id,
-        transferType: "outbound",
-        rail,
-        corridorCode: input.destinationCountry,
-        amountNgn: (input.amountEur * 1750).toFixed(2),
-        amountForeign: input.amountEur.toFixed(2),
-        foreignCurrency,
-        recipientName: input.recipientName,
-        recipientAccount: input.recipientIban,
-        status: "pending",
-        createdAt: new Date(),
-      }).returning();
+      // FF-FIX: wire the orphaned TB hold — insert failure compensates,
+      // success settles (post hold + atomic PG debit, journaled).
+      try {
+        await db.insert(transfers).values({
+          userId: ctx.user.id,
+          transferType: "outbound",
+          rail,
+          corridorCode: input.destinationCountry,
+          amountNgn: (input.amountEur * 1750).toFixed(2),
+          amountForeign: input.amountEur.toFixed(2),
+          foreignCurrency,
+          recipientName: input.recipientName,
+          recipientAccount: input.recipientIban,
+          status: "pending",
+          createdAt: new Date(),
+        }).returning();
+      } catch (insErr) {
+        if (pipelineResult.tigerBeetleRecorded) {
+          await compensateFailedTransfer({
+            transferId, userId: ctx.user.id, amount: input.amountEur, currency: foreignCurrency,
+            reason: `SEPA transfer record insert failed: ${insErr instanceof Error ? insErr.message : String(insErr)}`,
+            stage: "settlement",
+          }).catch((cErr) => logger.warn({ err: cErr instanceof Error ? cErr.message : String(cErr), transferId }, "[DiasporaEU] Hold release failed — reaper will reconcile"));
+        }
+        throw insErr;
+      }
+      if (pipelineResult.tigerBeetleRecorded) {
+        try {
+          await settleTransferHold({ transferId, userId: ctx.user.id, amount: input.amountEur, currency: foreignCurrency });
+        } catch (settleErr) {
+          logger.error({ err: settleErr instanceof Error ? settleErr.message : String(settleErr), transferId },
+            "[DiasporaEU] CRITICAL: transfer accepted but settlement failed — MANUAL RECONCILIATION REQUIRED (journal marked reconcile_required)");
+        }
+      }
 
       return {
         transferId,
