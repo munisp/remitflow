@@ -3,6 +3,26 @@
  * Wraps fetch with retry logic, timeout, and structured error handling.
  */
 
+import { context as otelContext, propagation, defaultTextMapSetter } from "@opentelemetry/api";
+import { getRequestTenantContext } from "./tenantGuc";
+
+// ── W3C trace-context + tenant propagation (W12-F) ────────────────────────────
+// Inject traceparent/tracestate + X-Tenant-Id on every outbound internal
+// service call so downstream receivers can continue the trace and attribute
+// the tenant. Same mechanism as server/middleware/kafka.ts injectTraceContext.
+// FAIL-SOFT: never throws; headers are omitted when no span/tenant is active.
+function telemetryHeaders(): Record<string, string> {
+  try {
+    const carrier: Record<string, string> = {};
+    propagation.inject(otelContext.active(), carrier, defaultTextMapSetter);
+    const tenantId = getRequestTenantContext()?.tenantId;
+    if (tenantId) carrier["X-Tenant-Id"] = tenantId;
+    return carrier;
+  } catch {
+    return {};
+  }
+}
+
 export interface ServiceCallOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: unknown;
@@ -45,6 +65,8 @@ export async function callService<T = unknown>(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   const defaultHeaders: Record<string, string> = {
+    // W12-F: trace/tenant propagation first — caller headers win on conflict.
+    ...telemetryHeaders(),
     "Content-Type": "application/json",
     "X-Internal-Service": "remitflow-api",
     ...headers,
