@@ -6,12 +6,31 @@ from .client import AzimoClient
 from typing import Dict
 import os
 
+_PLACEHOLDER_VALUES = {"test_key", "changeme", "change_me", "placeholder", "your_api_key_here"}
+
+
+def _require_env(name: str) -> str:
+    """Read a required credential from the environment.
+
+    Fails fast at startup if the variable is unset, empty, or still a
+    known placeholder value -- never fall back to a fake credential on a
+    money path.
+    """
+    value = os.getenv(name)
+    if not value or value.strip().lower() in _PLACEHOLDER_VALUES:
+        raise RuntimeError(
+            f"Missing required configuration: {name} is unset or a placeholder. "
+            f"Refusing to start the azimo gateway without real credentials."
+        )
+    return value
+
+
 class AzimoService:
     def __init__(self):
         self.client = AzimoClient(
-            api_key=os.getenv("AZIMO_API_KEY", "test_key")
+            api_key=_require_env("AZIMO_API_KEY")
         )
-    
+
     async def process_transfer(self, transfer_data: Dict) -> Dict:
         """Process a transfer through azimo"""
         try:
@@ -29,7 +48,7 @@ class AzimoService:
                 "gateway": "azimo",
                 "error": str(e)
             }
-    
+
     async def check_status(self, transfer_id: str) -> Dict:
         """Check transfer status"""
         try:

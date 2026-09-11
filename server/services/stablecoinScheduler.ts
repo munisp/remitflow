@@ -114,11 +114,21 @@ export async function executeDcaPurchase(plan: DcaPlan): Promise<{
         }
 
         // Record transaction
+        // W9-FIX1: transactions has no amount/currency columns — real columns
+        // are fromAmount/fromCurrency/toAmount/toCurrency. Fail closed on
+        // missing values (aborting here rolls back the whole atomic flow).
+        if (!plan.fiatCurrency || !plan.stablecoin
+            || !Number.isFinite(plan.fiatAmountPerPurchase) || !Number.isFinite(netAmount)) {
+          throw new Error("DCA transaction record missing required amount/currency values — aborting");
+        }
         await db.insert(transactions).values({
           userId: plan.userId,
           type: "exchange",
-          amount: String(plan.fiatAmountPerPurchase),
-          currency: plan.fiatCurrency,
+          fromAmount: String(plan.fiatAmountPerPurchase),
+          fromCurrency: plan.fiatCurrency,
+          toAmount: String(netAmount),
+          toCurrency: plan.stablecoin,
+          fee: String(fee),
           status: "completed",
           description: `DCA: ${plan.fiatAmountPerPurchase} ${plan.fiatCurrency} → ${netAmount.toFixed(6)} ${plan.stablecoin} (fee: ${fee.toFixed(2)})`,
           reference: orderId,
@@ -306,11 +316,21 @@ export async function autoConvertIncomingRemittance(
         }
 
         // Record transaction
+        // W9-FIX1: transactions has no amount/currency columns — real columns
+        // are fromAmount/fromCurrency/toAmount/toCurrency. Fail closed on
+        // missing values (aborting here rolls back the whole atomic flow).
+        if (!fiatCurrency || !pref.targetStablecoin
+            || !Number.isFinite(convertAmount) || !Number.isFinite(netStablecoinAmount)) {
+          throw new Error("Auto-convert transaction record missing required amount/currency values — aborting");
+        }
         await db.insert(transactions).values({
           userId,
           type: "exchange",
-          amount: String(convertAmount),
-          currency: fiatCurrency,
+          fromAmount: String(convertAmount),
+          fromCurrency: fiatCurrency,
+          toAmount: String(netStablecoinAmount),
+          toCurrency: pref.targetStablecoin,
+          fee: String(fee),
           status: "completed",
           description: `Auto-convert: ${convertAmount} ${fiatCurrency} → ${netStablecoinAmount.toFixed(6)} ${pref.targetStablecoin}`,
           reference: orderId,
@@ -373,12 +393,18 @@ export async function executeP2pClaim(
 
   const claimTx = claimTxns[0];
 
-  // Parse claim details from description
-  const amountMatch = claimTx.description?.match(/(\d+(?:\.\d+)?)\s+(\w+)/);
-  if (!amountMatch) return { success: false, error: "Invalid claim data" };
-
-  const amount = parseFloat(amountMatch[1]);
-  const stablecoin = amountMatch[2];
+  // F9-11 (W9-Q7): NEVER parse the amount/currency out of the free-text
+  // description — use the typed columns. Legacy rows without a usable typed
+  // amount/currency FAIL CLOSED: no wallet mutation, structured warn for ops.
+  const amount = Number(claimTx.fromAmount);
+  const stablecoin = typeof claimTx.fromCurrency === "string" ? claimTx.fromCurrency.trim() : "";
+  if (!Number.isFinite(amount) || amount <= 0 || !/^[A-Za-z0-9]{2,10}$/.test(stablecoin)) {
+    logger.warn({
+      claimId, txId: claimTx.id, senderUserId: claimTx.userId,
+      fromAmount: claimTx.fromAmount, fromCurrency: claimTx.fromCurrency,
+    }, "[P2PClaim] Legacy claim row lacks a typed amount/currency — claim refused (fail closed), manual reconciliation required");
+    return { success: false, error: "Claim row is missing its typed amount/currency — flagged for manual reconciliation" };
+  }
 
   // Check expiry (30 days from creation)
   const createdAt = new Date(claimTx.createdAt ?? Date.now());
@@ -445,15 +471,22 @@ export async function executeP2pClaim(
           })
           .where(eq(transactions.id, claimTx.id));
 
-        // Record claim transaction for claimer
+        // Record claim transaction for claimer.
+        // W9-Q9: "deposit" is NOT a member of the tx_type enum (send, receive,
+        // exchange, topup, withdrawal, fee, refund, airtime, bill, savings,
+        // card) — the write was dead. Map to enum-valid "receive" and preserve
+        // the original semantics in metadata/description. Also use the real
+        // column names (fromAmount/fromCurrency — amount/currency do not exist
+        // on the transactions table).
         await db.insert(transactions).values({
           userId: claimerUserId,
-          type: "deposit",
-          amount: String(amount),
-          currency: stablecoin,
+          type: "receive",
+          fromAmount: String(amount),
+          fromCurrency: stablecoin,
           status: "completed",
-          description: `P2P claim received: ${amount} ${stablecoin}`,
+          description: `P2P claim received (deposit): ${amount} ${stablecoin}`,
           reference: orderId,
+          metadata: { originalType: "deposit", rail: "stablecoin_p2p_claim", claimId, senderUserId: claimTx.userId },
         });
 
         return { orderId, amount, stablecoin };
@@ -507,11 +540,19 @@ export async function expireStaleP2pClaims(): Promise<{ expired: number; refunde
   let refunded = 0;
 
   for (const claim of staleClaims) {
-    const amountMatch = claim.description?.match(/(\d+(?:\.\d+)?)\s+(\w+)/);
-    if (!amountMatch) continue;
-
-    const amount = parseFloat(amountMatch[1]);
-    const stablecoin = amountMatch[2];
+    // F9-11 (W9-Q7): typed columns only — never regex an amount out of
+    // free-text. Legacy rows lacking a typed amount/currency are SKIPPED
+    // (fail closed): not refunded, not marked expired, flagged for ops via a
+    // structured warn so no funds silently evaporate or get double-refunded.
+    const amount = Number(claim.fromAmount);
+    const stablecoin = typeof claim.fromCurrency === "string" ? claim.fromCurrency.trim() : "";
+    if (!Number.isFinite(amount) || amount <= 0 || !/^[A-Za-z0-9]{2,10}$/.test(stablecoin)) {
+      logger.warn({
+        txId: claim.id, senderUserId: claim.userId,
+        fromAmount: claim.fromAmount, fromCurrency: claim.fromCurrency,
+      }, "[P2PClaim] Skipping stale claim — legacy row lacks typed amount/currency; manual reconciliation required");
+      continue;
+    }
 
     // Refund sender
     if (claim.userId) {

@@ -1,0 +1,33 @@
+# APISIX config.yaml — REQUIRED one-line enablement for the opentelemetry
+# plugin (W11-C1). Image: apache/apisix:3.9.0-debian (opentelemetry is a
+# stock plugin in this image — no custom build, no luarocks).
+#
+# OWNERSHIP NOTE: the live config template is services/gateway-config/apisix.yaml
+# (gateway track). This file documents the exact minimal diff for that track;
+# deploy/apisix/* is additive and never rewrites the gateway config.
+#
+# WHY: APISIX only loads plugins named in the `plugins:` list. The template
+# already enables `prometheus` (line ~113) and already carries the prometheus
+# plugin_attr export server (:9091) — but `opentelemetry` is missing, so the
+# global rule in deploy/apisix/global-rules-observability.yaml would be
+# rejected at apply time until this line lands.
+#
+# MINIMAL DIFF for services/gateway-config/apisix.yaml:
+#
+#   plugins:
+#     ...
+#     - prometheus
+#   + - opentelemetry        # stock plugin; enables deploy/apisix/global-rules-observability.yaml
+#     - datadog
+#     ...
+#
+# OPTIONAL (defaults are sane for the compose topology):
+#   plugin_attr:
+#     opentelemetry:
+#       trace_id_source: x-request-id   # default is random; pick one, document it
+#
+# NO OTHER CHANGES NEEDED: the collector endpoint, sampler, and
+# batch_span_processor all live in the global rule (data-plane state), not in
+# config.yaml.
+plugins:
+  - opentelemetry

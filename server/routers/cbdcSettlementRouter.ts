@@ -21,6 +21,7 @@ import { TRPCError } from "@trpc/server";
 import { logger } from "../_core/logger";
 import { withSpan } from "../telemetry/otel";
 import { publishPaymentInitiated } from "../middleware/kafka";
+import { assertFeatureEligible } from "../_core/featureGuard";
 
 // ── Service URLs ──────────────────────────────────────────────────────────────
 
@@ -126,6 +127,9 @@ export const cbdcSettlementRouter = router({
           "cbdc.amount": input.amount,
         });
 
+        // A2: enforce the declared stablecoin gate (flag + KYC tier >= 1 + growth plan).
+        await assertFeatureEligible(ctx, { flag: "stablecoin", minKycTier: 1, minPlan: "growth", featureName: "Stablecoin settlement" });
+
         const result = await serviceCall<{
           settlementId: string;
           txHash?: string;
@@ -146,16 +150,13 @@ export const cbdcSettlementRouter = router({
         );
 
         if (!result) {
-          // Fallback response when service is starting up
-          const settlementId = `STL-${Date.now()}`;
-          logger.warn({ transferId: input.transferId }, "[CBDC] Stablecoin engine unavailable — queued");
-          return {
-            settlementId,
-            transferId: input.transferId,
-            railId: input.railId,
-            status: "queued",
-            estimatedCompletionAt: new Date(Date.now() + 5 * 60_000).toISOString(),
-          };
+          // B6: fail closed — never fabricate a settlement id. No row is written
+          // and no phantom "queued" settlement is reported.
+          logger.error({ transferId: input.transferId }, "[CBDC] Stablecoin engine unavailable — failing closed");
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: "Stablecoin settlement service is unavailable — no settlement was initiated. Please try again.",
+          });
         }
 
         // Publish to Kafka for downstream processing
@@ -197,6 +198,9 @@ export const cbdcSettlementRouter = router({
           "cbdc.transfer_id": input.transferId,
         });
 
+        // A2: enforce the declared CBDC gate (flag + KYC tier >= 1 + enterprise plan).
+        await assertFeatureEligible(ctx, { flag: "cbdc", minKycTier: 1, minPlan: "enterprise", featureName: "CBDC settlement" });
+
         const result = await serviceCall<{
           cbdcTxId: string;
           status: string;
@@ -214,18 +218,29 @@ export const cbdcSettlementRouter = router({
           }
         );
 
+        // B6: fail closed — never fabricate a CBDC tx id. No row is written and
+        // no phantom settlement is reported.
+        if (!result) {
+          logger.error({ userId: ctx.user.id, transferId: input.transferId, cbdcType: input.cbdcType },
+            "[CBDC] AfriCBDC adapter unavailable — failing closed");
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: "CBDC settlement service is unavailable — no settlement was initiated. Please try again.",
+          });
+        }
+
         logger.info(
           { userId: ctx.user.id, transferId: input.transferId, cbdcType: input.cbdcType },
           "[CBDC] Settlement initiated"
         );
 
         return {
-          cbdcTxId: result?.cbdcTxId ?? `CBDC-${Date.now()}`,
+          cbdcTxId: result.cbdcTxId,
           transferId: input.transferId,
           cbdcType: input.cbdcType,
-          status: result?.status ?? "pending",
-          blockHeight: result?.blockHeight,
-          confirmedAt: result?.confirmedAt,
+          status: result.status,
+          blockHeight: result.blockHeight,
+          confirmedAt: result.confirmedAt,
         };
       });
     }),
@@ -242,6 +257,9 @@ export const cbdcSettlementRouter = router({
     }))
     .mutation(async ({ input, ctx }) => {
       return withSpan("cbdc.lockFxForward", async () => {
+        // A2: enforce the declared CBDC/FX-hedging gate (flag + KYC tier >= 1 + enterprise plan).
+        await assertFeatureEligible(ctx, { flag: "cbdc", minKycTier: 1, minPlan: "enterprise", featureName: "FX forward hedging" });
+
         const result = await serviceCall<{
           contractId: string;
           forwardRate: number;
@@ -259,16 +277,28 @@ export const cbdcSettlementRouter = router({
           }
         );
 
+        // B6: fail closed — never fabricate a hedge contract. A fabricated
+        // `FWD-` id with forwardRate: 0 reported "locked" left the platform
+        // unhedged while claiming otherwise.
+        if (!result) {
+          logger.error({ userId: ctx.user.id, base: input.baseCurrency, quote: input.quoteCurrency },
+            "[CBDC] FX hedging service unavailable — failing closed");
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: "FX hedging service is unavailable — no forward contract was locked. Please try again.",
+          });
+        }
+
         return {
-          contractId: result?.contractId ?? `FWD-${Date.now()}`,
+          contractId: result.contractId,
           baseCurrency: input.baseCurrency,
           quoteCurrency: input.quoteCurrency,
           notionalAmount: input.notionalAmount,
-          forwardRate: result?.forwardRate ?? 0,
-          spotRate: result?.spotRate ?? 0,
-          forwardPoints: result?.forwardPoints ?? 0,
+          forwardRate: result.forwardRate,
+          spotRate: result.spotRate,
+          forwardPoints: result.forwardPoints,
           settlementDays: input.settlementDays,
-          expiresAt: result?.expiresAt ?? new Date(Date.now() + input.settlementDays * 86400_000).toISOString(),
+          expiresAt: result.expiresAt,
           status: "locked",
         };
       });

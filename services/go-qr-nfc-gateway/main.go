@@ -60,7 +60,7 @@ func loadConfig() Config {
 		TemporalAddr:      getEnv("TEMPORAL_ADDR", "localhost:7233"),
 		OpenSearchURL:     getEnv("OPENSEARCH_URL", "http://localhost:9200"),
 		APISIXAdminKey:    getEnv("APISIX_ADMIN_KEY", ""),
-		QRSigningSecret:   getEnv("QR_SIGNING_SECRET", "dev-qr-secret"),
+		QRSigningSecret:   mustGetEnv("QR_SIGNING_SECRET"),
 		MaxTerminalAmount: 10000000,
 	}
 }
@@ -70,6 +70,16 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// mustGetEnv returns the env var or refuses to boot — FAIL CLOSED: never fall
+// back to a well-known default credential (see go-cips-adapter/internal/middleware/middleware.go:57).
+func mustGetEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		log.Fatalf("[QR/NFC Gateway Go] %s is not set: refusing to fall back to a well-known default credential; configure it explicitly", key)
+	}
+	return v
 }
 
 // ── EMV QR Code Parser ──────────────────────────────────────────────────────
@@ -332,10 +342,16 @@ func generateTxID(prefix string) string {
 
 // ── QR Signature Validator ───────────────────────────────────────────────────
 
+// validateQRSignature verifies the full HMAC-SHA256 tag. FAIL CLOSED: an empty
+// secret or empty signature NEVER verifies, and the tag is compared full-length
+// (no 64-bit truncation) with hmac.Equal.
 func validateQRSignature(payload, signature, secret string) bool {
+	if secret == "" || signature == "" {
+		return false
+	}
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))
-	expected := hex.EncodeToString(mac.Sum(nil))[:16]
+	expected := hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
@@ -464,14 +480,24 @@ type LedgerEntry struct {
 	Code          int     `json:"code"`
 }
 
+// ledgerClient has an explicit timeout — a hung ledger must not tie up
+// authorization handlers indefinitely (fail closed, bounded).
+var ledgerClient = &http.Client{Timeout: 10 * time.Second}
+
+// postLedgerEntry posts the double-entry ledger record synchronously and checks
+// the HTTP status: any transport error OR non-2xx response is a failure the
+// caller must handle (no fire-and-forget, no status-blind success).
 func postLedgerEntry(entry LedgerEntry) error {
 	body, _ := json.Marshal(entry)
-	resp, err := http.Post("http://localhost:8117/api/ledger/transfer", "application/json",
+	resp, err := ledgerClient.Post("http://localhost:8117/api/ledger/transfer", "application/json",
 		strings.NewReader(string(body)))
 	if err != nil {
-		return err
+		return fmt.Errorf("ledger transfer request failed: %w", err)
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("ledger transfer rejected: HTTP %d", resp.StatusCode)
+	}
 	return nil
 }
 
@@ -483,6 +509,10 @@ type Server struct {
 	nonces    *NonceTracker
 	events    *EventPublisher
 	db        *sql.DB
+	// dbSem bounds the async write-through fan-out (F16): at most
+	// cap(dbSem) concurrent dbUpsert goroutines; excess writes are dropped
+	// with a log instead of exhausting goroutines/connections.
+	dbSem chan struct{}
 }
 
 func NewServer(cfg Config) *Server {
@@ -491,6 +521,7 @@ func NewServer(cfg Config) *Server {
 		terminals: NewTerminalManager(),
 		nonces:    NewNonceTracker(),
 		events:    NewEventPublisher(cfg.DaprHTTPPort),
+		dbSem:     make(chan struct{}, 16),
 	}
 	s.initDB()
 	return s
@@ -534,16 +565,28 @@ func (s *Server) dbUpsert(table, key string, value interface{}) {
 	if s.db == nil {
 		return
 	}
+	// Bounded fan-out: refuse to spawn beyond the semaphore capacity rather
+	// than letting goroutine/connection usage grow without limit.
+	select {
+	case s.dbSem <- struct{}{}:
+	default:
+		log.Printf("[QR/NFC] dbUpsert queue full — dropping write-through for table=%s key=%s (in-memory state retained)", table, key)
+		return
+	}
 	go func() {
+		defer func() { <-s.dbSem }()
 		data, err := json.Marshal(value)
 		if err != nil {
+			log.Printf("[QR/NFC] dbUpsert marshal failed for table=%s key=%s: %v", table, key, err)
 			return
 		}
-		_, _ = s.db.Exec(
+		if _, err := s.db.Exec(
 			fmt.Sprintf(`INSERT INTO %s (id, data, updated_at) VALUES ($1, $2::jsonb, NOW())
 			ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`, table),
 			key, string(data),
-		)
+		); err != nil {
+			log.Printf("[QR/NFC] dbUpsert exec failed for table=%s key=%s: %v", table, key, err)
+		}
 	}()
 }
 
@@ -692,12 +735,22 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	txID := generateTxID("nfctx-")
 	authCode := generateAuthCode()
 
-	// Post to TigerBeetle ledger
-	go postLedgerEntry(LedgerEntry{
+	// Post to TigerBeetle ledger SYNCHRONOUSLY — fail closed: an authorization
+	// is only acknowledged once the double-entry ledger record is booked.
+	if err := postLedgerEntry(LedgerEntry{
 		DebitAccount: "customer-pool", CreditAccount: "merchant-" + terminal.MerchantID,
 		Amount: req.Amount, Currency: req.Currency,
 		Reference: "nfc-" + txID, Code: 710,
-	})
+	}); err != nil {
+		log.Printf("[QR/NFC] ledger posting failed for %s (terminal=%s amount=%.2f): %v", txID, req.TerminalID, req.Amount, err)
+		writeJSON(w, 503, AuthResponse{
+			Authorized: false, DeclineCode: "LEDGER_UNAVAILABLE",
+			DeclineMsg:  "Ledger write failed — authorization aborted, no funds movement booked",
+			TerminalID:  req.TerminalID, TxID: txID,
+			ProcessedAt: time.Now().UTC().Format(time.RFC3339),
+		})
+		return
+	}
 
 	// Publish event
 	s.events.Publish("qr-nfc.payment-authorized", map[string]interface{}{
@@ -785,20 +838,37 @@ func (s *Server) handleOfflineBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	batchID := generateTxID("batch-")
+	// Bounded, synchronous ledger posting: no fire-and-forget. If the batch
+	// ledger write fails the batch is explicitly reported as degraded instead
+	// of being silently acknowledged.
+	ledgerPosted := totalAmount <= 0
 	if totalAmount > 0 {
-		go postLedgerEntry(LedgerEntry{
+		if err := postLedgerEntry(LedgerEntry{
 			DebitAccount: "offline-pool", CreditAccount: "merchant-batch-" + req.TerminalID,
 			Amount: totalAmount, Currency: "NGN", Reference: "offline-" + batchID, Code: 715,
-		})
+		}); err != nil {
+			log.Printf("[QR/NFC] offline batch %s ledger posting failed (terminal=%s settled=%d total=%.2f): %v",
+				batchID, req.TerminalID, settled, totalAmount, err)
+		} else {
+			ledgerPosted = true
+		}
 	}
 
 	s.events.Publish("qr-nfc.offline-batch-settled", map[string]interface{}{
 		"batchId": batchID, "terminalId": req.TerminalID,
 		"settled": settled, "duplicates": duplicates, "totalAmount": totalAmount,
+		"ledgerPosted": ledgerPosted,
 	})
 
-	writeJSON(w, 200, map[string]interface{}{
+	status := 200
+	settleStatus := "settled"
+	if !ledgerPosted {
+		status = 503
+		settleStatus = "ledger_write_failed"
+	}
+	writeJSON(w, status, map[string]interface{}{
 		"batchId": batchID, "settled": settled, "duplicatesSkipped": duplicates, "totalAmount": totalAmount,
+		"ledgerPosted": ledgerPosted, "status": settleStatus,
 	})
 }
 

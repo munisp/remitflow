@@ -22,7 +22,7 @@ The former `drizzle/migrations/` subdirectory was a divergent second track that
 
 ## Current sequence
 
-`0000_baseline_schema.sql`, then `0051_*.sql` … `0083_*.sql` (numbers 0001–0050
+`0000_baseline_schema.sql`, then `0051_*.sql` … `0086_*.sql` (numbers 0001–0050
 were never part of this repository's applied history; the journal documents the
 files that actually exist — do not invent migrations for the gap).
 
@@ -34,6 +34,9 @@ Tail of the sequence:
 | `0081_dlq_messages.sql` | Kafka DLQ persistence (promoted from the deleted divergent track) |
 | `0082_tigerbeetle_id_widening.sql` | TB ids widened to TEXT (u128), UNIQUE(user_id,currency), flags/user_data_128/pending_id |
 | `0083_outbox_worker_lease.sql` | Outbox worker lease columns (locked_at/locked_by) + claim/dead-letter indexes |
+| `0084_settlement_journal.sql` | Exactly-once settlement journal (idempotency key for wallet debit + TB pending hold) |
+| `0085_card_chargeback_hardening.sql` | Card chargeback hardening |
+| `0086_reconciliation_quarantine.sql` | Reconciliation quarantine table |
 
 ## `drizzle/meta/_journal.json`
 

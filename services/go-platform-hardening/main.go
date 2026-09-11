@@ -110,7 +110,9 @@ var (
 	pagerdutyKey      = getEnv("PAGERDUTY_API_KEY", "")
 	companiesHouseKey = getEnv("COMPANIES_HOUSE_API_KEY", "")
 	cacApiKey         = getEnv("CAC_API_KEY", "")
-	auditHmacSecret   = getEnv("AUDIT_HMAC_SECRET", "remitflow-audit-secret-change-me")
+	// FAIL CLOSED: no default audit HMAC secret — refuse to boot when unset
+	// rather than ship a publicly known credential.
+	auditHmacSecret   = mustGetEnv("AUDIT_HMAC_SECRET")
 )
 
 func getEnv(key, fallback string) string {
@@ -118,6 +120,16 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// mustGetEnv returns the env var or panics at startup; there is no fallback
+// credential (see go-cips-adapter/internal/middleware/middleware.go:57).
+func mustGetEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		panic(key + " is not set: refusing to fall back to a well-known default credential; configure it explicitly")
+	}
+	return v
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────

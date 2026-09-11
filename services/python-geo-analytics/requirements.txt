@@ -1,0 +1,18 @@
+# python-geo-analytics — stdlib-only service (Wave-10 C6 constraint).
+# Core corridor-coverage / agent-heatmap statistics run on Python stdlib
+# (math, json, hmac, http.server). No third-party packages are required.
+#
+# OPTIONAL enhanced spatial engine: GeoLibre (`geolib`). It is imported under
+# a guarded try/except at runtime; when absent the service reports
+# geoEngine="haversine-stdlib" and core stats are still computed. To enable
+# the enhanced engine, uncomment (never required):
+# geolib>=0.1.0
+
+# ── OpenTelemetry (Wave 11, optional/fail-soft) ──────────────────────────────
+# Used only through the guarded shared helper (services/_shared/otel_helper.py).
+# When these packages are absent the service still boots and serves normally,
+# logs one WARN at startup, and /health honestly reports
+# telemetry="disabled-no-sdk" — telemetry is never faked.
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0

@@ -91,6 +91,9 @@ export const lendingBorrowingRouter = router({
   // Get market rates
   getMarkets: protectedProcedure
     .query(async () => {
+      // Wave 7 (C11): there is NO live lending pool — market parameters come
+      // from static config. Metrics are honestly zeroed (no Math.random
+      // supply/borrow/utilization presented as live market depth).
       return Object.entries(MARKETS).map(([coin, config]) => ({
         coin,
         stablecoin: coin,
@@ -98,9 +101,10 @@ export const lendingBorrowingRouter = router({
         borrowApy: config.borrowApy,
         ltv: config.ltv,
         liquidationThreshold: config.liquidationThreshold,
-        totalSupply: 5_000_000 + Math.random() * 10_000_000,
-        totalBorrow: 2_000_000 + Math.random() * 5_000_000,
-        utilizationRate: 40 + Math.random() * 30,
+        totalSupply: 0,
+        totalBorrow: 0,
+        utilizationRate: 0,
+        source: "config_static" as const,
       }));
     }),
 

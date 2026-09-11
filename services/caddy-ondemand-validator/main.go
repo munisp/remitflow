@@ -34,7 +34,9 @@ import (
 
 var (
 	apiBaseURL = getEnv("API_BASE_URL", "http://api:3000")
-	apiKey     = getEnv("INTERNAL_API_KEY", "caddy-ondemand-key-change-in-production")
+	// FAIL CLOSED: no default internal API key — refuse to boot when unset
+	// rather than ship a publicly known credential.
+	apiKey     = mustGetEnv("INTERNAL_API_KEY")
 	listenAddr = getEnv("LISTEN_ADDR", ":8070")
 	logLevel   = getEnv("LOG_LEVEL", "info")
 
@@ -49,6 +51,16 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// mustGetEnv returns the env var or panics at startup; there is no fallback
+// credential (see go-cips-adapter/internal/middleware/middleware.go:57).
+func mustGetEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		panic(key + " is not set: refusing to fall back to a well-known default credential; configure it explicitly")
+	}
+	return v
 }
 
 // ── Prometheus Metrics ────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ import { getDb } from "../db";
 import { westAfricaTransfers, users } from "../../drizzle/schema";
 import { eq, desc, and } from "drizzle-orm";
 import { safeParseAmount } from "../lib/safeDecimal";
-import { executeTransferPipeline } from "../_core/transferPipeline";
+import { executeTransferPipeline, settleTransferHold, compensateFailedTransfer } from "../_core/transferPipeline";
 import { logger } from "../_core/logger";
 import { KYC_TIER_LIMITS, type KycTier } from "../business-rules";
 
@@ -67,9 +67,13 @@ export const westAfricaRouter = router({
       recipientName: z.string().min(2).max(100),
       mojaloopDfspId: z.string().min(2).max(50),
       purposeCode: z.string().default("FAM"),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
+      // W12: canonical TOTP step-up (fail-closed) — money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "XOF transfer");
       const transferId = `XOF-${Date.now()}-${ctx.user.id}`;
 
       // KYC tier limit enforcement
@@ -98,36 +102,70 @@ export const westAfricaRouter = router({
         metadata: { mojaloopDfspId: input.mojaloopDfspId, purposeCode: input.purposeCode },
       });
 
+      // FF-FIX: the pipeline TB hold was NEVER settled/compensated (orphaned).
+      // Record-insert or rail failure → compensate (void hold, no debit ever
+      // happened); success → settle (post hold + atomic PG debit, journaled).
+      const releaseHold = (reason: string) =>
+        pipelineResult.tigerBeetleRecorded
+          ? compensateFailedTransfer({
+              transferId, userId: ctx.user.id, amount: input.amountNgn, currency: "NGN",
+              reason, stage: "settlement",
+            }).catch((cErr) => logger.warn({ err: cErr instanceof Error ? cErr.message : String(cErr), transferId }, "[WestAfrica] Hold release failed — reaper will reconcile"))
+          : Promise.resolve();
+
       // Create local record
-      await db.insert(westAfricaTransfers).values({
-        transferId,
-        userId: ctx.user.id,
-        corridorCode: input.corridorCode,
-        amountNgn: input.amountNgn.toString(),
-        recipientMobileMoney: input.recipientMobileMoney,
-        recipientName: input.recipientName,
-        mojaloopDfspId: input.mojaloopDfspId,
-        purposeCode: input.purposeCode,
-        status: "pending",
-        createdAt: new Date(),
-      }).returning();
+      try {
+        await db.insert(westAfricaTransfers).values({
+          transferId,
+          userId: ctx.user.id,
+          corridorCode: input.corridorCode,
+          amountNgn: input.amountNgn.toString(),
+          recipientMobileMoney: input.recipientMobileMoney,
+          recipientName: input.recipientName,
+          mojaloopDfspId: input.mojaloopDfspId,
+          purposeCode: input.purposeCode,
+          status: "pending",
+          createdAt: new Date(),
+        }).returning();
+      } catch (insErr) {
+        await releaseHold(`Local transfer record insert failed: ${insErr instanceof Error ? insErr.message : String(insErr)}`);
+        throw insErr;
+      }
 
       // Submit to XOF adapter
-      const result = await callXofAdapter("/submit", {
-        transfer_id: transferId,
-        corridor_code: input.corridorCode,
-        amount_ngn: input.amountNgn,
-        recipient_mobile_money: input.recipientMobileMoney,
-        recipient_name: input.recipientName,
-        mojaloop_dfsp_id: input.mojaloopDfspId,
-        purpose_code: input.purposeCode,
-        user_id: ctx.user.id,
-      });
+      let result;
+      try {
+        result = await callXofAdapter("/submit", {
+          transfer_id: transferId,
+          corridor_code: input.corridorCode,
+          amount_ngn: input.amountNgn,
+          recipient_mobile_money: input.recipientMobileMoney,
+          recipient_name: input.recipientName,
+          mojaloop_dfsp_id: input.mojaloopDfspId,
+          purpose_code: input.purposeCode,
+          user_id: ctx.user.id,
+        });
+      } catch (railErr) {
+        await releaseHold(`XOF adapter submission failed: ${railErr instanceof Error ? railErr.message : String(railErr)}`);
+        await db.update(westAfricaTransfers)
+          .set({ status: "failed", updatedAt: new Date() })
+          .where(eq(westAfricaTransfers.transferId, transferId));
+        throw railErr;
+      }
 
       // Update status
       await db.update(westAfricaTransfers)
         .set({ status: result.status ?? "processing", mojaloopTxnId: result.mojaloop_txn_id })
         .where(eq(westAfricaTransfers.transferId, transferId)).returning();
+
+      if (pipelineResult.tigerBeetleRecorded) {
+        try {
+          await settleTransferHold({ transferId, userId: ctx.user.id, amount: input.amountNgn, currency: "NGN" });
+        } catch (settleErr) {
+          logger.error({ err: settleErr instanceof Error ? settleErr.message : String(settleErr), transferId },
+            "[WestAfrica] CRITICAL: rail committed but settlement failed — MANUAL RECONCILIATION REQUIRED (journal marked reconcile_required)");
+        }
+      }
 
       return { ...result, transferId, verified: true, fraudScore: pipelineResult.fraudScore };
     }),

@@ -211,8 +211,81 @@ export async function executeCoordinatedTransaction(
   return tx;
 }
 
-async function executeStep(tx: CoordinatedTransaction, step: TransactionStep): Promise<void> {
+// ─── Distributed tx-lock (W12-FIX, audit F1-3/F2-9) ─────────────────────────
+// The coordinated-transaction lock guards money movement (cross-border sends,
+// batch payroll). Previous behavior FAILED OPEN: when Redis was unavailable
+// (`getRedisClient()` → null) the acquire step silently succeeded with NO
+// mutual exclusion, and release used a plain DEL against the constant value
+// "1" (no ownership check — could delete another holder's lock).
+//
+// New semantics — explicit tri-state on acquire:
+//   ACQUIRED    → step proceeds; a unique per-acquire token is recorded.
+//   CONTENTION  → lock held by another flow → step THROWS (operation denied,
+//                 the coordinator compensates and the tx never completes).
+//   UNAVAILABLE → Redis down/erroring → step THROWS a retryable
+//                 LockUnavailableError. The operation is DENIED — it never
+//                 proceeds without mutual exclusion.
+// Release uses compare-and-delete Lua on the unique token, so a lock that
+// TTL-expired and was re-acquired by another flow is never clobbered.
+// Best-effort release is safe: the 30s PX TTL is the backstop.
+
+/** Retryable denial — callers/coordinator may re-attempt the whole tx later. */
+export class LockUnavailableError extends Error {
+  readonly retryable = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "LockUnavailableError";
+  }
+}
+
+/** lockKey → ownership token for locks acquired by THIS process. */
+const txLockTokens = new Map<string, string>();
+
+function txLockKey(tx: CoordinatedTransaction): string {
+  return `txlock:${tx.userId}:${tx.transactionId}`;
+}
+
+/** Tri-state acquire: returns on ACQUIRED, throws on CONTENTION/UNAVAILABLE. */
+async function acquireTxLock(tx: CoordinatedTransaction): Promise<void> {
+  const lockKey = txLockKey(tx);
   const redis = getRedisClient();
+  if (!redis) {
+    // UNAVAILABLE — deny. Never run a money flow without mutual exclusion.
+    logger.error({ lockKey, txId: tx.transactionId }, "[FundLock] Redis unavailable — denying fund-flow step (fail-closed)");
+    throw new LockUnavailableError(
+      `[FundLock] Redis unavailable — cannot acquire distributed lock ${lockKey}; operation denied, retry later`
+    );
+  }
+  const token = randomUUID();
+  let result: string | null;
+  try {
+    result = await redis.set(lockKey, token, "PX", 30000, "NX");
+  } catch (err) {
+    // UNAVAILABLE — deny (retryable).
+    logger.error({ err, lockKey, txId: tx.transactionId }, "[FundLock] Redis error on acquire — denying fund-flow step (fail-closed)");
+    throw new LockUnavailableError(
+      `[FundLock] Redis error acquiring ${lockKey}: ${(err as Error).message}; operation denied, retry later`
+    );
+  }
+  if (result !== "OK") {
+    // CONTENTION — another holder owns the lock; deny this attempt.
+    throw new Error(`[FundLock] Lock contention on ${lockKey} — concurrent fund flow in progress, retry later`);
+  }
+  txLockTokens.set(lockKey, token); // ACQUIRED
+}
+
+/** Compare-and-delete release: only deletes while WE still own the lock. */
+async function releaseTxLock(tx: CoordinatedTransaction): Promise<void> {
+  const lockKey = txLockKey(tx);
+  const token = txLockTokens.get(lockKey);
+  txLockTokens.delete(lockKey);
+  const redis = getRedisClient();
+  if (!redis || !token) return; // nothing we can do — PX TTL is the backstop
+  const script = `if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`;
+  await redis.eval(script, 1, lockKey, token).catch(() => { /* best-effort — TTL expires the lock */ });
+}
+
+async function executeStep(tx: CoordinatedTransaction, step: TransactionStep): Promise<void> {
   switch (step.name) {
     case "validate_input":
     case "validate_batch":
@@ -225,11 +298,10 @@ async function executeStep(tx: CoordinatedTransaction, step: TransactionStep): P
       break;
     case "acquire_lock":
     case "acquire_batch_lock":
-      if (redis) {
-        const lockKey = `txlock:${tx.userId}:${tx.transactionId}`;
-        const acquired = await redis.set(lockKey, "1", "PX", 30000, "NX");
-        if (!acquired) throw new Error("Failed to acquire distributed lock");
-      }
+      // FAIL-CLOSED (W12-FIX): throws LockUnavailableError when Redis is
+      // down, throws on contention — the coordinator treats either as a step
+      // failure, compensates completed steps, and the tx never completes.
+      await acquireTxLock(tx);
       break;
     case "debit_sender":
     case "debit_stablecoin":
@@ -267,9 +339,9 @@ async function executeStep(tx: CoordinatedTransaction, step: TransactionStep): P
       break;
     case "release_lock":
     case "release_batch_lock":
-      if (redis) {
-        await redis.del(`txlock:${tx.userId}:${tx.transactionId}`).catch(() => {});
-      }
+      // Compare-and-delete on the unique ownership token (was plain DEL —
+      // could delete a re-acquired lock owned by another flow).
+      await releaseTxLock(tx);
       break;
     case "verify_payment":
     case "initiate_bank_payout":
@@ -302,9 +374,9 @@ async function compensateStep(tx: CoordinatedTransaction, step: TransactionStep)
       break;
     case "acquire_lock":
     case "acquire_batch_lock":
-      // Release lock
-      const redis = getRedisClient();
-      if (redis) await redis.del(`txlock:${tx.userId}:${tx.transactionId}`).catch(() => {});
+      // Release via compare-and-delete on the ownership token (W12-FIX);
+      // never a bare DEL against a key another flow may have re-acquired.
+      await releaseTxLock(tx);
       break;
     case "publish_kafka":
     case "publish_batch_kafka":

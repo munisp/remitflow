@@ -37,7 +37,7 @@ class PaystackClient:
             payload.encode(),
             hashlib.sha512
         ).hexdigest()
-        return expected == signature
+        return hmac.compare_digest(expected, signature)
     
     async def initiate_transfer(self, amount: int, recipient_code: str, reason: str, reference: str = None, currency: str = "NGN") -> Dict:
         """Initiate transfer (amount in kobo/pesewas)"""

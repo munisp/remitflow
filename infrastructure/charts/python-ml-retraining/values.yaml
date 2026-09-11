@@ -48,20 +48,20 @@ dapr:
 # (os.Getenv / env::var / os.getenv across python-ml-retraining's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install python-ml-retraining infrastructure/charts/python-ml-retraining \
 #     -n 54remit -f infrastructure/values-secrets/python-ml-retraining.yaml
 # (a gitignored, per-environment file).
 secrets:
-  DATABASE_URL: "CHANGE_ME"
-  DATA_DIR: "CHANGE_ME"
-  DRIFT_CHECK_INTERVAL_HOURS: "CHANGE_ME"
-  FX_FORECAST_SERVICE_URL: "CHANGE_ME"
-  GNN_FRAUD_SERVICE_URL: "CHANGE_ME"
-  INVESTMENT_ML_SERVICE_URL: "CHANGE_ME"
-  MIN_NEW_SAMPLES_TO_RETRAIN: "CHANGE_ME"
-  MLFLOW_REGISTRY_SERVICE_URL: "CHANGE_ME"
-  NLU_SERVICE_URL: "CHANGE_ME"
+  DATABASE_URL: ""  # REQUIRED
+  DATA_DIR: ""  # REQUIRED
+  DRIFT_CHECK_INTERVAL_HOURS: ""  # REQUIRED
+  FX_FORECAST_SERVICE_URL: ""  # REQUIRED
+  GNN_FRAUD_SERVICE_URL: ""  # REQUIRED
+  INVESTMENT_ML_SERVICE_URL: ""  # REQUIRED
+  MIN_NEW_SAMPLES_TO_RETRAIN: ""  # REQUIRED
+  MLFLOW_REGISTRY_SERVICE_URL: ""  # REQUIRED
+  NLU_SERVICE_URL: ""  # REQUIRED
   PORT: "8116"
-  RAY_TRAINING_SERVICE_URL: "CHANGE_ME"
-  RETRAIN_INTERVAL_HOURS: "CHANGE_ME"
+  RAY_TRAINING_SERVICE_URL: ""  # REQUIRED
+  RETRAIN_INTERVAL_HOURS: ""  # REQUIRED

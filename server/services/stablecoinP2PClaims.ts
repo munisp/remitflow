@@ -98,3 +98,50 @@ export async function releaseStablecoinP2PClaim(claimId: string, recipientUserId
     WHERE id = ${claimId} AND status = 'redeeming' AND claimed_by_user_id = ${String(recipientUserId)}
   `);
 }
+
+/**
+ * FF-FIX: saga rollback for claim creation — delete a PENDING claim whose
+ * escrow ledger debit never succeeded, so an unbacked claim can never be
+ * redeemed. Only the sender's own pending claim can be deleted.
+ */
+export async function deleteStablecoinP2PClaim(claimId: string, senderId: number | string): Promise<void> {
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  await db.execute(sql`
+    DELETE FROM stablecoin_p2p_claims
+    WHERE id = ${claimId} AND sender_id = ${String(senderId)} AND status = 'pending'
+  `);
+}
+
+/**
+ * FF-FIX: permanently fail a claim whose redemption credit already happened
+ * but completion failed. The claim is LOCKED (never re-redeemable) — the
+ * caller must post a compensating ledger reversal separately.
+ */
+export async function failStablecoinP2PClaim(claimId: string, recipientUserId: number | string, reason: string): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db.execute(sql`
+    UPDATE stablecoin_p2p_claims
+    SET status = 'failed'
+    WHERE id = ${claimId} AND status = 'redeeming' AND claimed_by_user_id = ${String(recipientUserId)}
+  `);
+}
+
+/**
+ * FF-FIX: sender cancel — guarded single-winner transition pending→cancelled.
+ * The caller must post the escrow→sender ledger reversal around this call.
+ */
+export async function cancelStablecoinP2PClaim(claimId: string, senderId: number | string): Promise<StablecoinP2PClaim> {
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const result = await db.execute(sql`
+    UPDATE stablecoin_p2p_claims
+    SET status = 'cancelled'
+    WHERE id = ${claimId} AND sender_id = ${String(senderId)} AND status = 'pending'
+    RETURNING *
+  `);
+  const row = rows(result)[0];
+  if (!row) throw new TRPCError({ code: "CONFLICT", message: "The claim is not pending (already redeemed, cancelled, or owned by someone else)." });
+  return claimFromRow(row);
+}

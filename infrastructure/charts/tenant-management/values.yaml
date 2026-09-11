@@ -57,7 +57,7 @@ secrets:
   LOG_PATH: "./logs"
   LOG_LEVEL: "info"
   LOG_SILENT: "false"
-  DATABASE_URI: "CHANGE_ME"
+  DATABASE_URI: ""  # REQUIRED
   # DAPR_HOST / DAPR_HTTP_PORT are auto-injected by the Dapr sidecar in-cluster
   # once dapr.enabled is true above — left here only as an explicit override
   # point in case that ever needs to change.

@@ -48,15 +48,15 @@ dapr:
 # (os.Getenv / env::var / os.getenv across go-xof-adapter's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install go-xof-adapter infrastructure/charts/go-xof-adapter \
 #     -n 54remit -f infrastructure/values-secrets/go-xof-adapter.yaml
 # (a gitignored, per-environment file).
 secrets:
   DAPR_HTTP_PORT: "3500"
-  DATABASE_URL: "CHANGE_ME"
-  INTERNAL_SERVICE_KEY: "CHANGE_ME"
-  MOJALOOP_ENDPOINT: "CHANGE_ME"
-  OPENSEARCH_URL: "CHANGE_ME"
+  DATABASE_URL: ""  # REQUIRED
+  INTERNAL_SERVICE_KEY: ""  # REQUIRED
+  MOJALOOP_ENDPOINT: ""  # REQUIRED
+  OPENSEARCH_URL: ""  # REQUIRED
   PORT: "8094"
-  TIGERBEETLE_ADDR: "CHANGE_ME"
+  TIGERBEETLE_ADDR: ""  # REQUIRED

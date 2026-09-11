@@ -416,11 +416,9 @@ describe("RemitFlow tRPC Routers", () => {
     expect(Array.isArray(watchlist)).toBe(true);
   });
 
-  it("investment.getPriceFeed returns live price feed", async () => {
-    const feed = await Promise.race([
-      caller.investment.getPriceFeed(),
-      new Promise((resolve) => setTimeout(() => resolve({ prices: [], count: 0, _timeout: true }), 5000)),
-    ]);
-    expect(feed).toBeDefined();
+  it("investment.getPriceFeed fails closed — phantom price proxy removed", async () => {
+    // The old client proxied a phantom go-investment-feed /prices endpoint.
+    // The real feed only refreshes the DB; the procedure now fails closed.
+    await expect(caller.investment.getPriceFeed()).rejects.toThrow(/go-investment-feed only refreshes the database/i);
   }, 10000);
 });

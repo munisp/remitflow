@@ -17,7 +17,23 @@ import axios from "axios";
 
 const AIRFLOW_BASE_URL = process.env.AIRFLOW_URL ?? "http://localhost:8081/api/v1";
 const AIRFLOW_USERNAME = process.env.AIRFLOW_USERNAME ?? "admin";
-const AIRFLOW_PASSWORD = process.env.AIRFLOW_PASSWORD ?? "admin";
+
+// W9/Q11 (F10-12): no repo-known default credentials. Production: missing
+// AIRFLOW_PASSWORD => throw at use (fail closed). Non-production: warn once and
+// run unauthenticated so the integration fails auth and is effectively disabled.
+let warnedMissingPassword = false;
+function getAirflowPassword(): string {
+  const pw = process.env.AIRFLOW_PASSWORD;
+  if (pw) return pw;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("AIRFLOW_PASSWORD is required in production — default credentials are not allowed");
+  }
+  if (!warnedMissingPassword) {
+    warnedMissingPassword = true;
+    console.warn("[airflow] AIRFLOW_PASSWORD unset — Airflow integration disabled (non-production only)");
+  }
+  return "";
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface AirflowDag {
@@ -173,17 +189,18 @@ export const REMITFLOW_DAGS: AirflowDag[] = [
 // ─── Airflow Service Class ────────────────────────────────────────────────────
 export class AirflowService {
   private get authHeaders() {
-    const token = Buffer.from(`${AIRFLOW_USERNAME}:${AIRFLOW_PASSWORD}`).toString("base64");
+    const token = Buffer.from(`${AIRFLOW_USERNAME}:${getAirflowPassword()}`).toString("base64");
     return { Authorization: `Basic ${token}`, "Content-Type": "application/json" };
   }
 
   private async request<T>(method: "get" | "post" | "patch" | "delete", path: string, data?: unknown): Promise<T | null> {
+    const headers = this.authHeaders; // resolves credentials — may throw in production (fail closed)
     try {
       const res = await axios({
         method,
         url: `${AIRFLOW_BASE_URL}${path}`,
         data,
-        headers: this.authHeaders,
+        headers,
         timeout: 10000,
       });
       return res.data as T;
@@ -193,9 +210,10 @@ export class AirflowService {
   }
 
   async isAvailable(): Promise<boolean> {
+    const headers = this.authHeaders; // may throw in production when unconfigured (fail closed)
     try {
       const res = await axios.get(`${AIRFLOW_BASE_URL}/health`, {
-        headers: this.authHeaders,
+        headers,
         timeout: 3000,
       });
       return res.status === 200;

@@ -50,7 +50,7 @@ dapr:
 # secret) — treat its override file with extra care (e.g. sealed-secrets or
 # a secrets manager, not a plain gitignored yaml, once one is adopted).
 secrets:
-  DATABASE_URI: "CHANGE_ME"
+  DATABASE_URI: ""  # REQUIRED — set via --set or secrets manager
   AUDIT_SVC_URL: "http://audit-service:8000"
   DAPR_PUBSUB: "pubsub"
   KAFKA_BOOTSTRAP_SERVERS: "kafka-service:9092"
@@ -58,23 +58,23 @@ secrets:
   KAFKA_SASL_MECHANISM: ""
   KAFKA_SASL_USERNAME: ""
   KAFKA_SASL_PASSWORD: ""
-  INTERNAL_API_BASE_URL: "CHANGE_ME"
-  KEYCLOAK_BASE_URL: "CHANGE_ME"
-  KEYCLOAK_ADMIN_USERNAME: "CHANGE_ME"
-  KEYCLOAK_ADMIN_PASSWORD: "CHANGE_ME"
+  INTERNAL_API_BASE_URL: ""  # REQUIRED — set via --set or secrets manager
+  KEYCLOAK_BASE_URL: ""  # REQUIRED — set via --set or secrets manager
+  KEYCLOAK_ADMIN_USERNAME: ""  # REQUIRED — set via --set or secrets manager
+  KEYCLOAK_ADMIN_PASSWORD: ""  # REQUIRED — set via --set or secrets manager
   DEFAULT_KEYCLOAK_REALM: "54remit"
-  DEFAULT_KEYCLOAK_PUBLIC_KEY: "CHANGE_ME"
+  DEFAULT_KEYCLOAK_PUBLIC_KEY: ""  # REQUIRED — set via --set or secrets manager
   DEFAULT_TENANT_ID: "54remit"
-  SYSTEM_SEED_TOKEN: "CHANGE_ME"
-  DEFAULT_SUPER_ADMIN_NAME: "CHANGE_ME"
-  DEFAULT_SUPER_ADMIN_EMAIL: "CHANGE_ME"
-  DEFAULT_SUPER_ADMIN_PASSWORD: "CHANGE_ME"
+  SYSTEM_SEED_TOKEN: ""  # REQUIRED — set via --set or secrets manager
+  DEFAULT_SUPER_ADMIN_NAME: ""  # REQUIRED — set via --set or secrets manager
+  DEFAULT_SUPER_ADMIN_EMAIL: ""  # REQUIRED — set via --set or secrets manager
+  DEFAULT_SUPER_ADMIN_PASSWORD: ""  # REQUIRED — set via --set or secrets manager
   PERMIFY_URL: "http://permify:3476"
   PERMIFY_DEFAULT_TENANT: "54remit"
   PERMIFY_WRITE_ATTEMPTS: "15"
   BLOCK_VPN: "true"
   BLOCK_TOR: "true"
   BLOCK_DATACENTER: "false"
-  REDIS_URL: "CHANGE_ME"
+  REDIS_URL: ""  # REQUIRED — set via --set or secrets manager
   APP_ENV: "production"
   ROOT_PATH: "/"

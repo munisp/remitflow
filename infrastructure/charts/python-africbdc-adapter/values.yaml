@@ -48,26 +48,26 @@ dapr:
 # (os.Getenv / env::var / os.getenv across python-africbdc-adapter's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install python-africbdc-adapter infrastructure/charts/python-africbdc-adapter \
 #     -n 54remit -f infrastructure/values-secrets/python-africbdc-adapter.yaml
 # (a gitignored, per-environment file).
 secrets:
-  AFRIGO_ENDPOINT: "CHANGE_ME"
+  AFRIGO_ENDPOINT: ""  # REQUIRED
   DAPR_HTTP_PORT: "3500"
-  DATABASE_URL: "CHANGE_ME"
-  ECEDI_API_KEY: "CHANGE_ME"
-  ECEDI_ENDPOINT: "CHANGE_ME"
-  ENAIRA_API_KEY: "CHANGE_ME"
-  ENAIRA_ENDPOINT: "CHANGE_ME"
-  FLUVIO_GATEWAY_URL: "CHANGE_ME"
+  DATABASE_URL: ""  # REQUIRED
+  ECEDI_API_KEY: ""  # REQUIRED
+  ECEDI_ENDPOINT: ""  # REQUIRED
+  ENAIRA_API_KEY: ""  # REQUIRED
+  ENAIRA_ENDPOINT: ""  # REQUIRED
+  FLUVIO_GATEWAY_URL: ""  # REQUIRED
   KAFKA_BROKERS: "kafka-service:9092"
-  KHOKHA_API_KEY: "CHANGE_ME"
-  KHOKHA_ENDPOINT: "CHANGE_ME"
-  LAKEHOUSE_URL: "CHANGE_ME"
-  MOJALOOP_HUB_URL: "CHANGE_ME"
-  OPENSEARCH_URL: "CHANGE_ME"
+  KHOKHA_API_KEY: ""  # REQUIRED
+  KHOKHA_ENDPOINT: ""  # REQUIRED
+  LAKEHOUSE_URL: ""  # REQUIRED
+  MOJALOOP_HUB_URL: ""  # REQUIRED
+  OPENSEARCH_URL: ""  # REQUIRED
   PORT: "8080"
-  REDIS_ADDR: "CHANGE_ME"
-  TEMPORAL_HOST_PORT: "CHANGE_ME"
-  TIGERBEETLE_ADDR: "CHANGE_ME"
+  REDIS_ADDR: ""  # REQUIRED
+  TEMPORAL_HOST_PORT: ""  # REQUIRED
+  TIGERBEETLE_ADDR: ""  # REQUIRED

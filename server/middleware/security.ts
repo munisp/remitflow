@@ -1,59 +1,13 @@
 /**
  * RemitFlow Security Hardening Middleware
- * Implements: CSP, HSTS, rate limiting, SQL injection prevention,
- * XSS protection, CSRF protection, request sanitization, IP allowlisting
+ * Implements: rate limiting, SQL injection prevention, XSS protection,
+ * request sanitization, security-event logging.
+ * NOTE: the dead CSP/headers middleware (`securityHeaders`) was removed —
+ * the live, nonce-based CSP is served by server/security.middleware.ts (Helmet).
  */
 import { Request, Response, NextFunction } from "express";
 import { logger } from '../_core/logger';
 import { redis } from './middlewareIntegration';
-
-// ─── Security Headers ─────────────────────────────────────────────────────────
-export function securityHeaders(req: Request, res: Response, next: NextFunction) {
-  // Content Security Policy
-  res.setHeader(
-    "Content-Security-Policy",
-    [
-      "default-src 'self'",
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://js.stripe.com https://maps.googleapis.com",
-      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-      "font-src 'self' https://fonts.gstatic.com",
-      "img-src 'self' data: blob: https: http:",
-      "connect-src 'self' https://api.stripe.com https://maps.googleapis.com wss: ws:",
-      "frame-src https://js.stripe.com https://hooks.stripe.com",
-      "object-src 'none'",
-      "base-uri 'self'",
-      "form-action 'self'",
-      "upgrade-insecure-requests",
-    ].join("; ")
-  );
-
-  // HTTP Strict Transport Security (2 years)
-  res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
-
-  // Prevent MIME sniffing
-  res.setHeader("X-Content-Type-Options", "nosniff");
-
-  // Prevent clickjacking
-  res.setHeader("X-Frame-Options", "DENY");
-
-  // XSS Protection (legacy browsers)
-  res.setHeader("X-XSS-Protection", "1; mode=block");
-
-  // Referrer Policy
-  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-
-  // Permissions Policy
-  res.setHeader(
-    "Permissions-Policy",
-    "camera=(), microphone=(), geolocation=(), payment=(self), usb=()"
-  );
-
-  // Remove fingerprinting headers
-  res.removeHeader("X-Powered-By");
-  res.removeHeader("Server");
-
-  next();
-}
 
 // ─── Rate Limiting (Redis-backed) ────────────────────────────────────────────
 

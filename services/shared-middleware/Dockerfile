@@ -9,16 +9,17 @@ LABEL org.opencontainers.image.vendor="RemitFlow" \
 RUN apk add --no-cache git ca-certificates tzdata
 WORKDIR /app
 COPY . .
-RUN go mod init remitflow/shared-middleware 2>/dev/null || true
+# No stub fallback: if the library or probe fails to build, the image build
+# FAILS — a container that always reports healthy while providing no middleware
+# functionality must never ship (F9).
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-w -s" -o middleware-health . 2>/dev/null || \
-    (echo '#!/bin/sh\necho OK' > /app/middleware-health && chmod +x /app/middleware-health)
+    go build -ldflags="-w -s" -o middleware-health ./cmd/healthprobe
 FROM alpine:3.19
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates wget
 WORKDIR /app
 COPY --from=builder /app/middleware-health .
 EXPOSE 8100
-HEALTHCHECK --interval=30s --timeout=5s CMD ./middleware-health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s CMD wget -q -O /dev/null http://127.0.0.1:8100/health || exit 1
 RUN addgroup --system --gid 1001 appgroup && \
     adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
 USER appuser

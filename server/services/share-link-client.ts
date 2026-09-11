@@ -1,9 +1,13 @@
 /**
  * RemitFlow Share Link Client
- * Typed HTTP client for the Rust social sharing link generator (port 8085)
+ *
+ * Wave 7 (C9): NO share-link service exists anywhere in services/ — the old
+ * target was a phantom and its callers fabricated share URLs/slugs. Every
+ * method now throws UNAVAILABLE ("service not deployed"); health() honestly
+ * reports offline. Do NOT reintroduce fabricated links.
  */
 
-const SHARE_BASE = process.env.SHARE_LINK_URL ?? "http://localhost:8085";
+const NOT_DEPLOYED = "share-link service not deployed";
 
 export interface ShareUrls {
   whatsapp: string;
@@ -60,87 +64,32 @@ export interface ShareLink {
   expiresAt?: string;
 }
 
-async function fetchShare<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${SHARE_BASE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options?.headers ?? {}),
-    },
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!res.ok) {
-    throw new Error(`[ShareLink] ${path} → ${res.status} ${res.statusText}`);
-  }
-  return res.json() as Promise<T>;
+function unavailable<T>(method: string): Promise<T> {
+  return Promise.reject(new Error(`UNAVAILABLE: ${NOT_DEPLOYED} — shareLinkClient.${method} cannot be served`));
 }
 
 export const shareLinkClient = {
-  /** Generate a new share link */
+  /** Generate a new share link — service not deployed, always throws */
   generate: (req: GenerateShareLinkRequest): Promise<GenerateShareLinkResponse> =>
-    fetchShare("/generate", {
-      method: "POST",
-      body: JSON.stringify({
-        resource_type: req.resourceType,
-        resource_id: req.resourceId,
-        title: req.title,
-        description: req.description,
-        image_url: req.imageUrl,
-        target_url: req.targetUrl,
-        base_url: req.baseUrl,
-        expires_in_days: req.expiresInDays,
-        created_by: req.createdBy,
-        metadata: req.metadata,
-      }),
-    }).then((raw: any) => ({
-      id: raw.id,
-      slug: raw.slug,
-      shortUrl: raw.short_url,
-      ogUrl: raw.og_url,
-      shareUrls: {
-        whatsapp: raw.share_urls?.whatsapp ?? "",
-        twitter: raw.share_urls?.twitter ?? "",
-        facebook: raw.share_urls?.facebook ?? "",
-        telegram: raw.share_urls?.telegram ?? "",
-        copy: raw.share_urls?.copy ?? raw.short_url,
-      },
-      expiresAt: raw.expires_at,
-    })),
+    unavailable(`generate(${req.resourceType}:${req.resourceId})`),
 
-  /** Resolve a slug to its target URL */
+  /** Resolve a slug to its target URL — service not deployed, always throws */
   resolve: (slug: string): Promise<{ found: boolean; redirectUrl?: string; link?: ShareLink }> =>
-    fetchShare(`/resolve/${slug}`).then((raw: any) => ({
-      found: raw.found,
-      redirectUrl: raw.redirect_url,
-      link: raw.link,
-    })),
+    unavailable(`resolve(${slug})`),
 
-  /** Get stats for a share link */
+  /** Get stats for a share link — service not deployed, always throws */
   stats: (slug: string): Promise<ShareLinkStats> =>
-    fetchShare(`/stats/${slug}`).then((raw: any) => ({
-      slug: raw.slug,
-      clicks: raw.clicks,
-      views: raw.views,
-      createdAt: raw.created_at,
-      isActive: raw.is_active,
-    })),
+    unavailable(`stats(${slug})`),
 
-  /** Track a click or view on a share link */
+  /** Track a click or view on a share link — service not deployed, always throws */
   track: (slug: string, eventType: "click" | "view"): Promise<{ ok: boolean }> =>
-    fetchShare(`/track/${slug}`, {
-      method: "POST",
-      body: JSON.stringify({ event_type: eventType }),
-    }),
+    unavailable(`track(${slug},${eventType})`),
 
-  /** List all active share links */
+  /** List all active share links — service not deployed, always throws */
   list: (): Promise<{ links: ShareLink[]; count: number }> =>
-    fetchShare("/list"),
+    unavailable("list()"),
 
-  /** Health check */
+  /** Health check — honest: the service does not exist, always offline */
   health: (): Promise<{ status: string; service: string; linksStored: number }> =>
-    fetchShare("/health").then((raw: any) => ({
-      status: raw.status,
-      service: raw.service,
-      linksStored: raw.links_stored ?? 0,
-    })),
+    Promise.resolve({ status: "offline", service: "share-link (not deployed)", linksStored: 0 }),
 };

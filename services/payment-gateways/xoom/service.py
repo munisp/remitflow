@@ -6,20 +6,48 @@ from .client import XoomClient
 from typing import Dict
 import os
 
+_PLACEHOLDER_VALUES = {"test_key", "changeme", "change_me", "placeholder", "your_api_key_here"}
+
+
+def _require_env(name: str) -> str:
+    """Read a required credential from the environment.
+
+    Fails fast at startup if the variable is unset, empty, or still a
+    known placeholder value -- never fall back to a fake credential on a
+    money path.
+    """
+    value = os.getenv(name)
+    if not value or value.strip().lower() in _PLACEHOLDER_VALUES:
+        raise RuntimeError(
+            f"Missing required configuration: {name} is unset or a placeholder. "
+            "Refusing to start the xoom gateway without real credentials."
+        )
+    return value
+
+
 class XoomService:
     def __init__(self):
         self.client = XoomClient(
-            api_key=os.getenv("XOOM_API_KEY", "test_key")
+            api_key=_require_env("XOOM_API_KEY")
         )
-    
+
     async def process_transfer(self, transfer_data: Dict) -> Dict:
-        """Process a transfer through xoom"""
+        """Process a transfer through xoom.
+
+        transfer_data keys: amount, currency, recipient (dict),
+        reference (unique caller-supplied reference).
+        """
         try:
-            result = await self.client.initiate_transfer(transfer_data)
+            result = await self.client.create_transfer(
+                amount=transfer_data["amount"],
+                currency=transfer_data["currency"],
+                recipient=transfer_data["recipient"],
+                reference=transfer_data["reference"],
+            )
             return {
                 "success": True,
                 "gateway": "xoom",
-                "transfer_id": result.get("id"),
+                "transfer_id": str(result.get("transfer_id")),
                 "status": result.get("status"),
                 "data": result
             }
@@ -29,7 +57,7 @@ class XoomService:
                 "gateway": "xoom",
                 "error": str(e)
             }
-    
+
     async def check_status(self, transfer_id: str) -> Dict:
         """Check transfer status"""
         try:

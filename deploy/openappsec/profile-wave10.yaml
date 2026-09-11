@@ -1,0 +1,118 @@
+# OpenAppSec Wave-10 prevention profile — RemitFlow (SPEC-wave10 C5)
+# WAF profile for the two PUBLIC Wave-10 surfaces:
+#   /pl/*           (payment links — unauthenticated, tokenized)
+#   /partner/v1/*   (embedded payouts — partner API key + HMAC)
+# Mirrors infrastructure/runtime/openappsec/local_policy.yaml structure.
+# SQLi/XSS coverage comes from the snort-signatures + web-attacks practices
+# (open-appsec defaults); rate limiting is enforced at the APISIX layer
+# (deploy/apisix/routes-wave10.yaml) — open-appsec logs + prevents, APISIX
+# throttles.
+policies:
+  default:
+    triggers:
+      - appsec-default-log-trigger
+    mode: prevent-learn
+    practices:
+      - webapp-default-practice
+    custom-response: appsec-default-web-user-response
+  specific-rules:
+    # ── Payment links: strictest public posture ──────────────────────────────
+    - name: wave10-payment-links
+      paths:
+        - /pl
+      triggers:
+        - appsec-default-log-trigger
+      mode: prevent-learn
+      practices:
+        - wave10-public-practice
+      custom-response: appsec-default-web-user-response
+    # ── Embedded payouts: signed partner traffic, still inspected ────────────
+    - name: wave10-embedded-payouts
+      paths:
+        - /partner/v1
+      triggers:
+        - appsec-default-log-trigger
+      mode: prevent-learn
+      practices:
+        - wave10-public-practice
+      custom-response: appsec-default-web-user-response
+
+practices:
+  - name: webapp-default-practice
+    openapi-schema-validation:
+      configmap: []
+      override-mode: prevent-learn
+    snort-signatures:
+      configmap: []
+      override-mode: prevent-learn
+    web-attacks:
+      max-body-size-kb: 1000000
+      max-header-size-bytes: 102400
+      max-object-depth: 40
+      max-url-size-bytes: 32768
+      minimum-confidence: critical
+      override-mode: prevent-learn
+      protections:
+        csrf-protection: inactive
+        error-disclosure: inactive
+        non-valid-http-methods: false
+        open-redirect: inactive
+    anti-bot:
+      injected-URIs: []
+      validated-URIs: []
+      override-mode: prevent-learn
+
+  # Public-surface practice: SQLi/XSS (snort + web-attacks) at HIGH confidence
+  # (not just critical) — these endpoints are unauthenticated/partner-facing
+  # and carry payment tokens, so medium-confidence attack indicators prevent.
+  - name: wave10-public-practice
+    openapi-schema-validation:
+      configmap: []
+      override-mode: prevent-learn
+    snort-signatures:
+      configmap: []
+      override-mode: prevent-learn
+    web-attacks:
+      max-body-size-kb: 256
+      max-header-size-bytes: 32768
+      max-object-depth: 20
+      max-url-size-bytes: 4096
+      minimum-confidence: high
+      override-mode: prevent-learn
+      protections:
+        csrf-protection: inactive
+        error-disclosure: inactive
+        non-valid-http-methods: false
+        open-redirect: inactive
+    anti-bot:
+      injected-URIs: []
+      validated-URIs: []
+      override-mode: prevent-learn
+
+log-triggers:
+  - name: appsec-default-log-trigger
+    access-control-logging:
+      allow-events: false
+      drop-events: true
+    additional-suspicious-events-logging:
+      enabled: true
+      minimum-severity: high
+      response-body: false
+    appsec-logging:
+      all-web-requests: false
+      detect-events: true
+      prevent-events: true
+    extended-logging:
+      http-headers: false
+      request-body: false
+      url-path: false
+      url-query: false
+    log-destination:
+      cloud: true
+      stdout:
+        format: json
+
+custom-responses:
+  - name: appsec-default-web-user-response
+    mode: response-code-only
+    http-response-code: 403

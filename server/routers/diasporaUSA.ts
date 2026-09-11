@@ -6,7 +6,7 @@ import { TRPCError } from "@trpc/server";
 import { getDb } from "../db";
 import { diasporaProfiles, diasporaOfferClaims, transfers, users } from "../../drizzle/schema";
 import { eq, desc, and } from "drizzle-orm";
-import { executeTransferPipeline } from "../_core/transferPipeline";
+import { executeTransferPipeline, settleTransferHold, compensateFailedTransfer } from "../_core/transferPipeline";
 import { logger } from "../_core/logger";
 import { KYC_TIER_LIMITS, type KycTier } from "../business-rules";
 
@@ -148,19 +148,41 @@ export const diasporaUSARouter = router({
         metadata: { recipientBank: input.recipientBankName, routingNumber: input.recipientRoutingNumber },
       });
 
-      await db.insert(transfers).values({
-        userId: ctx.user.id,
-        transferType: "outbound",
-        rail: "ach",
-        corridorCode: "US",
-        amountNgn: (input.amountUsd * 1620).toFixed(2),
-        amountForeign: input.amountUsd.toFixed(2),
-        foreignCurrency: "USD",
-        recipientName: input.recipientName,
-        recipientAccount: input.recipientAccountNumber,
-        status: "pending",
-        createdAt: new Date(),
-      }).returning();
+      // FF-FIX: the pipeline created a TB hold that was NEVER settled or
+      // compensated (orphaned). Now: record insert failure → compensate;
+      // success → settle (post hold + atomic PG debit, journaled).
+      try {
+        await db.insert(transfers).values({
+          userId: ctx.user.id,
+          transferType: "outbound",
+          rail: "ach",
+          corridorCode: "US",
+          amountNgn: (input.amountUsd * 1620).toFixed(2),
+          amountForeign: input.amountUsd.toFixed(2),
+          foreignCurrency: "USD",
+          recipientName: input.recipientName,
+          recipientAccount: input.recipientAccountNumber,
+          status: "pending",
+          createdAt: new Date(),
+        }).returning();
+      } catch (insErr) {
+        if (pipelineResult.tigerBeetleRecorded) {
+          await compensateFailedTransfer({
+            transferId, userId: ctx.user.id, amount: input.amountUsd, currency: "USD",
+            reason: `ACH transfer record insert failed: ${insErr instanceof Error ? insErr.message : String(insErr)}`,
+            stage: "settlement",
+          }).catch((cErr) => logger.warn({ err: cErr instanceof Error ? cErr.message : String(cErr), transferId }, "[DiasporaUSA] Hold release failed — reaper will reconcile"));
+        }
+        throw insErr;
+      }
+      if (pipelineResult.tigerBeetleRecorded) {
+        try {
+          await settleTransferHold({ transferId, userId: ctx.user.id, amount: input.amountUsd, currency: "USD" });
+        } catch (settleErr) {
+          logger.error({ err: settleErr instanceof Error ? settleErr.message : String(settleErr), transferId },
+            "[DiasporaUSA] CRITICAL: transfer accepted but settlement failed — MANUAL RECONCILIATION REQUIRED (journal marked reconcile_required)");
+        }
+      }
 
       return {
         transferId,

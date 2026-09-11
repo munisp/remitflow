@@ -446,10 +446,14 @@ describe("React Native Stablecoin UI", () => {
     expect(content).toContain("payBill");
   });
 
-  it("supports all 9 chains for bridging", () => {
+  it("supports only the 7 enabled chains for bridging (Solana/Tron gated off)", () => {
     const content = readFileSync(join(ROOT, "mobile/react-native/src/screens/StablecoinScreen.tsx"), "utf-8");
-    for (const chain of ["ethereum", "polygon", "bsc", "solana", "tron", "arbitrum", "optimism", "base", "avalanche"]) {
+    for (const chain of ["ethereum", "polygon", "bsc", "arbitrum", "optimism", "base", "avalanche"]) {
       expect(content).toContain(chain);
+    }
+    // Solana/Tron must not be advertised: no real on-chain adapter exists.
+    for (const gated of ['"solana"', '"tron"']) {
+      expect(content).not.toContain(gated);
     }
   });
 });

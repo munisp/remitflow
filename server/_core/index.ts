@@ -1,5 +1,11 @@
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import "dotenv/config";
+// W11-C2: OpenTelemetry bootstrap MUST be imported before all other server
+// modules so tracer/meter providers are registered before any module creates
+// instruments or starts spans. dotenv/config above must stay first so
+// OTEL_* env vars are populated before the otel module reads them.
+// The module logs the OTLP endpoint + sample rate itself on init (no dup here).
+import { initTelemetry, otelRequestMiddleware, shutdownTelemetry } from "../telemetry/otel";
 import express from "express";
 import { createServer } from "http";
 import net from "net";
@@ -55,6 +61,9 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
+  // W11-C2: start the OTel SDK before anything else touches tracers/meters.
+  // Fail-soft inside initTelemetry() — a collector outage never blocks boot.
+  initTelemetry();
   // Validate environment variables before starting — aborts in production if critical vars missing
   requireValidEnv();
   const app = express();
@@ -75,6 +84,15 @@ async function startServer() {
   // Request ID tracing and structured request observability.
   app.use(requestIdMiddleware);
   app.use(requestLoggingMiddleware);
+
+  // W11-FIX-TS: HTTP-level OTel SERVER span for every request, BEFORE the tRPC
+  // handler (and all downstream routes). Makes trace.getActiveSpan() non-empty
+  // for tRPC procedures so per-tenant span enrichment actually lands; also
+  // activates recordApiLatency on response finish. otelRequestMiddleware
+  // (server/telemetry/otel.ts) is fail-soft: with the SDK down the global
+  // tracer is a no-op proxy, so the span/startActiveSpan calls are inert and
+  // next() still runs; initTelemetry itself catches SDK start failures.
+  app.use(otelRequestMiddleware);
 
   // Parse ordinary API payloads before body-dependent security controls. Raw-body
   // payment and KYC webhook routes were registered above this point.
@@ -674,9 +692,21 @@ async function startServer() {
   // Receives alerts from Prometheus Alertmanager (WAF blocks, CSP violations, auth failures)
   // Protected by bearer token (ALERTMANAGER_WEBHOOK_TOKEN env var)
   app.post("/api/security-alert", express.json(), (req, res) => {
-    const authHeader = req.headers.authorization || "";
+    // W9/Q11 (F10-11): fail closed. When ALERTMANAGER_WEBHOOK_TOKEN is unset the
+    // endpoint previously skipped auth entirely — now it refuses with a structured
+    // warn and never processes the payload. Compare is constant-time (both sides
+    // hashed so timingSafeEqual never leaks token length).
     const expectedToken = process.env.ALERTMANAGER_WEBHOOK_TOKEN || "";
-    if (expectedToken && authHeader !== `Bearer ${expectedToken}`) {
+    if (!expectedToken) {
+      logger.warn({ event: "SECURITY_ALERT_REJECTED", reason: "token_not_configured", path: "/api/security-alert" },
+        "[SecurityAlert] ALERTMANAGER_WEBHOOK_TOKEN is not configured — skipping alert ingestion (fail-closed)");
+      return res.status(503).json({ error: "security alert webhook not configured" });
+    }
+    const authHeader = req.headers.authorization || "";
+    const bearer = authHeader.startsWith("Bearer ") ? authHeader.slice("Bearer ".length).trim() : "";
+    const expected = createHash("sha256").update(expectedToken).digest();
+    const actual = createHash("sha256").update(bearer).digest();
+    if (!timingSafeEqual(expected, actual)) {
       return res.status(401).json({ error: "unauthorized" });
     }
     const alerts = req.body?.alerts || [];
@@ -984,20 +1014,31 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
 
       for (const { proposal, fund } of pendingDisbursements) {
         try {
-          // Mark as completed (in production: integrate with payment rail)
-          await db.update(fundProposals)
-            .set({ status: "completed", fundedAt: new Date(), updatedAt: new Date() })
-            .where(eq(fundProposals.id, proposal.id));
+          // W9-FIX3: status flip + notification commit in ONE transaction (a
+          // crash between them previously left the proposal "completed" but the
+          // submitter never notified — or vice versa on retry). Notification
+          // type must be enum-valid: 'disbursement_completed' is NOT in
+          // notifTypeEnum [transaction, security, kyc, system, promotion,
+          // fx_alert] and the old `.catch(() => {})` swallowed the rejection
+          // silently. Use 'transaction', preserve the original in metadata, and
+          // let failures hit the structured warn below instead of vanishing.
+          await db.transaction(async (tx) => {
+            // Mark as completed (in production: integrate with payment rail)
+            await tx.update(fundProposals)
+              .set({ status: "completed", fundedAt: new Date(), updatedAt: new Date() })
+              .where(eq(fundProposals.id, proposal.id));
 
-          // Notify the proposal submitter
-          await db.insert(notifications).values({
-            userId: proposal.submittedByUserId,
-            type: "disbursement_completed",
-            title: "Disbursement Completed",
-            message: `Your proposal "${proposal.title}" has been disbursed. Amount: ${proposal.requestedAmount} ${proposal.currency ?? "USD"}.`,
-            isRead: false,
-            createdAt: new Date(),
-          }).catch(() => {});
+            // Notify the proposal submitter
+            await tx.insert(notifications).values({
+              userId: proposal.submittedByUserId,
+              type: "transaction",
+              title: "Disbursement Completed",
+              message: `Your proposal "${proposal.title}" has been disbursed. Amount: ${proposal.requestedAmount} ${proposal.currency ?? "USD"}.`,
+              metadata: { originalType: "disbursement_completed" },
+              isRead: false,
+              createdAt: new Date(),
+            });
+          });
 
           processed++;
         } catch (e: any) {
@@ -1319,10 +1360,51 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
     // hold expired unposted, and alerts. Holds must never silently expire
     // unposted for completed transfers.
     import("./transferPipeline").then(({ startSettlementReaper }) => startSettlementReaper()).catch(err => logger.warn({ errMsg: err?.message }, "[Settlement] Reaper init failed (non-blocking):"));
+    // W9/F11-3: 72h stablecoin-claim refund sweeper — previously defined but never
+    // registered, so expired claims were never auto-refunded. Boot registration is
+    // guarded: failure is logged loudly and never crashes the server.
+    try {
+      const { startStablecoinSchedulers } = await import("../services/stablecoinScheduler.js");
+      startStablecoinSchedulers();
+      logger.info("[Stablecoin] Schedulers started (claim-refund sweeper)");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "unknown";
+      logger.error({ errMsg: message }, "[Stablecoin] startStablecoinSchedulers failed to start — expired-claim refunds are NOT running:");
+    }
     // Initialize Kafka topics (non-blocking, graceful fallback if Kafka unavailable)
     ensureTopicsExist()
       .then(() => startKafkaConsumers())
       .catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic/consumer init failed (non-blocking):"));
+    // ── W10 boot registrations (SPEC-wave10) — all guarded, non-blocking ─────
+    // C2: daily AR aging schedule (Temporal cron `0 6 * * *`, queue ar-aging).
+    // If Temporal is unavailable the schedule is simply not registered — the
+    // sweep can still be triggered manually; failure is logged loudly.
+    import("../temporal/arAgingWorkflow.js").then(({ registerArAgingSchedule }) =>
+      registerArAgingSchedule().then((ok) => {
+        if (!ok) logger.warn("[W10/ArAging] registerArAgingSchedule returned false — daily overdue sweep NOT scheduled");
+      })
+    ).catch(err => logger.error({ errMsg: err?.message }, "[W10/ArAging] Schedule registration FAILED — invoices will not auto-age to overdue:"));
+    // C4: accounting-sync node-cron (15-min) — internally no-ops when the Go
+    // accounting-sync service is unconfigured (ACCOUNTING_SYNC_URL unset).
+    import("../routers/accountingSync.js").then(({ startAccountingSyncSchedule }) => {
+      startAccountingSyncSchedule();
+      logger.info("[W10/AccountingSync] 15-min sync scheduler started");
+    }).catch(err => logger.error({ errMsg: err?.message }, "[W10/AccountingSync] Scheduler init FAILED:"));
+    // C5: OpenSearch indexer — Kafka consumers on remitflow.vendor-bills /
+    // .invoices / .embedded-payouts. Fail-soft when OPENSEARCH_URL unset.
+    import("../services/searchIndexer.js").then(({ startSearchIndexer }) =>
+      startSearchIndexer()
+        .then(() => logger.info("[W10/SearchIndexer] Kafka→OpenSearch indexer started"))
+        .catch(err => logger.error({ errMsg: err?.message }, "[W10/SearchIndexer] Indexer FAILED to start — search falls back to DB LIKE:"))
+    ).catch(err => logger.error({ errMsg: err?.message }, "[W10/SearchIndexer] Module load FAILED:"));
+    // W10-FIX-B/H6: settlement sweeper — reconciles `executing` partner payouts
+    // (mojaloop getTransferStatus / circle getTransfer) and vendor_bills parked
+    // with railUncertain, retrying TB posts and resolving holds. Without it no
+    // async rail can ever reach `settled`.
+    import("../services/payoutSettlementSweeper.js").then(({ startPayoutSettlementSweeper }) => {
+      startPayoutSettlementSweeper();
+      logger.info("[W10/SettlementSweeper] 2-min payout settlement reconciler started");
+    }).catch(err => logger.error({ errMsg: err?.message }, "[W10/SettlementSweeper] FAILED to start — executing payouts will NOT auto-settle (manual recon required):"));
     // Bootstrap OpenSearch indices + stablecoin index templates/ILM (non-blocking; loud failure logging)
     import("../middleware/opensearch").then(({ bootstrapOpenSearch }) =>
       bootstrapOpenSearch()
@@ -1439,6 +1521,21 @@ async function gracefulShutdown(signal: string) {
     logger.info("[Shutdown] Kafka disconnected");
   } catch (err: any) {
     logger.warn({ errMsg: err.message }, "[Shutdown] Kafka disconnect warning:");
+  }
+
+  // Flush pending OTel spans/metrics (W12-F): shutdownTelemetry was previously
+  // never called, so the BatchSpanProcessor's in-flight buffer was lost on
+  // every SIGTERM. Bounded to 2s — telemetry flush must never stall pod exit
+  // past the 30s forced-exit backstop above. Fail-soft: errors are logged,
+  // never thrown.
+  try {
+    await Promise.race([
+      shutdownTelemetry(),
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
+    logger.info("[Shutdown] Telemetry flushed (2s budget)");
+  } catch (err: any) {
+    logger.warn({ errMsg: err?.message }, "[Shutdown] Telemetry flush warning:");
   }
 
   clearTimeout(shutdownTimeout);

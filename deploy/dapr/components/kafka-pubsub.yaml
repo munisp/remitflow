@@ -1,0 +1,50 @@
+# Dapr pub/sub component for RemitFlow Wave-10 services (W10-C4).
+#
+# Used by: go-accounting-sync (publishes remitflow.accounting-sync).
+#
+# The brokers value is an environment placeholder: render this manifest with
+# envsubst (or your CD templating) at deploy time:
+#
+#   KAFKA_BROKERS="kafka:9092" envsubst < deploy/dapr/components/kafka-pubsub.yaml | kubectl apply -f -
+#
+# SASL credentials come from the Kubernetes secret `remitflow-kafka`
+# (keys: saslUsername, saslPassword) — never inline credentials here.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: kafka-pubsub
+  namespace: default
+spec:
+  type: pubsub.kafka
+  version: v1
+  metadata:
+    - name: brokers # Required. Comma-separated broker list (env-rendered).
+      value: "${KAFKA_BROKERS}"
+    - name: authType # Required. SASL password auth in shared environments.
+      value: "password"
+    - name: saslUsername
+      secretKeyRef:
+        name: remitflow-kafka
+        key: saslUsername
+    - name: saslPassword
+      secretKeyRef:
+        name: remitflow-kafka
+        key: saslPassword
+    - name: saslMechanism
+      value: "SHA-512"
+    - name: consumerGroup
+      value: "{namespace}-accounting-sync"
+    - name: maxMessageBytes
+      value: "1048576"
+    - name: consumeRetryInterval
+      value: "200ms"
+    - name: heartbeatInterval
+      value: "5s"
+    - name: sessionTimeout
+      value: "15s"
+    - name: version
+      value: "2.0.0"
+auth:
+  secretStore: kubernetes
+scopes:
+  - accounting-sync

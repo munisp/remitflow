@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -209,6 +210,97 @@ func TestODL_InitiateSettlement_NonExistentQuote(t *testing.T) {
 	handleInitiateSettlement(w, r)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for nonexistent quote, got %d", w.Code)
+	}
+}
+
+// ── Fail-Closed Settlement Honesty ────────────────────────────────────────────
+
+// TestODL_SettlementFailsClosedWithoutRailAdapter asserts that no settlement
+// can reach COMPLETED or carry fabricated transaction IDs when no real rail
+// adapter is implemented.
+func TestODL_SettlementFailsClosedWithoutRailAdapter(t *testing.T) {
+	successBefore := successfulSettlements.Load()
+	failedBefore := failedSettlements.Load()
+
+	settlement := &ODLSettlement{
+		SettlementID:  "test-failclosed-001",
+		TransferID:    "tx-test-001",
+		QuoteID:       "quote-test-001",
+		Status:        StatusPending,
+		FromCurrency:  "USD",
+		ToCurrency:    "NGN",
+		SendAmount:    100,
+		ReceiveAmount: 150000,
+		BridgeAsset:   BridgeUSDC,
+		Provider:      ProviderCircle,
+		CreatedAt:     time.Now(),
+		AuditTrail:    []AuditEvent{},
+	}
+
+	executeODLSettlement(context.Background(), settlement)
+
+	if settlement.Status == StatusCompleted {
+		t.Fatal("settlement must NEVER be COMPLETED without real rail execution")
+	}
+	if settlement.Status != StatusUnavailable {
+		t.Errorf("expected UNAVAILABLE, got %s", settlement.Status)
+	}
+	if settlement.OnRampTxID != "" || settlement.BridgeTxHash != "" || settlement.OffRampTxID != "" {
+		t.Error("fabricated transaction IDs must not be attached without a real rail adapter")
+	}
+	if settlement.CompletedAt != nil {
+		t.Error("CompletedAt must not be set for an unavailable settlement")
+	}
+	if settlement.FailureReason == "" {
+		t.Error("failure reason must explain that the rail adapter is not implemented")
+	}
+	if !strings.Contains(settlement.FailureReason, "rail adapter not implemented") {
+		t.Errorf("failure reason should cite the missing rail adapter, got: %s", settlement.FailureReason)
+	}
+	if successfulSettlements.Load() != successBefore {
+		t.Error("successfulSettlements must not increase without real rail execution")
+	}
+	if failedSettlements.Load() != failedBefore+1 {
+		t.Error("unavailable settlement must be counted as failed, not successful")
+	}
+}
+
+// TestODL_InitiateSettlement_ReportsUnavailable asserts the API response
+// explicitly reports the unavailable rail instead of implying settlement.
+func TestODL_InitiateSettlement_ReportsUnavailable(t *testing.T) {
+	quote := &ODLQuote{
+		QuoteID:       "quote-unavailable-001",
+		FromCurrency:  "USD",
+		ToCurrency:    "KES",
+		SendAmount:    500,
+		ReceiveAmount: 64500,
+		BridgeAsset:   BridgeXRP,
+		Provider:      ProviderRipple,
+		ExpiresAt:     time.Now().Add(30 * time.Second),
+		LockedRate:    true,
+	}
+	store.mu.Lock()
+	store.quotes[quote.QuoteID] = quote
+	store.mu.Unlock()
+
+	body := `{"quote_id":"quote-unavailable-001","transfer_id":"tx-002","user_id":"user-001"}`
+	w := httptest.NewRecorder()
+	r, _ := http.NewRequest("POST", "/api/v1/settlements", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	handleInitiateSettlement(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when rail adapter is unavailable, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if resp["status"] != string(StatusUnavailable) {
+		t.Errorf("response status must be UNAVAILABLE, got %v", resp["status"])
+	}
+	if msg, _ := resp["message"].(string); !strings.Contains(msg, "rail adapter not implemented") {
+		t.Errorf("response message must state the rail adapter is not implemented, got %v", resp["message"])
 	}
 }
 

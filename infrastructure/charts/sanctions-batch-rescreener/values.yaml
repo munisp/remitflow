@@ -48,15 +48,15 @@ dapr:
 # (os.Getenv / env::var / os.getenv across sanctions-batch-rescreener's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install sanctions-batch-rescreener infrastructure/charts/sanctions-batch-rescreener \
 #     -n 54remit -f infrastructure/values-secrets/sanctions-batch-rescreener.yaml
 # (a gitignored, per-environment file).
 secrets:
-  BATCH_SIZE: "CHANGE_ME"
+  BATCH_SIZE: ""  # REQUIRED
   DAPR_HTTP_PORT: "3500"
-  DATABASE_URL: "CHANGE_ME"
+  DATABASE_URL: ""  # REQUIRED
   KAFKA_BROKERS: "kafka-service:9092"
-  PARALLELISM: "CHANGE_ME"
+  PARALLELISM: ""  # REQUIRED
   PORT: "8122"
-  SANCTIONS_ENGINE_URL: "CHANGE_ME"
+  SANCTIONS_ENGINE_URL: ""  # REQUIRED

@@ -1,0 +1,50 @@
+# RemitFlow — Grafana Tempo trace backend (W11-C1)
+# Image: grafana/tempo:2.6.1 (config schema: v2 Tempo config, stable for 2.6.x)
+# Single-binary, local-backend topology for the compose observability profile.
+# Retention: compactor block_retention 48h (compose volume tempo-data).
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317   # otel-collector otlp/tempo exporter targets tempo:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m
+  # Complete blocks are flushed to the WAL then to local storage.
+  trace_idle_period: 10s
+  max_block_bytes: 104857600      # 100 MiB per block cap
+
+compactor:
+  compaction:
+    block_retention: 48h          # sane dev/profile retention for trace data
+    compacted_block_retention: 1h
+    compaction_window: 1h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+    block:
+      bloom_filter_false_positive: 0.05
+
+# Metrics generator is intentionally OFF: span-metrics would duplicate what the
+# TS core already emits as real counters/histograms (server/telemetry/otel.ts),
+# and RED metrics derived from sampled spans are misleading for SLO alerting.
+overrides:
+  defaults:
+    ingestion:
+      rate_limit_bytes: 15000000   # ~15 MB/s burst guard per tenant id "single"
+      burst_size_bytes: 20000000
+      max_traces_per_user: 10000   # per-ingester live-trace cap (single tenant)

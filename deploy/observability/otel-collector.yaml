@@ -1,0 +1,273 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# RemitFlow — OpenTelemetry Collector (W11-C1)
+# ═══════════════════════════════════════════════════════════════════════════
+# Image: otel/opentelemetry-collector-contrib:0.110.0
+#
+# WHY THE CONTRIB IMAGE (not the core image):
+#   The `loki` exporter and the `postgresql`, `redis`, and `kafkametrics`
+#   receivers exist ONLY in the contrib distribution. The core image cannot
+#   run this configuration. (Note: the contrib `loki` exporter was deprecated
+#   shortly after 0.110.0 in favor of pushing OTLP/HTTP to Loki 3.x's native
+#   OTLP endpoint; we pin 0.110.0 where the loki exporter is fully supported.
+#   Migration path: replace the `loki` exporter with
+#   `otlphttp/loki: { endpoint: http://loki:3100/otlp }` on Loki >= 3.0.)
+#
+# EXPORT DECISION — prometheusremotewrite (not the prometheus pull exporter):
+#   We remote-write into Prometheus instead of exposing a :8889 exporter and
+#   scraping it, because (1) one write path carries BOTH OTLP app metrics and
+#   receiver-based metrics into Prometheus with no second scrape config to
+#   keep in sync, (2) resource_to_telemetry_conversion lifts resource attrs
+#   (service.name, deployment, tenant.id when present) onto every series so
+#   per-tenant alerting works uniformly, and (3) the OTTLP histograms from
+#   the TS core keep their native bucket layout. Prometheus runs with
+#   --web.enable-remote-write-receiver (see docker-compose.observability.yml).
+#
+# ENVIRONMENT (all endpoints env-driven; compose supplies these defaults):
+#   OTEL_GRPC_ENDPOINT        0.0.0.0:4317     OTLP/gRPC listen
+#   OTEL_HTTP_ENDPOINT        0.0.0.0:4318     OTLP/HTTP listen
+#   POSTGRES_HOST/PORT        postgres/5432    postgresql receiver target
+#   POSTGRES_USER             remitflow        read-only metrics role
+#   POSTGRES_PASSWORD         (required)       no default — injected by compose
+#   POSTGRES_DB               remitflow
+#   REDIS_HOST/PORT           redis/6379
+#   REDIS_MONITOR_USER        remitflow_admin  ACL user with +INFO +CLIENT +MEMORY
+#   REDIS_MONITOR_PASSWORD    (required)       matches redis/users.acl entry
+#   KAFKA_BROKERS             kafka:9092       PLAINTEXT in-compose listener
+#   APISIX_HOST               apisix:9091      prometheus plugin export server
+#   KEYCLOAK_HOST             keycloak:9000    KC 26 management interface
+#   PERMIFY_HOST              permify:3476
+#   TEMPORAL_HOST             temporal:9090    needs PROMETHEUS_ENDPOINT (below)
+#   MOJALOOP_CONNECTOR_HOST   mojaloop-connector:8113
+#   TB_BRIDGE_HOST            tb-bridge:8200
+#   OPENSEARCH_HOST           opensearch:9200  needs prometheus-exporter plugin
+#   OPENSEARCH_USER/PASSWORD  admin/(required)
+#   TEMPO_ENDPOINT            tempo:4317
+#   PROMETHEUS_RW_ENDPOINT    http://prometheus:9090/api/v1/write
+#   LOKI_ENDPOINT             http://loki:3100/loki/api/v1/push
+#
+# HONEST GAPS (no fake receivers — see README section in alerts.yml header):
+#   * TigerBeetle 0.16.63 exposes NO metrics endpoint (no /metrics, no OTLP).
+#     TB coverage is app-layer: we scrape tb-bridge (the Rust HTTP gateway in
+#     front of TB) and alert on TB post-commit failures via app metrics.
+#   * Fluvio has no OTel/Prometheus surface in this topology; event-stream
+#     coverage is app-layer (rust-fluvio-consumer /metrics, rust-lakehouse-writer).
+#   * Temporal server only serves Prometheus metrics when the temporal service
+#     is started with PROMETHEUS_ENDPOINT=0.0.0.0:9090 (docker-compose.yml,
+#     owned by the core-services track). Until wired, the temporal scrape
+#     target reports down — this is intentional fail-visible behavior.
+#   * OpenSearch requires the plugins-prom-exporter plugin (documented in
+#     docker-compose.middleware.yml) before /_prometheus/metrics exists.
+#   * open-appsec nano-agent exposes no documented Prometheus endpoint in
+#     this deployment mode, and NO log shipper is wired into this collector:
+#     the logs pipeline below receives ONLY OTLP-pushed logs. The agent's own
+#     log destination (deploy/openappsec/profile-wave10.yaml: log-destination)
+#     is stdout as JSON + the fog cloud — it does not write OTLP. To get WAF
+#     logs into Loki, add one of these REAL shippers (not currently present):
+#       (a) a `filelog` receiver tailing the nano-agent log files — a file
+#           path exists ONLY in the platform topology (docker-compose.platform.yml
+#           mounts appsec-logs:/var/log/nano_agent on appsec-agent); the
+#           docker-compose.yml openappsec-agent mounts no log volume, so this
+#           requires sharing that volume with the collector first;
+#       (b) a fluent-bit sidecar/daemon collecting the agent container's
+#           stdout and forwarding via its OTLP output to this collector:4318.
+#     Until one of these lands, WAF log coverage is: agent stdout (docker
+#     logs) + the open-appsec fog portal. Nothing else is claimed.
+#   * Permify v0.9.6 does not serve /metrics by default (its telemetry is
+#     OTel-push based); the job below is present but commented out — enable it
+#     only after Permify metrics are explicitly configured.
+# ═══════════════════════════════════════════════════════════════════════════
+
+extensions:
+  health_check:
+    endpoint: ${env:OTEL_HEALTH_ENDPOINT}   # default 0.0.0.0:13133 (compose)
+
+receivers:
+  # ── OTLP ingest (TS core, Go/Python/Rust services, APISIX, Dapr) ──────────
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:OTEL_GRPC_ENDPOINT}     # 0.0.0.0:4317
+      http:
+        endpoint: ${env:OTEL_HTTP_ENDPOINT}     # 0.0.0.0:4318
+
+  # ── PostgreSQL (contrib receiver; uses pg_stat_* — user needs pg_monitor) ──
+  postgresql:
+    endpoint: ${env:POSTGRES_HOST}:${env:POSTGRES_PORT}
+    transport: tcp
+    username: ${env:POSTGRES_USER}
+    password: ${env:POSTGRES_PASSWORD}
+    databases:
+      - ${env:POSTGRES_DB}
+    tls:
+      insecure: true          # in-cluster plaintext; terminate TLS at a proxy if crossing trust zones
+    collection_interval: 30s
+
+  # ── Redis (contrib receiver; requires an ACL user with +INFO) ─────────────
+  # redis/users.acl disables the default user; remitflow_admin carries
+  # +INFO +DBSIZE +SLOWLOG +LATENCY +MEMORY +CLIENT which this receiver needs.
+  redis:
+    endpoint: ${env:REDIS_HOST}:${env:REDIS_PORT}
+    transport: tcp
+    username: ${env:REDIS_MONITOR_USER}
+    password: ${env:REDIS_MONITOR_PASSWORD}
+    collection_interval: 30s
+
+  # ── Kafka (contrib kafkametrics: broker/topic/consumer-offset scrapers) ────
+  kafkametrics:
+    brokers:
+      - ${env:KAFKA_BROKERS}
+    protocol_version: 2.0.0    # bitnami/kafka:3.6 speaks >= 2.0 APIs
+    scrapers:
+      - brokers
+      - topics
+      - consumers
+    collection_interval: 30s
+
+  # ── Prometheus-format scrapes (native /metrics surfaces) ───────────────────
+  prometheus:
+    config:
+      scrape_configs:
+        # APISIX prometheus plugin export server (plugin_attr in
+        # services/gateway-config/apisix.yaml: export_addr :9091).
+        - job_name: apisix-collector
+          scrape_interval: 15s
+          metrics_path: /apisix/prometheus/metrics
+          static_configs:
+            - targets: ["${env:APISIX_HOST}"]          # apisix:9091
+
+        # Keycloak 26 management interface (/metrics requires
+        # KC_METRICS_ENABLED=true — set in docker-compose.middleware.yml).
+        - job_name: keycloak-collector
+          scrape_interval: 30s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["${env:KEYCLOAK_HOST}"]        # keycloak:9000
+
+        # Temporal server SDK/service metrics. REQUIRES the temporal service
+        # to be started with PROMETHEUS_ENDPOINT=0.0.0.0:9090 (see header).
+        - job_name: temporal-collector
+          scrape_interval: 30s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["${env:TEMPORAL_HOST}"]        # temporal:9090
+
+        # Mojaloop connector — Go gin service, real /metrics handler
+        # (services/mojaloop-connector/main.go:903,948).
+        - job_name: mojaloop-connector-collector
+          scrape_interval: 30s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["${env:MOJALOOP_CONNECTOR_HOST}"]
+
+        # TigerBeetle has NO metrics endpoint; tb-bridge (Rust HTTP gateway
+        # in front of TB) is the honest proxy for TB-path telemetry.
+        - job_name: tigerbeetle-bridge-collector
+          scrape_interval: 30s
+          metrics_path: /metrics
+          static_configs:
+            - targets: ["${env:TB_BRIDGE_HOST}"]
+
+        # OpenSearch — REQUIRES the plugins-prom-exporter plugin
+        # (install note in docker-compose.middleware.yml). Self-signed demo
+        # certs on the single-node dev cluster → insecure_skip_verify.
+        - job_name: opensearch-collector
+          scrape_interval: 30s
+          scheme: https
+          metrics_path: /_prometheus/metrics
+          basic_auth:
+            username: ${env:OPENSEARCH_USER}
+            password: ${env:OPENSEARCH_PASSWORD}
+          tls_config:
+            insecure_skip_verify: true
+          static_configs:
+            - targets: ["${env:OPENSEARCH_HOST}"]      # opensearch:9200
+
+        # PERMIFY — DISABLED INTENTIONALLY. Permify v0.9.6 does not expose a
+        # Prometheus /metrics endpoint out of the box; its instrumentation is
+        # OTel-push based. Enable this job only after Permify is configured
+        # with a metrics exporter, otherwise the target reports down and the
+        # MiddlewareDown alert would fire on a false positive.
+        # - job_name: permify-collector
+        #   scrape_interval: 30s
+        #   metrics_path: /metrics
+        #   static_configs:
+        #     - targets: ["${env:PERMIFY_HOST}"]       # permify:3476
+
+processors:
+  # Back-pressure guard: refuse to OOM the collector under trace bursts.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # Stamp deployment identity on every signal. Per-tenant dimensionality is
+  # attribute-based: app instrumentation sets `tenant.id` on spans/metrics/
+  # logs (see deploy/observability/README notes); it flows through unchanged
+  # and (for metrics) is lifted to a Prometheus label by
+  # resource_to_telemetry_conversion below.
+  resource:
+    attributes:
+      - key: deployment
+        value: remitflow
+        action: upsert
+      # Loki label hint: promote these resource attributes to Loki stream
+      # labels (consumed by the loki exporter; tenant.id activates the moment
+      # app instrumentation sets it — absent attributes are skipped).
+      - key: loki.resource.labels
+        value: service.name, tenant.id, deployment
+        action: insert
+
+exporters:
+  # ── Traces → Tempo (OTLP/gRPC) ────────────────────────────────────────────
+  otlp/tempo:
+    endpoint: ${env:TEMPO_ENDPOINT}            # tempo:4317
+    tls:
+      insecure: true
+
+  # ── Metrics → Prometheus (remote write; receiver enabled via CLI flag) ────
+  prometheusremotewrite:
+    endpoint: ${env:PROMETHEUS_RW_ENDPOINT}    # http://prometheus:9090/api/v1/write
+    tls:
+      insecure: true
+    resource_to_telemetry_conversion:
+      enabled: true   # lift service.name / deployment / tenant.id onto series labels
+
+  # ── Logs → Loki (contrib loki exporter, valid in 0.110.0; see header) ─────
+  loki:
+    endpoint: ${env:LOKI_ENDPOINT}             # http://loki:3100/loki/api/v1/push
+    tls:
+      insecure: true
+    # Valid keys for the (deprecated-in-later-versions) loki exporter are
+    # exporter/job/instance/level — there is NO `resource` key; resource-attr
+    # promotion is done via the loki.resource.labels hint above.
+    default_labels_enabled:
+      exporter: true
+      job: true
+      instance: true
+      level: true
+
+service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      # Collector self-metrics scraped by the prometheus.yml job
+      # "otel-collector" (target otel-collector:8888).
+      address: 0.0.0.0:8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp, postgresql, redis, kafkametrics, prometheus]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [loki]

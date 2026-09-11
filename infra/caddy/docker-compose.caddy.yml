@@ -148,13 +148,13 @@ services:
       - "8080:8080"   # HTTP (internal only; Caddy terminates TLS externally)
     environment:
       # Admin credentials
-      KEYCLOAK_ADMIN:          "${KEYCLOAK_ADMIN_USER:-admin}"
-      KEYCLOAK_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:-changeme-in-production}"
+      KEYCLOAK_ADMIN:          "${KEYCLOAK_ADMIN_USER:?KEYCLOAK_ADMIN_USER is required}"
+      KEYCLOAK_ADMIN_PASSWORD: "${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is required}"
       # Database backend (production: use dedicated Postgres DB)
       KC_DB:                   postgres
       KC_DB_URL:               "jdbc:postgresql://postgres:5432/remitflow_keycloak"
       KC_DB_USERNAME:          "${DB_USER:-remitflow}"
-      KC_DB_PASSWORD:          "${DB_PASSWORD:-remitflow_dev}"
+      KC_DB_PASSWORD:          "${DB_PASSWORD:?DB_PASSWORD is required}"
       # Proxy settings (Caddy handles TLS, Keycloak is behind proxy)
       KC_PROXY:                edge
       KC_HOSTNAME:             "${CADDY_KEYCLOAK_DOMAIN:-auth.remitflow.local}"

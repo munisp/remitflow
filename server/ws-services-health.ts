@@ -25,7 +25,14 @@ async function verifyWsSession(req: IncomingMessage): Promise<boolean> {
     const match = cookieHeader.match(/app_session_id=([^;]+)/);
     const token = match?.[1];
     if (!token) return false;
-    const secret = new TextEncoder().encode(process.env.JWT_SECRET ?? "");
+    // SEC (LOW): never verify with an empty key — an ""-signed HS256 token is
+    // trivially forgeable. Reject when JWT_SECRET is unset (misconfigured env).
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) {
+      logger.warn("[WS-Health] JWT_SECRET is not set — rejecting session verification (fail-closed)");
+      return false;
+    }
+    const secret = new TextEncoder().encode(jwtSecret);
     await jwtVerify(token, secret, { algorithms: ["HS256"] });
     return true;
   } catch {

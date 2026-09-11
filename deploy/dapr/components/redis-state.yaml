@@ -1,0 +1,37 @@
+# Dapr state store for RemitFlow Wave-10 services (W10-C4).
+#
+# Used by: go-accounting-sync for OAuth state nonces (single-use, TTL-bounded)
+# and sync cursors (idempotent push/pull resume).
+#
+# The redisHost value is an environment placeholder: render with envsubst at
+# deploy time:
+#
+#   REDIS_HOST="redis-master:6379" envsubst < deploy/dapr/components/redis-state.yaml | kubectl apply -f -
+#
+# The password comes from the Kubernetes secret `remitflow-redis`
+# (key: password) — never inline credentials here.
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: redis-state
+  namespace: default
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: "${REDIS_HOST}"
+    - name: redisPassword
+      secretKeyRef:
+        name: remitflow-redis
+        key: password
+    - name: enableTLS
+      value: "true"
+    # actorStateStore is intentionally "false": this store is used via the
+    # plain state API only.
+    - name: actorStateStore
+      value: "false"
+auth:
+  secretStore: kubernetes
+scopes:
+  - accounting-sync

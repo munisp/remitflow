@@ -2,8 +2,9 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { and, count, desc, eq, gte, sql, sum } from "drizzle-orm";
 import { createId } from "@paralleldrive/cuid2";
-import { router, protectedProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { logger } from "../_core/logger";
+import { assertFeatureEligible } from "../_core/featureGuard";
 import { getDb } from "../db";
 import {
   autosaveRules,
@@ -84,6 +85,8 @@ export const financialProductsRouter = router({
     description: z.string().max(500).optional(),
     instalments: instalmentSchema,
   })).mutation(async ({ ctx, input }) => {
+    // A12: BNPL is a declared tier-2 feature — enforce flag + KYC tier >= 2.
+    await assertFeatureEligible(ctx, { flag: "bnpl", minKycTier: 2, featureName: "BNPL financing" });
     const eligibility = await computeBnplCreditScore(ctx.user.id);
     if (eligibility.tier === "poor" || input.amount > eligibility.maxLimit) {
       throw new TRPCError({ code: "FORBIDDEN", message: "The requested BNPL amount is not eligible for this account." });
@@ -103,12 +106,61 @@ export const financialProductsRouter = router({
       installments: input.instalments,
       installmentAmount: installmentAmount.toFixed(2),
       interestRate: interestRate.toFixed(2),
-      status: "active",
+      // B7: a plan must NOT activate on creation — no disbursement to the
+      // merchant has happened yet. It becomes `active` only via
+      // confirmDisbursement with a real payout reference.
+      status: "pending_disbursement",
       nextDueDate: firstDue,
     }).returning();
     if (!plan) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Unable to persist BNPL plan." });
     await publishFinancialEvent(`bnpl:${plan.id}`, { userId: ctx.user.id, amount: input.amount, currency: input.currency, planId: plan.id, installments: input.instalments });
     return { planId: plan.id, totalAmount, installmentAmount, interestRate, nextDueDate: firstDue.toISOString(), status: plan.status };
+  }),
+
+  /**
+   * B7: Admin confirms the merchant payout for a BNPL plan. Requires a REAL
+   * payout reference (bank/processor reference for the merchant disbursement)
+   * — never a fabricated merchant payment. Only then does the plan activate
+   * and repayment become collectible.
+   */
+  confirmDisbursement: adminProcedure.input(z.object({
+    planId: z.number().int().positive(),
+    payoutReference: z.string().min(4).max(120),
+  })).mutation(async ({ ctx, input }) => {
+    const db = await requireDb();
+    const [plan] = await db.select().from(bnplPlans).where(eq(bnplPlans.id, input.planId)).limit(1);
+    if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "BNPL plan not found" });
+    if (plan.status !== "pending_disbursement") {
+      throw new TRPCError({ code: "BAD_REQUEST", message: `Plan is not awaiting disbursement (status: ${plan.status})` });
+    }
+
+    // Single-winner guarded activation + disbursement record in ONE transaction.
+    await db.transaction(async (tx: any) => {
+      const won = await tx
+        .update(bnplPlans)
+        .set({ status: "active", updatedAt: new Date() })
+        .where(and(eq(bnplPlans.id, input.planId), eq(bnplPlans.status, "pending_disbursement")))
+        .returning({ id: bnplPlans.id });
+      if (won.length === 0) {
+        throw new TRPCError({ code: "CONFLICT", message: "Disbursement was already confirmed for this plan" });
+      }
+
+      // Record the real payout reference on the ledger of record.
+      await tx.insert(transactions).values({
+        userId: plan.userId,
+        // W9/Q9: tx_type enum has no "bnpl_disbursement" — maps to "withdrawal"; semantics kept in description/metadata.txType
+        type: "withdrawal",
+        fromAmount: plan.totalAmount,
+        fromCurrency: plan.currency ?? "NGN",
+        status: "completed",
+        reference: input.payoutReference,
+        description: `BNPL merchant disbursement: ${plan.merchant}`,
+        metadata: { originalType: "bnpl_disbursement", planId: plan.id, confirmedBy: ctx.user.id },
+      });
+    });
+
+    logger.info({ planId: input.planId, payoutReference: input.payoutReference, adminId: ctx.user.id }, "[BNPL] Disbursement confirmed with payout reference");
+    return { planId: input.planId, status: "active", payoutReference: input.payoutReference };
   }),
 
   explainCreditDecision: protectedProcedure.query(async ({ ctx }) => {

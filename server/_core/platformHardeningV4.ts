@@ -692,7 +692,14 @@ function getSimulatedFxRate(from: string, to: string): number {
     "USD-ZAR": 18.7, "USD-GBP": 0.79, "USD-EUR": 0.92,
     "GBP-NGN": 2000.0, "EUR-NGN": 1720.0, "CAD-NGN": 1160.0,
   };
-  return rates[`${from}-${to}`] || rates[`${to}-${from}`] ? 1 / (rates[`${to}-${from}`] || 1) : 1.0;
+  // W9-Q7 (F13-4): operator-precedence bug — the old expression
+  //   a || b ? 1 / (rates[reverse] || 1) : 1.0
+  // parsed as (a || b) ? … : …, so every DIRECT pair returned 1 / (undefined || 1) = 1.0.
+  // Intent: direct rate wins; otherwise invert the reverse pair; otherwise 1.0.
+  const direct = rates[`${from}-${to}`];
+  if (direct) return direct;
+  const reverse = rates[`${to}-${from}`];
+  return reverse ? 1 / reverse : 1.0;
 }
 
 function getRailFee(rail: string, amount: number): number {

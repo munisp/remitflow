@@ -365,9 +365,24 @@ export function csrfProtectionMiddleware(req: Request, res: Response, next: Next
   const cookieToken = (req.cookies as any)?.csrf_token;
   const headerToken = req.headers["x-csrf-token"] as string;
 
-  // If neither cookie nor header is present, allow (first-time setup / non-browser clients)
-  // In production with SameSite=Strict this is sufficient; the double-submit adds extra defence
-  if (!cookieToken && !headerToken) return next();
+  // SEC (MEDIUM): previously a request with NEITHER cookie nor header was
+  // allowed straight through — the exact cross-site scenario (attacker cannot
+  // read the cookie) this middleware exists to stop. When a session cookie is
+  // present on a state-changing /api/trpc request, the double-submit proof is
+  // mandatory. Non-browser clients (no session cookie) are unaffected.
+  // NOTE: mounted at app.use("/api/", …) so req.path is mount-stripped —
+  // match the tRPC prefix against originalUrl.
+  const fullPath = req.originalUrl ?? req.path;
+  const hasSessionCookie = Boolean((req.cookies as any)?.app_session_id);
+  if (!cookieToken && !headerToken) {
+    if (hasSessionCookie && fullPath.startsWith("/api/trpc")) {
+      return res.status(403).json({
+        error: "CSRF token required. Fetch /api/csrf-token and send it as X-CSRF-Token.",
+        code: "CSRF_INVALID",
+      });
+    }
+    return next();
+  }
 
   if (!cookieToken || !headerToken || cookieToken !== headerToken) {
     return res.status(403).json({

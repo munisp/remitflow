@@ -125,18 +125,35 @@ fn sm3_hash(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+// NOTE: this is HMAC-SHA256 keyed by CIPS_SM2_PRIVATE_KEY, NOT real SM2/SM3 —
+// the responses are labeled honestly as "HMAC-SHA256" until a real SM2
+// implementation is integrated.
 fn sm2_sign(data: &[u8], key_id: &str) -> String {
+    let _ = key_id; // key_id identifies the key; it MUST NEVER derive it
+    // FAIL CLOSED: no sandbox default derivable from the public key_id.
     let key = std::env::var("CIPS_SM2_PRIVATE_KEY")
-        .unwrap_or_else(|_| format!("sm2-sandbox-key-{}", key_id));
+        .expect("CIPS_SM2_PRIVATE_KEY is not set: refusing to sign with a derivable default key; configure the signing key explicitly");
     let mut mac = HmacSha256::new_from_slice(key.as_bytes())
         .expect("HMAC key creation failed");
     mac.update(data);
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// constant_time_eq compares two byte strings without data-dependent early exit.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn sm2_verify(data: &[u8], signature: &str, key_id: &str) -> bool {
     let expected = sm2_sign(data, key_id);
-    expected == signature
+    constant_time_eq(expected.as_bytes(), signature.as_bytes())
 }
 
 // ---- Handlers --------------------------------------------------------------
@@ -162,7 +179,8 @@ async fn ready() -> impl IntoResponse {
 
 async fn sign_message(Json(req): Json<SignRequest>) -> impl IntoResponse {
     let key_id = req.key_id.unwrap_or_else(|| "remitflow-cips-001".into());
-    let algorithm = req.algorithm.unwrap_or_else(|| "SM2-SM3".into());
+    // Honest labeling: current implementation is HMAC-SHA256, not SM2-SM3.
+    let algorithm = req.algorithm.unwrap_or_else(|| "HMAC-SHA256".into());
     let hash = sm3_hash(req.message.as_bytes());
     let signature = sm2_sign(req.message.as_bytes(), &key_id);
 
@@ -181,14 +199,16 @@ async fn verify_signature(Json(req): Json<VerifyRequest>) -> impl IntoResponse {
 
     Json(VerifyResponse {
         valid,
-        algorithm: "SM2-SM3".into(),
+        algorithm: "HMAC-SHA256".into(), // honest label: not real SM2-SM3
         verified_at: chrono::Utc::now().to_rfc3339(),
     })
 }
 
 async fn compute_hmac(Json(req): Json<HmacRequest>) -> impl IntoResponse {
     let secret = req.secret.unwrap_or_else(|| {
-        std::env::var("CIPS_WEBHOOK_SECRET").unwrap_or_else(|_| "cips-sandbox-secret".into())
+        // FAIL CLOSED: no sandbox default HMAC secret.
+        std::env::var("CIPS_WEBHOOK_SECRET")
+            .expect("CIPS_WEBHOOK_SECRET is not set and no per-request secret supplied: refusing to compute HMAC with a sandbox default")
     });
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
         .expect("HMAC key creation failed");
@@ -222,7 +242,7 @@ async fn sign_pacs008(Json(env): Json<Pacs008Envelope>) -> impl IntoResponse {
     Json(SignedEnvelope {
         original: serde_json::from_str(&canonical).unwrap(),
         signature,
-        algorithm: "SM2-SM3".into(),
+        algorithm: "HMAC-SHA256".into(), // honest label: not real SM2-SM3
         key_id,
         signed_at: chrono::Utc::now().to_rfc3339(),
         digest,
@@ -234,7 +254,7 @@ async fn hash_message(Json(req): Json<SignRequest>) -> impl IntoResponse {
     let hash = sm3_hash(req.message.as_bytes());
     Json(serde_json::json!({
         "hash": hash,
-        "algorithm": "SM3",
+        "algorithm": "SHA-256", // honest label: sha2::Sha256, not real SM3
         "input_length": req.message.len(),
     }))
 }
@@ -246,6 +266,12 @@ async fn main() {
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    // FAIL CLOSED at startup: the signing key must be configured before we
+    // serve any request — never derive it from the public key_id.
+    let signing_key = std::env::var("CIPS_SM2_PRIVATE_KEY")
+        .expect("CIPS_SM2_PRIVATE_KEY is not set: refusing to boot — a default key is derivable from the public key_id; configure the signing key explicitly");
+    assert!(!signing_key.is_empty(), "CIPS_SM2_PRIVATE_KEY must not be empty");
 
     let port: u16 = std::env::var("PORT")
         .ok()

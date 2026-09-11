@@ -1,0 +1,119 @@
+# RemitFlow — Prometheus (W11-C1)
+# Image: prom/prometheus:v2.55.1
+# Started with --web.enable-remote-write-receiver (compose command) so the
+# OTel collector's prometheusremotewrite exporter can push into
+# /api/v1/write. Retention: 15d / 8GB cap, whichever first.
+#
+# Two metric paths converge here:
+#   1. REMOTE WRITE  — all OTLP app metrics (TS core remitflow.* instruments)
+#      + collector receiver metrics (postgresql/redis/kafkametrics).
+#   2. DIRECT SCRAPE — liveness `up` series for middleware (these jobs feed
+#      the MiddlewareDown alert: absent(up{job=~...}) == 1).
+# The job names below are contract-stable: alerts.yml matches on them.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    deployment: remitflow
+    cluster: compose
+
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+      timeout: 10s
+
+# Remote-write RECEIVER is enabled by CLI flag (--web.enable-remote-write-receiver)
+# — there is no config-file key for it in v2.55.x. Nothing else required here.
+
+scrape_configs:
+  # ── Collector self-metrics (pipeline health: refused spans, queue depth) ──
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]   # collector internal telemetry (compose env)
+    metrics_path: /metrics
+
+  # ── Middleware liveness (`up` series — job names consumed by alerts.yml) ──
+
+  # postgres — via postgres-exporter sidecar (docker-compose.observability.yml).
+  # PostgreSQL itself has no /metrics; the exporter is the honest adapter.
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  # redis — via redis_exporter sidecar (Redis itself has no /metrics).
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+
+  # kafka — via kafka_exporter sidecar (Kafka brokers have no /metrics;
+  # JMX is not enabled on the bitnami image in this repo).
+  - job_name: kafka
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+
+  # temporal — REQUIRES PROMETHEUS_ENDPOINT=0.0.0.0:9090 on the temporal
+  # service (docker-compose.yml, owned by the core-services track). Until
+  # then this target is down and the MiddlewareDown alert WILL fire for
+  # job="temporal" — fail-visible by design, silenced in alertmanager.yml
+  # via a commented example route rather than a fake target.
+  - job_name: temporal
+    static_configs:
+      - targets: ["temporal:9090"]
+
+  # apisix — stock prometheus plugin export server (config template already
+  # enables plugin_attr.prometheus on :9091 — services/gateway-config/apisix.yaml).
+  - job_name: apisix
+    metrics_path: /apisix/prometheus/metrics
+    static_configs:
+      - targets: ["apisix:9091"]
+
+  # keycloak — Keycloak 26 management interface (KC_METRICS_ENABLED=true and
+  # KC_HEALTH_ENABLED=true; both set in docker-compose.middleware.yml).
+  - job_name: keycloak
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["keycloak:9000"]
+    scrape_interval: 30s
+
+  # opensearch — REQUIRES plugins-prom-exporter (install note in
+  # docker-compose.middleware.yml). Demo self-signed certs → skip verify.
+  - job_name: opensearch
+    scheme: https
+    metrics_path: /_prometheus/metrics
+    basic_auth:
+      username: ${OPENSEARCH_USER}
+      password: ${OPENSEARCH_PASSWORD}
+    tls_config:
+      insecure_skip_verify: true
+    static_configs:
+      - targets: ["opensearch:9200"]
+    scrape_interval: 30s
+
+  # tigerbeetle — TigerBeetle 0.16.63 exposes NO metrics endpoint (no
+  # /metrics, no statsd, no OTLP). The honest liveness proxy is tb-bridge,
+  # the Rust HTTP gateway whose /metrics reflects TB request success/failure.
+  # Job name kept as "tigerbeetle" so the alert contract reads truthfully:
+  # if tb-bridge is down, the TB money path is down.
+  - job_name: tigerbeetle
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["tb-bridge:8200"]
+
+  # ── App-layer /metrics surfaces (honest coverage for middleware with no
+  #    native telemetry: mojaloop-connector exports real metrics at
+  #    services/mojaloop-connector/main.go:903) ──
+  - job_name: mojaloop-connector
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["mojaloop-connector:8113"]
+    scrape_interval: 30s
+
+  # Prometheus self-scrape.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

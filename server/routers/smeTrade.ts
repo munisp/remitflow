@@ -8,6 +8,7 @@ import { eq, desc, and, gte, lte, like, sql, count } from "drizzle-orm";
 import { users } from "../../drizzle/schema";
 import { logger } from '../_core/logger';
 import { executeTransferPipeline } from "../_core/transferPipeline";
+import { assertFeatureEligible } from "../_core/featureGuard";
 import { screenSanctions } from "../_core/polyglotClient";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { broadcastUserEvent } from "../sse.service";
@@ -85,9 +86,9 @@ export const smeTradeRouter = router({
         };
       }
 
-      // 2. Call the python-sme-compliance service
+      // 2. Call the python-sme-compliance service (fail-closed — no local fallback)
       let serviceResult: Record<string, unknown>;
-      let validationSource = "sme_compliance_service";
+      const validationSource = "sme_compliance_service";
       try {
         serviceResult = await callSmeService(SME_COMPLIANCE_URL, "/validate-form-m", {
           form_m_number: input.formMNumber,
@@ -98,32 +99,15 @@ export const smeTradeRouter = router({
           goods_description: input.goodsDescription ?? "",
         });
       } catch (err) {
-        // 3. Graceful fallback: local CBN Form M format validation
-        validationSource = "local_fallback";
-        const errors: string[] = [];
-        const warnings: string[] = [];
-
-        // CBN Form M number format: FM + year (2 digits) + 6-digit sequence, e.g. FM240001234
-        const formMPattern = /^FM\d{2}\d{4,10}$/;
-        if (!formMPattern.test(input.formMNumber)) {
-          errors.push(`Form M number '${input.formMNumber}' does not match CBN format (FM + 2-digit year + sequence, e.g. FM240001234)`);
-        }
-        if (!input.goodsDescription || input.goodsDescription.length < 10) {
-          warnings.push("Goods description is very brief — may be rejected by CBN");
-        }
-        const supportedCorridors = ["CN", "AE", "IN", "GB", "US", "DE", "FR", "CA"];
-        if (!supportedCorridors.includes(input.corridorCode)) {
-          errors.push(`Corridor '${input.corridorCode}' is not in the approved CBN trade corridors list`);
-        }
-        const isValid = errors.length === 0;
-        serviceResult = {
-          form_m_number: input.formMNumber,
-          is_valid: isValid,
-          errors,
-          warnings,
-          cbn_reference: isValid ? `CBN-FM-FALLBACK-${Date.now()}` : null,
-          validated_at: new Date().toISOString(),
-        };
+        // B10: FAIL CLOSED — the compliance service is down. Never fabricate a
+        // `CBN-FM-FALLBACK-*` regulatory reference from a regex-only check; the
+        // Form M simply stays unvalidated.
+        logger.error({ err: err instanceof Error ? err.message : String(err), formMNumber: input.formMNumber },
+          "[SME] Form M compliance service unavailable — failing closed, Form M NOT validated");
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Form M validation service is unavailable — the Form M was NOT validated. Please try again.",
+        });
       }
 
       // 4. Persist validation result to form_m_documents for audit trail
@@ -169,8 +153,25 @@ export const smeTradeRouter = router({
       payments: z.array(paymentSchema).min(1).max(500),
       formMNumber: z.string().optional(),
       batchReference: z.string().min(2).max(100).optional(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      // A8: batch payments are a declared growth-plan feature.
+      await assertFeatureEligible(ctx, { flag: "batch_payments", minPlan: "growth", featureName: "SME batch trade payments" });
+
+      // D7: TOTP step-up — up to 500 cross-border payments per call requires
+      // 2FA whenever the user is enrolled.
+      {
+        const { getTotpEnrollment, verifyTOTP } = await import("../totp");
+        const enrollment = await getTotpEnrollment(ctx.user.id);
+        if (!enrollment.dbAvailable) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — action blocked" });
+        if (enrollment.enabled && enrollment.secret) {
+          if (!input.totpCode) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+          const valid = await verifyTOTP(input.totpCode, enrollment.secret);
+          if (!valid) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+        }
+      }
+
       const totalAmountUsd = input.payments.reduce((s, p) => s + p.amountUsd, 0);
       const db = await getDb();
       const batchId = `SME-${Date.now()}-${ctx.user.id}`;

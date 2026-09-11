@@ -4,7 +4,9 @@
 
 Set environment variable:
 ```
-WESTERN-UNION_API_KEY=your_api_key_here
+WESTERN_UNION_API_KEY=...
+WESTERN_UNION_SECRET_KEY=...
+WESTERN_UNION_PARTNER_ID=...
 ```
 
 ## Usage

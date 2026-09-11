@@ -48,10 +48,10 @@ dapr:
 # (os.Getenv / env::var / os.getenv across direct-debit-service's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install direct-debit-service infrastructure/charts/direct-debit-service \
 #     -n 54remit -f infrastructure/values-secrets/direct-debit-service.yaml
 # (a gitignored, per-environment file).
 secrets:
-  KAFKA_REST_ENDPOINT: "CHANGE_ME"
+  KAFKA_REST_ENDPOINT: ""  # REQUIRED
   PORT: "8098"

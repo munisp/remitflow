@@ -1,0 +1,400 @@
+# RemitFlow — Prometheus alert rules (W11-C1)
+# ═══════════════════════════════════════════════════════════════════════════
+# METRIC PROVENANCE (every rule cites the source that emits the metric AND,
+# for REAL rules, the production call path that invokes the emitter):
+#
+#   REAL TODAY (verified production call path at this HEAD; OTLP→Prometheus
+#   translation: dots→underscores, counters +_total, UCUM units suffixed):
+#     remitflow_requests_total{rpc_method,rpc_type,ok,tenant_id}
+#         ← server/telemetry/tenantContext.ts:33 (counter
+#           "remitflow_requests_total"; tenantContext.ts:33-41 instruments),
+#           emitted by recordTenantRequest (tenantContext.ts:91-107), which is
+#           CALLED in production in the tRPC middleware — server/_core/trpc.ts:100.
+#           Name already ends in _total, so no suffix doubling occurs.
+#     remitflow_request_duration_ms(_milliseconds)?_bucket
+#         ← server/telemetry/tenantContext.ts:38 (histogram, same call path:
+#           recordTenantRequest → trpc.ts:100). Unit "ms" is UCUM, so the
+#           translator may append "_milliseconds"; __name__ regexes cover both.
+#     remitflow_api_request_duration_ms(_milliseconds)?_bucket
+#         ← server/telemetry/otel.ts:239 (histogram "remitflow.api.request.duration_ms"),
+#           emitted by recordApiLatency (otel.ts:233-245) from
+#           otelRequestMiddleware (otel.ts:271). Registration point:
+#           server/_core/index.ts (Express app.use(otelRequestMiddleware)) —
+#           wired by the W11 TS track; initTelemetry() is already called at
+#           server/_core/index.ts:66.
+#     up{job=...}
+#         ← deploy/observability/prometheus.yml scrape jobs.
+#
+#   REQUIRES INSTRUMENTATION (rules marked REQUIRES-METRIC): the emitter
+#   functions EXIST but have no production call path (verified by grep at this
+#   HEAD — only tests reference them), or the metric does not exist at all.
+#   Each such rule names the emitter + file:line + the call site needed.
+#   Until wired the rule simply never fires (Prometheus sees no series) — the
+#   rule is NOT silently deleted, so wiring the call is the only step needed.
+#     remitflow_transfers_total{status,corridor}
+#         ← emitter: recordTransferMetric, server/telemetry/otel.ts:203-218.
+#           NEEDED CALL SITE: transfer completion/terminal paths (e.g.
+#           server/_core/transferPipeline.ts status flips) — currently none.
+#     remitflow_slo_transfer_availability_total{good}
+#         ← emitter: recordSLOEvent, server/telemetry/slo.ts:169-183.
+#           NEEDED CALL SITE: transfer terminal states (success/failure) in the
+#           transfer pipeline — currently none (slo.ts only self-schedules
+#           checkBurnRateAlerts, which logs but never records events).
+#     remitflow_middleware_health{service}
+#         ← emitter: recordMiddlewareHealth, server/telemetry/otel.ts:248-265.
+#           NEEDED CALL SITE: the health-check scheduler that periodically
+#           probes middleware (system.health path) — currently none.
+#     remitflow_payouts_executing_stuck_total / remitflow_refunds_total /
+#     remitflow_rail_uncertain_parked / remitflow_tigerbeetle_post_commit_failures_total
+#         ← no emitter exists; see each rule for the emission point.
+#
+# TENANCY: the per-tenant dimension is the `tenant_id` label. It is REAL on
+# the remitflow_requests_total / remitflow_request_duration_ms series:
+# recordTenantRequest sets the `tenant.id` metric attribute (tenantContext.ts:99-101)
+# and the OTLP→Prometheus translation renders it as `tenant_id` (dots→
+# underscores). tenant.id is also stamped on spans (tenantContext.ts:60) and
+# promoted to Loki stream labels via the collector's loki.resource.labels
+# hint. Alertmanager group_by includes tenant_id, so the tenant-labeled rules
+# below route per tenant immediately.
+# ═══════════════════════════════════════════════════════════════════════════
+
+groups:
+  # ── (a) MIDDLEWARE LIVENESS ───────────────────────────────────────────────
+  # NOTE on the spec expression `absent(up{job=~"postgres|redis|..."}) == 1`:
+  # absent() over a regex only fires when EVERY matched job is missing at
+  # once, which would hide a single dead middleware. We therefore emit one
+  # rule per job (same absent()==1-for-2m semantics, per job) plus a generic
+  # up==0 rule. This is strictly more honest and more actionable.
+  - name: middleware-liveness
+    interval: 30s
+    rules:
+      # Scrape target exists but is DOWN. Source of `up`: prometheus.yml.
+      - alert: MiddlewareDown
+        expr: up{job=~"postgres|redis|kafka|temporal|apisix|keycloak|opensearch|tigerbeetle"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Middleware {{ $labels.job }} is DOWN (instance {{ $labels.instance }})"
+          description: "Prometheus target {{ $labels.job }}/{{ $labels.instance }} has been unreachable for >2m. Money path impact: postgres/tigerbeetle(bridge)/redis/kafka are settlement-critical; apisix/keycloak are auth-edge-critical; temporal blocks workflow payouts; opensearch degrades search/compliance."
+          runbook: "docker compose ps {{ $labels.job }}; check container logs; verify exporter sidecar (postgres-exporter/redis-exporter/kafka-exporter) for the adapter-backed jobs."
+
+      # Scrape target entirely ABSENT (exporter/container gone). One rule per
+      # job — absent() carries no job label, so the alertname encodes it.
+      # Job name → backing target mapping: deploy/observability/prometheus.yml.
+      - alert: MiddlewareScrapeMissing_postgres
+        expr: absent(up{job="postgres"}) == 1
+        for: 2m
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "No scrape series for job=postgres"
+          description: "postgres-exporter sidecar (docker-compose.observability.yml) is absent — PostgreSQL liveness is unmonitored."
+      - alert: MiddlewareScrapeMissing_redis
+        expr: absent(up{job="redis"}) == 1
+        for: 2m
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "No scrape series for job=redis"
+          description: "redis-exporter sidecar absent — Redis liveness unmonitored (sessions, idempotency, rate-limit state at risk)."
+      - alert: MiddlewareScrapeMissing_kafka
+        expr: absent(up{job="kafka"}) == 1
+        for: 2m
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "No scrape series for job=kafka"
+          description: "kafka-exporter sidecar absent — event backbone liveness unmonitored."
+      - alert: MiddlewareScrapeMissing_temporal
+        expr: absent(up{job="temporal"}) == 1
+        for: 2m
+        labels: {severity: warning, team: platform}
+        annotations:
+          summary: "No scrape series for job=temporal"
+          description: "Temporal Prometheus endpoint not wired (needs PROMETHEUS_ENDPOINT=0.0.0.0:9090 on the temporal service) or temporal is down. Warning until the core-services track adds the env var."
+      - alert: MiddlewareScrapeMissing_apisix
+        expr: absent(up{job="apisix"}) == 1
+        for: 2m
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "No scrape series for job=apisix"
+          description: "APISIX prometheus plugin export server (:9091) absent — gateway liveness unmonitored."
+      - alert: MiddlewareScrapeMissing_keycloak
+        expr: absent(up{job="keycloak"}) == 1
+        for: 2m
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "No scrape series for job=keycloak"
+          description: "Keycloak management interface (:9000) absent — KC_METRICS_ENABLED/KC_HEALTH_ENABLED set in docker-compose.middleware.yml."
+      - alert: MiddlewareScrapeMissing_opensearch
+        expr: absent(up{job="opensearch"}) == 1
+        for: 2m
+        labels: {severity: warning, team: platform}
+        annotations:
+          summary: "No scrape series for job=opensearch"
+          description: "OpenSearch prometheus-exporter plugin endpoint absent — install plugins-prom-exporter (note in docker-compose.middleware.yml) or cluster is down."
+      - alert: MiddlewareScrapeMissing_tigerbeetle
+        expr: absent(up{job="tigerbeetle"}) == 1
+        for: 2m
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "No scrape series for job=tigerbeetle"
+          description: "tb-bridge:8200 absent — TigerBeetle has no native metrics endpoint (0.16.63); the bridge is the only TB-path liveness signal. Ledger writes are blind."
+
+      # REQUIRES-METRIC: gauge "remitflow.middleware.health" (→ remitflow_middleware_health).
+      # Emitter exists — recordMiddlewareHealth, server/telemetry/otel.ts:248-265 —
+      # but is NEVER CALLED in production (verified by grep at this HEAD; only
+      # server/test/setup.ts mocks it). NEEDED CALL SITE: the health-check
+      # scheduler that periodically probes middleware (system.health path) —
+      # call recordMiddlewareHealth(service, healthy, latencyMs) per probe.
+      # Until wired, this rule sees no series and cannot fire; scrape-based
+      # MiddlewareDown above is the live liveness signal.
+      - alert: MiddlewareUnhealthyFromApi
+        expr: remitflow_middleware_health == 0
+        for: 2m
+        labels: {severity: critical, team: platform}
+        annotations:
+          summary: "API reports {{ $labels.service }} unhealthy"
+          description: "REQUIRES-METRIC rule: needs recordMiddlewareHealth (otel.ts:248-265) wired into the health-check scheduler — currently log-only / test-only. When live: remitflow.middleware.health gauge reports {{ $labels.service }}=0 from the API server's own health checks."
+
+  # ── (b) MONEY-PATH GUARDRAILS ─────────────────────────────────────────────
+  - name: money-path
+    interval: 30s
+    rules:
+      # REQUIRES-METRIC: counter "remitflow.payouts.executing.stuck" (→ remitflow_payouts_executing_stuck_total).
+      # Emission point: server/services/payoutSettlementSweeper.ts:155/204 —
+      # rows stuck in status='executing' are currently only logged
+      # ("leaving row executing for next sweep", sweeper.ts:243/263). Emit
+      # counter.add(1, {rail, tenant_id}) when an executing row exceeds its
+      # reconciliation deadline. The mission-named metric is kept verbatim.
+      - alert: PayoutStuckExecuting
+        expr: increase(remitflow_payouts_executing_stuck_total[15m]) > 0
+        for: 5m
+        labels: {severity: critical, team: money-path}
+        annotations:
+          summary: "Payout stuck in executing (rail={{ $labels.rail }}{{ if $labels.tenant_id }}, tenant={{ $labels.tenant_id }}{{ end }})"
+          description: "REQUIRES-METRIC rule: needs remitflow.payouts.executing.stuck counter in payoutSettlementSweeper.ts (currently log-only). A payout stuck in executing means funds may be in flight on the rail with no ledger resolution — manual reconciliation per sweeper CRITICAL log path."
+
+      # REQUIRES-METRIC: counter "remitflow.refunds.total"{status=failed|succeeded}
+      # (→ remitflow_refunds_total). Emission points:
+      #   server/_core/transferPipeline.ts:697-735 (reconcileSettlementJournal
+      #   refund path — today increments local counters only, no OTel) and
+      #   services/python-refund-engine/app.py (Stripe rail refunds — no
+      #   /metrics today). Threshold: >5% failures over 30m with >=10 attempts.
+      - alert: StripeRefundFailureRateHigh
+        expr: |
+          (
+            sum(rate(remitflow_refunds_total{status="failed", rail="stripe"}[30m]))
+            /
+            sum(rate(remitflow_refunds_total{rail="stripe"}[30m]))
+          ) > 0.05
+          and
+          sum(increase(remitflow_refunds_total{rail="stripe"}[30m])) >= 10
+        for: 10m
+        labels: {severity: critical, team: money-path}
+        annotations:
+          summary: "Stripe refund failure rate >5% (30m)"
+          description: "REQUIRES-METRIC rule: needs remitflow.refunds.total{status,rail} counters (transferPipeline.ts:697 / python-refund-engine). Failed refunds strand customer funds and breach corridor SLAs."
+
+      # REQUIRES-METRIC: gauge "remitflow.rail_uncertain.parked"
+      # (→ remitflow_rail_uncertain_parked). Emission point:
+      # server/services/payoutSettlementSweeper.ts:354-559 (vendor_bills in
+      # `paying` with metadata.railUncertain, sweeper.ts:27) and :559-587
+      # (p2p transfers parked in `settling`). Parked money = rail outcome
+      # UNKNOWN after commit attempt; any park > 0 for 10m is pageable.
+      - alert: RailUncertainParkedPayouts
+        expr: max(remitflow_rail_uncertain_parked) > 0
+        for: 10m
+        labels: {severity: critical, team: money-path}
+        annotations:
+          summary: "{{ $value }} railUncertain payouts parked >10m"
+          description: "REQUIRES-METRIC rule: needs remitflow.rail_uncertain.parked gauge in payoutSettlementSweeper.ts (park paths at :458/:519/:566). A parked railUncertain row means money movement state is unknown — do NOT auto-retry; follow the manual-recon runbook."
+
+      # REQUIRES-METRIC: counter "remitflow.tigerbeetle.post_commit_failures"
+      # (→ remitflow_tigerbeetle_post_commit_failures_total). Emission point:
+      # TB post-commit path in server/services/payoutSettlementSweeper.ts:5
+      # ("parked post-commit TB failures can never settle inside the request
+      # path") and the transferPipeline TB commit call sites
+      # (server/_core/transferPipeline.ts). TigerBeetle itself exposes no
+      # metrics (0.16.63) — this must be counted at the app layer.
+      - alert: TigerBeetlePostCommitFailures
+        expr: increase(remitflow_tigerbeetle_post_commit_failures_total[10m]) > 0
+        for: 0m
+        labels: {severity: critical, team: money-path}
+        annotations:
+          summary: "TigerBeetle post-commit failure(s) in last 10m"
+          description: "REQUIRES-METRIC rule: needs remitflow.tigerbeetle.post_commit_failures counter at the TB commit call sites (payoutSettlementSweeper.ts:5 documents the failure class). Post-commit failures mean the ledger write result is unknown after the rail committed — highest-severity reconciliation class."
+
+      # REQUIRES-METRIC: counter "remitflow.transfers.total" (→ remitflow_transfers_total).
+      # Emitter exists — recordTransferMetric, server/telemetry/otel.ts:203-218
+      # (labels status=initiated|completed|failed|cancelled, corridor) — but is
+      # NEVER CALLED in production (verified by grep at this HEAD; only
+      # server/test/setup.ts mocks it). NEEDED CALL SITE: transfer terminal
+      # paths (status flips in server/_core/transferPipeline.ts and the payout
+      # completion handlers) — call recordTransferMetric(status, corridor, amountUsd).
+      - alert: TransferFailureRateHigh
+        expr: |
+          (
+            sum(rate(remitflow_transfers_total{status="failed"}[15m]))
+            /
+            sum(rate(remitflow_transfers_total[15m]))
+          ) > 0.02
+          and
+          sum(increase(remitflow_transfers_total[15m])) >= 20
+        for: 10m
+        labels: {severity: warning, team: money-path}
+        annotations:
+          summary: "Transfer failure rate >2% (15m){{ if $labels.tenant_id }} — tenant {{ $labels.tenant_id }}{{ end }}"
+          description: "REQUIRES-METRIC rule: needs recordTransferMetric (otel.ts:203-218) wired at transfer completion paths. When live: transfer failure rate >2% (15m) with material volume indicates rail or ledger degradation."
+
+  # ── (c) API SLO BURN-RATE ─────────────────────────────────────────────────
+  # SLO definitions + thresholds: server/telemetry/slo.ts:32-68
+  # (transfer_availability target 0.9995, window 30d, alertThreshold 5;
+  #  transfer_latency_p99 target P99 < 500ms).
+  # The two availability burn-rate rules are REQUIRES-METRIC: they consume
+  # remitflow_slo_transfer_availability_total{good="true"|"false"} emitted per
+  # recordSLOEvent() (slo.ts:169-183) — an emitter that EXISTS but is NEVER
+  # CALLED in production (verified by grep at this HEAD; slo.ts self-schedules
+  # only checkBurnRateAlerts, which logs, and tests mock the rest).
+  # NEEDED CALL SITE: recordSLOEvent("transfer_availability", isGood) at
+  # transfer terminal states in the transfer pipeline.
+  # The latency rule consumes remitflow_api_request_duration_ms — REAL
+  # (recordApiLatency ← otelRequestMiddleware, registered in
+  # server/_core/index.ts by the W11 TS track; see header).
+  - name: api-slo
+    interval: 30s
+    rules:
+      # FAST BURN — multiwindow (1h long / 5m short), Google SRE workbook
+      # pattern. Threshold 5x matches slo.ts alertThreshold (slo.ts:38) and
+      # the "5x fast burn" note (slo.ts:16). Error budget rate = 1-0.9995.
+      # REQUIRES-METRIC: needs recordSLOEvent calls (see group header).
+      - alert: SLOTransferAvailabilityFastBurn
+        expr: |
+          (
+            1 - (
+              sum(rate(remitflow_slo_transfer_availability_total{good="true"}[1h]))
+              /
+              sum(rate(remitflow_slo_transfer_availability_total[1h]))
+            )
+          ) > 5 * (1 - 0.9995)
+          and
+          (
+            1 - (
+              sum(rate(remitflow_slo_transfer_availability_total{good="true"}[5m]))
+              /
+              sum(rate(remitflow_slo_transfer_availability_total[5m]))
+            )
+          ) > 5 * (1 - 0.9995)
+        for: 2m
+        labels: {severity: critical, team: api, slo: transfer_availability}
+        annotations:
+          summary: "Transfer API availability SLO fast burn (>5x)"
+          description: "REQUIRES-METRIC rule: needs recordSLOEvent (slo.ts:169-183) called at transfer terminal states. When live: error budget (99.95% target, slo.ts:33-39) burning faster than 5x over both 1h and 5m windows."
+
+      # SLOW BURN — 6h/30m windows at 1x (slo.ts:16 "1x slow burn").
+      # REQUIRES-METRIC: needs recordSLOEvent calls (see group header).
+      - alert: SLOTransferAvailabilitySlowBurn
+        expr: |
+          (
+            1 - (
+              sum(rate(remitflow_slo_transfer_availability_total{good="true"}[6h]))
+              /
+              sum(rate(remitflow_slo_transfer_availability_total[6h]))
+            )
+          ) > 1 * (1 - 0.9995)
+          and
+          (
+            1 - (
+              sum(rate(remitflow_slo_transfer_availability_total{good="true"}[30m]))
+              /
+              sum(rate(remitflow_slo_transfer_availability_total[30m]))
+            )
+          ) > 1 * (1 - 0.9995)
+        for: 1h
+        labels: {severity: warning, team: api, slo: transfer_availability}
+        annotations:
+          summary: "Transfer API availability SLO slow burn (>1x, 6h)"
+          description: "REQUIRES-METRIC rule: needs recordSLOEvent calls (slo.ts:169-183). When live: sustained sub-SLO success rate over 6h exhausts the 30d budget (slo.ts:36) if unaddressed."
+
+      # LATENCY SLO — P99 < 500ms on the transfer API (slo.ts:40-46). REAL.
+      # Metric source: server/telemetry/otel.ts:239
+      # (histogram remitflow.api.request.duration_ms, emitted by
+      # recordApiLatency from otelRequestMiddleware — registration point
+      # server/_core/index.ts, W11 TS track; unit "ms" may be translated to a
+      # "_milliseconds" suffix by the OTLP→Prometheus translator — the
+      # __name__ regex matches both forms).
+      - alert: SLOTransferApiLatencyP99
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (
+              rate({__name__=~"remitflow_api_request_duration_ms(_milliseconds)?_bucket", route=~"/api/trpc/transfer.*"}[5m])
+            )
+          ) > 500
+        for: 10m
+        labels: {severity: warning, team: api, slo: transfer_latency_p99}
+        annotations:
+          summary: "Transfer API P99 latency >500ms (10m)"
+          description: "SLO transfer_latency_p99 (slo.ts:40-46) breached on routes /api/trpc/transfer.*. Histogram from recordApiLatency (otel.ts:233-245)."
+
+  # ── (d) PER-TENANT GUARDRAILS ─────────────────────────────────────────────
+  # REAL METRICS — tenant-labeled series emitted by recordTenantRequest
+  # (server/telemetry/tenantContext.ts:91-107), CALLED in production at
+  # server/_core/trpc.ts:100. The `tenant.id` metric attribute translates to
+  # the `tenant_id` label; `ok` is "true"/"false" (NOT a status="error"
+  # label — tenantContext.ts:97). Both rules preserve tenant_id via
+  # sum by (tenant_id), so Alertmanager's group_by [alertname, tenant_id]
+  # routes them per tenant immediately.
+  - name: per-tenant
+    interval: 30s
+    rules:
+      # Per-tenant error share of tRPC requests. Metric source:
+      # server/telemetry/tenantContext.ts:33 (remitflow_requests_total, ok label).
+      # 5% errors with a >=30-requests/5m volume floor, sustained 10m.
+      - alert: TenantErrorRateHigh
+        expr: |
+          (
+            sum by (tenant_id) (rate(remitflow_requests_total{ok="false"}[5m]))
+            /
+            sum by (tenant_id) (rate(remitflow_requests_total[5m]))
+          ) > 0.05
+          and
+          sum by (tenant_id) (increase(remitflow_requests_total[5m])) >= 30
+        for: 10m
+        labels: {severity: warning, team: tenant}
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} error rate >5% (10m)"
+          description: "ok=false share of remitflow_requests_total (tenantContext.ts:91-107, wired at trpc.ts:100) exceeds 5% for tenant {{ $labels.tenant_id }} with material traffic. Series without a tenant (public routes) carry no tenant_id and are not covered by this rule — see TenantErrorRateHighNoTenant."
+
+      # Same signal for requests with NO tenant context (public/pre-tenant
+      # routes) — sum() without by() aggregates the tenant-less series.
+      - alert: TenantErrorRateHighNoTenant
+        expr: |
+          (
+            sum(rate(remitflow_requests_total{ok="false", tenant_id=""}[5m]))
+            /
+            sum(rate(remitflow_requests_total{tenant_id=""}[5m]))
+          ) > 0.10
+          and
+          sum(increase(remitflow_requests_total{tenant_id=""}[5m])) >= 100
+        for: 10m
+        labels: {severity: warning, team: api}
+        annotations:
+          summary: "Tenant-less (public) request error rate >10% (10m)"
+          description: "Error share on requests carrying no tenant.id (public routes, pre-tenant users — tenantContext.ts:99-101 omits the attribute). Higher threshold than per-tenant: public surface mixes health checks and crawlers."
+
+      # Per-tenant P99 latency on tRPC requests. Metric source:
+      # server/telemetry/tenantContext.ts:38 (remitflow_request_duration_ms
+      # histogram; UCUM "ms" may append "_milliseconds" — regex covers both).
+      # Threshold 2000ms aligns with the KYC P95 SLO ceiling (slo.ts:47-53);
+      # it is a coarse platform guard, not a per-tenant contracted SLO.
+      - alert: TenantLatencyP99
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, tenant_id) (
+              rate({__name__=~"remitflow_request_duration_ms(_milliseconds)?_bucket"}[5m])
+            )
+          ) > 2000
+        for: 10m
+        labels: {severity: warning, team: tenant}
+        annotations:
+          summary: "Tenant {{ $labels.tenant_id }} P99 latency >2000ms (10m)"
+          description: "P99 of remitflow_request_duration_ms (tenantContext.ts:38-41, wired at trpc.ts:100) for tenant {{ $labels.tenant_id }}. Investigate before it erodes the KYC P95 2000ms SLO (slo.ts:47-53)."

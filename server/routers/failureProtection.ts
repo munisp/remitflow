@@ -32,14 +32,40 @@ function genId(prefix: string): string {
   return `${prefix}-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 }
 
+// W9-FIX3 (HIGH): notifTypeEnum (drizzle/schema.ts) only allows
+// [transaction, security, kyc, system, promotion, fx_alert]. Callers below pass
+// domain-specific types (bnpl_overdue, transfer_stuck, ...) which Postgres
+// rejects — and the old catch swallowed the error SILENTLY, so money-relevant
+// notifications (overdues, disputes, refunds) were simply never delivered.
+// Fix centrally: map known money types to enum members, default any other
+// unknown type to "system", preserve the original type in metadata, and log
+// failures at warn WITH the type and error.
+const NOTIF_TYPE_MAP: Record<string, string> = {
+  auto_refund: "transaction",
+  transfer_stuck: "transaction",
+  bnpl_overdue: "transaction",
+  bnpl_collection: "transaction",
+  bnpl_dispute_resolved: "system",
+  agent_dispute_resolved: "system",
+  payroll_dispute_resolved: "system",
+  float_discrepancy: "security",
+};
+const VALID_NOTIF_TYPES = new Set(["transaction", "security", "kyc", "system", "promotion", "fx_alert"]);
+
+function mapNotifType(type: string): string {
+  if (VALID_NOTIF_TYPES.has(type)) return type;
+  return NOTIF_TYPE_MAP[type] ?? "system";
+}
+
 async function notify(db: ReturnType<typeof import("drizzle-orm/node-postgres").drizzle>, userId: number, type: string, message: string) {
+  const enumType = mapNotifType(type);
   try {
     await db.execute(sql`
-      INSERT INTO notifications ("userId", type, message, "createdAt")
-      VALUES (${userId}, ${type}, ${message}, NOW())
+      INSERT INTO notifications ("userId", title, type, message, metadata, "createdAt")
+      VALUES (${userId}, ${type}, ${enumType}::notif_type, ${message}, ${JSON.stringify({ originalType: type })}, NOW())
     `);
   } catch (e) {
-    logger.warn({ userId, type }, "[FailureProtection] Notification insert failed (non-fatal)");
+    logger.warn({ userId, type, enumType, err: e instanceof Error ? e.message : String(e) }, "[FailureProtection] Notification insert failed (non-fatal)");
   }
 }
 
@@ -152,44 +178,64 @@ export const bnplProtectionRouter = router({
       const dispute = (disputeRows.rows as Array<{ plan_id: number; user_id: number }>)[0];
       if (!dispute) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
-      if (input.resolution === "refund_buyer" || input.resolution === "partial_refund") {
-        // Refund amount = total paid so far (or partial), capped at what was actually paid
-        const paidRows = await db.execute(sql`
-          SELECT COALESCE(SUM(amount_ngn), 0) as total_paid FROM bnpl_installments WHERE plan_id = ${dispute.plan_id} AND status = 'paid'
-        `);
-        const totalPaid = Number((paidRows.rows[0] as { total_paid: number }).total_paid);
-        const requestedRefund = input.refundAmountNgn ?? totalPaid;
-        // Cap refund at total amount actually paid to prevent over-refunding
-        const refundAmount = Math.min(requestedRefund, totalPaid);
-        if (requestedRefund > totalPaid) {
-          logger.warn({ requestedRefund, totalPaid, disputeId: input.disputeId },
-            "[BNPL] Refund amount capped: requested exceeds total paid");
+      // FF-FIX: single-winner claim FIRST, in the same transaction as the
+      // refund — replayed/concurrent admin resolutions can no longer refund
+      // repeatedly, and a failed credit rolls the resolution back.
+      let refundedAmount = 0;
+      await db.transaction(async (tx: any) => {
+        const claim = (await tx.execute(sql`
+          UPDATE bnpl_merchant_disputes SET status = 'resolved', resolution = ${input.resolution}, resolved_at = NOW(), admin_notes = ${input.notes ?? ''}
+          WHERE dispute_id = ${input.disputeId} AND status = 'open'
+          RETURNING dispute_id
+        `)) as unknown as { rows?: unknown[] };
+        const claimedRows = Array.isArray(claim) ? claim : (claim.rows ?? []);
+        if (claimedRows.length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Dispute already resolved" });
         }
 
-        if (refundAmount > 0) {
-          await db.execute(sql`
-            UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${refundAmount}, "updatedAt" = NOW()
-            WHERE "userId" = ${dispute.user_id} AND currency = 'NGN'
+        if (input.resolution === "refund_buyer" || input.resolution === "partial_refund") {
+          // Refund amount = total paid so far (or partial), capped at what was actually paid
+          const paidRows = await tx.execute(sql`
+            SELECT COALESCE(SUM(amount_ngn), 0) as total_paid FROM bnpl_installments WHERE plan_id = ${dispute.plan_id} AND status = 'paid'
           `);
+          const totalPaid = Number((paidRows.rows[0] as { total_paid: number }).total_paid);
+          const requestedRefund = input.refundAmountNgn ?? totalPaid;
+          // Cap refund at total amount actually paid to prevent over-refunding
+          const refundAmount = Math.min(requestedRefund, totalPaid);
+          if (requestedRefund > totalPaid) {
+            logger.warn({ requestedRefund, totalPaid, disputeId: input.disputeId },
+              "[BNPL] Refund amount capped: requested exceeds total paid");
+          }
+
+          if (refundAmount > 0) {
+            const creditRows = (await tx.execute(sql`
+              UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${refundAmount}, "updatedAt" = NOW()
+              WHERE "userId" = ${dispute.user_id} AND currency = 'NGN' AND status = 'active'
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (creditRows.length === 0) {
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Refund credit failed — buyer wallet unavailable; dispute NOT resolved" });
+            }
+            refundedAmount = refundAmount;
+          }
+          await tx.execute(sql`UPDATE bnpl_plans SET status = 'cancelled' WHERE id = ${dispute.plan_id}`);
+        } else if (input.resolution === "resume_payments") {
+          await tx.execute(sql`
+            UPDATE bnpl_installments SET status = 'pending' WHERE plan_id = ${dispute.plan_id} AND status = 'frozen'
+          `);
+        } else if (input.resolution === "cancel_plan") {
+          await tx.execute(sql`UPDATE bnpl_plans SET status = 'cancelled' WHERE id = ${dispute.plan_id}`);
+          await tx.execute(sql`UPDATE bnpl_installments SET status = 'cancelled' WHERE plan_id = ${dispute.plan_id} AND status IN ('pending', 'frozen')`);
         }
-        await db.execute(sql`UPDATE bnpl_plans SET status = 'cancelled' WHERE id = ${dispute.plan_id}`);
+      });
+
+      if (input.resolution === "refund_buyer" || input.resolution === "partial_refund") {
         await notify(db, dispute.user_id, "bnpl_dispute_resolved",
-          `Your BNPL dispute has been resolved in your favor. ₦${refundAmount.toLocaleString()} has been refunded to your wallet.`);
+          `Your BNPL dispute has been resolved in your favor. ₦${refundedAmount.toLocaleString()} has been refunded to your wallet.`);
       } else if (input.resolution === "resume_payments") {
-        await db.execute(sql`
-          UPDATE bnpl_installments SET status = 'pending' WHERE plan_id = ${dispute.plan_id} AND status = 'frozen'
-        `);
         await notify(db, dispute.user_id, "bnpl_dispute_resolved",
           "Your BNPL merchant dispute has been reviewed. Payments have been resumed as the merchant has fulfilled their obligations.");
-      } else if (input.resolution === "cancel_plan") {
-        await db.execute(sql`UPDATE bnpl_plans SET status = 'cancelled' WHERE id = ${dispute.plan_id}`);
-        await db.execute(sql`UPDATE bnpl_installments SET status = 'cancelled' WHERE plan_id = ${dispute.plan_id} AND status IN ('pending', 'frozen')`);
       }
-
-      await db.execute(sql`
-        UPDATE bnpl_merchant_disputes SET status = 'resolved', resolution = ${input.resolution}, resolved_at = NOW(), admin_notes = ${input.notes ?? ''}
-        WHERE dispute_id = ${input.disputeId}
-      `);
 
       return { disputeId: input.disputeId, resolution: input.resolution };
     }),
@@ -289,28 +335,57 @@ export const agentProtectionRouter = router({
       const dispute = (rows.rows as Array<{ customer_id: number; expected_amount: number; transaction_ref: string }>)[0];
       if (!dispute) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
+      // FF-FIX: single-winner claim + refund in ONE transaction — replays lose
+      // the claim; the refund is capped at the ACTUAL transaction amount (the
+      // customer-supplied expected_amount was previously trusted blindly).
+      let refundedAmount = 0;
+      await db.transaction(async (tx: any) => {
+        const claim = (await tx.execute(sql`
+          UPDATE agent_customer_disputes SET status = 'resolved', resolution = ${input.resolution}, resolved_at = NOW()
+          WHERE dispute_id = ${input.disputeId} AND status = 'open'
+          RETURNING dispute_id
+        `)) as unknown as { rows?: unknown[] };
+        const claimedRows = Array.isArray(claim) ? claim : (claim.rows ?? []);
+        if (claimedRows.length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Dispute already resolved" });
+        }
+
+        if (input.resolution === "refund_customer") {
+          const txRows = await tx.execute(sql`
+            SELECT ABS(COALESCE(amount, 0)) AS actual_amount FROM transactions WHERE reference = ${dispute.transaction_ref} LIMIT 1
+          `);
+          const actualAmount = Number((txRows.rows[0] as { actual_amount: number } | undefined)?.actual_amount ?? 0);
+          const requested = input.refundAmount ?? Number(dispute.expected_amount);
+          const amount = actualAmount > 0 ? Math.min(requested, actualAmount) : Math.min(requested, Number(dispute.expected_amount));
+          if (requested > amount) {
+            logger.warn({ requested, cappedTo: amount, disputeId: input.disputeId }, "[AgentDispute] Refund capped against underlying transaction amount");
+          }
+          if (amount > 0) {
+            const creditRows = (await tx.execute(sql`
+              UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${amount}, "updatedAt" = NOW()
+              WHERE "userId" = ${dispute.customer_id} AND currency = 'NGN' AND status = 'active'
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (creditRows.length === 0) {
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Refund credit failed — customer wallet unavailable; dispute NOT resolved" });
+            }
+            refundedAmount = amount;
+          }
+        }
+
+        if (input.resolution === "suspend_agent" || input.resolution === "terminate_agent") {
+          const newStatus = input.resolution === "terminate_agent" ? "terminated" : "suspended";
+          await tx.execute(sql`
+            UPDATE agent_accounts SET status = ${newStatus}
+            WHERE id = (SELECT agent_id FROM pos_transactions WHERE reference = ${dispute.transaction_ref} LIMIT 1)
+          `);
+        }
+      });
+
       if (input.resolution === "refund_customer") {
-        const amount = input.refundAmount ?? dispute.expected_amount;
-        await db.execute(sql`
-          UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${amount}, "updatedAt" = NOW()
-          WHERE "userId" = ${dispute.customer_id} AND currency = 'NGN'
-        `);
         await notify(db, dispute.customer_id, "agent_dispute_resolved",
-          `Your agent cash dispute has been resolved. ₦${amount.toLocaleString()} has been refunded to your wallet.`);
+          `Your agent cash dispute has been resolved. ₦${refundedAmount.toLocaleString()} has been refunded to your wallet.`);
       }
-
-      if (input.resolution === "suspend_agent" || input.resolution === "terminate_agent") {
-        const newStatus = input.resolution === "terminate_agent" ? "terminated" : "suspended";
-        await db.execute(sql`
-          UPDATE agent_accounts SET status = ${newStatus}
-          WHERE id = (SELECT agent_id FROM pos_transactions WHERE reference = ${dispute.transaction_ref} LIMIT 1)
-        `);
-      }
-
-      await db.execute(sql`
-        UPDATE agent_customer_disputes SET status = 'resolved', resolution = ${input.resolution}, resolved_at = NOW()
-        WHERE dispute_id = ${input.disputeId}
-      `);
       return { disputeId: input.disputeId, resolution: input.resolution };
     }),
 });
@@ -374,13 +449,13 @@ export const transferProtectionRouter = router({
   autoRefundStuck: adminProcedure.mutation(async ({ ctx }) => {
     const db = await getDb();
     const result = await db.execute(sql`
-      SELECT id, "userId", amount, from_currency, reference, channel, metadata, "updatedAt"
+      SELECT id, "userId", amount, COALESCE(fee, 0) AS fee, from_currency, reference, channel, metadata, "updatedAt"
       FROM transactions
       WHERE status = 'stuck'
     `);
     // Filter by per-corridor auto-refund threshold
     const allStuck = result.rows as Array<{
-      id: number; userId: number; amount: string; from_currency: string; reference: string;
+      id: number; userId: number; amount: string; fee: string; from_currency: string; reference: string;
       channel: string | null; metadata: string | Record<string, unknown> | null; updatedAt: Date;
     }>;
     const toRefund: typeof allStuck = [];
@@ -398,7 +473,9 @@ export const transferProtectionRouter = router({
     let refunded = 0;
 
     for (const tx of toRefund) {
-      const amount = Number(tx.amount);
+      // FF-FIX: refund amount + fee — the original send debit was amount+fee,
+      // so refunding amount alone systematically leaked the fee.
+      const amount = Math.abs(Number(tx.amount)) + Math.abs(Number(tx.fee ?? 0));
       if (amount <= 0) continue;
 
       // FF-007: single-winner status transition FIRST — the wallet is credited
@@ -413,10 +490,16 @@ export const transferProtectionRouter = router({
           RETURNING id
         `)) as unknown as Array<{ id: number }>;
         if (claimed.length === 0) return false; // already refunded/resolved concurrently
-        await tx2.execute(sql`
+        // FF-FIX: row-count check — never mark refunded without the money
+        // actually landing; a missing/inactive wallet rolls the claim back.
+        const creditRows = (await tx2.execute(sql`
           UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${amount}, "updatedAt" = NOW()
-          WHERE "userId" = ${tx.userId} AND currency = ${tx.from_currency}
-        `);
+          WHERE "userId" = ${tx.userId} AND currency = ${tx.from_currency} AND status = 'active'
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (creditRows.length === 0) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Auto-refund credit failed — wallet unavailable for user ${tx.userId} (${tx.from_currency}); transfer left 'stuck' for manual recovery` });
+        }
         await tx2.execute(sql`
           INSERT INTO transactions ("userId", type, status, amount, from_currency, to_currency, description, reference, "createdAt", "updatedAt")
           VALUES (${tx.userId}, 'refund', 'completed', ${tx.amount}, ${tx.from_currency}, ${tx.from_currency},
@@ -555,25 +638,53 @@ export const payrollProtectionRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const rows = await db.execute(sql`SELECT * FROM payroll_disputes WHERE dispute_id = ${input.disputeId}`);
-      const dispute = (rows.rows as Array<{ employee_user_id: number; expected_amount: number; received_amount: number }>)[0];
+      const dispute = (rows.rows as Array<{ employee_user_id: number; expected_amount: number; received_amount: number; run_item_id: number }>)[0];
       if (!dispute) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
-      if (input.resolution === "pay_difference" || input.resolution === "full_repay") {
-        const amount = input.adjustmentAmount ?? (dispute.expected_amount - dispute.received_amount);
-        if (amount > 0) {
-          await db.execute(sql`
-            UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${amount}, "updatedAt" = NOW()
-            WHERE "userId" = ${dispute.employee_user_id} AND currency = 'USD'
-          `);
-          await notify(db, dispute.employee_user_id, "payroll_dispute_resolved",
-            `Your payroll dispute has been resolved. $${amount.toFixed(2)} has been credited to your wallet.`);
+      // FF-FIX: single-winner claim + credit in ONE transaction; the payout is
+      // capped against the actual payroll run item (both dispute amounts were
+      // user-supplied and previously trusted blindly).
+      let creditedAmount = 0;
+      await db.transaction(async (tx: any) => {
+        const claim = (await tx.execute(sql`
+          UPDATE payroll_disputes SET status = 'resolved', resolution = ${input.resolution}, resolved_at = NOW()
+          WHERE dispute_id = ${input.disputeId} AND status = 'open'
+          RETURNING dispute_id
+        `)) as unknown as { rows?: unknown[] };
+        const claimedRows = Array.isArray(claim) ? claim : (claim.rows ?? []);
+        if (claimedRows.length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Dispute already resolved" });
         }
-      }
 
-      await db.execute(sql`
-        UPDATE payroll_disputes SET status = 'resolved', resolution = ${input.resolution}, resolved_at = NOW()
-        WHERE dispute_id = ${input.disputeId}
-      `);
+        if (input.resolution === "pay_difference" || input.resolution === "full_repay") {
+          const itemRows = await tx.execute(sql`
+            SELECT gross_usd, net_usd FROM payroll_run_items WHERE id = ${dispute.run_item_id} LIMIT 1
+          `);
+          const item = (itemRows.rows as Array<{ gross_usd: string; net_usd: string }>)[0];
+          const cap = item ? Number(item.gross_usd) : Number(dispute.expected_amount);
+          const requested = input.adjustmentAmount ?? (Number(dispute.expected_amount) - Number(dispute.received_amount));
+          const amount = Math.min(requested, cap);
+          if (requested > amount) {
+            logger.warn({ requested, cappedTo: amount, disputeId: input.disputeId }, "[PayrollDispute] Payout capped against payroll run item");
+          }
+          if (amount > 0) {
+            const creditRows = (await tx.execute(sql`
+              UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${amount}, "updatedAt" = NOW()
+              WHERE "userId" = ${dispute.employee_user_id} AND currency = 'USD' AND status = 'active'
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (creditRows.length === 0) {
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Credit failed — employee wallet unavailable; dispute NOT resolved" });
+            }
+            creditedAmount = amount;
+          }
+        }
+      });
+
+      if (creditedAmount > 0) {
+        await notify(db, dispute.employee_user_id, "payroll_dispute_resolved",
+          `Your payroll dispute has been resolved. $${creditedAmount.toFixed(2)} has been credited to your wallet.`);
+      }
       return { disputeId: input.disputeId, resolution: input.resolution };
     }),
 });
@@ -637,32 +748,49 @@ export const investorProtectionRouter = router({
       if (!defaultCase) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
       const investorRows = await db.execute(sql`
-        SELECT user_id, amount_invested_usd FROM real_estate_investments WHERE listing_id = ${defaultCase.listing_id} AND status = 'frozen'
+        SELECT id, user_id, amount_invested_usd FROM real_estate_investments WHERE listing_id = ${defaultCase.listing_id} AND status = 'frozen'
       `);
-      const investors = investorRows.rows as Array<{ user_id: number; amount_invested_usd: number }>;
+      const investors = investorRows.rows as Array<{ id: number; user_id: number; amount_invested_usd: number }>;
       let totalRefunded = 0;
+      let refundedCount = 0;
 
+      // FF-FIX: per-investor single-winner transition (frozen→liquidated) +
+      // credit in ONE transaction — a crash/retry mid-loop can no longer
+      // double-pay already-credited investors.
       for (const inv of investors) {
         const refundAmount = Number(inv.amount_invested_usd) * (input.refundPercentage / 100);
-        if (refundAmount > 0) {
-          await db.execute(sql`
-            UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${refundAmount}, "updatedAt" = NOW()
-            WHERE "userId" = ${inv.user_id} AND currency = 'USD'
-          `);
-          totalRefunded += refundAmount;
-        }
+        const paid = await db.transaction(async (tx: any) => {
+          const claim = (await tx.execute(sql`
+            UPDATE real_estate_investments SET status = 'liquidated'
+            WHERE id = ${inv.id} AND status = 'frozen'
+            RETURNING id
+          `)) as unknown as { rows?: unknown[] };
+          const claimRows = Array.isArray(claim) ? claim : (claim.rows ?? []);
+          if (claimRows.length === 0) return false; // already processed
+          if (refundAmount > 0) {
+            const creditRows = (await tx.execute(sql`
+              UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${refundAmount}, "updatedAt" = NOW()
+              WHERE "userId" = ${inv.user_id} AND currency = 'USD' AND status = 'active'
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (creditRows.length === 0) {
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Wallet unavailable for investor ${inv.user_id} — refund rolled back` });
+            }
+          }
+          return true;
+        });
+        if (!paid) continue;
+        totalRefunded += refundAmount;
+        refundedCount++;
         await notify(db, inv.user_id, "investment_refund",
           `Your investment in the defaulted property has been partially refunded. $${refundAmount.toFixed(2)} (${input.refundPercentage}% of your investment) has been credited to your wallet.`);
       }
 
       await db.execute(sql`
-        UPDATE real_estate_investments SET status = 'liquidated' WHERE listing_id = ${defaultCase.listing_id} AND status = 'frozen'
-      `);
-      await db.execute(sql`
         UPDATE developer_defaults SET status = 'refunded', refund_percentage = ${input.refundPercentage} WHERE default_id = ${input.defaultId}
       `);
 
-      return { investorsRefunded: investors.length, totalRefundedUsd: totalRefunded, refundPercentage: input.refundPercentage };
+      return { investorsRefunded: refundedCount, totalRefundedUsd: totalRefunded, refundPercentage: input.refundPercentage };
     }),
 });
 
@@ -743,28 +871,46 @@ export const bondProtectionRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const holderRows = await db.execute(sql`
-        SELECT user_id, principal_usd FROM bond_subscriptions WHERE bond_id = ${input.bondId} AND status = 'impaired'
+        SELECT id, user_id, principal_usd FROM bond_subscriptions WHERE bond_id = ${input.bondId} AND status = 'impaired'
       `);
-      const holders = holderRows.rows as Array<{ user_id: number; principal_usd: string }>;
+      const holders = holderRows.rows as Array<{ id: number; user_id: number; principal_usd: string }>;
       const totalPrincipal = holders.reduce((s, h) => s + Number(h.principal_usd), 0);
       let distributed = 0;
+      let distributedCount = 0;
 
+      // FF-FIX: per-holder single-winner transition (impaired→recovered) +
+      // credit in ONE transaction — a crash/retry mid-loop no longer
+      // double-pays already-credited holders.
       for (const holder of holders) {
         const share = (Number(holder.principal_usd) / totalPrincipal) * input.totalRecoveryUsd;
-        await db.execute(sql`
-          UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${share}, "updatedAt" = NOW()
-          WHERE "userId" = ${holder.user_id} AND currency = 'USD'
-        `);
+        const paid = await db.transaction(async (tx: any) => {
+          const claim = (await tx.execute(sql`
+            UPDATE bond_subscriptions SET status = 'recovered', updated_at = NOW()
+            WHERE id = ${holder.id} AND status = 'impaired'
+            RETURNING id
+          `)) as unknown as { rows?: unknown[] };
+          const claimRows = Array.isArray(claim) ? claim : (claim.rows ?? []);
+          if (claimRows.length === 0) return false; // already processed
+          if (share > 0) {
+            const creditRows = (await tx.execute(sql`
+              UPDATE wallets SET balance = CAST(balance AS DECIMAL(18,4)) + ${share}, "updatedAt" = NOW()
+              WHERE "userId" = ${holder.user_id} AND currency = 'USD' AND status = 'active'
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (creditRows.length === 0) {
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Wallet unavailable for holder ${holder.user_id} — distribution rolled back` });
+            }
+          }
+          return true;
+        });
+        if (!paid) continue;
+        distributed += share;
+        distributedCount++;
         await notify(db, holder.user_id, "bond_recovery",
           `Recovery distribution: $${share.toFixed(2)} has been credited to your USD wallet from the defaulted bond recovery proceedings.`);
-        distributed += share;
       }
 
-      await db.execute(sql`
-        UPDATE bond_subscriptions SET status = 'recovered', updated_at = NOW() WHERE bond_id = ${input.bondId} AND status = 'impaired'
-      `);
-
-      return { holdersDistributed: holders.length, totalDistributedUsd: distributed };
+      return { holdersDistributed: distributedCount, totalDistributedUsd: distributed };
     }),
 });
 

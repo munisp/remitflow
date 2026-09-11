@@ -15,7 +15,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -256,6 +258,9 @@ func recordTigerBeetleTransfer(ref string, amountUSD float64, corridor string) {
 
 // ─── Dapr Integration ─────────────────────────────────────────────────────────
 
+// daprClient is bounded: a hung Dapr sidecar must not tie up callers (F17).
+var daprClient = &http.Client{Timeout: 5 * time.Second}
+
 func publishDaprEvent(topic string, payload interface{}) {
 	daprPort := os.Getenv("DAPR_HTTP_PORT")
 	if daprPort == "" {
@@ -263,13 +268,16 @@ func publishDaprEvent(topic string, payload interface{}) {
 	}
 	data, _ := json.Marshal(payload)
 	url := fmt.Sprintf("http://localhost:%s/v1.0/publish/pubsub/%s", daprPort, topic)
-	resp, err := http.Post(url, "application/json", nil)
+	resp, err := daprClient.Post(url, "application/json", bytes.NewReader(data))
 	if err != nil || resp == nil {
 		log.Printf("[BDCConnector] Dapr publish failed for topic %s: %v", topic, err)
 		return
 	}
 	defer resp.Body.Close()
-	_ = data
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[BDCConnector] Dapr publish rejected for topic %s: HTTP %d", topic, resp.StatusCode)
+		return
+	}
 	log.Printf("[BDCConnector] Dapr event published to topic: %s", topic)
 }
 
@@ -312,14 +320,17 @@ func getCorridorRate(corridor string) CorridorRate {
 
 // ─── Internal Auth ────────────────────────────────────────────────────────────
 
+// internalKeyAuth resolves INTERNAL_SERVICE_KEY once at startup and FAILS
+// CLOSED: there is no well-known default internal credential. Comparison is
+// constant-time.
 func internalKeyAuth() gin.HandlerFunc {
+	expected := os.Getenv("INTERNAL_SERVICE_KEY")
+	if expected == "" {
+		panic("INTERNAL_SERVICE_KEY is not set: refusing to fall back to a well-known default credential; configure the internal service key explicitly")
+	}
 	return func(c *gin.Context) {
 		key := c.GetHeader("X-Internal-Key")
-		expected := os.Getenv("INTERNAL_SERVICE_KEY")
-		if expected == "" {
-			expected = "remitflow-internal-2026"
-		}
-		if key != expected {
+		if subtle.ConstantTimeCompare([]byte(key), []byte(expected)) != 1 {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 			return
 		}

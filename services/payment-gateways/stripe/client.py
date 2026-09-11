@@ -34,9 +34,13 @@ class StripeClient:
             "Stripe-Version": "2023-10-16"
         }
     
-    async def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
+    async def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None, idempotency_key: Optional[str] = None) -> Dict:
         url = f"{self.base_url}{endpoint}"
         headers = self._get_headers()
+        if idempotency_key:
+            # Stripe dedupes POSTs on this header — always send it for
+            # payment-creation calls so retries are safe.
+            headers["Idempotency-Key"] = idempotency_key
         
         try:
             logger.info(f"Stripe API request: {method} {endpoint}")
@@ -72,7 +76,7 @@ class StripeClient:
             logger.error(f"Stripe API error: {str(e)}")
             raise StripeError(code="UNKNOWN_ERROR", message=str(e))
     
-    async def create_payment_intent(self, amount: int, currency: str, customer: str = None, metadata: Dict = None) -> Dict:
+    async def create_payment_intent(self, amount: int, currency: str, customer: str = None, metadata: Dict = None, idempotency_key: str = None) -> Dict:
         data = {
             "amount": amount,
             "currency": currency.lower(),
@@ -83,9 +87,9 @@ class StripeClient:
         if metadata:
             for key, value in metadata.items():
                 data[f"metadata[{key}]"] = value
-        
+
         logger.info(f"Creating Stripe payment intent: {amount} {currency}")
-        response = await self._make_request("POST", "/v1/payment_intents", data)
+        response = await self._make_request("POST", "/v1/payment_intents", data, idempotency_key=idempotency_key)
         
         return {
             "payment_intent_id": response["id"],

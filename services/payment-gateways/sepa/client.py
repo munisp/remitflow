@@ -91,10 +91,14 @@ class SEPAClient:
         except httpx.HTTPStatusError as e:
             logger.error(f"SEPA HTTP error: {e}")
             raise SEPAError(code=str(e.response.status_code), message=str(e))
+        except SEPAError:
+            # Provider rejection raised above — re-raise unwrapped so the
+            # provider error code is preserved.
+            raise
         except Exception as e:
             logger.error(f"SEPA error: {e}")
             raise SEPAError(code="INTERNAL_ERROR", message=str(e))
-    
+
     async def create_direct_debit(self, debtor_iban: str, debtor_name: str, amount: float, mandate_reference: str, remittance_info: str) -> Dict:
         """Create SEPA Direct Debit"""
         if not self._validate_iban(debtor_iban):

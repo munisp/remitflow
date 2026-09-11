@@ -17,7 +17,22 @@ import { TRPCError } from "@trpc/server";
 import * as crypto from "crypto";
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
-const ENCRYPTION_KEY = process.env.FIELD_ENCRYPTION_KEY ?? crypto.randomBytes(32).toString("hex");
+
+// W9/Q11 (F10-7): ephemeral per-process keys cause permanent data loss on
+// restart and diverge across replicas. Production: missing FIELD_ENCRYPTION_KEY
+// => throw at use (fail closed). Non-production: ephemeral key + warn.
+let cachedEncryptionKey: string | null = null;
+function getEncryptionKey(): string {
+  if (cachedEncryptionKey) return cachedEncryptionKey;
+  const envKey = process.env.FIELD_ENCRYPTION_KEY;
+  if (envKey) { cachedEncryptionKey = envKey; return envKey; }
+  if (IS_PRODUCTION) {
+    throw new Error("FIELD_ENCRYPTION_KEY is required in production — refusing to encrypt/decrypt PII with an ephemeral key");
+  }
+  console.warn("[dataResidency] FIELD_ENCRYPTION_KEY unset — using ephemeral key; data will NOT survive restarts (non-production only)");
+  cachedEncryptionKey = crypto.randomBytes(32).toString("hex");
+  return cachedEncryptionKey;
+}
 const ENCRYPTION_ALGORITHM = "aes-256-gcm";
 
 // ─── Data Residency Configuration ─────────────────────────────────────────────
@@ -112,7 +127,7 @@ const PII_FIELDS = new Set([
 // ─── Field-Level Encryption ───────────────────────────────────────────────────
 
 export function encryptField(plaintext: string): string {
-  const key = Buffer.from(ENCRYPTION_KEY, "hex");
+  const key = Buffer.from(getEncryptionKey(), "hex");
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
 
@@ -125,7 +140,7 @@ export function encryptField(plaintext: string): string {
 }
 
 export function decryptField(encrypted: string): string {
-  const key = Buffer.from(ENCRYPTION_KEY, "hex");
+  const key = Buffer.from(getEncryptionKey(), "hex");
   const [ivB64, authTagB64, ciphertext] = encrypted.split(":");
 
   if (!ivB64 || !authTagB64 || !ciphertext) {

@@ -146,6 +146,14 @@ export async function TransferWorkflow(input: TransferWorkflowInput): Promise<Tr
     // ── Step 4: Execute transfer ──────────────────────────────────────────────
     const execution = await executeTransferActivity(input, reservation.reservationId);
 
+    // W12: POINT OF NO RETURN. The reservation is CONSUMED (funds settled, lock
+    // drawn down). The release compensation must NOT run after this — if a
+    // later step (notify/audit) fails, releasing would credit the wallet back
+    // for a COMPLETED transfer (double settlement). Drop it from the
+    // compensation stack; the guarded/idempotent releaseFundsActivity is the
+    // second line of defense.
+    compensations.length = 0;
+
     // ── Step 5: Notify recipient ──────────────────────────────────────────────
     await notifyRecipientActivity(input, execution.transactionRef);
 

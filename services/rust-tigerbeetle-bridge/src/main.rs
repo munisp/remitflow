@@ -20,20 +20,26 @@
  * owned by the TypeScript layer.
  *
  * Environment:
- *   TIGERBEETLE_ADDRESSES   comma-separated replica host:port list (required)
- *   TIGERBEETLE_CLUSTER_ID  cluster id, default 0
- *   DATABASE_URL            PostgreSQL (health dependency probe only)
- *   PORT | TB_BRIDGE_PORT   listen port (default 8200)
+ *   TIGERBEETLE_ADDRESSES        comma-separated replica host:port list (required)
+ *   TIGERBEETLE_CLUSTER_ID       cluster id, default 0
+ *   DATABASE_URL                 PostgreSQL (health dependency probe only)
+ *   PORT | TB_BRIDGE_PORT        listen port (default 8200)
+ *   OTEL_SDK_DISABLED            "true"/"1" → run without tracing (fail-soft)
+ *   OTEL_EXPORTER_OTLP_ENDPOINT  OTLP/HTTP base endpoint (default http://localhost:4318)
+ *   OTEL_SERVICE_NAME            service.name resource attr (default rust-tigerbeetle-bridge)
+ *   OTEL_ENVIRONMENT             deployment.environment resource attr (default development)
  */
 
 mod tb_client;
+mod telemetry;
 #[cfg(test)]
 mod tests;
 
 use axum::{
-    extract::State,
+    extract::{Request, State},
     http::StatusCode,
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -41,7 +47,8 @@ use prometheus::{Histogram, HistogramOpts, IntCounter, Registry};
 use serde::Deserialize;
 use std::{net::SocketAddr, sync::Arc, time::{Duration, Instant}};
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, Instrument as _};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use tb_client::{NewAccount, NewTransfer, TbClient, TbClientError};
 
@@ -49,6 +56,74 @@ use tb_client::{NewAccount, NewTransfer, TbClient, TbClientError};
 const TRANSFER_FLAG_PENDING: u16 = 2;
 const TRANSFER_FLAG_POST_PENDING: u16 = 4;
 const TRANSFER_FLAG_VOID_PENDING: u16 = 8;
+
+/// Span-friendly classification of a transfer's two-phase role.
+fn transfer_kind(flags: u16) -> &'static str {
+    if flags & TRANSFER_FLAG_POST_PENDING != 0 {
+        "post"
+    } else if flags & TRANSFER_FLAG_VOID_PENDING != 0 {
+        "void"
+    } else if flags & TRANSFER_FLAG_PENDING != 0 {
+        "pending"
+    } else {
+        "standard"
+    }
+}
+
+// ─── Per-request tracing middleware ───────────────────────────────────────────
+
+/// W3C `traceparent`/`tracestate` extractor over HTTP headers — this is what
+/// joins bridge spans to the trace started by the TypeScript API layer.
+struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);
+
+impl opentelemetry::propagation::Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|v| v.to_str().ok())
+    }
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|k| k.as_str()).collect()
+    }
+}
+
+/// One server span per request: method + route, remote traceparent parentage,
+/// and tenant.id from the X-Tenant-Id header when present.
+async fn otel_request_span(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    // All routes in this service are fixed literals — no cardinality risk.
+    let path = req.uri().path().to_string();
+    let tenant = req
+        .headers()
+        .get("x-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let parent_cx = opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(req.headers()))
+    });
+
+    let span = tracing::info_span!(
+        "http.request",
+        otel.name = %format!("{method} {path}"),
+        otel.kind = "server",
+        http.request.method = %method,
+        url.path = %path,
+        http.response.status_code = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+        tenant.id = tracing::field::Empty,
+    );
+    // No-op when the extracted context is invalid/absent.
+    span.set_parent(parent_cx);
+    if let Some(t) = &tenant {
+        span.record("tenant.id", t.as_str());
+    }
+
+    let response = next.run(req).instrument(span.clone()).await;
+    let status = response.status().as_u16();
+    span.record("http.response.status_code", status as u64);
+    if status >= 500 {
+        span.record("otel.status_code", "error");
+    }
+    response
+}
 
 // ─── Request bodies (exact TS contract) ───────────────────────────────────────
 
@@ -138,16 +213,31 @@ async fn create_accounts(
         }
     }
 
-    match state.tb.create_accounts(&body.accounts).await {
+    // Child span for the ledger round-trip. Account ids never appear here —
+    // the service's existing logs don't print them either; counts and
+    // per-index error tallies carry the debugging signal.
+    let span = tracing::info_span!(
+        "tb.account.create",
+        otel.kind = "client",
+        tb.account.count = body.accounts.len() as u64,
+        tb.account.error_count = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    match state.tb.create_accounts(&body.accounts).instrument(span.clone()).await {
         Ok(errors) => {
             state.metrics.tb_op_latency.observe(start.elapsed().as_secs_f64());
             state.metrics.accounts_created.inc_by((body.accounts.len() - errors.len()) as u64);
             if !errors.is_empty() {
+                span.record("tb.account.error_count", errors.len() as u64);
+                span.record("otel.status_code", "error");
                 warn!(?errors, "tigerbeetle account creation returned per-index errors");
+            } else {
+                span.record("otel.status_code", "ok");
             }
             (StatusCode::OK, Json(serde_json::json!({ "errors": errors })))
         }
         Err(e) => {
+            span.record("otel.status_code", "error");
             state.metrics.errors_total.inc();
             error!(error = %e, "create_accounts failed");
             tb_error_response(e)
@@ -201,18 +291,46 @@ async fn create_transfers(
         }
     }
 
-    match state.tb.create_transfers(&body.transfers).await {
+    // Child span for the ledger round-trip — THE money span for payout
+    // holds/posts/voids. tb.transfer.kind is the two-phase role of the batch
+    // (homogeneous batches are the norm; mixed batches are labeled "mixed").
+    // No transfer ids, account ids, or amounts are attached — the service's
+    // own logs never print them, so spans don't either.
+    let kind = {
+        let first = transfer_kind(body.transfers[0].flags);
+        if body.transfers.iter().all(|t| transfer_kind(t.flags) == first) {
+            first
+        } else {
+            "mixed"
+        }
+    };
+    let deterministic_ids = body.transfers.iter().all(|t| !t.id.trim().is_empty());
+    let span = tracing::info_span!(
+        "tb.transfer.create",
+        otel.kind = "client",
+        tb.transfer.kind = kind,
+        tb.transfer.count = body.transfers.len() as u64,
+        tb.transfer.id_deterministic = deterministic_ids,
+        tb.transfer.error_count = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    match state.tb.create_transfers(&body.transfers).instrument(span.clone()).await {
         Ok(errors) => {
             state.metrics.tb_op_latency.observe(start.elapsed().as_secs_f64());
             state.metrics.transfers_posted.inc_by((body.transfers.len() - errors.len()) as u64);
             if !errors.is_empty() {
                 // Balance-invariant violations (exceeds_debits, etc.) land here
                 // as per-index result codes — surfaced verbatim to the caller.
+                span.record("tb.transfer.error_count", errors.len() as u64);
+                span.record("otel.status_code", "error");
                 warn!(?errors, "tigerbeetle transfer creation returned per-index errors");
+            } else {
+                span.record("otel.status_code", "ok");
             }
             (StatusCode::OK, Json(serde_json::json!({ "errors": errors })))
         }
         Err(e) => {
+            span.record("otel.status_code", "error");
             state.metrics.errors_total.inc();
             error!(error = %e, "create_transfers failed");
             tb_error_response(e)
@@ -228,9 +346,23 @@ async fn lookup_accounts(
     if body.ids.is_empty() {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "ids must be non-empty" })));
     }
-    match state.tb.lookup_accounts(&body.ids).await {
-        Ok(accounts) => (StatusCode::OK, Json(serde_json::json!({ "accounts": accounts }))),
+    // Child span for the hold/balance lookup. Requested/found counts only —
+    // account ids are never attached (matches the service's log discipline).
+    let span = tracing::info_span!(
+        "tb.account.lookup",
+        otel.kind = "client",
+        tb.lookup.requested = body.ids.len() as u64,
+        tb.lookup.found = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    match state.tb.lookup_accounts(&body.ids).instrument(span.clone()).await {
+        Ok(accounts) => {
+            span.record("tb.lookup.found", accounts.len() as u64);
+            span.record("otel.status_code", "ok");
+            (StatusCode::OK, Json(serde_json::json!({ "accounts": accounts })))
+        }
         Err(e) => {
+            span.record("otel.status_code", "error");
             state.metrics.errors_total.inc();
             error!(error = %e, "lookup_accounts failed");
             tb_error_response(e)
@@ -273,6 +405,8 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         Json(serde_json::json!({
             "status": if healthy { "healthy" } else { "unhealthy" },
             "service": "tigerbeetle-bridge",
+            // Honest signal: true only when OTLP spans are actually exported.
+            "telemetry": telemetry::telemetry_enabled(),
             "tigerbeetle": tb_probe,
             "postgres": pg,
             "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -298,13 +432,10 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
-    tracing_subscriber::fmt()
-        .json()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("tigerbeetle_bridge=info".parse()?),
-        )
-        .init();
+    // Logging + OTLP tracing. Fail-soft: never panics, never blocks startup —
+    // on OTEL_SDK_DISABLED=true or exporter-init failure the service runs
+    // with logs only and /health reports "telemetry": false.
+    let otel_guard = telemetry::init();
 
     // Fail loudly on misconfiguration — a bridge without a cluster address or
     // database can never serve honest responses.
@@ -356,6 +487,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/accounts/lookup", post(lookup_accounts))
         .route("/health", get(health))
         .route("/metrics", get(metrics_handler))
+        // Server span per request: traceparent parentage + tenant.id.
+        .layer(middleware::from_fn(otel_request_span))
         .layer(TraceLayer::new_for_http())
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(30)))
         .with_state(state);
@@ -364,7 +497,35 @@ async fn main() -> anyhow::Result<()> {
     info!("TigerBeetle bridge listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
+    // Flush + shut down the OTLP exporter so the tail of the trace (including
+    // in-flight money spans) is not lost on restart/deploy.
+    otel_guard.shutdown();
     Ok(())
+}
+
+/// SIGINT (Ctrl+C) or SIGTERM → begin graceful shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    info!("shutdown signal received — draining requests and flushing telemetry");
 }

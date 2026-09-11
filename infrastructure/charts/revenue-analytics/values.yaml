@@ -48,7 +48,7 @@ dapr:
 # (os.Getenv / env::var / os.getenv across revenue-analytics's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install revenue-analytics infrastructure/charts/revenue-analytics \
 #     -n 54remit -f infrastructure/values-secrets/revenue-analytics.yaml
 # (a gitignored, per-environment file).

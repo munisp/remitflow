@@ -20,12 +20,32 @@ import { logger } from "./logger";
 const STORAGE_ENDPOINT = process.env.STORAGE_ENDPOINT ?? "";
 const STORAGE_BUCKET = process.env.STORAGE_BUCKET ?? "";
 
+// SEC-01 (CRITICAL): the /icons/* key is attacker-controlled. Path traversal
+// via URL-encoded "../" reaches path.resolve below and escapes the icons root
+// (empirically reproduced: /icons/%2e%2e%2f%2e%2e%2fpackage.json). Accept only
+// flat file names — no path separators, no dot segments, no dotfiles.
+const ICON_KEY_RE = /^[A-Za-z0-9._-]+$/;
+
+function isValidIconKey(key: string): boolean {
+  return (
+    key.length > 0 &&
+    key.length <= 128 &&
+    ICON_KEY_RE.test(key) &&
+    !key.includes("..") &&
+    !key.startsWith(".")
+  );
+}
+
 export function registerStorageProxy(app: Express) {
   app.get("/icons/*", async (req, res) => {
     const params = req.params as unknown as Record<string, string | undefined>;
     const key = params["0"];
     if (!key) {
       res.status(400).send("Missing asset key");
+      return;
+    }
+    if (!isValidIconKey(key)) {
+      res.status(400).send("Invalid asset key");
       return;
     }
 
@@ -50,11 +70,14 @@ export function registerStorageProxy(app: Express) {
       }
     }
 
-    // Fallback: serve from local client/public/icons/
-    const localPath = path.resolve(process.cwd(), "client", "public", "icons", key);
+    // Fallback: serve from local client/public/icons/. sendFile with `root`
+    // enforces containment (rejects paths escaping root) and dotfiles:"deny"
+    // blocks hidden files; the key is already restricted to a flat safe name.
+    const iconsRoot = path.resolve(process.cwd(), "client", "public", "icons");
+    const localPath = path.resolve(iconsRoot, key);
     if (fs.existsSync(localPath)) {
       res.set("Cache-Control", "public, max-age=604800");
-      res.sendFile(localPath);
+      res.sendFile(key, { root: iconsRoot, dotfiles: "deny" });
     } else {
       res.status(404).send("Asset not found");
     }

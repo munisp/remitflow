@@ -22,7 +22,26 @@ import { createId } from "@paralleldrive/cuid2";
 import { runComplianceCheck } from "../_core/complianceEngine.js";
 import { KAFKA_TOPICS, publishEvent } from "../middleware/kafka.js";
 import { requestStablecoinEngine, requestStablecoinOracle, submitTravelRuleReport, requireFiniteNumber, requireText } from "../services/stablecoinOperations.js";
-import { createStablecoinP2PClaim, reserveStablecoinP2PClaim, completeStablecoinP2PClaim, releaseStablecoinP2PClaim } from "../services/stablecoinP2PClaims.js";
+import { createStablecoinP2PClaim, reserveStablecoinP2PClaim, completeStablecoinP2PClaim, releaseStablecoinP2PClaim, deleteStablecoinP2PClaim, failStablecoinP2PClaim, cancelStablecoinP2PClaim } from "../services/stablecoinP2PClaims.js";
+import { logger } from "../_core/logger.js";
+import { assertFeatureEligible } from "../_core/featureGuard.js";
+
+// ── D5: TOTP step-up (Contract 2) — enrolled users MUST pass 2FA before
+// stablecoins leave the platform; fail closed on enrollment-lookup errors.
+async function requireTotpStepUp(userId: number, totpCode: string | undefined): Promise<void> {
+  const { getTotpEnrollment, verifyTOTP } = await import("../totp.js");
+  const enrollment = await getTotpEnrollment(userId);
+  if (!enrollment.dbAvailable) {
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — operation blocked" });
+  }
+  if (!enrollment.enabled || !enrollment.secret) {
+    // W12: never waive — money-moving stablecoin ops require 2FA enrollment.
+    throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Two-factor authentication enrollment required before this action" });
+  }
+  if (!totpCode) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+  const valid = await verifyTOTP(totpCode, enrollment.secret);
+  if (!valid) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+}
 
 // ── KYC Tier Limits (USD equivalent) ─────────────────────────────────────────
 const KYC_TIER_LIMITS: Record<string, { onrampDaily: number; offrampDaily: number; singleTx: number }> = {
@@ -35,7 +54,10 @@ const KYC_TIER_LIMITS: Record<string, { onrampDaily: number; offrampDaily: numbe
 
 // ── Supported Stablecoins & Chains ───────────────────────────────────────────
 const SUPPORTED_STABLECOINS = ["USDC", "USDT", "DAI", "PYUSD", "EURC", "NGNT", "cUSD", "BUSD"] as const;
-const SUPPORTED_CHAINS = ["ethereum", "polygon", "bsc", "solana", "tron", "arbitrum", "optimism", "base", "avalanche"] as const;
+// Solana and Tron are intentionally absent: they have no real on-chain
+// adapter in blockchainClient (all reads were mock data) and fail closed.
+// Do not re-add until a real adapter exists.
+const SUPPORTED_CHAINS = ["ethereum", "polygon", "bsc", "arbitrum", "optimism", "base", "avalanche"] as const;
 const SUPPORTED_FIAT = ["USD", "NGN", "GBP", "EUR", "GHS", "KES", "ZAR", "XOF", "CAD", "AUD"] as const;
 
 // ── Travel Rule Threshold (USD) ───────────────────────────────────────────────
@@ -152,6 +174,9 @@ export const stablecoinEnhancedRouter = router({
       walletAddress: z.string().min(10).max(200).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // A10: declared gate — stablecoin flag + growth plan (KYC checks below kept).
+      await assertFeatureEligible(ctx, { flag: "stablecoin", minPlan: "growth", featureName: "Stablecoin services" });
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -235,7 +260,9 @@ export const stablecoinEnhancedRouter = router({
       // 6. Record transaction
       await db.insert(transactions).values({
         userId: ctx.user.id,
-        type: "onramp",
+        // W9/Q9: tx_type enum has no "onramp"/"deposit" — fiat→stablecoin purchase
+        // maps to "topup"; the rail semantics are preserved in description/metadata.
+        type: "topup",
         status: engineResult.status === "settled" ? "completed" : "pending",
         fromCurrency: input.fiatCurrency,
         fromAmount: input.fiatAmount.toString(),
@@ -244,6 +271,7 @@ export const stablecoinEnhancedRouter = router({
         fee: fee.toFixed(8),
         description: `On-ramp: ${input.fiatAmount} ${input.fiatCurrency} → ${stablecoinAmount.toFixed(6)} ${input.stablecoin} via ${input.provider}`,
         reference: txRef,
+        metadata: { originalType: "onramp", rail: input.provider, chain: input.chain },
       });
 
       // 7. TigerBeetle double-entry ledger
@@ -304,6 +332,9 @@ export const stablecoinEnhancedRouter = router({
       mobileMoneyNumber: z.string().max(20).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // A10: declared gate — stablecoin flag + growth plan (KYC checks below kept).
+      await assertFeatureEligible(ctx, { flag: "stablecoin", minPlan: "growth", featureName: "Stablecoin services" });
+
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
@@ -389,7 +420,9 @@ export const stablecoinEnhancedRouter = router({
       // 7. Record transaction
       await db.insert(transactions).values({
         userId: ctx.user.id,
-        type: "offramp",
+        // W9/Q9: tx_type enum has no "offramp" — stablecoin→fiat payout maps to
+        // "withdrawal"; the rail semantics are preserved in description/metadata.
+        type: "withdrawal",
         status: "processing",
         fromCurrency: input.stablecoin,
         fromAmount: input.stablecoinAmount.toString(),
@@ -398,6 +431,7 @@ export const stablecoinEnhancedRouter = router({
         fee: fee.toFixed(2),
         description: `Off-ramp: ${input.stablecoinAmount} ${input.stablecoin} → ${netPayout.toFixed(2)} ${input.fiatCurrency} via ${input.payoutRail}`,
         reference: txRef,
+        metadata: { originalType: "offramp", rail: input.payoutRail },
       });
 
       // 8. TigerBeetle double-entry ledger
@@ -560,28 +594,34 @@ export const stablecoinEnhancedRouter = router({
 import { executeAtomicStablecoinFlow } from "../services/stablecoinAtomicity";
 
 export const stablecoinExtendedRouter = router({
-  stakeForYield: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), protocol: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  stakeForYield: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), protocol: z.string(), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, direction: "buy" });
     const result = await callStablecoinEngine("/stablecoin/stake", { user_id: ctx.user.id, ...input });
     await publishStablecoinEvent("stablecoin.stake", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_STAKE", description: `Stake submitted for ${input.amount} ${input.stablecoin}`, metadata: result });
     return result;
   }),
-  unstake: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), protocol: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  unstake: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), protocol: z.string(), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, direction: "sell" });
     const result = await callStablecoinEngine("/stablecoin/unstake", { user_id: ctx.user.id, ...input });
     await publishStablecoinEvent("stablecoin.unstake", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_UNSTAKE", description: `Unstake submitted for ${input.amount} ${input.stablecoin}`, metadata: result });
     return result;
   }),
-  bridgeChain: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fromChain: z.string(), toChain: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  bridgeChain: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fromChain: z.string(), toChain: z.string(), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, chain: input.toChain, direction: "sell" });
     const result = await callStablecoinEngine("/stablecoin/bridge", { user_id: ctx.user.id, ...input });
     await publishStablecoinEvent("stablecoin.bridge", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_BRIDGE", description: `Bridge submitted from ${input.fromChain} to ${input.toChain}`, metadata: result });
     return result;
   }),
-  createDcaPlan: protectedProcedure.input(z.object({ stablecoin: z.string(), targetAsset: z.string(), fiatAmountPerPurchase: z.number().positive(), frequency: z.enum(["daily", "weekly", "biweekly", "monthly"]), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  createDcaPlan: protectedProcedure.input(z.object({ stablecoin: z.string(), targetAsset: z.string(), fiatAmountPerPurchase: z.number().positive(), frequency: z.enum(["daily", "weekly", "biweekly", "monthly"]), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    // W12: creating a DCA plan authorizes recurring purchases — gate with the
+    // canonical TOTP step-up (fail-closed).
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     const result = await callStablecoinEngine("/stablecoin/dca/plans", { user_id: ctx.user.id, ...input });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_DCA_CREATED", description: `DCA plan submitted for ${input.stablecoin}`, metadata: result });
     return result;
@@ -589,75 +629,117 @@ export const stablecoinExtendedRouter = router({
   pauseDcaPlan: protectedProcedure.input(z.object({ planId: z.string() })).mutation(async ({ ctx, input }) => callStablecoinEngine(`/stablecoin/dca/plans/${encodeURIComponent(input.planId)}/pause`, { user_id: ctx.user.id })),
   resumeDcaPlan: protectedProcedure.input(z.object({ planId: z.string() })).mutation(async ({ ctx, input }) => callStablecoinEngine(`/stablecoin/dca/plans/${encodeURIComponent(input.planId)}/resume`, { user_id: ctx.user.id })),
   setAutoConvert: protectedProcedure.input(z.object({ enabled: z.boolean(), fromCurrency: z.string(), targetStablecoin: z.string(), convertPercent: z.number().min(0).max(100), threshold: z.number().optional(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => callStablecoinEngine("/stablecoin/auto-convert/preferences", { user_id: ctx.user.id, ...input })),
-  sendToContact: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), recipientPhone: z.string().optional(), recipientEmail: z.string().email().optional(), message: z.string().max(500).optional() }).refine((value) => Boolean(value.recipientPhone || value.recipientEmail), { message: "A recipient phone or email is required." })).mutation(async ({ ctx, input }) => {
+  sendToContact: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), recipientPhone: z.string().optional(), recipientEmail: z.string().email().optional(), message: z.string().max(500).optional(), totpCode: z.string().regex(/^\d{6}$/).optional() }).refine((value) => Boolean(value.recipientPhone || value.recipientEmail), { message: "A recipient phone or email is required." })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     const recipientIdentifier = input.recipientEmail ?? input.recipientPhone!;
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, recipientName: recipientIdentifier, direction: "sell" });
     const claim = await createStablecoinP2PClaim({ senderId: ctx.user.id, recipientIdentifier, stablecoin: input.stablecoin, amount: input.amount, message: input.message });
     try {
       await recordLedgerEntry({ ref: claim.ledgerReference, userId: ctx.user.id, debitAccount: `user:${ctx.user.id}:${input.stablecoin}`, creditAccount: `p2p-escrow:${claim.id}`, amount: input.amount, currency: input.stablecoin, metadata: { claimId: claim.id, recipientIdentifier } });
-      await publishStablecoinEvent("stablecoin.p2p_claim_created", ctx.user.id, { transactionId: claim.id, amount: input.amount, currency: input.stablecoin, status: "pending" });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_CREATED", description: `P2P claim created for ${input.amount} ${input.stablecoin}`, metadata: { claimId: claim.id } });
-      return { claimId: claim.id, claimCode: claim.claimCode, expiresAt: claim.expiresAt, status: "pending" };
     } catch (error) {
+      // FF-FIX (saga rollback): the escrow debit failed — DELETE the claim row
+      // so an unbacked claim can never be redeemed (money creation).
+      await deleteStablecoinP2PClaim(claim.id, ctx.user.id).catch((rbErr: unknown) =>
+        logger.error({ claimId: claim.id, err: rbErr instanceof Error ? rbErr.message : String(rbErr) }, "[StablecoinP2P] CRITICAL: claim rollback failed — unbacked claim may exist"));
       throw error;
     }
+    await publishStablecoinEvent("stablecoin.p2p_claim_created", ctx.user.id, { transactionId: claim.id, amount: input.amount, currency: input.stablecoin, status: "pending" });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_CREATED", description: `P2P claim created for ${input.amount} ${input.stablecoin}`, metadata: { claimId: claim.id } });
+    return { claimId: claim.id, claimCode: claim.claimCode, expiresAt: claim.expiresAt, status: "pending" };
   }),
   redeemP2pClaim: protectedProcedure.input(z.object({ claimCode: z.string().min(16) })).mutation(async ({ ctx, input }) => {
     const claim = await reserveStablecoinP2PClaim(input.claimCode, ctx.user.id);
+    // FF-FIX: the redeem ledger entry is idempotency-keyed to the claim
+    // (ref = ledgerReference:redeem) so a retry of the same claim replays
+    // safely at the bridge instead of double-crediting.
+    let credited = false;
     try {
       await recordLedgerEntry({ ref: `${claim.ledgerReference}:redeem`, userId: ctx.user.id, debitAccount: `p2p-escrow:${claim.id}`, creditAccount: `user:${ctx.user.id}:${claim.stablecoin}`, amount: claim.amount, currency: claim.stablecoin, metadata: { claimId: claim.id } });
+      credited = true;
       await completeStablecoinP2PClaim(claim.id, ctx.user.id);
-      await publishStablecoinEvent("stablecoin.p2p_claim_redeemed", ctx.user.id, { transactionId: claim.id, amount: claim.amount, currency: claim.stablecoin, status: "completed" });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_REDEEMED", description: `P2P claim redeemed`, metadata: { claimId: claim.id } });
-      return { claimId: claim.id, status: "claimed" };
     } catch (error) {
+      if (credited) {
+        // FF-FIX: the escrow→recipient credit SUCCEEDED but completion failed.
+        // Reverse the credit and LOCK the claim — never flip it back to
+        // 'pending' (that made the same escrow double-spendable).
+        await recordLedgerEntry({ ref: `${claim.ledgerReference}:redeem:reversal`, userId: ctx.user.id, debitAccount: `user:${ctx.user.id}:${claim.stablecoin}`, creditAccount: `p2p-escrow:${claim.id}`, amount: claim.amount, currency: claim.stablecoin, metadata: { claimId: claim.id, reversalOf: `${claim.ledgerReference}:redeem` } })
+          .catch((revErr: unknown) => logger.error({ claimId: claim.id, err: revErr instanceof Error ? revErr.message : String(revErr) }, "[StablecoinP2P] CRITICAL: redeem reversal failed — manual reconciliation required"));
+        await failStablecoinP2PClaim(claim.id, ctx.user.id, "completion_failed_after_credit");
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Redemption failed after the ledger credit — the credit was reversed and the claim locked for review." });
+      }
+      // Credit never happened — safe to release the reservation.
       await releaseStablecoinP2PClaim(claim.id, ctx.user.id);
       throw error;
     }
+    await publishStablecoinEvent("stablecoin.p2p_claim_redeemed", ctx.user.id, { transactionId: claim.id, amount: claim.amount, currency: claim.stablecoin, status: "completed" });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_REDEEMED", description: `P2P claim redeemed`, metadata: { claimId: claim.id } });
+    return { claimId: claim.id, status: "claimed" };
   }),
-  buyWithFiat: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fiatCurrency: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  cancelP2pClaim: protectedProcedure.input(z.object({ claimId: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+    // FF-FIX: sender cancel — guarded single-winner pending→cancelled, then
+    // reverse the escrow back to the sender. If the reversal fails, the claim
+    // stays cancelled (funds remain in escrow) and is flagged for ops review —
+    // it can never be redeemed after cancellation.
+    const claim = await cancelStablecoinP2PClaim(input.claimId, ctx.user.id);
+    try {
+      await recordLedgerEntry({ ref: `${claim.ledgerReference}:cancel`, userId: ctx.user.id, debitAccount: `p2p-escrow:${claim.id}`, creditAccount: `user:${ctx.user.id}:${claim.stablecoin}`, amount: claim.amount, currency: claim.stablecoin, metadata: { claimId: claim.id, cancelled: true } });
+    } catch (error) {
+      logger.error({ claimId: claim.id, err: error instanceof Error ? error.message : String(error) }, "[StablecoinP2P] CRITICAL: cancel reversal failed — escrow refund stranded, manual recovery required");
+      throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Claim cancelled but the escrow refund could not be posted — support has been alerted." });
+    }
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_CANCELLED", description: `P2P claim cancelled and refunded`, metadata: { claimId: claim.id } });
+    return { claimId: claim.id, status: "cancelled" };
+  }),
+  buyWithFiat: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fiatCurrency: z.string(), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.fiatCurrency, stablecoin: input.stablecoin, direction: "buy" });
     const result = await callStablecoinEngine("/stablecoin/buy", { user_id: ctx.user.id, ...input });
     await publishStablecoinEvent("stablecoin.buy", ctx.user.id, { amount: input.amount, currency: input.fiatCurrency, operationId: result.operation_id });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_BUY", description: `Stablecoin buy submitted`, metadata: result });
     return result;
   }),
-  sellToFiat: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fiatCurrency: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  sellToFiat: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), fiatCurrency: z.string(), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.fiatCurrency, stablecoin: input.stablecoin, direction: "sell" });
     const result = await callStablecoinEngine("/stablecoin/sell", { user_id: ctx.user.id, ...input });
     await publishStablecoinEvent("stablecoin.sell", ctx.user.id, { amount: input.amount, currency: input.fiatCurrency, operationId: result.operation_id });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_SELL", description: `Stablecoin sell submitted`, metadata: result });
     return result;
   }),
-  withdrawToBank: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), bankAccountId: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  withdrawToBank: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), bankAccountId: z.string(), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, direction: "sell" });
     const result = await callStablecoinEngine("/stablecoin/withdraw", { user_id: ctx.user.id, ...input });
     await publishStablecoinEvent("stablecoin.withdraw", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_WITHDRAW", description: `Stablecoin withdrawal submitted`, metadata: result });
     return result;
   }),
-  swap: protectedProcedure.input(z.object({ fromStablecoin: z.string(), toStablecoin: z.string(), amount: z.number().positive(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  swap: protectedProcedure.input(z.object({ fromStablecoin: z.string(), toStablecoin: z.string(), amount: z.number().positive(), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.fromStablecoin, stablecoin: input.fromStablecoin, direction: "sell" });
     const result = await callStablecoinEngine("/stablecoin/swap", { user_id: ctx.user.id, ...input });
     await publishStablecoinEvent("stablecoin.swap", ctx.user.id, { amount: input.amount, currency: input.fromStablecoin, operationId: result.operation_id });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_SWAP", description: `Stablecoin swap submitted`, metadata: result });
     return result;
   }),
-  send: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), toAddress: z.string().min(10), chain: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  send: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), toAddress: z.string().min(10), chain: z.string(), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, walletAddress: input.toAddress, chain: input.chain, direction: "sell" });
     const result = await callStablecoinEngine("/stablecoin/send", { user_id: ctx.user.id, ...input });
     await publishStablecoinEvent("stablecoin.send", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_SEND", description: `Stablecoin transfer submitted`, metadata: result });
     return result;
   }),
-  payBill: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), billRef: z.string(), provider: z.string(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  payBill: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), billRef: z.string(), provider: z.string(), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, recipientName: input.provider, direction: "sell" });
     const result = await callStablecoinEngine("/stablecoin/bills", { user_id: ctx.user.id, ...input });
     await publishStablecoinEvent("stablecoin.bill_pay", ctx.user.id, { amount: input.amount, currency: input.stablecoin, operationId: result.operation_id });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_BILL_PAY", description: `Stablecoin bill payment submitted`, metadata: result });
     return result;
   }),
-  createVirtualCard: protectedProcedure.input(z.object({ stablecoin: z.string(), spendLimit: z.number().positive(), idempotencyKey: z.string().min(8) })).mutation(async ({ ctx, input }) => {
+  createVirtualCard: protectedProcedure.input(z.object({ stablecoin: z.string(), spendLimit: z.number().positive(), idempotencyKey: z.string().min(8), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
+    await requireTotpStepUp(ctx.user.id, input.totpCode);
     const result = await callStablecoinEngine("/stablecoin/cards", { user_id: ctx.user.id, ...input });
     await publishStablecoinEvent("stablecoin.card_created", ctx.user.id, { amount: input.spendLimit, currency: input.stablecoin, operationId: result.operation_id });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_CARD_CREATED", description: `Stablecoin virtual card issuance submitted`, metadata: result });
@@ -669,21 +751,42 @@ export const stablecoinExtendedRouter = router({
       await releaseStablecoinP2PClaim(claim.id, ctx.user.id);
       throw new TRPCError({ code: "BAD_REQUEST", message: "Claim asset does not match the requested stablecoin." });
     }
+    // FF-FIX: same saga as V1 — the redeem ledger entry is idempotency-keyed
+    // to the claim (ref = ledgerReference:redeem). If completion fails AFTER
+    // the credit succeeded, REVERSE the credit and LOCK the claim 'failed' —
+    // never release it back to 'pending' (double-spend of the escrow).
+    let credited = false;
     try {
       await recordLedgerEntry({ ref: `${claim.ledgerReference}:redeem`, userId: ctx.user.id, debitAccount: `p2p-escrow:${claim.id}`, creditAccount: `user:${ctx.user.id}:${claim.stablecoin}`, amount: claim.amount, currency: claim.stablecoin, metadata: { claimId: claim.id } });
+      credited = true;
       await completeStablecoinP2PClaim(claim.id, ctx.user.id);
-      await publishStablecoinEvent("stablecoin.p2p_claim_redeemed", ctx.user.id, { transactionId: claim.id, amount: claim.amount, currency: claim.stablecoin, status: "completed" });
-      await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_REDEEMED", description: "P2P claim redeemed", metadata: { claimId: claim.id } });
-      return { claimId: claim.id, status: "claimed" };
     } catch (error) {
+      if (credited) {
+        await recordLedgerEntry({ ref: `${claim.ledgerReference}:redeem:reversal`, userId: ctx.user.id, debitAccount: `user:${ctx.user.id}:${claim.stablecoin}`, creditAccount: `p2p-escrow:${claim.id}`, amount: claim.amount, currency: claim.stablecoin, metadata: { claimId: claim.id, reversalOf: `${claim.ledgerReference}:redeem` } })
+          .catch((revErr: unknown) => logger.error({ claimId: claim.id, err: revErr instanceof Error ? revErr.message : String(revErr) }, "[StablecoinP2P] CRITICAL: redeem reversal failed — manual reconciliation required"));
+        await failStablecoinP2PClaim(claim.id, ctx.user.id, "completion_failed_after_credit");
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Redemption failed after the ledger credit — the credit was reversed and the claim locked for review." });
+      }
+      // Credit never happened — safe to release the reservation.
       await releaseStablecoinP2PClaim(claim.id, ctx.user.id);
       throw error;
     }
+    await publishStablecoinEvent("stablecoin.p2p_claim_redeemed", ctx.user.id, { transactionId: claim.id, amount: claim.amount, currency: claim.stablecoin, status: "completed" });
+    await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_REDEEMED", description: "P2P claim redeemed", metadata: { claimId: claim.id } });
+    return { claimId: claim.id, status: "claimed" };
   }),
   sendToContactV2: protectedProcedure.input(z.object({ stablecoin: z.string(), amount: z.number().positive(), recipientPhone: z.string(), message: z.string().max(500).optional() })).mutation(async ({ ctx, input }) => {
     await runStablecoinCompliance({ userId: ctx.user.id, amount: input.amount, currency: input.stablecoin, stablecoin: input.stablecoin, recipientName: input.recipientPhone, direction: "sell" });
     const claim = await createStablecoinP2PClaim({ senderId: ctx.user.id, recipientIdentifier: input.recipientPhone, stablecoin: input.stablecoin, amount: input.amount, message: input.message });
-    await recordLedgerEntry({ ref: claim.ledgerReference, userId: ctx.user.id, debitAccount: `user:${ctx.user.id}:${input.stablecoin}`, creditAccount: `p2p-escrow:${claim.id}`, amount: input.amount, currency: input.stablecoin, metadata: { claimId: claim.id } });
+    // FF-FIX (saga rollback): if the escrow ledger debit fails, DELETE the
+    // claim row — an unbacked claim can never be redeemed (money creation).
+    try {
+      await recordLedgerEntry({ ref: claim.ledgerReference, userId: ctx.user.id, debitAccount: `user:${ctx.user.id}:${input.stablecoin}`, creditAccount: `p2p-escrow:${claim.id}`, amount: input.amount, currency: input.stablecoin, metadata: { claimId: claim.id } });
+    } catch (error) {
+      await deleteStablecoinP2PClaim(claim.id, ctx.user.id).catch((rbErr: unknown) =>
+        logger.error({ claimId: claim.id, err: rbErr instanceof Error ? rbErr.message : String(rbErr) }, "[StablecoinP2P] CRITICAL: claim rollback failed — unbacked claim may exist"));
+      throw error;
+    }
     await publishStablecoinEvent("stablecoin.p2p_claim_created", ctx.user.id, { transactionId: claim.id, amount: input.amount, currency: input.stablecoin, status: "pending" });
     await createAuditLog({ userId: ctx.user.id, action: "STABLECOIN_P2P_CLAIM_CREATED", description: "P2P claim created", metadata: { claimId: claim.id } });
     return { claimId: claim.id, claimCode: claim.claimCode, expiresAt: claim.expiresAt, status: "pending" };

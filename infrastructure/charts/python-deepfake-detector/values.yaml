@@ -48,18 +48,18 @@ dapr:
 # (os.Getenv / env::var / os.getenv across python-deepfake-detector's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install python-deepfake-detector infrastructure/charts/python-deepfake-detector \
 #     -n 54remit -f infrastructure/values-secrets/python-deepfake-detector.yaml
 # (a gitignored, per-environment file).
 secrets:
-  CORS_ORIGINS: "CHANGE_ME"
-  DATABASE_URL: "CHANGE_ME"
-  DEEPFAKE_CONFIDENCE_THRESHOLD: "CHANGE_ME"
-  ENABLE_FREQUENCY_FALLBACK: "CHANGE_ME"
-  ENABLE_LANDMARK_FALLBACK: "CHANGE_ME"
-  HF_DEEPFAKE_MODEL_ID: "CHANGE_ME"
-  MAX_BATCH_SIZE: "CHANGE_ME"
+  CORS_ORIGINS: ""  # REQUIRED
+  DATABASE_URL: ""  # REQUIRED
+  DEEPFAKE_CONFIDENCE_THRESHOLD: ""  # REQUIRED
+  ENABLE_FREQUENCY_FALLBACK: ""  # REQUIRED
+  ENABLE_LANDMARK_FALLBACK: ""  # REQUIRED
+  HF_DEEPFAKE_MODEL_ID: ""  # REQUIRED
+  MAX_BATCH_SIZE: ""  # REQUIRED
   PORT: "8097"
-  RATE_LIMIT_RPM: "CHANGE_ME"
-  USE_GPU: "CHANGE_ME"
+  RATE_LIMIT_RPM: ""  # REQUIRED
+  USE_GPU: ""  # REQUIRED

@@ -102,7 +102,19 @@ async function deliverWebhook(
       },
       body,
       signal: AbortSignal.timeout(10_000),
+      // W9/Q10 (F9-6): never follow redirects — the SSRF guard validated only
+      // the initial URL; a 3xx would re-target the signed payload elsewhere.
+      redirect: "manual",
     });
+
+    if (res.status >= 300 && res.status < 400) {
+      return {
+        success: false,
+        statusCode: res.status,
+        durationMs: Date.now() - start,
+        error: "Redirect response rejected (SSRF policy: redirects are not followed)",
+      };
+    }
 
     return {
       success: res.status >= 200 && res.status < 300,
@@ -544,7 +556,10 @@ export const developerPortalRouter = router({
         headers: { "Content-Type": "application/json", "X-RemitFlow-User": String(ctx.user.id) },
         body: JSON.stringify(input),
         signal: AbortSignal.timeout(15_000),
+        // W9/Q10 (F9-6): never follow redirects on outbound calls.
+        redirect: "manual",
       });
+      if (response.status >= 300 && response.status < 400) throw new TRPCError({ code: "BAD_GATEWAY", message: "Sandbox provider returned a redirect — rejected (redirects are not followed)." });
       if (!response.ok) throw new TRPCError({ code: "BAD_GATEWAY", message: `Sandbox provider rejected transfer (${response.status}).` });
       return response.json() as Promise<Record<string, unknown>>;
     }),

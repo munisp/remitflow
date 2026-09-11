@@ -35,13 +35,28 @@ class WebhookEvent(str, Enum):
     REFUND_FAILED = "refund.failed"
 
 
+class WebhookProcessingError(Exception):
+    """Raised when one or more event handlers fail.
+
+    The API layer must translate this into a 5xx so Paystack retries
+    the delivery instead of the event being silently lost.
+    """
+
+
 class PaystackWebhookHandler:
     """Handles Paystack webhook events"""
-    
+
     def __init__(self, secret_key: str):
         self.secret_key = secret_key
         self.event_handlers: Dict[str, List[Callable]] = {}
         self.processed_events: List[Dict] = []
+        # In-process idempotency set keyed on event identity
+        # (event type + data.reference/id). LIMITATION: this is
+        # per-process memory — a restart or a second replica re-processes
+        # redelivered events. Handlers must therefore be idempotent on
+        # their side; swap this for a shared store before running
+        # multiple replicas.
+        self._processed_event_keys: set = set()
         logger.info("Paystack webhook handler initialized")
     
     def verify_signature(self, payload: str, signature: str) -> bool:
@@ -72,38 +87,57 @@ class PaystackWebhookHandler:
     async def process_webhook(
         self,
         payload: str,
-        signature: str,
-        verify: bool = True
+        signature: str
     ) -> Dict:
-        """Process webhook payload"""
-        
-        # Verify signature
-        if verify and not self.verify_signature(payload, signature):
+        """Process webhook payload.
+
+        Signature verification is mandatory (fail-closed). Handler
+        failures raise WebhookProcessingError so the caller returns 5xx
+        and Paystack retries the delivery.
+        """
+
+        # Verify signature (always — verification cannot be disabled)
+        if not self.verify_signature(payload, signature):
             raise ValueError("Invalid webhook signature")
-        
+
         # Parse payload
         try:
             data = json.loads(payload)
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON payload: {e}")
             raise ValueError("Invalid JSON payload")
-        
+
         event_type = data.get("event")
         event_data = data.get("data")
-        
+
         if not event_type:
             raise ValueError("Missing event type")
-        
+
+        # Idempotency: dedupe redelivered events on their identity. Only
+        # possible when the event carries a reference or id.
+        event_data = event_data or {}
+        event_ref = event_data.get("reference") or event_data.get("id")
+        event_key = f"{event_type}:{event_ref}" if event_ref else None
+        if event_key and event_key in self._processed_event_keys:
+            logger.info(f"Duplicate webhook delivery ignored: {event_key}")
+            return {
+                "event_type": event_type,
+                "duplicate": True,
+                "handlers_executed": 0,
+                "results": []
+            }
+
         logger.info(f"Processing webhook: {event_type}")
-        
+
         # Store event
         self.processed_events.append({
             "event_type": event_type,
             "data": event_data,
             "processed_at": datetime.utcnow().isoformat()
         })
-        
-        # Execute handlers
+
+        # Execute handlers — any failure must surface as 5xx so the
+        # provider retries; do NOT record the event as processed yet.
         results = []
         if event_type in self.event_handlers:
             for handler in self.event_handlers[event_type]:
@@ -116,14 +150,16 @@ class PaystackWebhookHandler:
                     })
                 except Exception as e:
                     logger.error(f"Handler error for {event_type}: {e}")
-                    results.append({
-                        "handler": handler.__name__,
-                        "error": str(e),
-                        "status": "failed"
-                    })
-        
+                    raise WebhookProcessingError(
+                        f"Handler {handler.__name__} failed for {event_type}: {e}"
+                    ) from e
+
+        if event_key:
+            self._processed_event_keys.add(event_key)
+
         return {
             "event_type": event_type,
+            "duplicate": False,
             "handlers_executed": len(results),
             "results": results
         }

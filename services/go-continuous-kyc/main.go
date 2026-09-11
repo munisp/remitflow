@@ -191,9 +191,20 @@ func auditLog(action string, details map[string]interface{}) {
 	url := fmt.Sprintf("%s/audit-kyc-continuous/_doc", openSearchURL)
 	req, _ := http.NewRequest("POST", url, strings.NewReader(string(payload)))
 	req.Header.Set("Content-Type", "application/json")
+	// TLS verification is ON by default. InsecureSkipVerify is a dev-only
+	// escape hatch (KYC_AUDIT_INSECURE_TLS=true) and is REJECTED in production:
+	// KYC audit events must never be MITM-able in transit.
+	transport := &http.Transport{}
+	if os.Getenv("KYC_AUDIT_INSECURE_TLS") == "true" {
+		if os.Getenv("NODE_ENV") == "production" || os.Getenv("GO_ENV") == "production" {
+			log.Printf("[ContinuousKYC] FAIL-CLOSED: KYC_AUDIT_INSECURE_TLS rejected in production — audit entry not shipped")
+			return
+		}
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // dev only
+	}
 	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}},
+		Timeout:   5 * time.Second,
+		Transport: transport,
 	}
 	resp, err := client.Do(req)
 	if err == nil {

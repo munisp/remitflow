@@ -15,6 +15,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# OpenTelemetry — the whole family is pinned to the 0.27 line, which is the
+# release tracing-opentelemetry 0.28 bridges to (it requires opentelemetry
+# ^0.27). Mixing 0.28+ otel crates with tracing-opentelemetry 0.28 does NOT
+# compile, so keep these versions in lockstep (see OTEL.md).
+opentelemetry = { version = "0.27.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.27.1", default-features = false, features = ["trace", "rt-tokio"] }
+# OTLP/HTTP+protobuf exporter (no tonic — the service has no gRPC stack, and
+# http-proto keeps the dependency graph small). reqwest-client selects the
+# reqwest transport implementation inside opentelemetry-http.
+opentelemetry-otlp = { version = "0.27.0", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+tracing-opentelemetry = "0.28.0"
+# HTTP client used by the OTLP exporter. Must stay on ^0.12 — that is the
+# version opentelemetry-http 0.27 implements its HttpClient trait for.
+reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
 anyhow = "1"
 thiserror = "2"
 tower-http = { version = "0.6", features = ["trace", "timeout"] }

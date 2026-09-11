@@ -203,6 +203,22 @@ function generateQRSignature(payload: string, secret: string): string {
   return createHmac("sha256", secret).update(payload).digest("hex").slice(0, 16);
 }
 
+// W9/Q11 (F10-4): no repo-known static signing secret. Production: missing
+// QR_SIGNING_SECRET => throw at use (fail closed — QR signing disabled).
+// Non-production: ephemeral random secret + warn (never a known/static credential).
+let cachedQrSecret: string | null = null;
+function getQrSigningSecret(): string {
+  if (cachedQrSecret) return cachedQrSecret;
+  const envSecret = process.env.QR_SIGNING_SECRET;
+  if (envSecret) { cachedQrSecret = envSecret; return envSecret; }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("QR_SIGNING_SECRET is required in production — refusing to sign payment QR payloads");
+  }
+  console.warn("[qrPayments] QR_SIGNING_SECRET unset — using ephemeral random secret (non-production only)");
+  cachedQrSecret = randomBytes(32).toString("hex");
+  return cachedQrSecret;
+}
+
 // ── tRPC Router ──────────────────────────────────────────────────────────────
 
 export const qrPaymentsRouter = router({
@@ -221,7 +237,7 @@ export const qrPaymentsRouter = router({
         currency: input.currency,
         merchantId: qrId,
       });
-      const signature = generateQRSignature(payload, process.env.QR_SIGNING_SECRET || "dev-qr-secret");
+      const signature = generateQRSignature(payload, getQrSigningSecret());
 
       const qr: QRCode = {
         qrId, userId: ctx.user.id.toString(), type: "static",
@@ -283,7 +299,7 @@ export const qrPaymentsRouter = router({
           });
       }
 
-      const signature = generateQRSignature(payload, process.env.QR_SIGNING_SECRET || "dev-qr-secret");
+      const signature = generateQRSignature(payload, getQrSigningSecret());
 
       const qr: QRCode = {
         qrId, userId: ctx.user.id.toString(), type: input.format === "deeplink" ? "dynamic" : input.format,

@@ -3,8 +3,22 @@
  * ─────────────────────────────────────
  * Central typed client for ALL polyglot microservices.
  * Every service has a default localhost port and an env-override.
- * All calls are fire-and-forget safe: if a sidecar is unavailable,
+ * Non-critical calls are fire-and-forget safe: if a sidecar is unavailable,
  * the function resolves with a safe default so the main flow continues.
+ * Compliance/critical calls (amlCheck, fraudScore, checkSanctions, pixTransfer,
+ * upiTransfer, getFxQuote, initiateTransfer, postLedgerEntry, validateFile,
+ * getNavData) are FAIL-CLOSED: they throw instead of fabricating a safe
+ * default — no phantom ids, rates, scores, or pass-results are ever invented.
+ *
+ * Wave-7 ground-truth corrections (verified against services/ source):
+ *   aml-engine              :8083  POST /screen
+ *   fraud-ml                :8082  POST /score
+ *   python-compliance-svc   :8083  POST /sanctions/screen
+ *   python-pix-adapter      :8080  POST /api/v1/transfers
+ *   rust-upi-adapter        :8092  POST /api/v1/transfers
+ *   fx-engine               :8081  POST /quote (POST only)
+ *   ledger-service          :8086  POST /api/v1/transfers
+ *   transfer-engine         gRPC-only (:50051) — no HTTP; initiateTransfer throws
  *
  * Port assignments (8082–8220):
  *   8082  rust-audit-service
@@ -14,12 +28,12 @@
  *   8086  python-anomaly-detector
  *   8087  rust-crypto-guard
  *   8088  rust-device-fingerprint
- *   8089  transfer-engine (Go)
- *   8090  fx-engine (Go)
+ *   8089  transfer-engine (Go) — gRPC-only on :50051, no HTTP
+ *   8081  fx-engine (Go) — POST /quote
  *   8091  risk-engine (Go)
- *   8092  ledger-service (Go)
- *   8093  aml-engine (Rust)
- *   8094  fraud-ml (Python)
+ *   8086  ledger-service (Go) — /api/v1/transfers
+ *   8083  aml-engine (Rust) — /screen
+ *   8082  fraud-ml (Python) — /score
  *   8095  python-compliance-ml
  *   8096  python-kyc-liveness
  *   8097  python-sanctions-updater
@@ -28,8 +42,8 @@
  *   8100  search-indexer (Python)
  *   8101  rust-sme-bulk-processor
  *   8102  go-cips-adapter
- *   8103  python-pix-adapter
- *   8104  rust-upi-adapter
+ *   8080  python-pix-adapter — /api/v1/transfers
+ *   8092  rust-upi-adapter — /api/v1/transfers
  *   8105  go-kafka-service
  *   8106  kafka-processor (Python)
  *   8107  go-temporal-worker
@@ -71,12 +85,12 @@ export const SERVICE_URLS = {
   rustCryptoGuard:     process.env.RUST_CRYPTO_GUARD_URL     ?? "http://localhost:8087",
   rustDeviceFingerprint: process.env.RUST_DEVICE_FP_URL      ?? "http://localhost:8088",
   // Core financial
-  transferEngine:      process.env.TRANSFER_ENGINE_URL       ?? "http://localhost:8089",
-  fxEngine:            process.env.FX_ENGINE_URL             ?? "http://localhost:8090",
+  transferEngine:      process.env.TRANSFER_ENGINE_URL       ?? "http://localhost:8089", // gRPC-only (:50051) — no HTTP route exists
+  fxEngine:            process.env.FX_ENGINE_URL             ?? "http://localhost:8081",
   riskEngine:          process.env.RISK_ENGINE_URL           ?? "http://localhost:8091",
-  ledgerService:       process.env.LEDGER_SERVICE_URL        ?? "http://localhost:8092",
-  amlEngine:           process.env.AML_ENGINE_URL            ?? "http://localhost:8093",
-  fraudMl:             process.env.FRAUD_ML_URL              ?? "http://localhost:8094",
+  ledgerService:       process.env.LEDGER_SERVICE_URL        ?? "http://localhost:8086",
+  amlEngine:           process.env.AML_ENGINE_URL            ?? "http://localhost:8083",
+  fraudMl:             process.env.FRAUD_ML_URL              ?? "http://localhost:8082",
   pythonComplianceMl:  process.env.PYTHON_COMPLIANCE_ML_URL  ?? "http://localhost:8095",
   // KYC
   rustLivenessProxy:   process.env.RUST_LIVENESS_PROXY_URL   ?? "http://localhost:8096",  // Rust fail-closed proxy → python-kyc-liveness
@@ -91,8 +105,8 @@ export const SERVICE_URLS = {
   // Payment rails
   mojaloopConnector:   process.env.MOJALOOP_URL              ?? "http://localhost:8113",
   goCipsAdapter:       process.env.GO_CIPS_URL               ?? "http://localhost:8102",
-  pythonPixAdapter:    process.env.PYTHON_PIX_URL            ?? "http://localhost:8103",
-  rustUpiAdapter:      process.env.RUST_UPI_URL              ?? "http://localhost:8104",
+  pythonPixAdapter:    process.env.PYTHON_PIX_URL            ?? "http://localhost:8080",
+  rustUpiAdapter:      process.env.RUST_UPI_URL              ?? "http://localhost:8092",
   // Messaging
   goKafkaService:      process.env.GO_KAFKA_URL              ?? "http://localhost:8105",
   kafkaProcessor:      process.env.KAFKA_PROCESSOR_URL       ?? "http://localhost:8106",
@@ -160,10 +174,13 @@ async function fetchSvc<T>(
   path: string,
   method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
   body?: unknown,
-  fallback?: T
+  fallback?: T,
+  options?: { failClosed?: boolean; serviceName?: string }
 ): Promise<T> {
   const controller = new AbortController();
   const tid = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const unavailable = () =>
+    new Error(`${options?.serviceName ?? `${url}${path}`} unavailable — failing closed`);
   try {
     const res = await fetch(`${url}${path}`, {
       method,
@@ -171,9 +188,13 @@ async function fetchSvc<T>(
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
-    if (!res.ok) return fallback as T;
+    if (!res.ok) {
+      if (options?.failClosed) throw unavailable();
+      return fallback as T;
+    }
     return (await res.json()) as T;
-  } catch {
+  } catch (err) {
+    if (options?.failClosed) throw err instanceof Error && err.message.includes("failing closed") ? err : unavailable();
     return fallback as T;
   } finally {
     clearTimeout(tid);
@@ -218,6 +239,9 @@ export interface AmlCheckResult {
   reasons: string[];
   requiresReview: boolean;
 }
+/** FAIL-CLOSED (Wave 7 / C1): aml-engine is :8083 POST /screen (verified in
+ *  services/aml-engine/src/main.rs). Any outage/HTTP error THROWS — callers
+ *  must treat a thrown error as a hard block. No `{flagged:false}` fabrication. */
 export async function amlCheck(payload: {
   userId: number;
   amount: number;
@@ -225,10 +249,27 @@ export async function amlCheck(payload: {
   destinationCountry: string;
   beneficiaryName: string;
 }): Promise<AmlCheckResult> {
-  return fetchSvc<AmlCheckResult>(
-    SERVICE_URLS.amlEngine, "/check", "POST", payload,
-    { flagged: false, riskScore: 0, reasons: [], requiresReview: false }
+  const res = await fetchSvc<{
+    decision: "PASS" | "REVIEW" | "BLOCK";
+    risk_score: number;
+    matched_rules: Array<{ rule_id: string; rule_name: string; severity: string; detail: string }>;
+  }>(
+    SERVICE_URLS.amlEngine, "/screen", "POST",
+    {
+      transaction_id: `aml-${payload.userId}-${Date.now()}`,
+      amount_usd: payload.amount,
+      receiver_country: payload.destinationCountry,
+      receiver_name: payload.beneficiaryName,
+    },
+    undefined,
+    { failClosed: true, serviceName: "aml-engine" }
   );
+  return {
+    flagged: res.decision !== "PASS",
+    riskScore: res.risk_score,
+    reasons: (res.matched_rules ?? []).map((r) => r.rule_name || r.detail).filter(Boolean),
+    requiresReview: res.decision !== "PASS",
+  };
 }
 
 // ── Fraud ML (Python) ─────────────────────────────────────────────────────────
@@ -237,16 +278,42 @@ export interface FraudScore {
   label: "low" | "medium" | "high" | "critical";
   features: Record<string, number>;
 }
+/** FAIL-CLOSED (Wave 7 / C2): fraud-ml is :8082 POST /score (verified in
+ *  services/fraud-ml/main.py). Any outage/HTTP error THROWS — a fraud-engine
+ *  outage must never resolve to `{score:0, label:"low"}`. */
 export async function fraudScore(payload: {
   userId: number;
   amount: number;
   deviceFingerprint?: string;
   ipAddress?: string;
 }): Promise<FraudScore> {
-  return fetchSvc<FraudScore>(
-    SERVICE_URLS.fraudMl, "/score", "POST", payload,
-    { score: 0, label: "low", features: {} }
+  const res = await fetchSvc<{
+    fraud_score: number;
+    risk_level: string;      // MINIMAL | LOW | MEDIUM | HIGH
+    recommendation: string;  // PASS | MONITOR | REVIEW | BLOCK
+    top_features: Array<Record<string, unknown>>;
+  }>(
+    SERVICE_URLS.fraudMl, "/score", "POST",
+    {
+      transaction_id: `fraud-${payload.userId}-${Date.now()}`,
+      amount_usd: payload.amount,
+      device_fingerprint: payload.deviceFingerprint,
+    },
+    undefined,
+    { failClosed: true, serviceName: "fraud-ml" }
   );
+  const label: FraudScore["label"] =
+    res.recommendation === "BLOCK" ? "critical"
+    : res.risk_level === "HIGH" ? "high"
+    : res.risk_level === "MEDIUM" ? "medium"
+    : "low";
+  const features: Record<string, number> = {};
+  for (const f of res.top_features ?? []) {
+    const name = (f.feature ?? f.name) as string | undefined;
+    const val = Number(f.importance ?? f.value ?? f.contribution);
+    if (name && Number.isFinite(val)) features[name] = val;
+  }
+  return { score: res.fraud_score, label, features };
 }
 
 // ── Transfer Engine (Go) ──────────────────────────────────────────────────────
@@ -257,7 +324,9 @@ export interface TransferEngineResult {
   fee: number;
   fxRate: number;
 }
-export async function initiateTransfer(payload: {
+/** FAIL-CLOSED (Wave 7 / C5): transfer-engine is gRPC-only (:50051) — there is
+ *  NO HTTP endpoint. Always throws; never fabricates a `local-<ts>` transfer id. */
+export async function initiateTransfer(_payload: {
   fromUserId: number;
   toUserId?: number;
   amount: number;
@@ -265,10 +334,7 @@ export async function initiateTransfer(payload: {
   toCurrency: string;
   rail: "swift" | "sepa" | "ach" | "mojaloop" | "pix" | "upi";
 }): Promise<TransferEngineResult> {
-  return fetchSvc<TransferEngineResult>(
-    SERVICE_URLS.transferEngine, "/transfer", "POST", payload,
-    { transferId: `local-${Date.now()}`, status: "queued", estimatedArrival: new Date(Date.now() + 86400000).toISOString(), fee: 0, fxRate: 1 }
-  );
+  throw new Error("transfer-engine unavailable — not reachable over HTTP (gRPC-only :50051), failing closed");
 }
 
 // ── FX Engine (Go) ────────────────────────────────────────────────────────────
@@ -280,11 +346,34 @@ export interface FxQuote {
   spread: number;
   validUntil: string;
 }
-export async function getFxQuote(from: string, to: string): Promise<FxQuote> {
-  return fetchSvc<FxQuote>(
-    SERVICE_URLS.fxEngine, `/quote?from=${from}&to=${to}`, "GET", undefined,
-    { fromCurrency: from, toCurrency: to, rate: 1, inverseRate: 1, spread: 0.005, validUntil: new Date(Date.now() + 900000).toISOString() }
+/** FAIL-CLOSED (Wave 7 / C6): fx-engine is :8081 POST /quote (POST only —
+ *  verified in services/fx-engine/main.go). Any outage THROWS; never returns
+ *  a fabricated `rate: 1` quote. */
+export async function getFxQuote(from: string, to: string, amount = 1): Promise<FxQuote> {
+  const res = await fetchSvc<{
+    from: string;
+    to: string;
+    rate: number;
+    fxRate: number;
+    spread: number;
+    expiresAt: number; // unix epoch (seconds or ms)
+  }>(
+    SERVICE_URLS.fxEngine, "/quote", "POST", { from, to, amount },
+    undefined,
+    { failClosed: true, serviceName: "fx-engine" }
   );
+  const rate = res.fxRate ?? res.rate;
+  if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0) {
+    throw new Error("fx-engine returned an invalid quote — failing closed");
+  }
+  return {
+    fromCurrency: res.from ?? from,
+    toCurrency: res.to ?? to,
+    rate,
+    inverseRate: 1 / rate,
+    spread: res.spread ?? 0,
+    validUntil: new Date(res.expiresAt > 1e12 ? res.expiresAt : res.expiresAt * 1000).toISOString(),
+  };
 }
 
 // ── Risk Engine (Go) ──────────────────────────────────────────────────────────
@@ -295,11 +384,30 @@ export interface RiskAssessment {
   triggers: string[];
   recommendedAction: "allow" | "review" | "block";
 }
+/** FAIL-CLOSED (Wave 7 verification): risk-engine is :8091 POST /score
+ *  (verified in services/risk-engine/main.go:434 — there is no /assess). Any
+ *  outage THROWS; never fabricates `{riskLevel:"low", recommendedAction:"allow"}`. */
 export async function assessRisk(userId: number, context: Record<string, unknown>): Promise<RiskAssessment> {
-  return fetchSvc<RiskAssessment>(
-    SERVICE_URLS.riskEngine, "/assess", "POST", { userId, context },
-    { userId, riskLevel: "low", score: 0, triggers: [], recommendedAction: "allow" }
+  const res = await fetchSvc<{
+    riskScore: number;
+    riskLevel: string;
+    flags: string[];
+    decision: string; // "approve" | "review" | "reject"
+  }>(
+    SERVICE_URLS.riskEngine, "/score", "POST",
+    { transactionId: `risk-${userId}-${Date.now()}`, userId: String(userId), ...context },
+    undefined,
+    { failClosed: true, serviceName: "risk-engine" }
   );
+  const level = (res.riskLevel ?? "").toLowerCase();
+  return {
+    userId,
+    // Unrecognized level => conservative "high", never "low"
+    riskLevel: (["low", "medium", "high", "critical"].includes(level) ? level : "high") as RiskAssessment["riskLevel"],
+    score: typeof res.riskScore === "number" ? res.riskScore : 1,
+    triggers: res.flags ?? [],
+    recommendedAction: res.decision === "approve" ? "allow" : res.decision === "reject" ? "block" : "review",
+  };
 }
 
 // ── Ledger Service (Go) ───────────────────────────────────────────────────────
@@ -311,11 +419,24 @@ export interface LedgerEntry {
   currency: string;
   timestamp: string;
 }
+/** FAIL-CLOSED (Wave 7 / C5): ledger-service is :8086 POST /api/v1/transfers
+ *  (verified in services/ledger-service/main.go). Any outage THROWS; never
+ *  fabricates a `local-<ts>` entry id. */
 export async function postLedgerEntry(entry: Omit<LedgerEntry, "entryId" | "timestamp">): Promise<LedgerEntry> {
-  return fetchSvc<LedgerEntry>(
-    SERVICE_URLS.ledgerService, "/entry", "POST", entry,
-    { ...entry, entryId: `local-${Date.now()}`, timestamp: new Date().toISOString() }
+  const res = await fetchSvc<{ transfer_id?: string; id?: string; status?: string }>(
+    SERVICE_URLS.ledgerService, "/api/v1/transfers", "POST",
+    {
+      debit_account_id: entry.debitAccount,
+      credit_account_id: entry.creditAccount,
+      amount: entry.amount,
+      currency: entry.currency,
+    },
+    undefined,
+    { failClosed: true, serviceName: "ledger-service" }
   );
+  const entryId = res.transfer_id ?? res.id;
+  if (!entryId) throw new Error("ledger-service returned no transfer id — failing closed");
+  return { ...entry, entryId, timestamp: new Date().toISOString() };
 }
 
 // ── KYC Liveness (Python) ─────────────────────────────────────────────────────
@@ -388,11 +509,28 @@ export interface SanctionsCheckResult {
   matchScore: number;
   entityName?: string;
 }
+/** FAIL-CLOSED (Wave 7 / C3): the REAL screener is python-compliance-service
+ *  :8083 POST /sanctions/screen (verified in services/python-compliance-service/main.py).
+ *  sanctions-updater has no /check. Any outage THROWS; never returns `{matched:false}`. */
 export async function checkSanctions(name: string, country?: string): Promise<SanctionsCheckResult> {
-  return fetchSvc<SanctionsCheckResult>(
-    SERVICE_URLS.pythonSanctions, "/check", "POST", { name, country },
-    { matched: false, matchedLists: [], matchScore: 0 }
+  const res = await fetchSvc<{
+    name: string;
+    is_sanctioned: boolean;
+    match_type?: string | null;
+    risk_level: string;
+    action: string;
+    list_source?: string | null;
+  }>(
+    SERVICE_URLS.pythonCompliance, "/sanctions/screen", "POST", { name, country },
+    undefined,
+    { failClosed: true, serviceName: "python-compliance-service" }
   );
+  return {
+    matched: res.is_sanctioned,
+    matchedLists: res.list_source ? [res.list_source] : [],
+    matchScore: res.is_sanctioned ? 1 : 0,
+    entityName: res.name,
+  };
 }
 
 // ── PDF Receipt (Python / Rust) ───────────────────────────────────────────────
@@ -408,9 +546,13 @@ export async function generateReceipt(transfer: {
   senderName: string;
   date: string;
 }): Promise<ReceiptResult> {
+  // FAIL-CLOSED (Wave 7 verification): the fallback fabricated a
+  // `receipt-<id>` receiptId with an empty pdfUrl — a phantom document.
+  // Any outage now THROWS UNAVAILABLE instead.
   return fetchSvc<ReceiptResult>(
     SERVICE_URLS.rustPdfReceipt, "/generate", "POST", transfer,
-    { pdfUrl: "", receiptId: `receipt-${transfer.id}` }
+    undefined,
+    { failClosed: true, serviceName: "rust-pdf-receipt" }
   );
 }
 
@@ -500,15 +642,31 @@ export interface PixResult {
   status: "ACSC" | "RJCT" | "PDNG";
   timestamp: string;
 }
+/** FAIL-CLOSED (Wave 7 / C4): python-pix-adapter is :8080 POST /api/v1/transfers
+ *  (verified in services/python-pix-adapter/app/main.py). Any outage THROWS;
+ *  never fabricates a `pix-<ts>` end-to-end id or ACSC status. */
 export async function pixTransfer(payload: {
   pixKey: string;
   amount: number;
   description: string;
 }): Promise<PixResult> {
-  return fetchSvc<PixResult>(
-    SERVICE_URLS.pythonPixAdapter, "/transfer", "POST", payload,
-    { endToEndId: `pix-${Date.now()}`, status: "ACSC", timestamp: new Date().toISOString() }
+  const res = await fetchSvc<{
+    end_to_end_id: string;
+    status: string;
+    settled_at?: string;
+    created_at?: string;
+  }>(
+    SERVICE_URLS.pythonPixAdapter, "/api/v1/transfers", "POST",
+    { payee_key: payload.pixKey, amount: payload.amount, description: payload.description },
+    undefined,
+    { failClosed: true, serviceName: "python-pix-adapter" }
   );
+  if (!res.end_to_end_id) throw new Error("python-pix-adapter returned no end_to_end_id — failing closed");
+  return {
+    endToEndId: res.end_to_end_id,
+    status: (res.status === "ACSC" || res.status === "RJCT" ? res.status : "PDNG"),
+    timestamp: res.settled_at ?? res.created_at ?? new Date().toISOString(),
+  };
 }
 
 // ── UPI Adapter (Rust) ────────────────────────────────────────────────────────
@@ -517,15 +675,30 @@ export interface UpiResult {
   status: "SUCCESS" | "FAILURE" | "PENDING";
   upiRefNum: string;
 }
+/** FAIL-CLOSED (Wave 7 / C4): rust-upi-adapter is :8092 POST /api/v1/transfers
+ *  (verified in services/rust-upi-adapter/src/main.rs + models.rs). Any outage
+ *  THROWS; never fabricates a `upi-<ts>` transaction id or SUCCESS status. */
 export async function upiTransfer(payload: {
   vpa: string;
   amount: number;
   remarks: string;
 }): Promise<UpiResult> {
-  return fetchSvc<UpiResult>(
-    SERVICE_URLS.rustUpiAdapter, "/transfer", "POST", payload,
-    { transactionId: `upi-${Date.now()}`, status: "SUCCESS", upiRefNum: `REF${Date.now()}` }
+  const res = await fetchSvc<{
+    transaction_id: string;
+    rrn: string;
+    status: string;
+  }>(
+    SERVICE_URLS.rustUpiAdapter, "/api/v1/transfers", "POST",
+    { payee_vpa: payload.vpa, amount: payload.amount, remarks: payload.remarks },
+    undefined,
+    { failClosed: true, serviceName: "rust-upi-adapter" }
   );
+  if (!res.transaction_id) throw new Error("rust-upi-adapter returned no transaction_id — failing closed");
+  return {
+    transactionId: res.transaction_id,
+    status: (res.status === "SUCCESS" || res.status === "FAILURE" ? res.status : "PENDING"),
+    upiRefNum: res.rrn ?? "",
+  };
 }
 
 // ── Search Indexer (Python) ───────────────────────────────────────────────────
@@ -558,11 +731,10 @@ export interface PortfolioMetrics {
   sharpeRatio: number;
   volatility: number;
 }
+/** FAIL-CLOSED (Wave 7 / C10): no portfolio-calc service exists anywhere in
+ *  services/ — the registry target was a phantom. Always throws. */
 export async function calcPortfolio(userId: number): Promise<PortfolioMetrics> {
-  return fetchSvc<PortfolioMetrics>(
-    SERVICE_URLS.rustPortfolioCalc, `/portfolio/${userId}`, "GET", undefined,
-    { totalValue: 0, totalReturn: 0, returnPct: 0, sharpeRatio: 0, volatility: 0 }
-  );
+  throw new Error(`portfolio-calc service not deployed — metrics for user ${userId} unavailable`);
 }
 
 // ── Share Link (Rust) ─────────────────────────────────────────────────────────
@@ -571,16 +743,15 @@ export interface ShareLinkResult {
   token: string;
   expiresAt: string;
 }
+/** FAIL-CLOSED (Wave 7 / C9): no share-link service exists anywhere in
+ *  services/ — the fallback fabricated share URLs/slugs. Always throws. */
 export async function createShareLink(payload: {
   resourceType: string;
   resourceId: string;
   userId: number;
   expiresInHours?: number;
 }): Promise<ShareLinkResult> {
-  return fetchSvc<ShareLinkResult>(
-    SERVICE_URLS.rustShareLink, "/create", "POST", payload,
-    { shortUrl: `https://remitflow.app/s/${Date.now()}`, token: `tok-${Date.now()}`, expiresAt: new Date(Date.now() + 86400000).toISOString() }
-  );
+  throw new Error(`share-link service not deployed — cannot create link for ${payload.resourceType}:${payload.resourceId}`);
 }
 
 // ── Device Fingerprint (Rust) ─────────────────────────────────────────────────
@@ -590,10 +761,13 @@ export interface DeviceRisk {
   isKnownDevice: boolean;
   flags: string[];
 }
+/** FAIL-CLOSED (Wave 7 / C12): on ANY failure the device is reported UNKNOWN
+ *  (isKnownDevice:false, riskScore:100) so callers force re-verification —
+ *  never silently trusted as a known device. */
 export async function checkDeviceFingerprint(fp: string, userId?: number): Promise<DeviceRisk> {
   return fetchSvc<DeviceRisk>(
     SERVICE_URLS.rustDeviceFingerprint, "/check", "POST", { fingerprint: fp, userId },
-    { fingerprint: fp, riskScore: 0, isKnownDevice: true, flags: [] }
+    { fingerprint: fp, riskScore: 100, isKnownDevice: false, flags: ["device_fingerprint_service_unavailable"] }
   );
 }
 
@@ -603,11 +777,12 @@ export interface ComplianceScore {
   category: "clean" | "suspicious" | "high_risk";
   triggers: string[];
 }
-export async function complianceScore(userId: number, txData: Record<string, unknown>): Promise<ComplianceScore> {
-  return fetchSvc<ComplianceScore>(
-    SERVICE_URLS.pythonComplianceMl, "/score", "POST", { userId, ...txData },
-    { score: 0, category: "clean", triggers: [] }
-  );
+/** FAIL-CLOSED (Wave 7 verification): the registry contract ({userId,...txData}
+ *  → {score,category:"clean"}) does not match the real python-compliance-ml
+ *  /compliance/score schema, and the fallback fabricated a clean bill
+ *  `{score:0, category:"clean"}`. Throws instead. */
+export async function complianceScore(userId: number, _txData: Record<string, unknown>): Promise<ComplianceScore> {
+  throw new Error(`compliance-ml scoring unavailable for user ${userId} — failing closed`);
 }
 
 // ── Investment ML (Python) ────────────────────────────────────────────────────
@@ -616,10 +791,9 @@ export interface InvestmentRecommendation {
   riskProfile: "conservative" | "moderate" | "aggressive";
 }
 export async function getInvestmentRecommendations(userId: number): Promise<InvestmentRecommendation> {
-  return fetchSvc<InvestmentRecommendation>(
-    SERVICE_URLS.pythonInvestmentMl, `/recommendations/${userId}`, "GET", undefined,
-    { recommendations: [], riskProfile: "moderate" }
-  );
+  // FAIL-CLOSED (Wave 7 / C10): no investment-ml service exists anywhere in
+  // services/ — the fallback fabricated an empty "moderate" profile. Always throws.
+  throw new Error(`investment-ml service not deployed — recommendations for user ${userId} unavailable`);
 }
 
 // ── NAV Analytics (Python) ────────────────────────────────────────────────────
@@ -629,11 +803,11 @@ export interface NavData {
   change7d: number;
   aum: number;
 }
+/** FAIL-CLOSED (Wave 7 / C12): python-nav-analytics was deleted as an
+ *  unbuildable scaffold — no NAV source exists. Always throws; never
+ *  fabricates `nav: 1.0`. */
 export async function getNavData(fundId: string): Promise<NavData> {
-  return fetchSvc<NavData>(
-    SERVICE_URLS.pythonNavAnalytics, `/nav/${fundId}`, "GET", undefined,
-    { nav: 1.0, change24h: 0, change7d: 0, aum: 0 }
-  );
+  throw new Error(`nav-analytics service not deployed — NAV for fund ${fundId} unavailable`);
 }
 
 // ── Export Service (Go) ───────────────────────────────────────────────────────
@@ -664,11 +838,11 @@ export interface FeedPost {
   likes: number;
   createdAt: string;
 }
+/** FAIL-CLOSED (Wave 7 / C8): go-community-feed was deleted as an unbuildable
+ *  scaffold — no feed service exists. Always throws; never returns a phantom
+ *  empty feed presented as success. */
 export async function getCommunityFeed(page = 1, limit = 20): Promise<FeedPost[]> {
-  return fetchSvc<FeedPost[]>(
-    SERVICE_URLS.goCommunityFeed, `/feed?page=${page}&limit=${limit}`, "GET", undefined,
-    []
-  );
+  throw new Error(`community-feed service not deployed — feed page ${page} (limit ${limit}) unavailable`);
 }
 
 // ── Investment Feed (Go) ──────────────────────────────────────────────────────
@@ -712,11 +886,12 @@ export interface FileValidationResult {
   threats: string[];
   hash: string;
 }
+/** FAIL-CLOSED (Wave 7 / C12): the old target (:8087 /validate) was a phantom
+ *  port; the real rust-crypto-guard exposes /validate-file with a
+ *  content_b64/mime_type/filename contract that a URL-only scan cannot satisfy.
+ *  Scanner unavailable => THROW, so the upload is rejected — never `{safe:true}`. */
 export async function validateFile(fileUrl: string): Promise<FileValidationResult> {
-  return fetchSvc<FileValidationResult>(
-    SERVICE_URLS.rustCryptoGuard, "/validate", "POST", { fileUrl },
-    { safe: true, mimeType: "application/octet-stream", threats: [], hash: "" }
-  );
+  throw new Error(`file scanner unavailable — failing closed, upload rejected (${fileUrl})`);
 }
 
 // ── Permify (Go) ──────────────────────────────────────────────────────────────

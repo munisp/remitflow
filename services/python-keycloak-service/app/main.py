@@ -43,10 +43,12 @@ def _require_env(name: str) -> str:
 KEYCLOAK_URL = os.getenv("KEYCLOAK_URL", "http://keycloak:8080")
 KEYCLOAK_REALM = os.getenv("KEYCLOAK_REALM", "remitflow")
 KEYCLOAK_CLIENT_ID = os.getenv("KEYCLOAK_CLIENT_ID", "remitflow-backend")
-KEYCLOAK_CLIENT_SECRET = os.getenv("KEYCLOAK_CLIENT_SECRET", "remitflow-client-secret-001")
+# FAIL CLOSED: no default Keycloak credentials — refuse to boot when unset
+# rather than ship publicly known admin/client credentials.
+KEYCLOAK_CLIENT_SECRET = _require_env("KEYCLOAK_CLIENT_SECRET")
 KEYCLOAK_ADMIN_USER = os.getenv("KEYCLOAK_ADMIN_USER", "admin")
-KEYCLOAK_ADMIN_PASSWORD = os.getenv("KEYCLOAK_ADMIN_PASSWORD", "admin")
-INTERNAL_API_KEY = os.getenv("KEYCLOAK_INTERNAL_API_KEY", "keycloak-bridge-key-001")
+KEYCLOAK_ADMIN_PASSWORD = _require_env("KEYCLOAK_ADMIN_PASSWORD")
+INTERNAL_API_KEY = _require_env("KEYCLOAK_INTERNAL_API_KEY")
 
 logging.basicConfig(level=logging.INFO, format="[Keycloak] %(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

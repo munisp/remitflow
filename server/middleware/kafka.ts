@@ -5,6 +5,58 @@
  */
 import { Kafka, Producer, Consumer, Admin, logLevel, CompressionTypes } from "kafkajs";
 import { logger } from '../_core/logger';
+import {
+  trace,
+  context as otelContext,
+  propagation,
+  defaultTextMapSetter,
+  defaultTextMapGetter,
+  SpanKind,
+  SpanStatusCode,
+} from "@opentelemetry/api";
+import { getRequestTenantContext } from "../_core/tenantGuc";
+
+// ── W3C trace-context propagation (W11-C2) ────────────────────────────────────
+// publishEvent injects traceparent/tracestate from the ACTIVE context into the
+// Kafka message headers, plus x-tenant-id from the request tenant context
+// (AsyncLocalStorage) when the publish happens inside an authenticated tRPC
+// request. Consumers using subscribeWithHandler extract the context and run
+// each message in a CONSUMER span that continues the producer's trace.
+// FAIL-SOFT: propagation failures are debug-logged; the message is still
+// published/consumed. Absence of headers is honest — consumers start a root
+// span; tenant.id is omitted, never faked.
+
+type KafkaHeaderCarrier = Record<string, Buffer | string | (Buffer | string)[] | undefined>;
+
+const kafkaTracer = () => trace.getTracer("remitflow-kafka", "1.0.0");
+
+/** Inject W3C traceparent/tracestate + x-tenant-id into outgoing message headers. Never throws. */
+function injectTraceContext(headers: Record<string, Buffer>): void {
+  try {
+    const carrier: Record<string, string> = {};
+    propagation.inject(otelContext.active(), carrier, defaultTextMapSetter);
+    for (const [key, value] of Object.entries(carrier)) {
+      headers[key] = Buffer.from(value);
+    }
+    // Tenant tag: read from the request-scoped tenant context when available.
+    const tenantId = getRequestTenantContext()?.tenantId;
+    if (tenantId) headers["x-tenant-id"] = Buffer.from(tenantId);
+  } catch (err) {
+    logger.debug({ err }, "[telemetry] Kafka trace-context injection failed — publishing without headers");
+  }
+}
+
+/** Convert Kafka message headers (Buffers) to a string carrier for propagation.extract. */
+function kafkaHeadersToCarrier(headers: KafkaHeaderCarrier | undefined): Record<string, string> {
+  const carrier: Record<string, string> = {};
+  if (!headers) return carrier;
+  for (const [key, raw] of Object.entries(headers)) {
+    const first = Array.isArray(raw) ? raw[0] : raw;
+    if (first === undefined) continue;
+    carrier[key] = Buffer.isBuffer(first) ? first.toString("utf8") : String(first);
+  }
+  return carrier;
+}
 
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || "localhost:9092").split(",");
 const KAFKA_CLIENT_ID = process.env.KAFKA_CLIENT_ID || "remitflow-app";
@@ -250,19 +302,22 @@ export async function publishEvent<T>(topic: KafkaTopic | string, key: string, p
     return false;
   }
   try {
+    const headers: Record<string, Buffer> = {
+      'x-schema-version': Buffer.from('v1'),
+      'x-source': Buffer.from('remitflow-app'),
+      // Deterministic idempotency key: stable for a given (topic, aggregate/event id)
+      // so retries of the same logical event dedupe instead of duplicating.
+      'x-idempotency-key': Buffer.from(`${topic}:${key}`),
+    };
+    // W11-C2: W3C traceparent/tracestate (+ x-tenant-id) for cross-service traces
+    injectTraceContext(headers);
     await p.send({
       topic,
       compression: CompressionTypes.GZIP,
       messages: [{
         key,
         value: JSON.stringify({ ...(payload as object), _publishedAt: new Date().toISOString() }),
-        headers: {
-          'x-schema-version': Buffer.from('v1'),
-          'x-source': Buffer.from('remitflow-app'),
-          // Deterministic idempotency key: stable for a given (topic, aggregate/event id)
-          // so retries of the same logical event dedupe instead of duplicating.
-          'x-idempotency-key': Buffer.from(`${topic}:${key}`),
-        },
+        headers,
       }],
     });
     return true;
@@ -308,12 +363,56 @@ export async function subscribeWithHandler(
     eachMessage: async ({ topic, partition, message }) => {
       const key = message.key?.toString() ?? null;
       const valueStr = message.value?.toString() ?? "{}";
+      const processMessage = async () => {
+        try {
+          const value = JSON.parse(valueStr) as Record<string, unknown>;
+          await handler(topic, key, value);
+        } catch (err) {
+          logger.error({ topic, partition, offset: message.offset, err }, "[Kafka] Message processing failed — sending to DLQ");
+          await sendToDLQ(topic, key ?? "unknown", valueStr, (err as Error).message).catch(() => {});
+        }
+      };
+
+      // W11-C2: continue the producer's trace (traceparent header) in a
+      // CONSUMER span. Fail-soft: any telemetry error → process uninstrumented.
+      let span: ReturnType<ReturnType<typeof kafkaTracer>["startSpan"]> | null = null;
+      let spanCtx = otelContext.active();
       try {
-        const value = JSON.parse(valueStr) as Record<string, unknown>;
-        await handler(topic, key, value);
+        const carrier = kafkaHeadersToCarrier(message.headers as KafkaHeaderCarrier | undefined);
+        const parentCtx = propagation.extract(otelContext.active(), carrier, defaultTextMapGetter);
+        const tenantId = carrier["x-tenant-id"];
+        const attributes: Record<string, string> = {
+          "messaging.system": "kafka",
+          "messaging.destination": topic,
+          "messaging.kafka.partition": String(partition),
+          "messaging.kafka.offset": String(message.offset),
+        };
+        if (tenantId) attributes["tenant.id"] = tenantId;
+        span = kafkaTracer().startSpan(
+          `kafka.consume/${topic}`,
+          { kind: SpanKind.CONSUMER, attributes },
+          parentCtx,
+        );
+        spanCtx = trace.setSpan(parentCtx, span);
       } catch (err) {
-        logger.error({ topic, partition, offset: message.offset, err }, "[Kafka] Message processing failed — sending to DLQ");
-        await sendToDLQ(topic, key ?? "unknown", valueStr, (err as Error).message).catch(() => {});
+        logger.debug({ err }, "[telemetry] Kafka consumer span setup failed — processing uninstrumented");
+      }
+
+      try {
+        if (span) {
+          await otelContext.with(spanCtx, processMessage);
+          span.setStatus({ code: SpanStatusCode.OK });
+        } else {
+          await processMessage();
+        }
+      } catch (err) {
+        // processMessage already DLQs handler errors; this is a telemetry-layer catch.
+        if (span) {
+          span.recordException(err as Error);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+        }
+      } finally {
+        span?.end();
       }
     },
   });

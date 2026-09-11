@@ -210,36 +210,12 @@ export const accountAbstractionRouter = router({
       const wallet = wallets.get(input.walletId);
       if (!wallet || wallet.userId !== ctx.user.id) throw new Error("Wallet not found");
 
-      const userOpId = `uop-${randomBytes(8).toString("hex")}`;
-      const gasEstimate = 150_000 + Math.floor(Math.random() * 50_000);
-      const gasCost = gasEstimate * 30 / 1e9; // ~30 gwei
-
-      const op: UserOperation = {
-        userOpId,
-        walletAddress: wallet.address,
-        nonce: userOps.size,
-        callData: `transfer(${input.to}, ${input.amount})`,
-        gasLimit: gasEstimate,
-        gasPaid: gasCost,
-        paymasterUsed: true,
-        status: "confirmed",
-        txHash: `0x${randomBytes(32).toString("hex")}`,
-        createdAt: new Date().toISOString(),
-      };
-
-      userOps.set(userOpId, op);
-      _writeThrough("feature_user_operations", String(userOpId), op).catch(() => {});
-      persistFeatureRecord("feature_user_operations", userOpId, { id: userOpId, ...(typeof op === 'object' ? op : {}) }).catch(() => {});
-      wallet.totalGasSponsored += gasCost;
-
-      return {
-        userOpId: op.userOpId,
-        txHash: op.txHash,
-        status: op.status,
-        gasSponsored: true,
-        gasCost,
-        paymasterUsed: true,
-      };
+      // Wave 7 (C11): there is NO ERC-4337 bundler/paymaster deployed. The old
+      // code invented a random gas estimate, a fabricated txHash, and instantly
+      // stamped the user op "confirmed". That is phantom execution — refuse.
+      throw new Error(
+        "UNAVAILABLE: gasless transactions unavailable — no account-abstraction bundler/paymaster is deployed"
+      );
     }),
 
   // Initiate social recovery

@@ -1,0 +1,35 @@
+# RemitFlow — Grafana datasource provisioning (W11-C1)
+# Image: grafana/grafana:11.3.0 (provisioning API v1 format).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: remitflow-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: 15s
+
+  - name: Tempo
+    uid: remitflow-tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: true
+    jsonData:
+      tracesToMetrics:
+        datasourceUid: remitflow-prometheus
+      tracesToLogsV2:
+        datasourceUid: remitflow-loki
+      serviceMap:
+        datasourceUid: remitflow-prometheus
+
+  - name: Loki
+    uid: remitflow-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true

@@ -1,0 +1,37 @@
+# Dapr Configuration — RemitFlow tracing + metrics (W11-C1)
+# ─────────────────────────────────────────────────────────────────────────────
+# Verified against the Dapr 1.x Configuration CRD (apiVersion dapr.io/v1alpha1,
+# kind Configuration) as implemented by daprio/dapr:1.14.4 — the version this
+# repo already runs (docker-compose.yml dapr-placement/dapr-scheduler).
+#
+# spec.tracing.otel is the native OTel exporter block (Dapr >= 1.11): the
+# sidecar exports spans over OTLP/gRPC to the collector at otel-collector:4317
+# (deploy/observability/otel-collector.yaml). The legacy zipkin block is NOT
+# used — this stack has no Zipkin backend.
+#
+# ACTIVATION (honest wiring note):
+#   * Kubernetes: reference this Configuration from the sidecar via the pod
+#     annotation `dapr.io/config: "remitflow-tracing"` (same Deployment that
+#     carries the annotations in deploy/dapr/README.md), then
+#     `kubectl apply -f deploy/dapr/configuration.yaml`.
+#   * Self-hosted (this compose repo): pass
+#     `--config /etc/dapr/configuration.yaml` to each daprd sidecar and mount
+#     this file; the placement/scheduler control-plane services in
+#     docker-compose.yml do not themselves emit app traces.
+#   Until a sidecar references this Configuration it is inert — nothing here
+#   silently changes behavior.
+apiVersion: dapr.io/v1alpha1
+kind: Configuration
+metadata:
+  name: remitflow-tracing
+  namespace: default
+spec:
+  tracing:
+    samplingRate: "0.5"        # 50% head sampling at the sidecar; TS core samples downstream
+    stdout: false
+    otel:
+      endpointAddress: "otel-collector:4317"   # OTLP/gRPC (docker-compose.observability.yml)
+      isSecure: false                          # in-cluster plaintext; set true + TLS for cross-zone
+      protocol: grpc
+  metrics:
+    enabled: true                # sidecar Prometheus metrics on :9090/metrics (scrape via pod annotations in k8s)

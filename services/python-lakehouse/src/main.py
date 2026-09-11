@@ -488,6 +488,11 @@ _pool: Optional[asyncpg.Pool] = None
 # Ingest/read/compact/sync operate on the lakehouse object store; they must
 # require authentication and only operate on registered tables.
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+if not INTERNAL_API_TOKEN:
+    raise RuntimeError(
+        "INTERNAL_API_TOKEN is not set: refusing to start — an unset token would "
+        "crash request handling with TypeError instead of a clean 401. Configure it explicitly."
+    )
 
 
 def require_internal_auth(x_internal_token: Optional[str] = Header(default=None)) -> None:

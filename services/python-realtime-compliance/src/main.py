@@ -48,6 +48,11 @@ DATABASE_URL = os.getenv("DATABASE_URL")  # required for GDPR erasure; fail-clos
 
 # ── Internal auth (fail-closed) ────────────────────────────────────────────────
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+if not INTERNAL_API_TOKEN:
+    raise RuntimeError(
+        "INTERNAL_API_TOKEN is not set: refusing to start — an unset token would "
+        "crash request handling with TypeError instead of a clean 401. Configure it explicitly."
+    )
 COMPLIANCE_ROLES = {"admin", "compliance_officer"}
 
 

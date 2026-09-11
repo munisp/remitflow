@@ -491,7 +491,11 @@ export function verifyFlutterwaveWebhook(payload: string, signature: string): bo
   const secret = process.env.FLUTTERWAVE_WEBHOOK_SECRET;
   if (!secret) return false;
 
-  return signature === secret; // Flutterwave uses direct secret comparison
+  // Flutterwave uses direct secret comparison — still constant-time (W9/Q11).
+  const sigBuf = Buffer.from(signature, "utf8");
+  const secretBuf = Buffer.from(secret, "utf8");
+  if (sigBuf.length !== secretBuf.length) return false;
+  return timingSafeEqual(sigBuf, secretBuf);
 }
 
 export function verifyPayPalWebhook(headers: Record<string, string>, body: string): boolean {

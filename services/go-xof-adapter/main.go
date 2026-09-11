@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/subtle"
 "context"
 "encoding/json"
 "fmt"
@@ -330,22 +331,25 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+// authMiddleware resolves INTERNAL_SERVICE_KEY once at startup and FAILS
+// CLOSED: there is no well-known default internal credential. Comparison is
+// constant-time.
 func authMiddleware(next http.Handler) http.Handler {
+	key := os.Getenv("INTERNAL_SERVICE_KEY")
+	if key == "" {
+		panic("INTERNAL_SERVICE_KEY is not set: refusing to fall back to a well-known default credential; configure the internal service key explicitly")
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/ready" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		key := os.Getenv("INTERNAL_SERVICE_KEY")
-		if key == "" {
-			key = "remitflow-internal-2026"
-		}
-		if apiKey := r.Header.Get("X-API-Key"); apiKey == key {
+		if apiKey := r.Header.Get("X-API-Key"); subtle.ConstantTimeCompare([]byte(apiKey), []byte(key)) == 1 {
 			next.ServeHTTP(w, r)
 			return
 		}
 		auth := r.Header.Get("Authorization")
-		if len(auth) > 7 && auth[:7] == "Bearer " && auth[7:] == key {
+		if len(auth) > 7 && auth[:7] == "Bearer " && subtle.ConstantTimeCompare([]byte(auth[7:]), []byte(key)) == 1 {
 			next.ServeHTTP(w, r)
 			return
 		}

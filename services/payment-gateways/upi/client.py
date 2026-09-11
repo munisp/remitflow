@@ -5,6 +5,7 @@ Unified Payments Interface (India)
 
 import httpx
 import hashlib
+import hmac
 import logging
 from typing import Dict, Optional
 from datetime import datetime
@@ -28,8 +29,10 @@ class UPIClient:
         logger.info(f"UPI client initialized for VPA: {vpa}")
     
     def _generate_checksum(self, data: str) -> str:
-        """Generate SHA256 checksum"""
-        return hashlib.sha256(f"{data}{self.merchant_key}".encode()).hexdigest()
+        """Generate HMAC-SHA256 checksum (length-extension-safe)."""
+        return hmac.new(
+            self.merchant_key.encode(), data.encode(), hashlib.sha256
+        ).hexdigest()
     
     async def collect_request(self, payer_vpa: str, amount: float, note: str, reference_id: str) -> Dict:
         """Initiate UPI collect request"""
@@ -128,18 +131,23 @@ class UPIClient:
         }
     
     async def refund(self, original_txn_id: str, amount: float, reason: str) -> Dict:
-        """Initiate refund"""
+        """Initiate refund (signed identically to collections)"""
+        data_str = f"{self.merchant_id}{original_txn_id}{amount}"
+        checksum = self._generate_checksum(data_str)
+
         payload = {
             "merchantId": self.merchant_id,
             "originalTxnId": original_txn_id,
             "refundAmount": f"{amount:.2f}",
-            "reason": reason
+            "reason": reason,
+            "checksum": checksum
         }
-        
+
         try:
             response = await self.client.post(
                 f"{self.base_url}/v1/refund",
-                json=payload
+                json=payload,
+                headers={"X-Merchant-ID": self.merchant_id}
             )
             response.raise_for_status()
             data = response.json()

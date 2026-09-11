@@ -42,7 +42,9 @@ impl Config {
     fn from_env() -> Self {
         Config {
             port: std::env::var("PORT").unwrap_or_else(|_| "8123".into()).parse().unwrap_or(8123),
-            qr_signing_secret: std::env::var("QR_SIGNING_SECRET").unwrap_or_else(|_| "dev-qr-secret".into()),
+            // FAIL CLOSED: no default QR signing secret — refuse to boot when unset.
+            qr_signing_secret: std::env::var("QR_SIGNING_SECRET")
+                .expect("QR_SIGNING_SECRET is not set: refusing to fall back to a well-known default credential; configure it explicitly"),
             kafka_brokers: std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".into()),
             redis_url: std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into()),
             fluvio_endpoint: std::env::var("FLUVIO_ENDPOINT").unwrap_or_else(|_| "localhost:9003".into()),

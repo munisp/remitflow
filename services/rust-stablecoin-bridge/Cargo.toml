@@ -1,0 +1,22 @@
+[package]
+name    = "rust-stablecoin-bridge"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "rust-stablecoin-bridge"
+path = "src/main.rs"
+
+[dependencies]
+actix-web  = "4"
+actix-cors = "0.7"
+tokio      = { version = "1", features = ["full"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono     = "0.4"
+uuid       = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = 3
+lto       = true
+codegen-units = 1

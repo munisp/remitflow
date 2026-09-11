@@ -48,11 +48,11 @@ dapr:
 # (os.Getenv / env::var / os.getenv across go-security-hardening's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install go-security-hardening infrastructure/charts/go-security-hardening \
 #     -n 54remit -f infrastructure/values-secrets/go-security-hardening.yaml
 # (a gitignored, per-environment file).
 secrets:
-  DATABASE_URL: "CHANGE_ME"
-  JWT_SECRET: "CHANGE_ME"
+  DATABASE_URL: ""  # REQUIRED
+  JWT_SECRET: ""  # REQUIRED
   PORT: "8110"

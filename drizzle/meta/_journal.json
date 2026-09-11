@@ -239,6 +239,27 @@
       "when": 1776481895965,
       "tag": "0083_outbox_worker_lease",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1776481955965,
+      "tag": "0084_settlement_journal",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1776482015965,
+      "tag": "0085_card_chargeback_hardening",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1776482075965,
+      "tag": "0086_reconciliation_quarantine",
+      "breakpoints": true
     }
   ]
 }

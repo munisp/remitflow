@@ -4,7 +4,9 @@
 
 Set environment variable:
 ```
-BRICS-PAY_API_KEY=your_api_key_here
+BRICS_PAY_API_KEY=...
+BRICS_PAY_SECRET_KEY=...
+BRICS_PAY_MERCHANT_ID=...
 ```
 
 ## Usage

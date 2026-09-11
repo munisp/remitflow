@@ -15,7 +15,9 @@ import { trpc } from "@/utils/trpc";
 
 const STABLECOINS = ["USDT", "USDC", "BUSD", "DAI", "NGNT", "cUSD", "PYUSD"] as const;
 const FIATS = ["USD", "NGN", "GBP", "EUR", "GHS", "KES", "ZAR", "XOF"] as const;
-const CHAINS = ["ethereum", "polygon", "bsc", "solana", "tron", "arbitrum", "optimism", "base", "avalanche"] as const;
+// Solana/Tron removed: not enabled server-side (no real adapter; reads fail
+// closed). Keep this list in sync with server/routers/stablecoinEnhanced.ts.
+const CHAINS = ["ethereum", "polygon", "bsc", "arbitrum", "optimism", "base", "avalanche"] as const;
 
 export default function StablecoinPage() {
   const [amount, setAmount] = useState("");

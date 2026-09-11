@@ -137,14 +137,12 @@ const swiftRouter = router({
 
       // 2FA enforcement for high-value SWIFT transfers (> $1,000 equivalent)
       if (estimatedUsd > 1000) {
-        // SEC-25: read enrollment from mfa_settings (with users.twoFactor* fallback)
-        const { getTotpEnrollment, verifyTOTP } = await import("../totp");
-        const enrollment = await getTotpEnrollment(ctx.user.id);
-        if (enrollment.dbAvailable && enrollment.enabled) {
-          if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: SWIFT transfers over $1,000 require TOTP verification." });
-          const valid = await verifyTOTP(input.totpCode, enrollment.secret ?? "");
-          if (!valid) throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code" });
-        }
+        // W12/SEC-25: fail CLOSED. Previously `if (enrollment.dbAvailable &&
+        // enrollment.enabled)` silently skipped 2FA when the enrollment store
+        // was down or the user was unenrolled. Now: DB error → deny; unenrolled
+        // → honest enrollment-required error; enrolled → valid code required.
+        const { requireTotpStepUp } = await import("../_core/totpStepUp");
+        await requireTotpStepUp(ctx.user.id, input.totpCode, "SWIFT transfers over $1,000");
       }
 
       // KYC tier limit enforcement
@@ -182,16 +180,33 @@ const swiftRouter = router({
       const usageRow = await getAnnualUsage(ctx.user.id, input.purpose_code, year);
       const usedUsd = usageRow ? safeParseAmount(usageRow.usedUsd as string) : 0;
 
-      // Call Go service with X-Used-Annual-USD header for limit enforcement
-      const res = await fetch(`${SWIFT_URL}/submit`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Used-Annual-USD": String(usedUsd),
-        },
-        body: JSON.stringify({ ...input, sender_user_id: ctx.user.id }),
-        signal: AbortSignal.timeout(10_000),
-      });
+      // Call Go service with X-Used-Annual-USD header for limit enforcement.
+      // FF-FIX: if the rail call itself throws (network/timeout), compensate
+      // the TB hold — it must not stay orphaned forever.
+      let res: Response;
+      try {
+        res = await fetch(`${SWIFT_URL}/submit`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Used-Annual-USD": String(usedUsd),
+          },
+          body: JSON.stringify({ ...input, sender_user_id: ctx.user.id }),
+          signal: AbortSignal.timeout(10_000),
+        });
+      } catch (fetchErr) {
+        if (pipelineResult.tigerBeetleRecorded) {
+          await compensateFailedTransfer({
+            transferId,
+            userId: ctx.user.id,
+            amount: input.amount_ngn,
+            currency: "NGN",
+            reason: `SWIFT service unreachable: ${fetchErr instanceof Error ? fetchErr.message : String(fetchErr)}`,
+            stage: "settlement",
+          }).catch((cErr) => logger.warn({ err: cErr instanceof Error ? cErr.message : String(cErr), transferId }, "[Outbound] Hold release after SWIFT network failure failed — reaper will reconcile"));
+        }
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "SWIFT service unreachable — no funds moved, hold released" });
+      }
 
       if (!res.ok) {
         const err = await res.json() as Record<string, unknown>;
@@ -214,13 +229,23 @@ const swiftRouter = router({
 
       // FF-001: rail accepted — settle: post the TB hold in full AND debit the
       // PG wallet atomically (journaled, replay-safe).
+      // FF-FIX: the rail has COMMITTED the payout — a settlement failure (e.g.
+      // insufficient PG balance) must NOT throw back to the user as if the
+      // transfer failed. The journal row is marked reconcile_required and the
+      // reaper/recon completes the post; alert ops loudly.
       if (pipelineResult.tigerBeetleRecorded) {
-        await settleTransferHold({
-          transferId,
-          userId: ctx.user.id,
-          amount: input.amount_ngn,
-          currency: "NGN",
-        });
+        try {
+          await settleTransferHold({
+            transferId,
+            userId: ctx.user.id,
+            amount: input.amount_ngn,
+            currency: "NGN",
+          });
+        } catch (settleErr) {
+          logger.error({ err: settleErr instanceof Error ? settleErr.message : String(settleErr), transferId },
+            "[Outbound] CRITICAL: rail committed but settlement failed — MANUAL RECONCILIATION REQUIRED (journal marked reconcile_required)");
+          return { ...(result as object), verified: true, transferId, settlement: "reconcile_required", fraudScore: pipelineResult.fraudScore, tigerBeetleRecorded: pipelineResult.tigerBeetleRecorded };
+        }
       }
 
       // Increment annual usage in DB

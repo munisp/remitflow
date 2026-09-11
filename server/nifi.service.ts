@@ -16,7 +16,23 @@ import axios from "axios";
 
 const NIFI_BASE_URL = process.env.NIFI_URL ?? "http://localhost:8080/nifi-api";
 const NIFI_USERNAME = process.env.NIFI_USERNAME ?? "admin";
-const NIFI_PASSWORD = process.env.NIFI_PASSWORD ?? "adminadminadmin";
+
+// W9/Q11 (F10-12): no repo-known default credentials. Production: missing
+// NIFI_PASSWORD => throw at use (fail closed). Non-production: warn once and
+// skip token auth so the integration fails auth and is effectively disabled.
+let warnedMissingPassword = false;
+function getNifiPassword(): string {
+  const pw = process.env.NIFI_PASSWORD;
+  if (pw) return pw;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("NIFI_PASSWORD is required in production — default credentials are not allowed");
+  }
+  if (!warnedMissingPassword) {
+    warnedMissingPassword = true;
+    console.warn("[nifi] NIFI_PASSWORD unset — NiFi integration disabled (non-production only)");
+  }
+  return "";
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface NiFiProcessGroup {
@@ -124,10 +140,12 @@ export class NiFiService {
 
   private async getToken(): Promise<string | null> {
     if (this.token && Date.now() < this.tokenExpiry) return this.token;
+    const password = getNifiPassword(); // may throw in production when unconfigured (fail closed)
+    if (!password) return null; // non-production unconfigured: no token, requests will fail auth
     try {
       const res = await axios.post(
         `${NIFI_BASE_URL}/access/token`,
-        new URLSearchParams({ username: NIFI_USERNAME, password: NIFI_PASSWORD }),
+        new URLSearchParams({ username: NIFI_USERNAME, password }),
         { headers: { "Content-Type": "application/x-www-form-urlencoded" }, timeout: 5000 }
       );
       this.token = res.data as string;

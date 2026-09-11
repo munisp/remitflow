@@ -14,6 +14,7 @@ import { protectedProcedure, adminProcedure, publicProcedure, router, strictRate
 import { getDb, createAuditLog } from "../db";
 import { transactions, wallets } from "../../drizzle/schema";
 import { executeTransferPipeline } from "../_core/transferPipeline";
+import { assertFeatureEligible } from "../_core/featureGuard";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { logger } from "../_core/logger";
 import { broadcastUserEvent } from "../sse.service";
@@ -187,10 +188,22 @@ export const liquidityPoolRouter = router({
       stablecoin: z.enum(SUPPORTED_STABLECOINS),
       fiatAmount: z.number().positive().max(10_000_000),
       fiatCurrency: z.enum(SUPPORTED_FIAT),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      // W12: canonical TOTP step-up (fail-closed) — money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "stablecoin purchase");
+
+      // A3: enforce the declared stablecoin gate (flag + KYC tier >= 1 + growth plan).
+      await assertFeatureEligible(ctx, { flag: "stablecoin", minKycTier: 1, minPlan: "growth", featureName: "Stablecoin on-ramp" });
+      // A3: explicit tier0 hard block (mirrors stablecoinEnhanced.ts:174-176).
+      if (String((ctx.user as Record<string, unknown>).kycTier ?? "tier0") === "tier0") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "KYC verification required to buy stablecoins." });
+      }
 
       const lp = getLiquidityProvider(input.provider);
 
@@ -307,10 +320,22 @@ export const liquidityPoolRouter = router({
       stablecoin: z.enum(SUPPORTED_STABLECOINS),
       stablecoinAmount: z.number().positive().max(10_000_000),
       fiatCurrency: z.enum(SUPPORTED_FIAT),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      // W12: canonical TOTP step-up (fail-closed) — money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "stablecoin sale");
+
+      // A3: enforce the declared stablecoin gate (flag + KYC tier >= 1 + growth plan).
+      await assertFeatureEligible(ctx, { flag: "stablecoin", minKycTier: 1, minPlan: "growth", featureName: "Stablecoin off-ramp" });
+      // A3: explicit tier0 hard block (mirrors stablecoinEnhanced.ts:174-176).
+      if (String((ctx.user as Record<string, unknown>).kycTier ?? "tier0") === "tier0") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "KYC verification required to sell stablecoins." });
+      }
 
       const lp = getLiquidityProvider(input.provider);
 

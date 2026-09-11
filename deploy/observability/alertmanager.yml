@@ -1,0 +1,98 @@
+# RemitFlow — Alertmanager (W11-C1)
+# Image: prom/alertmanager:v0.27.0
+#
+# Routing model: per-tenant, attribute-based. Alerts carry tenant_id when the
+# underlying series carries it (lifted from the `tenant.id` OTel attribute by
+# the collector). group_by [alertname, tenant_id] keeps one tenant's storm
+# from swallowing another's page.
+#
+# ENVIRONMENT (no real secrets in this file — rendered by compose entrypoint
+# envsubst, see docker-compose.observability.yml):
+#   ALERT_WEBHOOK_URL      (required)  default receiver endpoint, e.g. an
+#                                      internal incident bridge / Slack proxy
+#   ALERT_WEBHOOK_URL_ACME (optional)  per-tenant receiver example (acme)
+#   ALERT_EMAIL_TO         (optional)  ops mailing list for warning-level email
+#   ALERT_EMAIL_FROM       (optional)  sender identity
+#   ALERT_SMTP_HOST        (optional)  smtp relay host:port
+#   ALERT_SMTP_USER        (optional)
+#   ALERT_SMTP_PASSWORD    (optional)  injected via env only — never committed
+
+global:
+  smtp_smarthost: "${ALERT_SMTP_HOST}"
+  smtp_from: "${ALERT_EMAIL_FROM}"
+  smtp_auth_username: "${ALERT_SMTP_USER}"
+  smtp_auth_password: "${ALERT_SMTP_PASSWORD}"
+  smtp_require_tls: true
+  resolve_timeout: 5m
+
+# Critical pages suppress matching warnings for the same alert+tenant.
+inhibit_rules:
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["alertname", "tenant_id"]
+# NOTE: no MiddlewareDown↔MiddlewareScrapeMissing inhibit — they are mutually
+# exclusive by construction (absent() is false whenever an up series exists),
+# and absent()-derived alerts carry no job label to equal-match on anyway.
+
+route:
+  receiver: default-webhook
+  group_by: ["alertname", "tenant_id"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Money-path pages: tighter grouping, faster escalation cadence.
+    - matchers:
+        - team = "money-path"
+      receiver: default-webhook
+      group_by: ["alertname", "tenant_id", "rail"]
+      group_wait: 15s
+      repeat_interval: 2h
+      continue: true
+
+    # Per-tenant routing EXAMPLE — the pattern for tenant-isolated alerting.
+    # Add one route per contracted tenant; alerts whose series carry
+    # tenant_id="acme" page the tenant-acme receiver instead of the default.
+    - matchers:
+        - tenant_id = "acme"
+      receiver: tenant-acme
+      group_by: ["alertname"]
+      repeat_interval: 6h
+
+    # Warning-level platform noise → email, batched hourly.
+    - matchers:
+        - severity = "warning"
+        - team = "platform"
+      receiver: platform-email
+      group_by: ["alertname"]
+      group_interval: 1h
+      repeat_interval: 24h
+
+receivers:
+  # Default: configurable webhook (incident bridge / chat proxy).
+  - name: default-webhook
+    webhook_configs:
+      - url: "${ALERT_WEBHOOK_URL}"
+        send_resolved: true
+        max_alerts: 50
+        timeout: 10s
+
+  # Per-tenant example receiver (acme). Points at a tenant-scoped webhook.
+  - name: tenant-acme
+    webhook_configs:
+      - url: "${ALERT_WEBHOOK_URL_ACME}"
+        send_resolved: true
+        max_alerts: 50
+
+  # Warning-level platform email (SMTP via env placeholders — no secrets here).
+  - name: platform-email
+    email_configs:
+      - to: "${ALERT_EMAIL_TO}"
+        send_resolved: true
+        headers:
+          subject: "[remitflow][warning] {{ .CommonLabels.alertname }}"
+
+  # Null receiver for deliberately muted classes (kept for explicit silences).
+  - name: "null"

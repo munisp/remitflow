@@ -10,6 +10,8 @@ import { Connection, Client, type WorkflowHandle } from "@temporalio/client";
 import type { TransferWorkflowInput, KYCWorkflowInput, RecurringPaymentWorkflowInput } from "./workflows";
 import { logger } from '../_core/logger';
 import { TRPCError } from "@trpc/server";
+// W11-C2: client-side OTel span per workflow start/signal + traceparent/x-tenant-id header injection
+import { TemporalOtelWorkflowClientInterceptor } from "./interceptors";
 
 const TEMPORAL_ADDRESS = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
 const TASK_QUEUE = process.env.TEMPORAL_TASK_QUEUE ?? "remitflow-main";
@@ -34,7 +36,11 @@ async function getTemporalClient(): Promise<Client | null> {
     const connection = await Connection.connect({
       address: TEMPORAL_ADDRESS,
     });
-    _client = new Client({ connection, namespace: NAMESPACE });
+    _client = new Client({
+      connection,
+      namespace: NAMESPACE,
+      interceptors: { workflow: [new TemporalOtelWorkflowClientInterceptor()] },
+    });
     _connectionFailed = false;
     logger.info("[Temporal Client] Connected to Temporal server");
     return _client;

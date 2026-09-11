@@ -1,0 +1,329 @@
+# APISIX Wave-10 Routes — RemitFlow (SPEC-wave10 C5)
+# ─────────────────────────────────────────────────────────────────────────────
+# Every route below targets a REAL backend path (V2-R4). The Wave-10 business
+# APIs are tRPC routers on the Node backend — there are NO standalone
+# /partner/v1/* or /pl/* handlers. tRPC-over-HTTP mapping convention:
+#
+#   mutation  →  POST /api/trpc/<router>.<procedure>     (JSON body)
+#   query     →  GET  /api/trpc/<router>.<procedure>?input=<urlencoded JSON>
+#
+# Public partner/link paths are mapped onto those canonical tRPC paths with
+# the stock APISIX proxy-rewrite plugin (regex_uri). Query strings are
+# preserved across the rewrite, so tRPC GET queries keep their ?input= param.
+#
+# Surfaces:
+#   /partner/v1/*                → embeddedPayouts tRPC router (C5):
+#                                    createPayout (mutation), getPayout (query),
+#                                    corridors (query)
+#   /pl/*                        → paymentLinks tRPC router (C2):
+#                                    resolve (query), payCard / payBank /
+#                                    payWallet (mutations)
+#   /api/trpc/billCapture.inboundEmail
+#                                → bill-capture inbound-email webhook (C3)
+#   /services/bill-capture       → Python bill-capture OCR service (internal-only)
+#   /services/accounting-sync    → Go accounting-sync service (internal-only)
+#
+# Only plugins shipped with apache/apisix:3.9 are used (proxy-rewrite,
+# limit-count, limit-req, api-breaker, key-auth, consumer-restriction) — same
+# discipline as infra/apisix/stablecoin-routes.yaml. WAF inspection is
+# performed by the open-appsec agent at the container/ingress layer — it is
+# NOT an APISIX plugin (see deploy/openappsec/profile-wave10.yaml and
+# docker-compose.security.yml).
+# Applied idempotently alongside services/gateway-config/apply-stablecoin-routes.py.
+
+routes:
+  # ─── PARTNER: Embedded Payouts (/partner/v1/* → embeddedPayouts tRPC) ─────
+  # key-auth identifies the partner consumer; the tRPC router additionally
+  # verifies the partner API key + HMAC-SHA256 body signature
+  # (x-payout-signature, PAYOUTS_API_HMAC_SECRET) — fail closed when either is
+  # missing/invalid. Rate limits are per partner consumer.
+
+  # Create payout: POST /partner/v1/payouts → embeddedPayouts.createPayout
+  - id: wave10-partner-payout-create
+    uri: /partner/v1/payouts
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/partner/v1/payouts$", "/api/trpc/embeddedPayouts.createPayout"]
+      key-auth:
+        header: x-api-key
+        hide_credentials: true
+      limit-count:
+        count: 120
+        time_window: 60
+        key: consumer_name
+        rejected_code: 429
+      limit-req:
+        rate: 10
+        burst: 20
+        key: consumer_name
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 5
+        healthy:
+          http_statuses: [200]
+          successes: 2
+
+  # Payout status: GET /partner/v1/payouts/get?input={...} → embeddedPayouts.getPayout
+  - id: wave10-partner-payout-get
+    uri: /partner/v1/payouts/get
+    methods: [GET]
+    upstream_id: remitflow-backend
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/partner/v1/payouts/get$", "/api/trpc/embeddedPayouts.getPayout"]
+      key-auth:
+        header: x-api-key
+        hide_credentials: true
+      limit-count:
+        count: 120
+        time_window: 60
+        key: consumer_name
+        rejected_code: 429
+      limit-req:
+        rate: 10
+        burst: 20
+        key: consumer_name
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 5
+        healthy:
+          http_statuses: [200]
+          successes: 2
+
+  # Corridor quote: GET /partner/v1/corridors → embeddedPayouts.corridors
+  - id: wave10-partner-corridors
+    uri: /partner/v1/corridors
+    methods: [GET]
+    upstream_id: remitflow-backend
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/partner/v1/corridors$", "/api/trpc/embeddedPayouts.corridors"]
+      key-auth:
+        header: x-api-key
+        hide_credentials: true
+      limit-count:
+        count: 120
+        time_window: 60
+        key: consumer_name
+        rejected_code: 429
+      limit-req:
+        rate: 10
+        burst: 20
+        key: consumer_name
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 5
+        healthy:
+          http_statuses: [200]
+          successes: 2
+
+  # ─── PUBLIC: Payment Links (/pl/* → paymentLinks tRPC) ────────────────────
+  # Tokenized public endpoints — no gateway consumer. Aggressive per-IP rate
+  # limits: token guessing must be uneconomic. OpenAppSec profile
+  # wave10-public applies SQLi/XSS inspection at the ingress layer.
+
+  # Resolve a link token: GET /pl/resolve?input={"token":"..."} → paymentLinks.resolve
+  - id: wave10-payment-link-resolve
+    uri: /pl/resolve
+    methods: [GET]
+    upstream_id: remitflow-backend
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/pl/resolve$", "/api/trpc/paymentLinks.resolve"]
+      limit-count:
+        count: 30
+        time_window: 60
+        key: remote_addr
+        rejected_code: 429
+      limit-req:
+        rate: 2
+        burst: 5
+        key: remote_addr
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 5
+        healthy:
+          http_statuses: [200]
+          successes: 2
+
+  # Pay by card (creates a cardFunding intent): POST /pl/pay/card → paymentLinks.payCard
+  - id: wave10-payment-link-pay-card
+    uri: /pl/pay/card
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/pl/pay/card$", "/api/trpc/paymentLinks.payCard"]
+      limit-count:
+        count: 30
+        time_window: 60
+        key: remote_addr
+        rejected_code: 429
+      limit-req:
+        rate: 2
+        burst: 5
+        key: remote_addr
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 5
+        healthy:
+          http_statuses: [200]
+          successes: 2
+
+  # Pay by bank: POST /pl/pay/bank → paymentLinks.payBank
+  - id: wave10-payment-link-pay-bank
+    uri: /pl/pay/bank
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/pl/pay/bank$", "/api/trpc/paymentLinks.payBank"]
+      limit-count:
+        count: 30
+        time_window: 60
+        key: remote_addr
+        rejected_code: 429
+      limit-req:
+        rate: 2
+        burst: 5
+        key: remote_addr
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 5
+        healthy:
+          http_statuses: [200]
+          successes: 2
+
+  # Pay from RemitFlow wallet (session-auth'd tRPC): POST /pl/pay/wallet → paymentLinks.payWallet
+  - id: wave10-payment-link-pay-wallet
+    uri: /pl/pay/wallet
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      proxy-rewrite:
+        regex_uri: ["^/pl/pay/wallet$", "/api/trpc/paymentLinks.payWallet"]
+      limit-count:
+        count: 30
+        time_window: 60
+        key: remote_addr
+        rejected_code: 429
+      limit-req:
+        rate: 2
+        burst: 5
+        key: remote_addr
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 5
+        healthy:
+          http_statuses: [200]
+          successes: 2
+
+  # ─── WEBHOOK: Bill-capture inbound email (billCapture.inboundEmail) ───────
+  # Mailbox-provider → backend webhook. INBOUND-EMAIL SECURITY NOTES:
+  #   - NO key-auth here: the mailbox provider is not an APISIX consumer and
+  #     cannot hold gateway credentials. Authentication is enforced INSIDE the
+  #     tRPC procedure: shared-secret header `x-inbound-email-secret` checked
+  #     constant-time against INBOUND_EMAIL_SECRET — fail closed (503) when
+  #     the secret is unset, 401 on mismatch.
+  #   - Per-IP limit-req only: secret-guessing and attachment flooding must be
+  #     uneconomic. The procedure additionally enforces a MIME/extension
+  #     allowlist, a 20 MiB document cap, sha256 idempotency, and
+  #     token-hash tenant resolution.
+  #   - The route exposes ONLY this single procedure path — no /pl-style
+  #     wildcard — so the gateway never broadens the public tRPC surface.
+  - id: wave10-bill-capture-inbound-email
+    uri: /api/trpc/billCapture.inboundEmail
+    methods: [POST]
+    upstream_id: remitflow-backend
+    plugins:
+      limit-req:
+        rate: 5
+        burst: 10
+        key: remote_addr
+        rejected_code: 429
+      api-breaker:
+        break_response_code: 503
+        max_breaker_sec: 60
+        unhealthy:
+          http_statuses: [500, 502, 503]
+          failures: 5
+        healthy:
+          http_statuses: [200]
+          successes: 2
+
+  # ─── INTERNAL: Bill Capture OCR service (:8112) ────────────────────────────
+  # Internal-only: restricted to named consumers (service accounts). The
+  # service itself also enforces INTERNAL_SERVICE_KEY constant-time compare.
+  - id: wave10-bill-capture-internal
+    uri: /services/bill-capture/*
+    methods: [GET, POST]
+    upstream:
+      type: roundrobin
+      nodes:
+        "bill-capture:8112": 1
+    plugins:
+      key-auth:
+        header: x-api-key
+        hide_credentials: true
+      consumer-restriction:
+        whitelist:
+          - remitflow-backend
+      limit-req:
+        rate: 20
+        burst: 20
+        key: consumer_name
+        rejected_code: 429
+
+  # ─── INTERNAL: Accounting Sync service (:8113) ─────────────────────────────
+  # Internal-only: restricted to named consumers (service accounts). OAuth
+  # callback relays are proxied only through this route, never public.
+  - id: wave10-accounting-sync-internal
+    uri: /services/accounting-sync/*
+    methods: [GET, POST]
+    upstream:
+      type: roundrobin
+      nodes:
+        "accounting-sync:8113": 1
+    plugins:
+      key-auth:
+        header: x-api-key
+        hide_credentials: true
+      consumer-restriction:
+        whitelist:
+          - remitflow-backend
+      limit-req:
+        rate: 20
+        burst: 20
+        key: consumer_name
+        rejected_code: 429
+#END

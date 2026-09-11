@@ -26,7 +26,7 @@ import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { BatchSpanProcessor, ConsoleSpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-node";
 import { trace, metrics, context, SpanStatusCode, SpanKind } from "@opentelemetry/api";
-import type { Span, Tracer, Meter } from "@opentelemetry/api";
+import type { Span, Tracer, Meter, ObservableGauge, Histogram } from "@opentelemetry/api";
 import { logger } from "../_core/logger";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -148,6 +148,57 @@ export async function withSpan<T>(
 
 const _meter = () => getMeter();
 
+// ── Instrument memoization (W11-FIX-TS) ───────────────────────────────────────
+// OTel dedup rule: ONE instrument per metric name. Creating an ObservableGauge
+// per call re-registers its callback on every invocation (N calls → N
+// callbacks → duplicate observations); creating a Histogram per call forces
+// the SDK through its dedup path on the hot request path. Instead: histograms
+// are memoized per name; each observable gauge is created ONCE per name with a
+// single callback that reads the latest value per attribute set, and values
+// are updated per call.
+
+const _histograms = new Map<string, Histogram>();
+
+function memoHistogram(name: string, description: string, unit: string): Histogram {
+  let h = _histograms.get(name);
+  if (!h) {
+    h = _meter().createHistogram(name, { description, unit });
+    _histograms.set(name, h);
+  }
+  return h;
+}
+
+interface GaugeObservation {
+  value: number;
+  attributes: Record<string, string>;
+}
+
+/** metric name -> (JSON-serialized attributes -> latest observation) */
+const _observableGauges = new Map<string, Map<string, GaugeObservation>>();
+
+function recordGaugeValue(
+  name: string,
+  description: string,
+  unit: string,
+  value: number,
+  attributes: Record<string, string>
+): void {
+  let values = _observableGauges.get(name);
+  if (!values) {
+    values = new Map<string, GaugeObservation>();
+    _observableGauges.set(name, values);
+    const gauge: ObservableGauge = _meter().createObservableGauge(name, { description, unit });
+    const valuesRef = values;
+    // Single callback for the lifetime of the gauge — registered exactly once.
+    gauge.addCallback((result) => {
+      for (const obs of valuesRef.values()) {
+        result.observe(obs.value, obs.attributes);
+      }
+    });
+  }
+  values.set(JSON.stringify(attributes), { value, attributes });
+}
+
 /** Record a transfer event metric */
 export function recordTransferMetric(
   status: "initiated" | "completed" | "failed" | "cancelled",
@@ -185,15 +236,12 @@ export function recordApiLatency(
   statusCode: number,
   durationMs: number
 ): void {
-  const histogram = _meter().createHistogram("remitflow.api.request.duration_ms", {
-    description: "API request duration in milliseconds",
-    unit: "ms",
-  });
-  histogram.record(durationMs, {
-    route,
-    method,
-    status_code: String(statusCode),
-  });
+  memoHistogram("remitflow.api.request.duration_ms", "API request duration in milliseconds", "ms")
+    .record(durationMs, {
+      route,
+      method,
+      status_code: String(statusCode),
+    });
 }
 
 /** Record middleware health metric */
@@ -202,19 +250,18 @@ export function recordMiddlewareHealth(
   healthy: boolean,
   latencyMs: number
 ): void {
-  const gauge = _meter().createObservableGauge("remitflow.middleware.health", {
-    description: "Middleware service health status (1=healthy, 0=unhealthy)",
-    unit: "1",
-  });
-  gauge.addCallback((result) => {
-    result.observe(healthy ? 1 : 0, { service });
-  });
+  // Gauge is created once per metric name (see recordGaugeValue); each call
+  // only updates the latest value for this service's attribute set.
+  recordGaugeValue(
+    "remitflow.middleware.health",
+    "Middleware service health status (1=healthy, 0=unhealthy)",
+    "1",
+    healthy ? 1 : 0,
+    { service }
+  );
 
-  const histogram = _meter().createHistogram("remitflow.middleware.latency_ms", {
-    description: "Middleware service health check latency",
-    unit: "ms",
-  });
-  histogram.record(latencyMs, { service });
+  memoHistogram("remitflow.middleware.latency_ms", "Middleware service health check latency", "ms")
+    .record(latencyMs, { service });
 }
 
 // ── Express Middleware for Request Tracing ────────────────────────────────────

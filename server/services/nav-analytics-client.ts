@@ -1,9 +1,12 @@
 /**
  * RemitFlow Nav Analytics Client
- * Typed HTTP client for the Python mobile navigation analytics service (port 8086)
+ *
+ * Wave 7 (C8): python-nav-analytics was deleted as an unbuildable scaffold —
+ * no nav-analytics service exists. Every method now throws UNAVAILABLE
+ * ("service not deployed"); health() honestly reports offline.
  */
 
-const NAV_BASE = process.env.NAV_ANALYTICS_URL ?? "http://localhost:8086";
+const NOT_DEPLOYED = "nav-analytics service not deployed";
 
 export interface NavTabSummary {
   tab: string;
@@ -56,23 +59,12 @@ export interface RetentionDay {
   tabs: Record<string, number>;
 }
 
-async function fetchNav<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${NAV_BASE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...(options?.headers ?? {}),
-    },
-    signal: AbortSignal.timeout(5000),
-  });
-  if (!res.ok) {
-    throw new Error(`[NavAnalytics] ${path} → ${res.status} ${res.statusText}`);
-  }
-  return res.json() as Promise<T>;
+function unavailable<T>(method: string): Promise<T> {
+  return Promise.reject(new Error(`UNAVAILABLE: ${NOT_DEPLOYED} — navAnalyticsClient.${method} cannot be served`));
 }
 
 export const navAnalyticsClient = {
-  /** Track a nav tap event */
+  /** Track a nav tap event — service not deployed, always throws */
   track: (event: {
     tab: string;
     userId?: string;
@@ -81,99 +73,34 @@ export const navAnalyticsClient = {
     country?: string;
     dwellSeconds?: number;
   }): Promise<{ ok: boolean; tab: string; totalEvents: number }> =>
-    fetchNav("/track", {
-      method: "POST",
-      body: JSON.stringify({
-        tab: event.tab,
-        user_id: event.userId,
-        segment: event.segment,
-        platform: event.platform,
-        country: event.country,
-        dwell_seconds: event.dwellSeconds,
-      }),
-    }),
+    unavailable(`track(${event.tab})`),
 
-  /** Get summary stats for nav usage */
+  /** Get summary stats — service not deployed, always throws */
   getSummary: (hours = 24): Promise<NavSummary> =>
-    fetchNav<any>(`/summary?hours=${hours}`).then((raw) => ({
-      periodHours: raw.period_hours,
-      totalTaps: raw.total_taps,
-      uniqueUsers: raw.unique_users,
-      tabs: (raw.tabs ?? []).map((t: any) => ({
-        tab: t.tab,
-        label: t.label,
-        icon: t.icon,
-        taps: t.taps,
-        sharePct: t.share_pct,
-        engagementScore: t.engagement_score,
-      })),
-      platforms: raw.platforms ?? {},
-      topCountries: raw.top_countries ?? [],
-    })),
+    unavailable(`getSummary(${hours}h)`),
 
-  /** Get heatmap data */
+  /** Get heatmap data — service not deployed, always throws */
   getHeatmap: (hours = 168): Promise<NavHeatmap> =>
-    fetchNav<any>(`/heatmap?hours=${hours}`).then((raw) => ({
-      periodHours: raw.period_hours,
-      hours: raw.hours,
-      heatmap: raw.heatmap,
-      labels: raw.labels,
-    })),
+    unavailable(`getHeatmap(${hours}h)`),
 
-  /** Get AI-ranked nav order recommendations for a segment */
+  /** Get AI-ranked nav order recommendations — service not deployed, always throws */
   getRecommendations: (segment = "new_user"): Promise<{
     segment: string;
     totalEventsAnalyzed: number;
     recommendedOrder: NavRecommendation[];
     model: string;
   }> =>
-    fetchNav<any>(`/recommendations?segment=${segment}`).then((raw) => ({
-      segment: raw.segment,
-      totalEventsAnalyzed: raw.total_events_analyzed,
-      recommendedOrder: (raw.recommended_order ?? []).map((r: any) => ({
-        tab: r.tab,
-        label: r.label,
-        icon: r.icon,
-        score: r.score,
-        taps: r.taps,
-        engagementPct: r.engagement_pct,
-        rank: r.rank,
-      })),
-      model: raw.model,
-    })),
+    unavailable(`getRecommendations(${segment})`),
 
-  /** Get top 5 most-used community features */
+  /** Get top community features — service not deployed, always throws */
   getTopFeatures: (hours = 24): Promise<{ periodHours: number; topFeatures: TopFeature[] }> =>
-    fetchNav<any>(`/top-features?hours=${hours}`).then((raw) => ({
-      periodHours: raw.period_hours,
-      topFeatures: (raw.top_features ?? []).map((f: any) => ({
-        rank: f.rank,
-        tab: f.tab,
-        label: f.label,
-        icon: f.icon,
-        taps: f.taps,
-        sharePct: f.share_pct,
-        trend: f.trend,
-      })),
-    })),
+    unavailable(`getTopFeatures(${hours}h)`),
 
-  /** Get daily active users per nav section */
+  /** Get daily active users per nav section — service not deployed, always throws */
   getRetention: (days = 7): Promise<{ days: number; retention: RetentionDay[]; labels: Record<string, string> }> =>
-    fetchNav<any>(`/retention?days=${days}`).then((raw) => ({
-      days: raw.days,
-      retention: (raw.retention ?? []).map((r: any) => ({
-        date: r.date,
-        totalDau: r.total_dau,
-        tabs: r.tabs,
-      })),
-      labels: raw.labels,
-    })),
+    unavailable(`getRetention(${days}d)`),
 
-  /** Health check */
+  /** Health check — honest: the service does not exist, always offline */
   health: (): Promise<{ status: string; service: string; totalEvents: number }> =>
-    fetchNav<any>("/health").then((raw) => ({
-      status: raw.status,
-      service: raw.service,
-      totalEvents: raw.total_events,
-    })),
+    Promise.resolve({ status: "offline", service: "nav-analytics (not deployed)", totalEvents: 0 }),
 };

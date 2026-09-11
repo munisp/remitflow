@@ -4,6 +4,7 @@ Flutterwave Payment Gateway Client - Production Implementation
 
 import httpx
 import hashlib
+import hmac
 import logging
 from typing import Dict, Optional, List
 from datetime import datetime
@@ -19,11 +20,15 @@ class FlutterwaveError(Exception):
         super().__init__(f"Flutterwave Error {code}: {message}")
 
 class FlutterwaveClient:
-    def __init__(self, api_key: str, secret_key: str, encryption_key: str, base_url: str = "https://api.flutterwave.com"):
+    def __init__(self, api_key: str, secret_key: str, encryption_key: str, base_url: str = "https://api.flutterwave.com", callback_url: Optional[str] = None):
         self.api_key = api_key
         self.secret_key = secret_key
         self.encryption_key = encryption_key
         self.base_url = base_url.rstrip('/')
+        # Webhook/callback ingress for transfer status notifications.
+        # Must be OUR ingress (e.g. https://api.remitflow.example/...),
+        # never the provider host. None => omit callback_url from payloads.
+        self.callback_url = callback_url
         self.client = httpx.AsyncClient(timeout=30)
         logger.info("Flutterwave client initialized")
     
@@ -34,8 +39,22 @@ class FlutterwaveClient:
         }
     
     def _verify_signature(self, payload: str, signature: str) -> bool:
-        expected = hashlib.sha256((self.secret_key + payload).encode()).hexdigest()
-        return expected == signature
+        """Constant-time comparison of a payload signature (HMAC-SHA256)."""
+        expected = hmac.new(
+            self.secret_key.encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(expected, signature)
+
+    def verify_webhook_hash(self, verif_hash: str) -> bool:
+        """Verify a Flutterwave webhook's `verif-hash` header.
+
+        Flutterwave signs webhooks by sending the configured secret hash
+        verbatim in the `verif-hash` header; compare constant-time and
+        fail closed.
+        """
+        if not verif_hash or not self.secret_key:
+            return False
+        return hmac.compare_digest(self.secret_key, verif_hash)
     
     async def initiate_transfer(self, account_bank: str, account_number: str, amount: float, currency: str, narration: str, reference: str, beneficiary_name: str = None) -> Dict:
         """Initiate transfer to bank account"""
@@ -46,10 +65,12 @@ class FlutterwaveClient:
             "currency": currency,
             "narration": narration,
             "reference": reference,
-            "callback_url": f"{self.base_url}/webhooks/flutterwave",
             "debit_currency": currency
         }
-        
+
+        if self.callback_url:
+            payload["callback_url"] = self.callback_url
+
         if beneficiary_name:
             payload["beneficiary_name"] = beneficiary_name
         

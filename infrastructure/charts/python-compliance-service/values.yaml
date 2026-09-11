@@ -48,17 +48,17 @@ dapr:
 # (os.Getenv / env::var / os.getenv across python-compliance-service's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install python-compliance-service infrastructure/charts/python-compliance-service \
 #     -n 54remit -f infrastructure/values-secrets/python-compliance-service.yaml
 # (a gitignored, per-environment file).
 secrets:
-  CORS_ORIGINS: "CHANGE_ME"
-  DATABASE_URL: "CHANGE_ME"
-  EU_SANCTIONS_URL: "CHANGE_ME"
-  HMT_SANCTIONS_URL: "CHANGE_ME"
-  OFAC_SDN_URL: "CHANGE_ME"
+  CORS_ORIGINS: ""  # REQUIRED
+  DATABASE_URL: ""  # REQUIRED
+  EU_SANCTIONS_URL: ""  # REQUIRED
+  HMT_SANCTIONS_URL: ""  # REQUIRED
+  OFAC_SDN_URL: ""  # REQUIRED
   PORT: "8083"
-  REDIS_URL: "CHANGE_ME"
-  SANCTIONS_REFRESH_INTERVAL_SECS: "CHANGE_ME"
-  UN_SANCTIONS_URL: "CHANGE_ME"
+  REDIS_URL: ""  # REQUIRED
+  SANCTIONS_REFRESH_INTERVAL_SECS: ""  # REQUIRED
+  UN_SANCTIONS_URL: ""  # REQUIRED

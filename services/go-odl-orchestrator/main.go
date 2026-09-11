@@ -89,6 +89,10 @@ const (
 	StatusCompleted   ODLSettlementStatus = "COMPLETED"
 	StatusFailed      ODLSettlementStatus = "FAILED"
 	StatusSlippage    ODLSettlementStatus = "FAILED_SLIPPAGE"
+	// StatusUnavailable is the honest terminal state for settlement requests
+	// whose rail adapter is not implemented. It MUST be used instead of
+	// COMPLETED whenever no real on-chain/rail execution occurred.
+	StatusUnavailable ODLSettlementStatus = "UNAVAILABLE"
 )
 
 // CorridorRoute defines the optimal ODL route for a currency corridor.
@@ -265,121 +269,60 @@ func calculateSlippage(quotedRate, actualRate float64) float64 {
 	return math.Abs(actualRate-quotedRate) / quotedRate * 100
 }
 
-// simulateOnRamp simulates the on-ramp leg (source currency → bridge asset).
-func simulateOnRamp(ctx context.Context, settlement *ODLSettlement) (string, float64, error) {
-	// In production: calls Circle API, Stellar anchor, or Ripple ODL
-	txID := generateID("ONRAMP")
-	bridgeAmount := settlement.SendAmount * 0.9985 // 0.15% on-ramp fee
-	settlement.AuditTrail = append(settlement.AuditTrail, AuditEvent{
-		Timestamp: time.Now(),
-		Event:     "ON_RAMP_INITIATED",
-		Details:   fmt.Sprintf("Converting %.2f %s to %s", settlement.SendAmount, settlement.FromCurrency, settlement.BridgeAsset),
-		TxID:      txID,
-	})
-	return txID, bridgeAmount, nil
+// railAdapterAvailable reports whether a real settlement rail adapter is
+// implemented and configured for the given provider.
+//
+// FAIL-CLOSED (honesty audit): no on-ramp/bridge/off-ramp adapter exists for
+// ANY provider (Circle, Ripple, Stellar, Polygon) in this service — the
+// previous implementation fabricated "txIDs" via generateID and marked the
+// settlement COMPLETED. Until a real adapter is wired, this returns false and
+// every settlement terminates UNAVAILABLE. Do NOT flip this to true without a
+// real adapter performing actual execution.
+func railAdapterAvailable(provider ODLProvider) bool {
+	return false
 }
 
-// simulateBridgeTransfer simulates the bridge asset transfer.
-func simulateBridgeTransfer(ctx context.Context, settlement *ODLSettlement, bridgeAmount float64) (string, error) {
-	txHash := generateID("BRIDGE")
-	settlement.AuditTrail = append(settlement.AuditTrail, AuditEvent{
-		Timestamp: time.Now(),
-		Event:     "BRIDGE_TRANSFER_INITIATED",
-		Details:   fmt.Sprintf("Bridging %.6f %s via %s", bridgeAmount, settlement.BridgeAsset, settlement.Provider),
-		TxID:      txHash,
-	})
-	return txHash, nil
-}
-
-// simulateOffRamp simulates the off-ramp leg (bridge asset → destination currency).
-func simulateOffRamp(ctx context.Context, settlement *ODLSettlement, bridgeAmount float64) (string, float64, error) {
-	txID := generateID("OFFRAMP")
-	// Simulate slight slippage
-	slippage := 0.05 // 0.05% — within acceptable range
-	receiveAmount := settlement.ReceiveAmount * (1 - slippage/100)
-	settlement.AuditTrail = append(settlement.AuditTrail, AuditEvent{
-		Timestamp: time.Now(),
-		Event:     "OFF_RAMP_INITIATED",
-		Details:   fmt.Sprintf("Converting %s to %.2f %s", settlement.BridgeAsset, receiveAmount, settlement.ToCurrency),
-		TxID:      txID,
-	})
-	return txID, slippage, nil
-}
-
-// executeODLSettlement runs the full ODL pipeline atomically.
+// executeODLSettlement runs the ODL settlement pipeline.
+//
+// Fail-closed: if no real rail adapter is available for the settlement's
+// provider, the settlement terminates in StatusUnavailable with an explicit
+// reason. It NEVER fabricates transaction IDs and NEVER marks a settlement
+// COMPLETED without real rail execution. Nothing downstream may treat an
+// UNAVAILABLE settlement as settled funds.
 func executeODLSettlement(ctx context.Context, settlement *ODLSettlement) {
-	slog.Info("ODL settlement started", "id", settlement.SettlementID)
+	slog.Info("ODL settlement requested", "id", settlement.SettlementID)
 	totalSettlements.Add(1)
 
-	// Step 1: On-ramp
-	settlement.Status = StatusOnRamping
-	onRampTxID, bridgeAmount, err := simulateOnRamp(ctx, settlement)
-	if err != nil {
-		settlement.Status = StatusFailed
-		settlement.FailureReason = fmt.Sprintf("on-ramp failed: %v", err)
-		failedSettlements.Add(1)
-		slog.Error("ODL on-ramp failed", "id", settlement.SettlementID, "err", err)
-		return
-	}
-	settlement.OnRampTxID = onRampTxID
-
-	// Step 2: Bridge transfer
-	settlement.Status = StatusBridging
-	bridgeTxHash, err := simulateBridgeTransfer(ctx, settlement, bridgeAmount)
-	if err != nil {
-		settlement.Status = StatusFailed
-		settlement.FailureReason = fmt.Sprintf("bridge transfer failed: %v", err)
-		failedSettlements.Add(1)
-		return
-	}
-	settlement.BridgeTxHash = bridgeTxHash
-
-	// Step 3: Off-ramp
-	settlement.Status = StatusOffRamping
-	offRampTxID, actualSlippage, err := simulateOffRamp(ctx, settlement, bridgeAmount)
-	if err != nil {
-		settlement.Status = StatusFailed
-		settlement.FailureReason = fmt.Sprintf("off-ramp failed: %v", err)
-		failedSettlements.Add(1)
-		return
-	}
-	settlement.OffRampTxID = offRampTxID
-	settlement.ActualSlippage = actualSlippage
-
-	// Step 4: Slippage check
-	if actualSlippage > maxSlippagePct {
-		settlement.Status = StatusSlippage
-		settlement.FailureReason = fmt.Sprintf(
-			"slippage %.3f%% exceeds max %.3f%%", actualSlippage, maxSlippagePct,
+	if !railAdapterAvailable(settlement.Provider) {
+		reason := fmt.Sprintf(
+			"settlement rail adapter not implemented for provider %s (bridge asset %s); "+
+				"refusing to fabricate on-chain transaction IDs or mark settlement COMPLETED",
+			settlement.Provider, settlement.BridgeAsset,
 		)
-		totalSlippageEvents.Add(1)
+		settlement.Status = StatusUnavailable
+		settlement.FailureReason = reason
+		settlement.AuditTrail = append(settlement.AuditTrail, AuditEvent{
+			Timestamp: time.Now(),
+			Event:     "SETTLEMENT_UNAVAILABLE",
+			Details:   reason,
+		})
 		failedSettlements.Add(1)
-		slog.Warn("ODL settlement aborted: slippage exceeded",
+		slog.Warn("ODL settlement unavailable: rail adapter not implemented",
 			"id", settlement.SettlementID,
-			"slippage", actualSlippage,
+			"provider", settlement.Provider,
+			"bridge_asset", settlement.BridgeAsset,
 		)
 		return
 	}
 
-	// Step 5: Mark complete
-	now := time.Now()
-	settlement.Status = StatusCompleted
-	settlement.CompletedAt = &now
-	settlement.AuditTrail = append(settlement.AuditTrail, AuditEvent{
-		Timestamp: now,
-		Event:     "SETTLEMENT_COMPLETED",
-		Details: fmt.Sprintf(
-			"ODL settlement complete. Slippage: %.4f%%", actualSlippage,
-		),
-	})
-
-	successfulSettlements.Add(1)
-	totalVolumeUSD.Add(int64(settlement.SendAmount * 100))
-	slog.Info("ODL settlement completed",
-		"id", settlement.SettlementID,
-		"slippage_pct", actualSlippage,
-		"bridge", settlement.BridgeAsset,
-	)
+	// Unreachable until a real rail adapter is implemented and
+	// railAdapterAvailable reports it. A real implementation must populate
+	// OnRampTxID / BridgeTxHash / OffRampTxID with values returned by the
+	// actual rail/blockchain, and only then may set StatusCompleted.
+	settlement.Status = StatusFailed
+	settlement.FailureReason = "rail adapter reported available but no execution path exists"
+	failedSettlements.Add(1)
+	slog.Error("ODL settlement invariant violated", "id", settlement.SettlementID)
 }
 
 // ── HTTP Handlers ─────────────────────────────────────────────────────────────
@@ -478,10 +421,24 @@ func handleInitiateSettlement(w http.ResponseWriter, r *http.Request) {
 	store.settlements[settlement.SettlementID] = settlement
 	store.mu.Unlock()
 
-	// Execute asynchronously
-	go executeODLSettlement(context.Background(), settlement)
+	// Evaluate synchronously: the current implementation has no real rail
+	// adapters, so the terminal (honest) state is known immediately and the
+	// API response can state it explicitly instead of implying settlement is
+	// underway.
+	executeODLSettlement(context.Background(), settlement)
 
 	w.Header().Set("Content-Type", "application/json")
+	if settlement.Status == StatusUnavailable {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"settlement_id": settlement.SettlementID,
+			"status":        settlement.Status,
+			"simulated":     false,
+			"rail_adapter":  "unavailable",
+			"message":       settlement.FailureReason,
+		})
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"settlement_id": settlement.SettlementID,

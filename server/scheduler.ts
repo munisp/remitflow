@@ -45,6 +45,7 @@ import { logger } from './_core/logger';
 import { safeParseAmount } from "./lib/safeDecimal";
 import { auditCoreOperation } from "./middleware/coreAtomicity";
 import { KAFKA_TOPICS } from "./middleware/kafka";
+import { sweepAutoRefunds } from "./routers/propertyEscrow";
 
 // ============================================================================
 // FX Rate Cache (backed by fx-rates.service with real API sources)
@@ -701,19 +702,48 @@ export function startScheduler(): void {
   });
 
   // Job 12: Wallet balance reconciliation — daily at 03:00 UTC
+  // W9/F11-4 rewrite: the previous query referenced columns that never existed
+  // (ledger_entries."walletId", ledger_entries.direction) so this job has
+  // never successfully run. Real columns (drizzle/schema.ts ledger_entries):
+  // debit_account_id / credit_account_id / amount / currency / code — account
+  // ids are TigerBeetle 128-bit ids mapped to (user_id, currency) via the
+  // tigerbeetle_accounts table (same mapping _core/tigerBeetle.ts persists and
+  // _core/transferPipeline.ts resolves against). The job FAILS LOUDLY when the
+  // mapping is absent/empty — it never silently "passes" reconciliation.
   cron.schedule("0 3 * * *", async () => {
     try {
       const db = await getDb();
-      if (!db) return;
+      if (!db) {
+        logger.error("[Scheduler] Wallet reconciliation: DB unavailable — reconciliation NOT performed (fail-loud)");
+        return;
+      }
+
+      // Coverage gate: without active account-id mappings the JOIN is blind
+      // and every wallet would look "balanced" — refuse to pass in that state.
+      const mappingResult = await db.execute(
+        sql`SELECT COUNT(*) AS mapping_count FROM tigerbeetle_accounts WHERE status = 'active'`
+      );
+      const mappingCount = Number(((mappingResult as any).rows ?? [])[0]?.mapping_count ?? 0);
+      if (mappingCount === 0) {
+        logger.error({ mappingCount }, "[Scheduler] Wallet reconciliation CANNOT run: no active tigerbeetle_accounts mappings — reconciliation is blind, treating as FAILURE not pass");
+        await notifyOwner({ title: "🚨 Wallet Reconciliation Broken", content: "Nightly wallet reconciliation could not run: the tigerbeetle_accounts account-id mapping table has no active rows. Balances were NOT verified." }).catch(() => {});
+        return;
+      }
+
       const result = await db.execute(
         sql`SELECT COUNT(*) AS discrepancy_count
             FROM wallets w
+            INNER JOIN tigerbeetle_accounts ta
+              ON ta.user_id = w."userId" AND ta.currency = w.currency AND ta.status = 'active'
             LEFT JOIN (
-              SELECT "walletId", SUM(CASE WHEN direction = 'credit' THEN CAST(amount AS DECIMAL)
-                                         WHEN direction = 'debit' THEN -CAST(amount AS DECIMAL)
-                                         ELSE 0 END) AS ledger_sum
-              FROM ledger_entries GROUP BY "walletId"
-            ) le ON le."walletId" = w.id
+              SELECT account_id, SUM(signed_amount) AS ledger_sum FROM (
+                SELECT credit_account_id AS account_id,  CAST(amount AS DECIMAL(24,8)) AS signed_amount FROM ledger_entries
+                UNION ALL
+                SELECT debit_account_id  AS account_id, -CAST(amount AS DECIMAL(24,8)) AS signed_amount FROM ledger_entries
+              ) movements
+              WHERE account_id IS NOT NULL
+              GROUP BY account_id
+            ) le ON le.account_id = ta.tb_account_id
             WHERE ABS(CAST(w.balance AS DECIMAL) - COALESCE(le.ledger_sum, 0)) > 0.01`
       );
       const rows = (result as any).rows ?? [];
@@ -725,7 +755,24 @@ export function startScheduler(): void {
         logger.info(`[Scheduler] Wallet reconciliation: all balances match ✓`);
       }
     }
-    catch (err) { logger.error({ err: err }, '[Scheduler] Wallet reconciliation job error:'); }
+    catch (err) {
+      // Fail LOUD: a broken reconciliation must page ops, never silently pass.
+      logger.error({ err: err instanceof Error ? err.message : String(err) }, '[Scheduler] Wallet reconciliation job FAILED — balances NOT verified:');
+      await notifyOwner({ title: "🚨 Wallet Reconciliation Failed", content: `Nightly wallet reconciliation threw an error and balances were NOT verified: ${err instanceof Error ? err.message : String(err)}` }).catch(() => {});
+    }
+  });
+
+  // Job 13: Property escrow auto-refund sweeper (W9/F11-2) — every hour.
+  // Honours the "auto-refund after 90-day grace period" promise made when a
+  // property dispute is raised; without this job autoRefundDate was dead text.
+  cron.schedule("40 * * * *", async () => {
+    try {
+      const result = await sweepAutoRefunds();
+      if (result.refunded > 0 || result.failed > 0) {
+        logger.info({ ...result }, "[Scheduler] Property escrow auto-refund sweep finished");
+      }
+    }
+    catch (err) { logger.error({ err: err instanceof Error ? err.message : String(err) }, '[Scheduler] Property escrow auto-refund sweep job error:'); }
   });
 
   // Start transfer batch queue (continuous 50ms flush — 1B payments/day pattern)
@@ -742,6 +789,8 @@ export function startScheduler(): void {
   logger.info("  \u2022 KYC expiry reminders: daily at 09:00");
   logger.info("  \u2022 Weekly community fund digest: every Monday at 08:00");
   logger.info("  \u2022 Document vault expiry reminders: daily at 10:00");
+  logger.info("  • Wallet reconciliation: daily at 03:00");
+  logger.info("  • Property escrow auto-refund sweep: hourly");
 }
 
 // ============================================================================
