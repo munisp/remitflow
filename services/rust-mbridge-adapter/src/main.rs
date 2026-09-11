@@ -121,6 +121,18 @@ struct HealthResponse {
 
 // ── Supported CBDC currencies ─────────────────────────────────────────────────
 
+
+/// http_client returns a reqwest client with an explicit total timeout — the
+/// reqwest default is NO timeout, and a hung peer must not stall handler
+/// tasks indefinitely (F14).
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("failed to build reqwest client")
+}
+
 fn is_supported_cbdc(cbdc: &str) -> bool {
     matches!(cbdc, "eCNY" | "eHKD" | "dAED" | "eBaht" | "eSAR")
 }
@@ -131,8 +143,10 @@ fn mojaloop_countries() -> std::collections::HashSet<&'static str> {
 
 // ── Middleware helpers (fire-and-forget) ──────────────────────────────────────
 
-async fn publish_kafka(cfg: &Config, topic: &str, payload: serde_json::Value) {
-    let client = reqwest::Client::new();
+// publish_kafka publishes the CBDC event and RETURNS failures to the caller —
+// CBDC event publication must never silently drop (F14).
+async fn publish_kafka(cfg: &Config, topic: &str, payload: serde_json::Value) -> Result<(), String> {
+    let client = http_client();
     let url = format!("http://localhost:8095/publish/{}", topic);
     let body = serde_json::json!({
         "eventType": topic,
@@ -140,13 +154,25 @@ async fn publish_kafka(cfg: &Config, topic: &str, payload: serde_json::Value) {
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "payload": payload,
     });
-    if let Err(e) = timeout(Duration::from_secs(3), client.post(&url).json(&body).send()).await {
-        warn!("[Kafka] WARN: {}", e);
+    match timeout(Duration::from_secs(3), client.post(&url).json(&body).send()).await {
+        Err(_) => {
+            warn!("[Kafka] ERROR: publish timeout for topic {}", topic);
+            Err(format!("kafka publish timeout for topic {}", topic))
+        }
+        Ok(Err(e)) => {
+            warn!("[Kafka] ERROR: publish failed for topic {}: {}", topic, e);
+            Err(format!("kafka publish failed for topic {}: {}", topic, e))
+        }
+        Ok(Ok(resp)) if !resp.status().is_success() => {
+            warn!("[Kafka] ERROR: publish rejected for topic {}: HTTP {}", topic, resp.status());
+            Err(format!("kafka publish rejected for topic {}: HTTP {}", topic, resp.status()))
+        }
+        Ok(Ok(_)) => Ok(()),
     }
 }
 
 async fn publish_dapr(cfg: &Config, topic: &str, data: serde_json::Value) {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = format!("http://localhost:{}/v1.0/publish/remitflow-pubsub/{}", cfg.dapr_http_port, topic);
     let body = serde_json::json!({"data": data});
     if let Err(e) = timeout(Duration::from_secs(3), client.post(&url).json(&body).send()).await {
@@ -155,7 +181,7 @@ async fn publish_dapr(cfg: &Config, topic: &str, data: serde_json::Value) {
 }
 
 async fn produce_fluvio(cfg: &Config, topic: &str, key: &str, value: &str) {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = format!("{}/produce", cfg.fluvio_gateway_url);
     let body = serde_json::json!({"topic": topic, "key": key, "value": value});
     if let Err(e) = timeout(Duration::from_secs(3), client.post(&url).json(&body).send()).await {
@@ -164,7 +190,7 @@ async fn produce_fluvio(cfg: &Config, topic: &str, key: &str, value: &str) {
 }
 
 async fn record_tigerbeetle(cfg: &Config, transfer_id: &str, debit: &str, credit: &str, amount: i64, ledger: u32) {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let body = serde_json::json!({
         "id": transfer_id, "debitAccountId": debit,
         "creditAccountId": credit, "amount": amount,
@@ -176,7 +202,7 @@ async fn record_tigerbeetle(cfg: &Config, transfer_id: &str, debit: &str, credit
 }
 
 async fn index_opensearch(cfg: &Config, index: &str, doc_id: &str, doc: serde_json::Value) {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = format!("{}/{}/_doc/{}", cfg.opensearch_url, index, doc_id);
     if let Err(e) = timeout(Duration::from_secs(3), client.put(&url).json(&doc).send()).await {
         warn!("[OpenSearch] WARN: {}", e);
@@ -184,7 +210,7 @@ async fn index_opensearch(cfg: &Config, index: &str, doc_id: &str, doc: serde_js
 }
 
 async fn emit_lakehouse(cfg: &Config, event_type: &str, data: serde_json::Value) {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let url = format!("{}/events", cfg.lakehouse_url);
     let body = serde_json::json!({
         "source": "rust-mbridge-adapter",
@@ -198,7 +224,7 @@ async fn emit_lakehouse(cfg: &Config, event_type: &str, data: serde_json::Value)
 }
 
 async fn trigger_temporal(cfg: &Config, workflow_type: &str, workflow_id: &str, input: serde_json::Value) {
-    let client = reqwest::Client::new();
+    let client = http_client();
     let body = serde_json::json!({
         "workflowType": workflow_type,
         "workflowId": workflow_id,
@@ -214,7 +240,7 @@ async fn route_via_mojaloop(cfg: &Config, req: &MBridgeTransferRequest) -> bool 
     if !mojaloop_countries().contains(req.receiver_country.as_str()) {
         return false;
     }
-    let client = reqwest::Client::new();
+    let client = http_client();
     let body = serde_json::json!({
         "transferId": req.transfer_id,
         "payerFsp": "remitflow",
@@ -267,8 +293,10 @@ async fn initiate_transfer(
         &format!("mbridge-{}-credit", req.receive_cbdc.to_lowercase()),
         (req.send_amount * 10000.0) as i64, 2).await;
 
-    // 3. Publish Kafka event
-    publish_kafka(&cfg, "payment.mbridge.initiated", serde_json::json!({
+    // 3. Publish Kafka event — failure is surfaced in the response status
+    // (the transfer is marked "submitted_event_unpublished", never a silent
+    // "submitted" with no event).
+    let kafka_result = publish_kafka(&cfg, "payment.mbridge.initiated", serde_json::json!({
         "transferId": req.transfer_id,
         "sendCbdc": req.send_cbdc,
         "receiveCbdc": req.receive_cbdc,
@@ -322,15 +350,23 @@ async fn initiate_transfer(
         "dltTxHash": dlt_tx_hash,
     })).await;
 
+    let (status, message) = match &kafka_result {
+        Ok(()) => ("submitted".to_string(), "mBridge CBDC transfer submitted to DLT".to_string()),
+        Err(e) => (
+            "submitted_event_unpublished".to_string(),
+            format!("mBridge CBDC transfer submitted to DLT, but event publication failed: {}", e),
+        ),
+    };
+
     Ok(Json(MBridgeTransferResponse {
         transfer_id: req.transfer_id,
         dlt_tx_hash,
-        status: "submitted".into(),
+        status,
         receive_amount,
         exchange_rate: 0.9985,
         settlement_time_ms: 3000,
         mojaloop_routed,
-        message: "mBridge CBDC transfer submitted to DLT".into(),
+        message,
     }))
 }
 
