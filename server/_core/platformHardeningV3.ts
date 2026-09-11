@@ -296,20 +296,40 @@ export interface ScheduledJob {
   expireInSeconds?: number;
 }
 
+// Wave 7 (C12): these cron targets are phantom services — verified against
+// services/ source + compose files:
+//   :8310/trigger       go-continuous-kyc source exists but is NOT deployed
+//                       (absent from every docker-compose file)
+//   :8311/process       no service listens on :8311 at all
+//   :8314/batch-screen  python-adverse-media listens on :8314 but has NO
+//                       /batch-screen route (real route: /screen/adverse-media)
+//   :8315/refresh-stats python-predictive-routing listens on :8315 but has NO
+//                       /refresh-stats route
+// The old handlers swallowed every failure with `.catch(() => {})`, making the
+// crons look alive while doing nothing. They are now explicitly disabled: one
+// logger.warn per job, then skip cleanly.
+const disabledCronWarned = new Set<string>();
+function cronDisabled(jobName: string, target: string, reason: string): void {
+  if (disabledCronWarned.has(jobName)) return; // warn once, skip cleanly thereafter
+  disabledCronWarned.add(jobName);
+  logger.warn({ job: jobName, target, reason }, "cron disabled: target service not deployed");
+}
+
 const SCHEDULED_JOBS: ScheduledJob[] = [
   {
     name: "continuous-kyc-rescreen",
     cron: "*/15 * * * *", // Every 15 minutes
     handler: async () => {
-      // Trigger Go continuous KYC service
-      await fetch("http://localhost:8310/trigger", { method: "POST" }).catch(() => {});
+      cronDisabled("continuous-kyc-rescreen", "http://localhost:8310/trigger",
+        "go-continuous-kyc is not deployed (absent from all compose files)");
     },
   },
   {
     name: "dlq-retry-processor",
     cron: "*/5 * * * *", // Every 5 minutes
     handler: async () => {
-      await fetch("http://localhost:8311/process", { method: "POST" }).catch(() => {});
+      cronDisabled("dlq-retry-processor", "http://localhost:8311/process",
+        "no DLQ processor service exists — nothing listens on :8311");
     },
   },
   {
@@ -337,14 +357,16 @@ const SCHEDULED_JOBS: ScheduledJob[] = [
     name: "adverse-media-batch-screen",
     cron: "0 2 * * *", // Daily at 2 AM
     handler: async () => {
-      await fetch("http://localhost:8314/batch-screen", { method: "POST" }).catch(() => {});
+      cronDisabled("adverse-media-batch-screen", "http://localhost:8314/batch-screen",
+        "python-adverse-media has no /batch-screen route (real route is /screen/adverse-media)");
     },
   },
   {
     name: "corridor-stats-refresh",
     cron: "*/10 * * * *", // Every 10 minutes
     handler: async () => {
-      await fetch("http://localhost:8315/refresh-stats", { method: "POST" }).catch(() => {});
+      cronDisabled("corridor-stats-refresh", "http://localhost:8315/refresh-stats",
+        "python-predictive-routing has no /refresh-stats route");
     },
   },
 ];
@@ -681,11 +703,26 @@ export function enforceDataResidency(userCountry: string, dataType: "pii" | "fin
 
 // ── Biometric Template Encryption ───────────────────────────────────────────
 
-const BIOMETRIC_KEY = process.env.BIOMETRIC_ENCRYPTION_KEY || randomBytes(32).toString("hex");
+// W9/Q11 (F10-7): ephemeral per-process keys cause permanent biometric data
+// loss on restart and diverge across replicas. Production: missing
+// BIOMETRIC_ENCRYPTION_KEY => throw at use (fail closed). Non-production:
+// ephemeral key + warn.
+let cachedBiometricKey: string | null = null;
+function getBiometricKey(): string {
+  if (cachedBiometricKey) return cachedBiometricKey;
+  const envKey = process.env.BIOMETRIC_ENCRYPTION_KEY;
+  if (envKey) { cachedBiometricKey = envKey; return envKey; }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("BIOMETRIC_ENCRYPTION_KEY is required in production — refusing to encrypt biometric templates with an ephemeral key");
+  }
+  console.warn("[platformHardeningV3] BIOMETRIC_ENCRYPTION_KEY unset — using ephemeral key; data will NOT survive restarts (non-production only)");
+  cachedBiometricKey = randomBytes(32).toString("hex");
+  return cachedBiometricKey;
+}
 
 export function encryptBiometricTemplate(template: Buffer): { encrypted: string; iv: string } {
   const iv = randomBytes(16);
-  const key = Buffer.from(BIOMETRIC_KEY, "hex");
+  const key = Buffer.from(getBiometricKey(), "hex");
   const cipher = createCipheriv("aes-256-gcm", key, iv);
   const encrypted = Buffer.concat([cipher.update(template), cipher.final()]);
   const authTag = cipher.getAuthTag();
@@ -696,7 +733,7 @@ export function encryptBiometricTemplate(template: Buffer): { encrypted: string;
 }
 
 export function decryptBiometricTemplate(encrypted: string, iv: string): Buffer {
-  const key = Buffer.from(BIOMETRIC_KEY, "hex");
+  const key = Buffer.from(getBiometricKey(), "hex");
   const ivBuf = Buffer.from(iv, "base64");
   const encBuf = Buffer.from(encrypted, "base64");
   const authTag = encBuf.subarray(encBuf.length - 16);
@@ -738,11 +775,25 @@ export async function generateVASPReport(db: any, transfer: {
   receiverName: string;
   transferType: "crypto" | "fiat";
 }): Promise<{ reportId: string; filingRequired: boolean; jurisdiction: string }> {
-  const amountUsd = transfer.currency === "USD" ? transfer.amount : transfer.amount * (await getLiveFxRate(transfer.currency, "USD").catch(() => 1));
+  // Wave 7 verification: NEVER fabricate rate=1 for a regulatory threshold.
+  // On FX failure the threshold cannot be evaluated — skip the computation,
+  // log explicitly, and fail CLOSED regulatorily (file rather than risk an
+  // unfiled reportable transfer).
+  let amountUsd: number | null = null;
+  if (transfer.currency === "USD") {
+    amountUsd = transfer.amount;
+  } else {
+    try {
+      amountUsd = transfer.amount * await getLiveFxRate(transfer.currency, "USD");
+    } catch (fxErr) {
+      logger.warn({ err: fxErr instanceof Error ? fxErr.message : String(fxErr), currency: transfer.currency },
+        "[VASP] FX rate unavailable — skipping MiCA threshold evaluation (no rate=1 fabrication); filing conservatively");
+    }
+  }
 
   // MiCA threshold: €1000 for crypto transfers
   const micaThreshold = 1000;
-  const filingRequired = transfer.transferType === "crypto" && amountUsd >= micaThreshold;
+  const filingRequired = transfer.transferType === "crypto" && (amountUsd === null || amountUsd >= micaThreshold);
 
   const reportId = `VASP-${Date.now()}-${randomBytes(4).toString("hex")}`;
 
