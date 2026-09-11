@@ -41,6 +41,7 @@ import {
   correspondentBanks,
 } from "../../drizzle/schema";
 import { randomBytes } from "crypto";
+import { validateIBAN } from "./beneficiaryVerification";
 
 // ─── 1. Payment Methods Router ────────────────────────────────────────────────
 export const paymentMethodsExtRouter = router({
@@ -122,8 +123,11 @@ export const paymentMethodsExtRouter = router({
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      if (!/^[A-Z]{2}\d{2}[A-Z0-9]{4,}$/.test(input.iban)) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid IBAN format" });
+      // W9/Q10 (F9-8): mod-97 checksum validation (shared helper) instead of a
+      // regex that accepts any well-formed string. Invalid IBAN => reject.
+      const ibanCheck = validateIBAN(input.iban);
+      if (!ibanCheck.valid) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: `Invalid IBAN: ${ibanCheck.reason ?? "checksum failed"}` });
       }
       if (input.isDefault) {
         await db.update(sepaPaymentMethods).set({ isDefault: false }).where(eq(sepaPaymentMethods.userId, ctx.user.id)).returning();
