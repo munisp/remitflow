@@ -1,7 +1,8 @@
 /**
  * RemitFlow — React Native Stablecoin Screen
  * Provides 7 tabs: On-Ramp, Off-Ramp, Swap, Send, Yield, Bridge, Bill Pay
- * Supports all 9 chains: ethereum, polygon, bsc, solana, tron, arbitrum, optimism, base, avalanche
+ * Supports 7 chains: ethereum, polygon, bsc, arbitrum, optimism, base, avalanche
+ * (Solana/Tron not enabled server-side — no real on-chain adapter)
  */
 
 import React, { useState } from "react";
@@ -18,12 +19,12 @@ import { trpc } from "../utils/trpc";
 const TABS = ["On-Ramp", "Off-Ramp", "Swap", "Send", "Yield", "Bridge", "Bill Pay"] as const;
 type Tab = typeof TABS[number];
 
+// Solana/Tron removed: not enabled server-side (no real adapter; reads fail
+// closed). Keep in sync with server/routers/stablecoinEnhanced.ts.
 const SUPPORTED_CHAINS = [
   "ethereum",
   "polygon",
   "bsc",
-  "solana",
-  "tron",
   "arbitrum",
   "optimism",
   "base",

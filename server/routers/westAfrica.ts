@@ -67,9 +67,13 @@ export const westAfricaRouter = router({
       recipientName: z.string().min(2).max(100),
       mojaloopDfspId: z.string().min(2).max(50),
       purposeCode: z.string().default("FAM"),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
       const db = await getDb();
+      // W12: canonical TOTP step-up (fail-closed) — money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "XOF transfer");
       const transferId = `XOF-${Date.now()}-${ctx.user.id}`;
 
       // KYC tier limit enforcement
