@@ -1,6 +1,6 @@
 replicaCount: 1
 image:
-  repository: registry.digitalocean.com/talentgraph-auth/54remit-go-ghipss-adapter
+  repository: registry.digitalocean.com/talentgraph-services/54remit-go-ghipss-adapter
   pullPolicy: IfNotPresent
   tag: 0.1.0
 nameOverride: ''
@@ -14,15 +14,15 @@ podSecurityContext: {}
 securityContext: {}
 service:
   type: ClusterIP
-  port: 80
-  targetPort: 8080
+  port: 8100
+  targetPort: 8100
 resources:
   requests:
     cpu: 100m
-    memory: 128Mi
+    memory: 250Mi
   limits:
-    cpu: 250m
-    memory: 500Mi
+    cpu: 500m
+    memory: 1000Mi
 autoscaling:
   enabled: false
   minReplicas: 1
@@ -35,7 +35,7 @@ tolerations: []
 affinity: {}
 dapr:
   appId: go-ghipss-adapter
-  appPort: 8080
+  appPort: 8100
   enableMetrics: true
   enabled: true
   metricsPort: 9099
@@ -44,28 +44,11 @@ dapr:
   cpu-limit: 300m
   memory-request: 250Mi
   memory-limit: 1000Mi
-# Auto-generated: env var names below were discovered via source grep
-# (os.Getenv / env::var / os.getenv across go-ghipss-adapter's codebase), so this list
-# reflects what the service actually reads — not a guess. Known non-secret
-# infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
-#   helm upgrade --install go-ghipss-adapter infrastructure/charts/go-ghipss-adapter \
-#     -n 54remit -f infrastructure/values-secrets/go-ghipss-adapter.yaml
-# (a gitignored, per-environment file).
+# ⚠️ Do not commit real values here — see admin-service/values.yaml's comment
+# for the override convention. This service holds the most sensitive
+# credentials of the three (Keycloak admin password, superadmin bootstrap
+# secret) — treat its override file with extra care (e.g. sealed-secrets or
+# a secrets manager, not a plain gitignored yaml, once one is adopted).
 secrets:
-  DAPR_HTTP_PORT: "3500"
-  DATABASE_URL: "CHANGE_ME"
-  FLUVIO_GATEWAY_URL: "CHANGE_ME"
-  GHIPSS_ENDPOINT: "CHANGE_ME"
-  GIP_ENDPOINT: "CHANGE_ME"
-  INTERNAL_SERVICE_KEY: "CHANGE_ME"
-  KAFKA_BROKERS: "kafka-service:9092"
-  LAKEHOUSE_URL: "CHANGE_ME"
-  MMI_ENDPOINT: "CHANGE_ME"
-  MOJALOOP_HUB_URL: "CHANGE_ME"
-  OPENSEARCH_URL: "CHANGE_ME"
-  PAPSS_ENDPOINT: "CHANGE_ME"
-  PORT: "8080"
-  REDIS_ADDR: "CHANGE_ME"
-  TEMPORAL_HOST_PORT: "CHANGE_ME"
-  TIGERBEETLE_ADDR: "CHANGE_ME"
+  GHIPSS_BASE_URL: ""  # REQUIRED — set via --set or secrets manager
+  GHIPSS_API_KEY: ""  # REQUIRED — set via --set or secrets manager
