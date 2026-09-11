@@ -483,8 +483,13 @@ export const diasporaBondRouter = router({
     .input(z.object({
       subscriptionId: z.number(),
       paymentReference: z.string().min(4).max(120),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // W12: activates a paid bond subscription (money-moving) — canonical
+      // TOTP step-up, fail-closed.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "bond payment confirmation");
       const db = await getDb();
       const [sub] = await db
         .select()
@@ -937,11 +942,15 @@ export const diasporaBondRouter = router({
     .input(z.object({
       orderId: z.number(),
       unitsToFill: z.number().positive().optional(), // partial fill supported
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       // A5: enforce the declared investments gate — this procedure debits the
       // buyer and credits the seller and previously had NO user check at all.
       await assertFeatureEligible(ctx, { flag: "investments", minKycTier: 2, minPlan: "growth", featureName: "Diaspora bond secondary market" });
+      // W12: canonical TOTP step-up (fail-closed) — debits buyer / credits seller.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "secondary-market order fill");
       const db = await getDb();
       const [order] = await db
         .select({ order: bondSecondaryOrders, bond: diasporaBonds })
@@ -1225,36 +1234,27 @@ export const diasporaBondRouter = router({
           fromAmount: redemptionAmount.toFixed(2),
           fromCurrency: "USD",
           status: "completed",
-          reference: `BONDREDEEM-${input.subscriptionId}`,
-          description: `Diaspora bond early redemption (${EARLY_REDEMPTION_PENALTY_RATE * 100}% penalty applied)`,
-          metadata: { originalType: "diaspora_bond_early_redemption", subscriptionId: input.subscriptionId, penalty },
+          reference: `REDEEM-${sub.subscriptionRef}`,
+          description: `Bond early redemption: subscription ${sub.subscriptionRef} (principal ${sub.purchasePrice} USD, penalty ${penalty.toFixed(2)} USD)`,
+          metadata: { originalType: "bond_early_redemption", subscriptionId: sub.id, bondId: sub.bondId, penalty: penalty.toFixed(2) },
         });
+
+        await tx
+          .update(diasporaBonds)
+          .set({
+            raisedAmount: sql`${diasporaBonds.raisedAmount} - ${sub.purchasePrice}`,
+            updatedAt: new Date(),
+          })
+          .where(eq(diasporaBonds.id, sub.bondId));
       });
 
-      await createAuditLog({ userId: ctx.user.id, action: "BOND_EARLY_REDEMPTION", metadata: { subscriptionId: input.subscriptionId, redemptionAmount, penalty, reason: input.reason } });
-      return { subscriptionId: input.subscriptionId, redemptionAmount, penalty, status: "sold" };
-    }),
-
-  // ── Investment Opportunities ───────────────────────────────────────────────
-
-  listInvestmentOpportunities: protectedProcedure
-    .input(z.object({
-      type: z.enum(["bond", "real_estate", "treasury_bill", "mutual_fund", "all"]).default("all"),
-      minAmount: z.number().optional(),
-      maxRisk: z.enum(["low", "medium", "high", "all"]).default("all"),
-    }))
-    .query(async ({ input }) => {
-      const db = await getDb();
-      const opportunities = await db
-        .select()
-        .from(investmentOpportunities)
-        .where(eq(investmentOpportunities.status, "active"))
-        .orderBy(desc(investmentOpportunities.createdAt));
-
-      const RISK_ORDER = ["low", "medium", "high"];
-      return opportunities
-        .filter((o: any) => input.type === "all" || o.type === input.type)
-        .filter((o: any) => !input.minAmount || Number(o.minInvestment) <= input.minAmount)
-        .filter((o: any) => input.maxRisk === "all" || RISK_ORDER.indexOf(o.riskLevel) <= RISK_ORDER.indexOf(input.maxRisk));
+      return {
+        subscriptionId: input.subscriptionId,
+        principalUsd: Number(sub.purchasePrice),
+        penalty,
+        penaltyRate: EARLY_REDEMPTION_PENALTY_RATE,
+        redemptionAmount,
+        creditedToWallet: true,
+      };
     }),
 });
