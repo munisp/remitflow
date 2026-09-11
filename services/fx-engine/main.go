@@ -186,9 +186,12 @@ func dbPersistQuote(ctx context.Context, quoteID, from, to, fsp string, send, re
 	}
 }
 
-func dbPersistExecution(ctx context.Context, txID, userID, recipientID, from, to, fsp, reference string, amount, receive, rate, fee float64) {
+// dbPersistExecution writes the executed trade to fx_executions. FAIL CLOSED:
+// the error is returned to the caller — an executed FX trade MUST NOT be
+// acknowledged without its audit/reconciliation record.
+func dbPersistExecution(ctx context.Context, txID, userID, recipientID, from, to, fsp, reference string, amount, receive, rate, fee float64) error {
 	if fxDb == nil {
-		return
+		return fmt.Errorf("fx database not configured")
 	}
 	_, err := fxDb.db.ExecContext(ctx,
 		`INSERT INTO fx_executions (transaction_id, user_id, recipient_id, from_currency, to_currency, send_amount, receive_amount, fx_rate, fee, fsp, reference)
@@ -196,8 +199,10 @@ func dbPersistExecution(ctx context.Context, txID, userID, recipientID, from, to
 		 ON CONFLICT (transaction_id) DO NOTHING`,
 		txID, userID, recipientID, from, to, amount, receive, rate, fee, fsp, reference)
 	if err != nil {
-		log.Printf("[FX-DB] WARN: execution persist failed: %v", err)
+		log.Printf("[FX-DB] ERROR: execution persist failed: %v", err)
+		return fmt.Errorf("execution persist failed: %w", err)
 	}
+	return nil
 }
 
 func dbPersistRateHistory(ctx context.Context, base string, rates map[string]float64) {
@@ -215,6 +220,9 @@ func dbPersistRateHistory(ctx context.Context, base string, rates map[string]flo
 var (
 	rdb         *redis.Client
 	ratesAPIKey = os.Getenv("EXCHANGE_RATE_API_KEY") // optional; falls back to free tier
+	// fxHTTPClient is the dedicated client for external FX-rate fetches —
+	// bounded so a hung upstream cannot exhaust handler goroutines.
+	fxHTTPClient = &http.Client{Timeout: 10 * time.Second}
 )
 
 // Spread per FSP (basis points above mid-rate)
@@ -298,11 +306,16 @@ func fetchRates(base string) (map[string]float64, error) {
 		url = fmt.Sprintf("https://v6.exchangerate-api.com/v6/%s/latest/%s", ratesAPIKey, strings.ToUpper(base))
 	}
 
-	resp, err := http.Get(url)
+	// Dedicated client with timeout: a hung upstream rate API must not tie up
+	// handler goroutines indefinitely.
+	resp, err := fxHTTPClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("rate fetch failed: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("rate fetch failed: upstream HTTP %d", resp.StatusCode)
+	}
 
 	body, _ := io.ReadAll(resp.Body)
 	var result struct {
@@ -473,8 +486,17 @@ func handleExecute(c *gin.Context) {
 
 	log.Printf("[FX] %s", auditEvent)
 
-	// Persist execution to PostgreSQL (write-through)
-	dbPersistExecution(c.Request.Context(), txID, req.UserID, req.RecipientID, req.From, req.To, fsp, req.Reference, req.Amount, receiveAmount, appliedRate, fee)
+	// Persist execution to PostgreSQL (write-through). FAIL CLOSED: the trade
+	// is NOT acknowledged unless its audit/reconciliation record is booked.
+	if err := dbPersistExecution(c.Request.Context(), txID, req.UserID, req.RecipientID, req.From, req.To, fsp, req.Reference, req.Amount, receiveAmount, appliedRate, fee); err != nil {
+		log.Printf("[FX] EXECUTION_FAILED txid=%s err=%v", txID, err)
+		c.JSON(503, gin.H{
+			"error":         "execution persistence failed — trade not acknowledged",
+			"transactionId": txID,
+			"status":        "failed",
+		})
+		return
+	}
 
 	c.JSON(200, ExecuteResponse{
 		TransactionID: txID,

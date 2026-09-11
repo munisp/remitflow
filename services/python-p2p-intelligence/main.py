@@ -13,11 +13,15 @@ Runs as HTTP service on port 8111.
 
 import json
 import hashlib
+import hmac
+import logging
+import secrets
 import math
 import os
 import re
 import statistics
 import time
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any
 import signal
@@ -202,6 +206,41 @@ def generate_social_entry(tx: dict) -> dict:
 # USSD Command Parser — offline P2P for feature phones
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ── W9/Q11 (F10-10): PIN hashing ──────────────────────────────────────────────
+# PINs are 4 digits — unsalted fast hashes (sha256) are brute-forced in
+# milliseconds and must never be stored or returned. We use PBKDF2-HMAC-SHA256
+# with 100k iterations and a per-PIN random 16-byte salt.
+# Storage format: "pbkdf2$<salt_hex>$<hash_hex>".
+# BREAKING CHANGE: parse_ussd("pin_change") no longer returns old/new PIN
+# hashes in the HTTP response. Verification goes through /ussd/pin/verify,
+# which dual-reads legacy unsalted sha256 hex (constant-time) so existing
+# stored hashes still verify; new storage must use hash_pin().
+PBKDF2_ITERATIONS = 100_000
+
+
+def hash_pin(pin: str) -> str:
+    """Hash a PIN for storage: pbkdf2$<salt_hex>$<hash_hex>."""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", pin.encode(), salt, PBKDF2_ITERATIONS)
+    return f"pbkdf2${salt.hex()}${dk.hex()}"
+
+
+def verify_pin(pin: str, stored: str) -> bool:
+    """Constant-time PIN verification. Dual-reads legacy unsalted sha256 hex."""
+    try:
+        if stored.startswith("pbkdf2$"):
+            _, salt_hex, hash_hex = stored.split("$", 2)
+            dk = hashlib.pbkdf2_hmac("sha256", pin.encode(), bytes.fromhex(salt_hex), PBKDF2_ITERATIONS)
+            return hmac.compare_digest(dk.hex(), hash_hex)
+        # Legacy format: unsalted sha256 hex — still compared in constant time.
+        if len(stored) == 64:
+            legacy = hashlib.sha256(pin.encode()).hexdigest()
+            return hmac.compare_digest(legacy, stored.lower())
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return False
+
+
 # Format: *347*<amount>*<phone>#  or  *347*<command>*<params>#
 USSD_PATTERNS = {
     "send": re.compile(r"^\*347\*(\d+)\*(\+?\d{7,15})#$"),        # *347*amount*phone#
@@ -240,11 +279,14 @@ def parse_ussd(command: str) -> dict:
                     "from_phone": groups[1],
                 }
             elif action == "pin_change":
+                # W9/Q11 (F10-10): never return PIN hash material in the HTTP
+                # response. The caller must verify the old PIN via
+                # /ussd/pin/verify and persist the new PIN with hash_pin()
+                # server-side — hash material never leaves this service.
                 return {
                     "valid": True,
                     "action": "pin_change",
-                    "old_pin_hash": hashlib.sha256(groups[0].encode()).hexdigest(),
-                    "new_pin_hash": hashlib.sha256(groups[1].encode()).hexdigest(),
+                    "requires_pin_verification": True,
                 }
 
     return {"valid": False, "error": "Unknown USSD command", "help": "*347*amount*phone# to send"}
@@ -327,6 +369,16 @@ class P2PIntelligenceHandler(BaseHTTPRequestHandler):
             self._send_json(generate_social_entry(body))
         elif self.path == "/ussd/parse":
             self._send_json(parse_ussd(body.get("command", "")))
+        elif self.path == "/ussd/pin/verify":
+            # W9/Q11 (F10-10): constant-time PBKDF2 verify (dual-reads legacy
+            # sha256). The response contains ONLY the boolean — hash material
+            # (stored or computed) is never returned.
+            pin = str(body.get("pin", ""))
+            stored_hash = str(body.get("stored_hash", ""))
+            if not pin or not stored_hash:
+                self._send_json({"error": "pin and stored_hash are required"}, 400)
+                return
+            self._send_json({"valid": verify_pin(pin, stored_hash)})
         elif self.path == "/dispute/recommend":
             self._send_json(recommend_resolution(body))
         else:
@@ -337,7 +389,7 @@ class P2PIntelligenceHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "status": "ok",
                 "service": "p2p-intelligence",
-                "endpoints": ["/fraud/score", "/fx/trend", "/social/entry", "/ussd/parse", "/dispute/recommend"],
+                "endpoints": ["/fraud/score", "/fx/trend", "/social/entry", "/ussd/parse", "/ussd/pin/verify", "/dispute/recommend"],
                 "model_version": "1.0.0",
             })
         else:
