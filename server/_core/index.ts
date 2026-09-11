@@ -552,7 +552,7 @@ async function startServer() {
       const ctx = await createContext({ req, res } as any);
       if (!ctx.user) return res.status(401).json({ error: "Unauthorized" });
       const { getDb } = await import("../db.js");
-      const { transactions, users } = await import("../../drizzle/schema.js");
+      const { transactions } = await import("../../drizzle/schema.js");
       const { eq, and, gte, lte } = await import("drizzle-orm");
       const db = await getDb();
       if (!db) return res.status(503).json({ error: "Database unavailable" });
