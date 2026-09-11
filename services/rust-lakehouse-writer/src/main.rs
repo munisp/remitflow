@@ -130,7 +130,7 @@ fn serve_metrics(port: u16, metrics: Arc<Metrics>, shutdown: Arc<AtomicBool>) {
             error!(error = %e, port, "metrics listener bind failed");
             return;
         }
-    };
+    }
     // Non-blocking so the thread can observe the shutdown flag.
     if let Err(e) = listener.set_nonblocking(true) {
         error!(error = %e, "metrics listener set_nonblocking failed");
