@@ -373,9 +373,12 @@ export async function runTransferPipeline(
     // Step 4: Processing
     await advanceTransferState(transferRef, userId, "processing");
     await delay(STATE_DURATION_MS.processing!);
-    // Step 5: Partner sent — route to appropriate payment rail based on corridor
+    // Step 5: Partner sent — route to appropriate payment rail based on corridor.
+    // Wave 7 verification: partnerRef starts NULL and is set ONLY by a real rail
+    // response (or the legitimate internal cash-pickup reference). The machine
+    // must NEVER reach partner_sent on a pre-generated/fabricated reference.
     const db5 = await getDb();
-    let partnerRef = `RF-${Date.now()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+    let partnerRef: string | null = null;
     if (db5) {
       const [txRow] = await db5.select({
         toCurrency: transactions.toCurrency,
@@ -462,14 +465,45 @@ export async function runTransferPipeline(
             partnerRef = genericResult.transferId;
           }
         } catch (railErr) {
+          // Wave 7 (C4/C5): the registry rail clients are now fail-closed — a
+          // thrown error lands here. Mark the transfer honestly failed with NO
+          // fabricated partnerRef, then compensate the ledger hold the pipeline
+          // placed (if any) so funds are never left held.
+          const reason = `Payment rail disbursement failed: ${railErr instanceof Error ? railErr.message : String(railErr)}. Funds will be returned to sender wallet.`;
           logger.error(`[TransferStateMachine] Payment rail error for ${transferRef}:`, railErr);
           await advanceTransferState(transferRef, userId, "failed", {
-            failureReason: `Payment rail disbursement failed: ${railErr instanceof Error ? railErr.message : String(railErr)}. Funds will be returned to sender wallet.`,
+            failureReason: reason,
             requiresManualReview: true,
           });
+          try {
+            const { compensateFailedTransfer } = await import("./_core/transferPipeline");
+            await compensateFailedTransfer({
+              transferId: transferRef,
+              userId,
+              amount,
+              currency: (txRow.fromCurrency ?? "USD").toUpperCase(),
+              reason,
+              stage: "settlement",
+            });
+          } catch (compErr) {
+            logger.error(`[TransferStateMachine] Hold compensation failed for ${transferRef} — manual reconciliation required:`, compErr);
+          }
           return;
         }
       }
+    }
+    if (!partnerRef) {
+      // No rail produced a real reference (DB unavailable or transfer row
+      // missing) — fail honestly instead of advancing on a fabricated ref.
+      const reason = db5
+        ? "Transfer record not found — cannot route to a payment rail. Funds will be returned to sender wallet."
+        : "Database unavailable — cannot route to a payment rail. Funds will be returned to sender wallet.";
+      logger.error(`[TransferStateMachine] ${reason} (${transferRef})`);
+      await advanceTransferState(transferRef, userId, "failed", {
+        failureReason: reason,
+        requiresManualReview: true,
+      });
+      return;
     }
     await advanceTransferState(transferRef, userId, "partner_sent", {
       partnerReference: partnerRef,
