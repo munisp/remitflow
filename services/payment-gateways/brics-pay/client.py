@@ -115,21 +115,27 @@ class BRICSPayClient:
         method: str,
         endpoint: str,
         payload: Optional[Dict] = None,
-        params: Optional[Dict] = None
+        params: Optional[Dict] = None,
+        expect_transaction_status: bool = False
     ) -> Dict:
         """
         Make authenticated request to BRICS Pay API
         Centralized error handling following NIBSS pattern
-        
+
         Args:
             method: HTTP method
             endpoint: API endpoint
             payload: Request payload for POST requests
             params: Query parameters for GET requests
-            
+            expect_transaction_status: only True for transaction-creating
+                responses that carry a top-level `status` field. Read
+                endpoints (status/rate/corridors/limits/balance) return
+                `data` payloads without that field and must NOT be gated
+                on it.
+
         Returns:
             Response data
-            
+
         Raises:
             BRICSPayError: On API errors
         """
@@ -174,8 +180,9 @@ class BRICSPayClient:
                     details=data
                 )
             
-            # Check response status
-            if data.get("status") != BRICSTransactionStatus.SUCCESS.value:
+            # Check response status only for transaction-creating calls;
+            # GET endpoints return `data` without a top-level `status`.
+            if expect_transaction_status and data.get("status") != BRICSTransactionStatus.SUCCESS.value:
                 raise BRICSPayError(
                     code=data.get("errorCode", "UNKNOWN"),
                     message=data.get("message", "Transaction failed"),
@@ -256,8 +263,10 @@ class BRICSPayClient:
         
         logger.info(f"Initiating BRICS Pay transfer: {reference} - {amount} {source_currency}")
         
-        response = await self._make_request("POST", "/v1/transfers", payload)
-        
+        response = await self._make_request(
+            "POST", "/v1/transfers", payload, expect_transaction_status=True
+        )
+
         logger.info(f"BRICS Pay transfer initiated: {response['data']['transferId']}")
         
         return {

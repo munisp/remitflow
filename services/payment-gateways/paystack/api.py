@@ -2,11 +2,12 @@
 Paystack API - Comprehensive wrapper for all Paystack operations
 """
 
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Dict, Optional, List
 from datetime import datetime
+import hmac
 import os
 import uvicorn
 import logging
@@ -15,7 +16,12 @@ import logging
 from client import PaystackClient
 from payment_channels import PaystackPaymentChannels, PaymentChannel
 from refunds_splits import PaystackRefunds, PaystackSplitPayments
-from webhook_handler import PaystackWebhookHandler, WebhookEvent, setup_webhook_handlers
+from webhook_handler import (
+    PaystackWebhookHandler,
+    WebhookEvent,
+    WebhookProcessingError,
+    setup_webhook_handlers,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,9 +36,36 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-Internal-Token"],
 )
 
-# Configuration (in production, load from env)
-PAYSTACK_SECRET_KEY = "sk_test_xxx"  # Replace with actual key
-PAYSTACK_PUBLIC_KEY = "pk_test_xxx"  # Replace with actual key
+# Configuration — loaded from the environment at startup; the service
+# refuses to boot with missing or placeholder credentials.
+_PLACEHOLDER_VALUES = {"test_key", "sk_test_xxx", "pk_test_xxx", "changeme", "change_me", "placeholder"}
+
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value or value.strip().lower() in _PLACEHOLDER_VALUES:
+        raise RuntimeError(
+            f"Missing required configuration: {name} is unset or a placeholder. "
+            "Refusing to start the paystack gateway without real credentials."
+        )
+    return value
+
+
+PAYSTACK_SECRET_KEY = _require_env("PAYSTACK_SECRET_KEY")
+PAYSTACK_PUBLIC_KEY = os.getenv("PAYSTACK_PUBLIC_KEY") or None
+INTERNAL_API_TOKEN = _require_env("INTERNAL_API_TOKEN")
+
+
+async def verify_internal_token(request: Request):
+    """Auth dependency: every non-health route requires the internal
+    service-mesh token in the X-Internal-Token header (constant-time
+    comparison). The Paystack webhook route authenticates via the
+    x-paystack-signature HMAC instead.
+    """
+    token = request.headers.get("X-Internal-Token", "")
+    if not token or not hmac.compare_digest(token, INTERNAL_API_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid or missing internal token")
+
 
 # Initialize clients
 paystack_client = PaystackClient(PAYSTACK_SECRET_KEY, PAYSTACK_PUBLIC_KEY)
@@ -104,6 +137,23 @@ class VirtualAccountRequest(BaseModel):
     preferred_bank: Optional[str] = None
 
 
+# Sensitive charge-continuation credentials MUST arrive in the request
+# body, never as URL query parameters (access logs / proxies / history).
+class SubmitOTPRequest(BaseModel):
+    otp: str
+    reference: str
+
+
+class SubmitPINRequest(BaseModel):
+    pin: str
+    reference: str
+
+
+class SubmitPhoneRequest(BaseModel):
+    phone: str
+    reference: str
+
+
 # API Endpoints
 
 @app.get("/health")
@@ -119,7 +169,7 @@ async def health_check():
 
 # Payment Initialization
 
-@app.post("/api/v1/payments/initialize")
+@app.post("/api/v1/payments/initialize", dependencies=[Depends(verify_internal_token)])
 async def initialize_payment(request: PaymentInitRequest):
     """Initialize payment"""
     try:
@@ -140,7 +190,7 @@ async def initialize_payment(request: PaymentInitRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/v1/payments/verify/{reference}")
+@app.get("/api/v1/payments/verify/{reference}", dependencies=[Depends(verify_internal_token)])
 async def verify_payment(reference: str):
     """Verify payment"""
     try:
@@ -153,7 +203,7 @@ async def verify_payment(reference: str):
 
 # USSD Payments
 
-@app.post("/api/v1/payments/ussd")
+@app.post("/api/v1/payments/ussd", dependencies=[Depends(verify_internal_token)])
 async def initiate_ussd_payment(request: USSDPaymentRequest):
     """Initiate USSD payment"""
     try:
@@ -172,7 +222,7 @@ async def initiate_ussd_payment(request: USSDPaymentRequest):
 
 # Mobile Money
 
-@app.post("/api/v1/payments/mobile-money")
+@app.post("/api/v1/payments/mobile-money", dependencies=[Depends(verify_internal_token)])
 async def initiate_mobile_money(request: MobileMoneyRequest):
     """Initiate mobile money payment"""
     try:
@@ -192,7 +242,7 @@ async def initiate_mobile_money(request: MobileMoneyRequest):
 
 # Virtual Accounts
 
-@app.post("/api/v1/virtual-accounts/create")
+@app.post("/api/v1/virtual-accounts/create", dependencies=[Depends(verify_internal_token)])
 async def create_virtual_account(request: VirtualAccountRequest):
     """Create dedicated virtual account"""
     try:
@@ -208,7 +258,7 @@ async def create_virtual_account(request: VirtualAccountRequest):
 
 # Transfers
 
-@app.post("/api/v1/transfers/initiate")
+@app.post("/api/v1/transfers/initiate", dependencies=[Depends(verify_internal_token)])
 async def initiate_transfer(request: TransferRequest):
     """Initiate transfer"""
     try:
@@ -225,7 +275,7 @@ async def initiate_transfer(request: TransferRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/v1/transfers/status/{transfer_code}")
+@app.get("/api/v1/transfers/status/{transfer_code}", dependencies=[Depends(verify_internal_token)])
 async def get_transfer_status(transfer_code: str):
     """Get transfer status"""
     try:
@@ -238,7 +288,7 @@ async def get_transfer_status(transfer_code: str):
 
 # Refunds
 
-@app.post("/api/v1/refunds/create")
+@app.post("/api/v1/refunds/create", dependencies=[Depends(verify_internal_token)])
 async def create_refund(request: RefundRequest):
     """Create refund"""
     try:
@@ -255,7 +305,7 @@ async def create_refund(request: RefundRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/v1/refunds/list")
+@app.get("/api/v1/refunds/list", dependencies=[Depends(verify_internal_token)])
 async def list_refunds(
     reference: Optional[str] = None,
     currency: Optional[str] = None,
@@ -276,7 +326,7 @@ async def list_refunds(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/v1/refunds/{refund_id}")
+@app.get("/api/v1/refunds/{refund_id}", dependencies=[Depends(verify_internal_token)])
 async def get_refund(refund_id: str):
     """Get refund details"""
     try:
@@ -289,7 +339,7 @@ async def get_refund(refund_id: str):
 
 # Split Payments
 
-@app.post("/api/v1/splits/create")
+@app.post("/api/v1/splits/create", dependencies=[Depends(verify_internal_token)])
 async def create_split(request: SplitCreateRequest):
     """Create split payment configuration"""
     try:
@@ -307,7 +357,7 @@ async def create_split(request: SplitCreateRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/v1/splits/list")
+@app.get("/api/v1/splits/list", dependencies=[Depends(verify_internal_token)])
 async def list_splits(
     name: Optional[str] = None,
     active: Optional[bool] = None,
@@ -328,7 +378,7 @@ async def list_splits(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.get("/api/v1/splits/{split_id}")
+@app.get("/api/v1/splits/{split_id}", dependencies=[Depends(verify_internal_token)])
 async def get_split(split_id: str):
     """Get split configuration"""
     try:
@@ -354,27 +404,35 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
         body = await request.body()
         payload = body.decode()
         
-        # Process webhook
+        # Process webhook (signature always verified; handler failures
+        # raise WebhookProcessingError)
         result = await webhook_handler.process_webhook(payload, signature)
-        
+
         return {"status": "processed", "result": result}
-        
+
+    except HTTPException:
+        raise
     except ValueError as e:
         logger.error(f"Webhook validation error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
+    except WebhookProcessingError as e:
+        # Return 5xx so Paystack retries the delivery instead of the
+        # event being silently lost.
+        logger.error(f"Webhook handler failure: {e}")
+        raise HTTPException(status_code=500, detail="Webhook handler failed; will be retried")
     except Exception as e:
         logger.error(f"Webhook processing error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/v1/webhooks/events")
+@app.get("/api/v1/webhooks/events", dependencies=[Depends(verify_internal_token)])
 async def get_webhook_events(event_type: Optional[str] = None, limit: int = 100):
     """Get processed webhook events"""
     events = webhook_handler.get_processed_events(event_type, limit)
     return {"events": events, "count": len(events)}
 
 
-@app.get("/api/v1/webhooks/stats")
+@app.get("/api/v1/webhooks/stats", dependencies=[Depends(verify_internal_token)])
 async def get_webhook_stats():
     """Get webhook statistics"""
     return webhook_handler.get_statistics()
@@ -382,33 +440,33 @@ async def get_webhook_stats():
 
 # OTP/PIN Submission
 
-@app.post("/api/v1/payments/submit-otp")
-async def submit_otp(otp: str, reference: str):
+@app.post("/api/v1/payments/submit-otp", dependencies=[Depends(verify_internal_token)])
+async def submit_otp(request: SubmitOTPRequest):
     """Submit OTP"""
     try:
-        result = await payment_channels.submit_otp(otp, reference)
+        result = await payment_channels.submit_otp(request.otp, request.reference)
         return result
     except Exception as e:
         logger.error(f"OTP submission error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/api/v1/payments/submit-pin")
-async def submit_pin(pin: str, reference: str):
+@app.post("/api/v1/payments/submit-pin", dependencies=[Depends(verify_internal_token)])
+async def submit_pin(request: SubmitPINRequest):
     """Submit PIN"""
     try:
-        result = await payment_channels.submit_pin(pin, reference)
+        result = await payment_channels.submit_pin(request.pin, request.reference)
         return result
     except Exception as e:
         logger.error(f"PIN submission error: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/api/v1/payments/submit-phone")
-async def submit_phone(phone: str, reference: str):
+@app.post("/api/v1/payments/submit-phone", dependencies=[Depends(verify_internal_token)])
+async def submit_phone(request: SubmitPhoneRequest):
     """Submit phone number"""
     try:
-        result = await payment_channels.submit_phone(phone, reference)
+        result = await payment_channels.submit_phone(request.phone, request.reference)
         return result
     except Exception as e:
         logger.error(f"Phone submission error: {e}")
@@ -417,7 +475,7 @@ async def submit_phone(phone: str, reference: str):
 
 # Charge Status
 
-@app.get("/api/v1/payments/charge/{reference}")
+@app.get("/api/v1/payments/charge/{reference}", dependencies=[Depends(verify_internal_token)])
 async def check_charge(reference: str):
     """Check pending charge status"""
     try:
