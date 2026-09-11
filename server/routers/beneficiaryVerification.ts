@@ -31,7 +31,9 @@ const IBAN_LENGTHS: Record<string, number> = {
   IE: 22, FI: 18, SE: 24, DK: 18, NO: 15, CH: 21, PL: 28, CZ: 24,
 };
 
-function validateIBAN(iban: string): { valid: boolean; reason?: string } {
+// W9/Q10 (F9-8): exported so other routers (e.g. orphanFeatures SEPA) reuse the
+// real mod-97 checksum instead of regex-only IBAN checks.
+export function validateIBAN(iban: string): { valid: boolean; reason?: string } {
   const cleaned = iban.replace(/\s/g, "").toUpperCase();
   if (cleaned.length < 15 || cleaned.length > 34) {
     return { valid: false, reason: "IBAN length invalid" };
@@ -137,32 +139,44 @@ export const beneficiaryVerificationRouter = router({
 
       const allPassed = checks.every((c) => c.passed);
 
-      // Persist verification result to DB
+      // W9/Q10 (F9-5): these are REGEX-ONLY format checks — they can never
+      // establish that an account exists or belongs to anyone. Never persist
+      // or return "verified" from them:
+      //   - no applicable format rules (unknown country)  => "unverified" (fail closed)
+      //   - all regex checks pass                          => "format_validated" only
+      //   - any check fails                                => "failed"
+      // NOTE: the beneficiaries table has no verificationStatus/verifiedAt
+      // columns (the previous UPDATE referenced nonexistent columns and could
+      // never succeed) — the outcome is recorded in the audit log instead.
+      const hasFormatRules = Boolean(pattern) || Boolean(IBAN_LENGTHS[input.countryCode]);
+      const persistedStatus: "unverified" | "format_validated" | "failed" = !hasFormatRules
+        ? "unverified"
+        : allPassed
+          ? "format_validated"
+          : "failed";
+
       const db = await getDb();
-      if (db && input.beneficiaryId) {
-        await db.execute(sql`
-          UPDATE beneficiaries
-          SET "verifiedAt" = NOW(), "verificationStatus" = ${allPassed ? 'verified' : 'failed'}
-          WHERE id = ${input.beneficiaryId} AND "userId" = ${ctx.user.id}
-        `);
-      }
       if (db) {
         await db.execute(sql`
           INSERT INTO "auditLogs" ("userId", action, metadata, "createdAt")
-          VALUES (${ctx.user.id}, 'BENEFICIARY_VERIFICATION', ${JSON.stringify({ accountNumber: input.accountNumber.slice(0, 4) + '****', countryCode: input.countryCode, verified: allPassed, checksRun: checks.length })}::jsonb, NOW())
+          VALUES (${ctx.user.id}, 'BENEFICIARY_VERIFICATION', ${JSON.stringify({ accountNumber: input.accountNumber.slice(0, 4) + '****', countryCode: input.countryCode, beneficiaryId: input.beneficiaryId ?? null, status: persistedStatus, checksRun: checks.length })}::jsonb, NOW())
         `);
       }
 
       logger.info({
         countryCode: input.countryCode,
-        passed: allPassed,
+        status: persistedStatus,
         checks: checks.length,
       }, "Beneficiary verification completed");
 
       return {
-        verified: allPassed,
+        // Regex-only checks NEVER verify a beneficiary — bank-side
+        // confirmation is required before this may become true.
+        verified: false,
+        formatValidated: persistedStatus === "format_validated",
+        status: persistedStatus,
         checks,
-        confidence: allPassed ? "high" : "low",
+        confidence: persistedStatus === "format_validated" ? "medium" : "low",
       };
     }),
 
