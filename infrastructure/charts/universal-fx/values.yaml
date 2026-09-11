@@ -48,15 +48,15 @@ dapr:
 # (os.Getenv / env::var / os.getenv across universal-fx's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install universal-fx infrastructure/charts/universal-fx \
 #     -n 54remit -f infrastructure/values-secrets/universal-fx.yaml
 # (a gitignored, per-environment file).
 secrets:
-  COINGECKO_API_KEY: "CHANGE_ME"
-  DATABASE_URL: "CHANGE_ME"
+  COINGECKO_API_KEY: ""  # REQUIRED
+  DATABASE_URL: ""  # REQUIRED
   PORT: "8084"
-  RATE_CACHE_TTL_SECONDS: "CHANGE_ME"
-  RATE_LOCK_HMAC_SECRET: "CHANGE_ME"
-  RATE_LOCK_TTL_SECONDS: "CHANGE_ME"
-  SLIPPAGE_BPS: "CHANGE_ME"
+  RATE_CACHE_TTL_SECONDS: ""  # REQUIRED
+  RATE_LOCK_HMAC_SECRET: ""  # REQUIRED
+  RATE_LOCK_TTL_SECONDS: ""  # REQUIRED
+  SLIPPAGE_BPS: ""  # REQUIRED

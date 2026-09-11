@@ -48,15 +48,15 @@ dapr:
 # (os.Getenv / env::var / os.getenv across ledger-service's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install ledger-service infrastructure/charts/ledger-service \
 #     -n 54remit -f infrastructure/values-secrets/ledger-service.yaml
 # (a gitignored, per-environment file).
 secrets:
-  DATABASE_URL: "CHANGE_ME"
-  GO_ENV: "CHANGE_ME"
-  KAFKA_BROKER: "CHANGE_ME"
+  DATABASE_URL: ""  # REQUIRED
+  GO_ENV: ""  # REQUIRED
+  KAFKA_BROKER: ""  # REQUIRED
   NODE_ENV: "production"
   PORT: "8086"
-  TIGERBEETLE_ADDRESSES: "CHANGE_ME"
-  TIGERBEETLE_CLUSTER_ID: "CHANGE_ME"
+  TIGERBEETLE_ADDRESSES: ""  # REQUIRED
+  TIGERBEETLE_CLUSTER_ID: ""  # REQUIRED

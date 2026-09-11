@@ -48,12 +48,12 @@ dapr:
 # (os.Getenv / env::var / os.getenv across rust-immigrant-worker-kyc's codebase), so this list
 # reflects what the service actually reads — not a guess. Known non-secret
 # infra defaults (Kafka, Dapr, log level, etc.) are pre-filled; everything
-# else is "CHANGE_ME" and MUST be overridden at deploy time, never committed:
+# else is empty and REQUIRED at deploy time (set via --set or a secrets manager), never committed:
 #   helm upgrade --install rust-immigrant-worker-kyc infrastructure/charts/rust-immigrant-worker-kyc \
 #     -n 54remit -f infrastructure/values-secrets/rust-immigrant-worker-kyc.yaml
 # (a gitignored, per-environment file).
 secrets:
   DAPR_HTTP_PORT: "3500"
-  DATABASE_URL: "CHANGE_ME"
-  INTERNAL_SERVICE_KEY: "CHANGE_ME"
+  DATABASE_URL: ""  # REQUIRED
+  INTERNAL_SERVICE_KEY: ""  # REQUIRED
   PORT: "8099"
