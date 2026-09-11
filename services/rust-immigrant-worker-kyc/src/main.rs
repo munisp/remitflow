@@ -86,7 +86,7 @@ fn determine_tier(req: &VerificationRequest) -> KycTier {
 async fn publish_event(topic: &str, data: serde_json::Value) {
     let dapr_port = std::env::var("DAPR_HTTP_PORT").unwrap_or_else(|_| "3500".to_string());
     let url = format!("http://localhost:{}/v1.0/publish/kafka-pubsub/{}", dapr_port, topic);
-    let client = reqwest::Client::new();
+    let client = http_client();
     let _ = client.post(&url).json(&data).send().await;
 }
 
@@ -293,6 +293,31 @@ async fn db_log_event(pool: &PgPool, event_type: &str, payload: &serde_json::Val
     Ok(())
 }
 
+
+/// constant_time_eq compares two byte strings without data-dependent early exit.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+
+/// http_client returns a reqwest client with an explicit total timeout — the
+/// reqwest default is NO timeout, and a hung peer must not stall handler
+/// tasks indefinitely (F14).
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("failed to build reqwest client")
+}
+
 #[tokio::main]
 async fn load_from_db(pool: &PgPool) {
     match sqlx::query_as::<_, (String, serde_json::Value)>(
@@ -354,15 +379,21 @@ async fn main() -> std::io::Result<()> {
             async move { handle_check_limit(p, u, body).await }
         });
 
+    // FAIL CLOSED: no default internal key — refuse to boot when unset.
+    let internal_key = std::env::var("INTERNAL_SERVICE_KEY")
+        .expect("INTERNAL_SERVICE_KEY is not set: refusing to fall back to a well-known default credential; configure the internal service key explicitly");
+    assert!(!internal_key.is_empty(), "INTERNAL_SERVICE_KEY must not be empty");
     let auth_filter = warp::header::optional::<String>("authorization")
         .and(warp::header::optional::<String>("x-api-key"))
-        .and_then(|auth: Option<String>, api_key: Option<String>| async move {
-            let key = std::env::var("INTERNAL_SERVICE_KEY").unwrap_or_else(|_| "remitflow-internal-2026".to_string());
-            if api_key.as_deref() == Some(&key) { return Ok(()); }
-            if let Some(a) = &auth {
-                if a.starts_with("Bearer ") && &a[7..] == key { return Ok(()); }
+        .and_then(move |auth: Option<String>, api_key: Option<String>| {
+            let key = internal_key.clone();
+            async move {
+                if api_key.as_deref().map_or(false, |ak| constant_time_eq(ak.as_bytes(), key.as_bytes())) { return Ok(()); }
+                if let Some(a) = &auth {
+                    if a.starts_with("Bearer ") && constant_time_eq(&a.as_bytes()[7..], key.as_bytes()) { return Ok(()); }
+                }
+                Err(warp::reject::reject())
             }
-            Err(warp::reject::reject())
         })
         .untuple_one();
     let protected = auth_filter.and(verify_route.or(check_limit_route));
