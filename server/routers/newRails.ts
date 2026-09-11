@@ -22,6 +22,7 @@ import {
 } from "../../drizzle/schema";
 import { eq, sql } from "drizzle-orm";
 import { logger } from "../_core/logger";
+import { assertFeatureEligible } from "../_core/featureGuard";
 
 const MICROSERVICE_URLS = {
   bricspay: process.env.BRICSPAY_SERVICE_URL?.trim() ?? "",
@@ -153,6 +154,8 @@ export const newRailsRouter = router({
     initiate: protectedProcedure
       .input(bricspayInitiateSchema)
       .mutation(async ({ ctx, input }) => {
+        // A1: enforce the declared send_money gate (flag + KYC tier >= 1).
+        await assertFeatureEligible(ctx, { flag: "send_money", minKycTier: 1, featureName: "BRICSPay transfers" });
         // Domain insert + outbox event commit atomically (transactional outbox)
         // — the transfer row and its integration event can never diverge.
         const record = await withTransactionOutbox(async (tx, emit) => {
@@ -238,6 +241,8 @@ export const newRailsRouter = router({
     initiate: protectedProcedure
       .input(mbridgeInitiateSchema)
       .mutation(async ({ ctx, input }) => {
+        // A1: enforce the declared CBDC gate (flag + KYC tier >= 1 + enterprise plan).
+        await assertFeatureEligible(ctx, { flag: "cbdc", minKycTier: 1, minPlan: "enterprise", featureName: "mBridge CBDC transfers" });
         const db = await getDb();
         if (!db) throw new Error("DB unavailable");
         const [record] = await db.insert(mbridgeTransfers).values({
@@ -285,6 +290,8 @@ export const newRailsRouter = router({
     initiate: protectedProcedure
       .input(ghipssInitiateSchema)
       .mutation(async ({ ctx, input }) => {
+        // A1: enforce the declared send_money gate (flag + KYC tier >= 1).
+        await assertFeatureEligible(ctx, { flag: "send_money", minKycTier: 1, featureName: "GhIPSS transfers" });
         const db = await getDb();
         if (!db) throw new Error("DB unavailable");
         const [record] = await db.insert(ghipssTransfers).values({
@@ -335,6 +342,8 @@ export const newRailsRouter = router({
     initiate: protectedProcedure
       .input(africbdcInitiateSchema)
       .mutation(async ({ ctx, input }) => {
+        // A1: enforce the declared CBDC gate (flag + KYC tier >= 1 + enterprise plan).
+        await assertFeatureEligible(ctx, { flag: "cbdc", minKycTier: 1, minPlan: "enterprise", featureName: "AfriCBDC transfers" });
         const db = await getDb();
         if (!db) throw new Error("DB unavailable");
         const [record] = await db.insert(africbdcTransfers).values({
@@ -384,6 +393,8 @@ export const newRailsRouter = router({
     initiate: protectedProcedure
       .input(papssInitiateSchema)
       .mutation(async ({ ctx, input }) => {
+        // A1: enforce the declared send_money gate (flag + KYC tier >= 1).
+        await assertFeatureEligible(ctx, { flag: "send_money", minKycTier: 1, featureName: "PAPSS transfers" });
         const db = await getDb();
         if (!db) throw new Error("DB unavailable");
         const corridor = `${input.senderCountry}-${input.receiverCountry}`;
