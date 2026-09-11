@@ -183,8 +183,12 @@ export const immigrantWorkerRouter = router({
       corridorCode: z.enum(["TG", "NE", "ML", "BJ", "GH"]),
       recipientName: z.string().min(2).max(100),
       mojaloopDfspId: z.string().min(2).max(50),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      // W12: canonical TOTP step-up (fail-closed) — money-moving mutation.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "worker transfer");
       // Check KYC and limits
       const limitCheck = await callKycService("/check-limit", {
         user_id: ctx.user.id,
