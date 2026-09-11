@@ -1,0 +1,103 @@
+{
+  "uid": "remitflow-per-tenant",
+  "title": "RemitFlow — Per-Tenant View",
+  "description": "Tenant-scoped request rate, latency, and errors from the REAL tenant-labeled series: remitflow_requests_total and remitflow_request_duration_ms, emitted by recordTenantRequest (server/telemetry/tenantContext.ts:91-107) and called in production at server/_core/trpc.ts:100. The `tenant.id` metric attribute becomes the `tenant_id` label in Prometheus. Series without a tenant (public routes) carry no tenant_id and are excluded from the $tenant filter by design.",
+  "tags": ["remitflow", "tenant"],
+  "timezone": "utc",
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "schemaVersion": 39,
+  "version": 2,
+  "annotations": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "name": "tenant",
+        "label": "Tenant",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+        "query": "label_values(remitflow_requests_total, tenant_id)",
+        "refresh": 2,
+        "includeAll": false,
+        "multi": false,
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request Rate by Procedure — tenant $tenant",
+      "description": "tRPC requests/s for the selected tenant (remitflow_requests_total, tenantContext.ts:33; wired at trpc.ts:100).",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (rpc_method) (rate(remitflow_requests_total{tenant_id=\"$tenant\"}[5m]))",
+          "legendFormat": "{{rpc_method}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Latency P99 / P95 — tenant $tenant",
+      "description": "tRPC request latency for the selected tenant (remitflow_request_duration_ms, tenantContext.ts:38). Name regex covers the UCUM unit-suffix translation variant.",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate({__name__=~\"remitflow_request_duration_ms(_milliseconds)?_bucket\", tenant_id=\"$tenant\"}[5m])))",
+          "legendFormat": "p99"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate({__name__=~\"remitflow_request_duration_ms(_milliseconds)?_bucket\", tenant_id=\"$tenant\"}[5m])))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Error Rate — tenant $tenant",
+      "description": "ok=false share of requests for the selected tenant (ok label from tenantContext.ts:97 — there is no status=error label).",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(remitflow_requests_total{tenant_id=\"$tenant\", ok=\"false\"}[5m])) / sum(rate(remitflow_requests_total{tenant_id=\"$tenant\"}[5m]))",
+          "legendFormat": "error share"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Money-Path Request Volume — tenant $tenant",
+      "description": "Request rate on money-path tRPC procedures (transfer/payout/payment-link families) for the selected tenant. HONEST NOTE: true USD payout volumes require remitflow_transfers_amount_usd (otel.ts:212), which is REQUIRES-METRIC — recordTransferMetric has no production call path yet; this panel tracks request counts instead of faking volumes.",
+      "datasource": { "type": "prometheus", "uid": "remitflow-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (rpc_method) (rate(remitflow_requests_total{tenant_id=\"$tenant\", rpc_method=~\"transfer.*|embeddedPayouts.*|paymentLinks.*|p2p.*\"}[5m]))",
+          "legendFormat": "{{rpc_method}}"
+        }
+      ]
+    }
+  ]
+}
