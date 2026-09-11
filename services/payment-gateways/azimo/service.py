@@ -20,7 +20,7 @@ def _require_env(name: str) -> str:
     if not value or value.strip().lower() in _PLACEHOLDER_VALUES:
         raise RuntimeError(
             f"Missing required configuration: {name} is unset or a placeholder. "
-            "Refusing to start the azimo gateway without real credentials."
+            f"Refusing to start the azimo gateway without real credentials."
         )
     return value
 
@@ -32,17 +32,13 @@ class AzimoService:
         )
 
     async def process_transfer(self, transfer_data: Dict) -> Dict:
-        """Process a transfer through azimo.
-
-        transfer_data keys: amount, currency, recipient (dict),
-        reference (unique caller-supplied reference).
-        """
+        """Process a transfer through azimo"""
         try:
             result = await self.client.initiate_transfer(transfer_data)
             return {
                 "success": True,
                 "gateway": "azimo",
-                "transfer_id": str(result.get("id")),
+                "transfer_id": result.get("id"),
                 "status": result.get("status"),
                 "data": result
             }
