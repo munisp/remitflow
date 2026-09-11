@@ -336,6 +336,7 @@ export const partnerApplicationsRouter = router({
 
       // Update application
       await db.execute(sql`
+        UPDATE partner_applications
         SET status = 'approved', reviewed_by = ${ctx.user.id}, reviewed_at = NOW(),
             approved_at = NOW(), review_notes = ${input.reviewNotes ?? null},
             tenant_id = ${tenantId}, updated_at = NOW()
