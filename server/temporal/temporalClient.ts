@@ -15,6 +15,8 @@
  */
 
 import { logger } from "../_core/logger.js";
+// W11-C2: client-side OTel span per workflow start/signal + traceparent/x-tenant-id header injection
+import { TemporalOtelWorkflowClientInterceptor } from "./interceptors";
 
 const TEMPORAL_HOST = process.env.TEMPORAL_HOST_PORT ?? "localhost:7233";
 const TEMPORAL_NAMESPACE = process.env.TEMPORAL_NAMESPACE ?? "remitflow";
@@ -87,6 +89,7 @@ export async function getTemporalClient(): Promise<TemporalClientLike> {
     const client = new Client({
       connection,
       namespace: TEMPORAL_NAMESPACE,
+      interceptors: { workflow: [new TemporalOtelWorkflowClientInterceptor()] },
     });
 
     const created: TemporalClientLike = {
