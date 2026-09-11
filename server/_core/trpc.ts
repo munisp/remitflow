@@ -206,11 +206,24 @@ const auditMiddleware = t.middleware(async opts => {
   }
 });
 
+// W12-F: audited/rate-limited chains previously omitted tracingMiddleware +
+// tenantEnrichmentMiddleware, so these procedures ran with NO trpc.* span and
+// NO tenant.id telemetry. Both are now composed in with the same ordering as
+// protectedProcedure (:150-154): tracing FIRST (wraps the whole chain),
+// tenant enrichment BEFORE the audit/rate-limit middlewares so their sidecar
+// calls also inherit span + tenant context. Auth → tenantGuc ordering and
+// audit/rate-limit semantics are unchanged.
 /** Protected procedure + automatic Rust audit log on every call */
-export const auditedProcedure = t.procedure.use(requireUser).use(tenantGucMiddleware).use(auditMiddleware);
+export const auditedProcedure = t.procedure
+  .use(tracingMiddleware)
+  .use(requireUser)
+  .use(tenantGucMiddleware)
+  .use(tenantEnrichmentMiddleware)
+  .use(auditMiddleware);
 
 /** Admin procedure + automatic Rust audit log on every call */
 export const auditedAdminProcedure = t.procedure
+  .use(tracingMiddleware)
   .use(
     t.middleware(async opts => {
       const { ctx, next } = opts;
@@ -221,6 +234,7 @@ export const auditedAdminProcedure = t.procedure
     }),
   )
   .use(tenantGucMiddleware)
+  .use(tenantEnrichmentMiddleware)
   .use(auditMiddleware);
 
 // ── Rate-limit middleware ─────────────────────────────────────────────────────
@@ -282,14 +296,18 @@ function makeRateLimitMiddleware(limit: number, windowSecs: number) {
 
 /** Protected + audited + rate-limited (60 req/min default) */
 export const rateLimitedProcedure = t.procedure
+  .use(tracingMiddleware)
   .use(requireUser)
   .use(tenantGucMiddleware)
+  .use(tenantEnrichmentMiddleware)
   .use(auditMiddleware)
   .use(makeRateLimitMiddleware(60, 60));
 
 /** Protected + audited + strict rate-limited (10 req/min — for sensitive ops) */
 export const strictRateLimitedProcedure = t.procedure
+  .use(tracingMiddleware)
   .use(requireUser)
   .use(tenantGucMiddleware)
+  .use(tenantEnrichmentMiddleware)
   .use(auditMiddleware)
   .use(makeRateLimitMiddleware(10, 60));
