@@ -131,12 +131,39 @@ export const swiftGatewayRouter = router({
         },
       };
 
+      // W7/B4: attempt REAL SWIFT egress only when an egress gateway is
+      // configured. The Kafka topic below has no consumer, so without
+      // SWIFT_EGRESS_URL nothing ever reaches the SWIFT network — the funds
+      // stay held and the transaction is queued as `pending_egress`. We must
+      // NEVER claim the network "accepted" a payment that was not transmitted.
+      const egressUrl = process.env.SWIFT_EGRESS_URL;
+      let egressTransmitted = false;
+      if (egressUrl) {
+        try {
+          const egressRes = await fetch(`${egressUrl.replace(/\/$/, "")}/pacs008`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(pacs008Message),
+            signal: AbortSignal.timeout(15_000),
+          });
+          egressTransmitted = egressRes.ok;
+          if (!egressRes.ok) {
+            logger.warn({ uetr, status: egressRes.status }, "[SWIFT] egress gateway rejected pacs.008 — payment left queued (pending_egress)");
+          }
+        } catch (err) {
+          logger.warn({ uetr, err: err instanceof Error ? err.message : String(err) }, "[SWIFT] egress gateway unreachable — payment left queued (pending_egress)");
+        }
+      } else {
+        logger.warn({ uetr }, "[SWIFT] SWIFT_EGRESS_URL not configured — payment queued, NOT transmitted to SWIFT");
+      }
+      const initialStatus = egressTransmitted ? "ACCP" : "pending_egress";
+
       // Store in DB
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const swiftId = randomBytes(16).toString("hex");
       await db.execute(
         `INSERT INTO swift_transactions (id, user_id, uetr, msg_id, end_to_end_id, tx_id, debtor_name, debtor_account, debtor_bic, creditor_name, creditor_account, creditor_bic, amount, currency, charge_bearer, remittance_info, status, message_json, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, 'ACCP', $17, NOW(), NOW())`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, NOW(), NOW())`,
         [
           swiftId,
           ctx.user.id,
@@ -145,6 +172,7 @@ export const swiftGatewayRouter = router({
           input.creditorName, input.creditorAccount, input.creditorBic,
           input.instructedAmount, input.currency, input.chargeBearer,
           input.remittanceInfo || null,
+          initialStatus,
           JSON.stringify(pacs008Message),
         ]
       );
@@ -176,12 +204,14 @@ export const swiftGatewayRouter = router({
         description: JSON.stringify({ uetr, amount: input.instructedAmount, currency: input.currency, creditorBic: input.creditorBic }),
       });
 
-      // Push notification
+      // Push notification — honest about whether anything left the platform.
       broadcastUserEvent(ctx.user.id, {
         type: "transfer_sent",
         payload: {
-          title: "SWIFT Transfer Initiated",
-          message: `${input.instructedAmount} ${input.currency} to ${input.creditorName} (${input.creditorBic})`,
+          title: egressTransmitted ? "SWIFT Transfer Transmitted" : "SWIFT Transfer Queued",
+          message: egressTransmitted
+            ? `${input.instructedAmount} ${input.currency} to ${input.creditorName} (${input.creditorBic}) — transmitted to SWIFT egress, awaiting network acknowledgement`
+            : `${input.instructedAmount} ${input.currency} to ${input.creditorName} (${input.creditorBic}) — queued — not yet transmitted to SWIFT`,
           amount: input.instructedAmount,
           currency: input.currency,
         },
@@ -193,9 +223,15 @@ export const swiftGatewayRouter = router({
         msgId,
         endToEndId,
         txId,
-        status: "ACCP",
-        statusDescription: "Payment accepted for processing",
-        estimatedSettlement: new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString(),
+        status: initialStatus,
+        statusDescription: egressTransmitted
+          ? "Transmitted to SWIFT egress gateway — awaiting network acknowledgement"
+          : "queued — not yet transmitted to SWIFT",
+        fundsHeld: true,
+        transmittedToSwift: egressTransmitted,
+        estimatedSettlement: egressTransmitted
+          ? new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString()
+          : null,
         pacs008Message,
         fraudScore: pipelineResult.fraudScore,
       };
@@ -267,7 +303,7 @@ export const swiftGatewayRouter = router({
     .input(z.object({
       page: z.number().min(1).default(1),
       limit: z.number().min(1).max(100).default(20),
-      status: z.enum(["ACCP", "ACSP", "ACSC", "RJCT", "PDNG"]).optional(),
+      status: z.enum(["ACCP", "ACSP", "ACSC", "RJCT", "PDNG", "pending_egress"]).optional(),
     }))
     .query(async ({ ctx, input }) => {
       const db = await getDb();
@@ -291,25 +327,43 @@ export const swiftGatewayRouter = router({
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function getStatusDescription(status: string): string {
   const descriptions: Record<string, string> = {
-    ACCP: "Accepted — validation passed",
+    // ACCP rows only exist after a real 2xx from the configured egress gateway.
+    ACCP: "Transmitted to SWIFT egress gateway — awaiting network acknowledgement",
     ACSP: "Accepted — settlement in progress",
     ACSC: "Accepted — settlement completed",
     RJCT: "Rejected",
     PDNG: "Pending — awaiting processing",
     ACWC: "Accepted with change",
     PART: "Partially accepted",
+    pending_egress: "queued — not yet transmitted to SWIFT",
   };
   return descriptions[status] || "Unknown status";
 }
 
 function buildGpiTimeline(tx: any) {
+  // W7/B4: return ONLY events that exist in the DB. The previous version
+  // fabricated "Correspondent Bank" / "Beneficiary Bank" hops at synthetic
+  // timestamps (created_at + 1800000ms) — phantom GPI tracking data. An empty
+  // or single-event list is the honest answer until a real GPI feed writes
+  // status transitions.
   const timeline = [];
-  if (tx.created_at) timeline.push({ timestamp: tx.created_at, status: "ACCP", bank: "RemitFlow", description: "Payment accepted" });
-  if (tx.status === "ACSP" || tx.status === "ACSC") {
-    timeline.push({ timestamp: new Date(new Date(tx.created_at).getTime() + 1800000).toISOString(), status: "ACSP", bank: "Correspondent Bank", description: "Settlement in progress" });
+  if (tx.created_at) {
+    timeline.push({
+      timestamp: tx.created_at,
+      status: tx.status,
+      bank: "RemitFlow",
+      description: getStatusDescription(tx.status),
+    });
   }
-  if (tx.status === "ACSC") {
-    timeline.push({ timestamp: tx.updated_at || new Date().toISOString(), status: "ACSC", bank: "Beneficiary Bank", description: "Settlement completed" });
+  const createdMs = tx.created_at ? new Date(tx.created_at).getTime() : 0;
+  const updatedMs = tx.updated_at ? new Date(tx.updated_at).getTime() : 0;
+  if (tx.updated_at && updatedMs > createdMs) {
+    timeline.push({
+      timestamp: tx.updated_at,
+      status: tx.status,
+      bank: "RemitFlow",
+      description: `Status updated: ${getStatusDescription(tx.status)}`,
+    });
   }
   return timeline;
 }

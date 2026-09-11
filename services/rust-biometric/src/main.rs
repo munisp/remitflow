@@ -418,7 +418,10 @@ async fn main() {
         .init();
 
     let port     = env("PORT", "8149");
-    let hmac_key = env("BIOMETRIC_HMAC_KEY", "remitflow-biometric-hmac-key-change-in-production");
+    // FAIL CLOSED: no default HMAC key — refuse to boot when unset rather
+    // than ship a publicly known biometric-token signing key.
+    let hmac_key = std::env::var("BIOMETRIC_HMAC_KEY")
+        .expect("BIOMETRIC_HMAC_KEY is not set: refusing to fall back to a well-known default credential; configure it explicitly");
 
     let state = Arc::new(AppState {
         profiles: RwLock::new(HashMap::new()),
