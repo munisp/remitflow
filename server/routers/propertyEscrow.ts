@@ -29,11 +29,11 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { randomBytes } from "crypto";
+import { randomBytes, createHash } from "crypto";
 import { router, protectedProcedure, adminProcedure, publicProcedure } from "../_core/trpc.js";
 import { getDb } from "../db.js";
 import { createAuditLog } from "../audit.service.js";
-import { sql, eq, desc, and, gte, lte } from "drizzle-orm";
+import { sql, eq, desc, and, gte, lte, inArray } from "drizzle-orm";
 import {
   builderProfiles, propertyEscrowPlans, propertyMilestones,
   milestoneEvidence, propertyEscrowDisputes, escrowPaymentSchedule,
@@ -41,6 +41,7 @@ import {
 } from "../../drizzle/schema.js";
 import { getKafkaProducer, publishEvent, KAFKA_TOPICS } from "../middleware/kafka.js";
 import { executeTransferPipeline } from "../_core/transferPipeline.js";
+import { assertFeatureEligible } from "../_core/featureGuard.js";
 import { broadcastUserEvent } from "../sse.service.js";
 import {
   redis, tigerBeetle, fluvio,
@@ -224,6 +225,8 @@ const escrowPlanRouter = router({
       })).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // A6: real estate escrow is a declared tier-2 investments feature.
+      await assertFeatureEligible(ctx, { flag: "investments", minKycTier: 2, featureName: "Property escrow" });
       const db = await getDbConn();
 
       // Verify listing exists
@@ -390,6 +393,8 @@ const escrowPlanRouter = router({
   payDeposit: protectedProcedure
     .input(z.object({ planId: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
+      // A6: real estate escrow is a declared tier-2 investments feature.
+      await assertFeatureEligible(ctx, { flag: "investments", minKycTier: 2, featureName: "Property escrow deposit" });
       const db = await getDbConn();
       const [plan] = await db.select().from(propertyEscrowPlans).where(and(eq(propertyEscrowPlans.planId, input.planId), eq(propertyEscrowPlans.buyerId, ctx.user.id))).limit(1);
       if (!plan) throw new TRPCError({ code: "NOT_FOUND", message: "Escrow plan not found" });
@@ -404,18 +409,38 @@ const escrowPlanRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: `Insufficient USD balance. Required: $${depositUsd.toFixed(2)}` });
       }
 
-      const [debitedDeposit] = await db.update(wallets).set({
-        balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) - ${depositUsd} AS VARCHAR)`,
-        updatedAt: new Date(),
-      }).where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${depositUsd}`)).returning();
-      if (!debitedDeposit) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+      // FF-FIX: single-winner deposit claim + guarded debit in ONE transaction —
+      // two concurrent payDeposit calls can no longer both debit.
+      await db.transaction(async (tx: any) => {
+        const claim = await tx.update(propertyEscrowPlans)
+          .set({ depositPaid: true, updatedAt: new Date() })
+          .where(and(
+            eq(propertyEscrowPlans.id, plan.id),
+            eq(propertyEscrowPlans.depositPaid, false),
+            eq(propertyEscrowPlans.status, "draft"),
+          ))
+          .returning({ id: propertyEscrowPlans.id });
+        if (claim.length === 0) {
+          throw new TRPCError({ code: "CONFLICT", message: "Deposit already paid (concurrent request)" });
+        }
+        const debit = await tx.update(wallets).set({
+          balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) - ${depositUsd} AS VARCHAR)`,
+          updatedAt: new Date(),
+        }).where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,2)) >= ${depositUsd}`)).returning();
+        if (debit.length === 0) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+      });
+
+      // Deterministic TB hold id derived from the plan — BigInt(Date.now())
+      // collided across same-millisecond deposits.
+      const holdId = BigInt("0x" + createHash("sha256").update(`escrow-deposit:${plan.planId}`).digest("hex").slice(0, 15));
+      const voidId = BigInt("0x" + createHash("sha256").update(`escrow-deposit-void:${plan.planId}`).digest("hex").slice(0, 15));
 
       // Lock deposit in TigerBeetle (FAIL-CLOSED — escrow MUST be ledger-backed).
-      // If the ledger hold fails, refund the wallet debit so the buyer is not
-      // left short without an escrow record, then propagate the failure.
+      // If the ledger hold fails, refund the wallet debit AND release the plan
+      // claim so the buyer is made whole, then propagate the failure.
       try {
         await tigerBeetle.createPendingTransfer({
-          id: BigInt(Date.now()),
+          id: holdId,
           debitAccountId: BigInt(ctx.user.id),
           creditAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
           amount: BigInt(Math.round(depositUsd * 100)),
@@ -424,37 +449,62 @@ const escrowPlanRouter = router({
           timeoutSeconds: 86400, // 24h timeout for escrow holds
         });
       } catch (err) {
-        await db.update(wallets).set({
-          balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${depositUsd} AS VARCHAR)`,
-          updatedAt: new Date(),
-        }).where(eq(wallets.id, wallet.id));
+        await db.transaction(async (tx: any) => {
+          await tx.update(wallets).set({
+            balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${depositUsd} AS VARCHAR)`,
+            updatedAt: new Date(),
+          }).where(eq(wallets.id, wallet.id));
+          await tx.update(propertyEscrowPlans).set({ depositPaid: false, updatedAt: new Date() })
+            .where(and(eq(propertyEscrowPlans.id, plan.id), eq(propertyEscrowPlans.status, "draft")));
+        });
         throw err;
       }
 
-      // Record transaction
-      await db.insert(transactions).values({
-        userId: ctx.user.id,
-        type: "escrow_deposit" as any,
-        status: "completed" as any,
-        fromAmount: String(depositUsd),
-        fromCurrency: "USD",
-        toAmount: String(depositUsd),
-        toCurrency: "USD",
-        description: `Property escrow deposit for plan ${plan.planId}`,
-        reference: `ESCROW-DEP-${plan.planId}`,
-      } as any).returning();
-
-      // Activate plan
+      // FF-FIX: post-hold writes are saga-compensated — a failure here voids
+      // the TB hold, refunds the wallet, and releases the plan claim (the old
+      // code left the buyer debited with a held amount and a draft plan).
       const nextPaymentDate = new Date();
       nextPaymentDate.setMonth(nextPaymentDate.getMonth() + 1);
-      await db.update(propertyEscrowPlans).set({
-        depositPaid: true,
-        status: "active",
-        totalPaidUsd: String(depositUsd),
-        startedAt: new Date(),
-        nextPaymentDate,
-        updatedAt: new Date(),
-      }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
+      try {
+        // Record transaction
+        await db.insert(transactions).values({
+          userId: ctx.user.id,
+          type: "withdrawal",
+          status: "completed",
+          fromAmount: String(depositUsd),
+          fromCurrency: "USD",
+          toAmount: String(depositUsd),
+          toCurrency: "USD",
+          description: `Property escrow deposit for plan ${plan.planId}`,
+          reference: `ESCROW-DEP-${plan.planId}`,
+          metadata: { originalType: "escrow_deposit", planId: plan.planId },
+        } as any).returning();
+
+        // Activate plan
+        await db.update(propertyEscrowPlans).set({
+          status: "active",
+          totalPaidUsd: String(depositUsd),
+          startedAt: new Date(),
+          nextPaymentDate,
+          updatedAt: new Date(),
+        }).where(and(eq(propertyEscrowPlans.id, plan.id), eq(propertyEscrowPlans.depositPaid, true))).returning();
+      } catch (postHoldErr) {
+        logger.error({ planId: plan.planId, err: postHoldErr instanceof Error ? postHoldErr.message : String(postHoldErr) },
+          "[PropertyEscrow] Post-hold failure — voiding hold, refunding buyer, releasing claim");
+        try { await tigerBeetle.voidPendingTransfer(voidId, holdId, "USD"); } catch (voidErr) {
+          logger.error({ planId: plan.planId, err: voidErr instanceof Error ? voidErr.message : String(voidErr) },
+            "[PropertyEscrow] CRITICAL: hold void failed — manual reconciliation required");
+        }
+        await db.transaction(async (tx: any) => {
+          await tx.update(wallets).set({
+            balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${depositUsd} AS VARCHAR)`,
+            updatedAt: new Date(),
+          }).where(eq(wallets.id, wallet.id));
+          await tx.update(propertyEscrowPlans).set({ depositPaid: false, updatedAt: new Date() })
+            .where(and(eq(propertyEscrowPlans.id, plan.id), eq(propertyEscrowPlans.status, "draft")));
+        });
+        throw postHoldErr;
+      }
 
       await createAuditLog({ userId: ctx.user.id, action: "ESCROW_DEPOSIT_PAID", metadata: { planId: plan.planId, amount: depositUsd } });
       await notifyOwner({ title: "Escrow Deposit Paid", content: `Buyer ${ctx.user.id} paid $${depositUsd.toFixed(2)} deposit for escrow plan ${plan.planId}` });
@@ -535,14 +585,15 @@ const escrowPlanRouter = router({
       // Record transaction
       const [tx] = await db.insert(transactions).values({
         userId: ctx.user.id,
-        type: "escrow_installment" as any,
-        status: "completed" as any,
+        type: "withdrawal",
+        status: "completed",
         fromAmount: String(amount),
         fromCurrency: "USD",
         toAmount: String(amount),
         toCurrency: "USD",
         description: `Installment #${nextInstallment.installmentNumber} for escrow plan ${plan.planId}`,
         reference: `ESCROW-INST-${plan.planId}-${nextInstallment.installmentNumber}`,
+        metadata: { originalType: "escrow_installment", planId: plan.planId, installmentNumber: nextInstallment.installmentNumber },
       } as any).returning();
 
       // Mark installment paid
@@ -675,8 +726,24 @@ const milestoneRouter = router({
     }),
 
   approveMilestone: adminProcedure
-    .input(z.object({ milestoneId: z.string().min(1) }))
+    .input(z.object({
+      milestoneId: z.string().min(1),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
+    }))
     .mutation(async ({ ctx, input }) => {
+      // D9: releasing escrow funds is high-impact — the ADMIN's own TOTP must
+      // be verified whenever the admin has 2FA enrolled (never silently skip).
+      {
+        const { getTotpEnrollment, verifyTOTP } = await import("../totp");
+        const enrollment = await getTotpEnrollment(ctx.user.id);
+        if (!enrollment.dbAvailable) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — action blocked" });
+        if (enrollment.enabled && enrollment.secret) {
+          if (!input.totpCode) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+          const valid = await verifyTOTP(input.totpCode, enrollment.secret);
+          if (!valid) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+        }
+      }
+
       const db = await getDbConn();
       const [milestone] = await db.select().from(propertyMilestones).where(eq(propertyMilestones.milestoneId, input.milestoneId)).limit(1);
       if (!milestone) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
@@ -697,29 +764,49 @@ const milestoneRouter = router({
 
       const releaseAmount = Number(milestone.releaseAmountUsd);
 
-      // Release funds from TigerBeetle escrow to builder (FAIL-CLOSED)
-      const tbTransferId = BigInt(Date.now());
-      const [builderForTb] = await db.select().from(builderProfiles).where(eq(builderProfiles.id, plan.builderId)).limit(1);
+      const [builder] = await db.select().from(builderProfiles).where(eq(builderProfiles.id, plan.builderId)).limit(1);
+      if (!builder) throw new TRPCError({ code: "NOT_FOUND", message: "Builder profile not found" });
+
+      // B12: resolve a PROPER TigerBeetle payout account for the builder on the
+      // escrow ledger — NEVER BigInt(builder.userId) (a raw user id is not a
+      // provisioned TB account). The account id is deterministic (hash of the
+      // builder user id) and provisioned idempotently (TB exists(21) tolerated
+      // by the bridge client), so repeated milestone releases target the same
+      // account.
+      const builderPayoutAccountId = BigInt("0x" + createHash("sha256").update(`escrow-builder-payout:${builder.userId}`).digest("hex").slice(0, 15));
+      await tigerBeetle.createAccounts([{
+        id: builderPayoutAccountId,
+        ledger: ESCROW_LEDGER,
+        code: ESCROW_CODE,
+        userData128: BigInt(builder.userId),
+      }]);
+
+      // B12: the TB release must succeed BEFORE the SQL wallet is credited — a
+      // TB failure can no longer leave the SQL wallet credited with no ledger
+      // backing. Deterministic transfer id (BigInt(Date.now()) collided across
+      // same-millisecond releases).
+      const tbTransferId = BigInt("0x" + createHash("sha256").update(`escrow-release:${milestone.milestoneId}`).digest("hex").slice(0, 15));
       await tigerBeetle.createTransfer({
         id: tbTransferId,
         debitAccountId: plan.tigerBeetleEscrowAccount ?? BigInt(0),
-        creditAccountId: BigInt(builderForTb?.userId ?? 0),
+        creditAccountId: builderPayoutAccountId,
         amount: BigInt(Math.round(releaseAmount * 100)),
         ledger: ESCROW_LEDGER,
         code: ESCROW_CODE,
         pending: false, // Posted (final) — funds released to builder
       });
 
-      // Credit builder's wallet
-      const [builder] = await db.select().from(builderProfiles).where(eq(builderProfiles.id, plan.builderId)).limit(1);
-      if (builder) {
-        const [builderWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, builder.userId), eq(wallets.currency, "USD"))).limit(1);
-        if (builderWallet) {
-          await db.update(wallets).set({
-            balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${releaseAmount} AS VARCHAR)`,
-            updatedAt: new Date(),
-          }).where(eq(wallets.id, builderWallet.id)).returning();
-        }
+      // Credit builder's wallet ONLY after the confirmed TB post. Row-count
+      // checked: a missing builder wallet aborts the release — the milestone
+      // is NOT marked approved and the discrepancy is logged for reconciliation.
+      const credited = await db.update(wallets).set({
+        balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${releaseAmount} AS VARCHAR)`,
+        updatedAt: new Date(),
+      }).where(and(eq(wallets.userId, builder.userId), eq(wallets.currency, "USD"))).returning({ id: wallets.id });
+      if (credited.length === 0) {
+        logger.error({ milestoneId: input.milestoneId, builderUserId: builder.userId, releaseAmount, tbTransferId: tbTransferId.toString() },
+          "[PropertyEscrow] Builder USD wallet missing AFTER TB release posted — milestone NOT approved; MANUAL RECONCILIATION REQUIRED");
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Builder USD wallet unavailable — milestone not approved; ledger release flagged for reconciliation" });
       }
 
       // Update milestone
@@ -776,6 +863,145 @@ const milestoneRouter = router({
 // ═══════════════════════════════════════════════════════════════════════════════
 // PROPERTY DISPUTES
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * W9/F11-2: shared full-refund internals for property escrows. Used by BOTH
+ * the buyer-initiated `requestFullRefund` and the scheduler-driven
+ * `sweepAutoRefunds` — one implementation, never duplicated.
+ * Credits the buyer's USD wallet, records the refund transaction, and closes
+ * the plan as `refunded`. Returns the refunded amount (0 when nothing is
+ * refundable — caller decides whether that is an error).
+ */
+async function executeFullEscrowRefund(
+  db: any,
+  plan: typeof propertyEscrowPlans.$inferSelect,
+  opts: { reason: string; actorUserId: number; auditAction?: string },
+): Promise<number> {
+  const refundAmount = Number(plan.totalPaidUsd) - Number(plan.totalReleasedUsd);
+  if (refundAmount <= 0) return 0;
+
+  // Credit buyer wallet — W9-FIX2: FAIL CLOSED. Previously a missing buyer USD
+  // wallet silently skipped the credit while the refund was still recorded and
+  // the plan closed (money vanished). A refund with no destination cannot
+  // complete — throw so the dispute stays open and the sweep can retry.
+  const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, plan.buyerId), eq(wallets.currency, "USD"))).limit(1);
+  if (!wallet) {
+    throw new TRPCError({ code: "PRECONDITION_FAILED", message: `Buyer USD wallet not found — escrow refund for plan ${plan.planId} aborted, no funds moved` });
+  }
+
+  // W9-FIX2 (MEDIUM): wallet credit + refund record + plan flip commit in ONE
+  // db.transaction. Previously a crash after the credit left the dispute open
+  // and the plan un-flipped, so the next hourly sweep double-refunded.
+  await db.transaction(async (tx: any) => {
+    // W9-FIX3 (HIGH): GUARDED single-winner plan flip FIRST — claims the refund
+    // before any money moves. Both requestFullRefund and the auto-refund sweep
+    // read the plan status OUTSIDE this transaction, so two concurrent refunds
+    // could both pass the disputed/defaulted check and double-credit the buyer
+    // (TOCTOU). Zero rows updated means a concurrent refund already claimed it
+    // — throw inside the transaction so the credit below never commits.
+    const flipped = await tx.update(propertyEscrowPlans)
+      .set({ status: "refunded", cancelledAt: new Date(), updatedAt: new Date() })
+      .where(and(
+        eq(propertyEscrowPlans.id, plan.id),
+        inArray(propertyEscrowPlans.status, ["disputed", "defaulted"]),
+      ))
+      .returning({ id: propertyEscrowPlans.id });
+    if (flipped.length === 0) {
+      throw new TRPCError({ code: "CONFLICT", message: `Escrow refund for plan ${plan.planId} aborted — plan is no longer disputed/defaulted (a concurrent refund already claimed it); no funds moved` });
+    }
+
+    await tx.update(wallets).set({
+      balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${refundAmount} AS VARCHAR)`,
+      updatedAt: new Date(),
+    }).where(eq(wallets.id, wallet.id)).returning();
+
+    await tx.insert(transactions).values({
+      userId: plan.buyerId,
+      type: "refund",
+      status: "completed",
+      fromAmount: String(refundAmount),
+      fromCurrency: "USD",
+      toAmount: String(refundAmount),
+      toCurrency: "USD",
+      description: `Property escrow full refund — plan ${plan.planId}: ${opts.reason}`,
+      reference: `ESCROW-FULLREFUND-${plan.planId}`,
+    } as any).returning();
+  });
+  await createAuditLog({ userId: opts.actorUserId, action: opts.auditAction ?? "ESCROW_FULL_REFUND", metadata: { planId: plan.planId, refundAmount, reason: opts.reason } });
+
+  return refundAmount;
+}
+
+/**
+ * W9/F11-2: auto-refund sweeper. Disputes promise "full refund automatically
+ * issued after the 90-day grace period" (see dispute raise) but nothing ever
+ * read `autoRefundDate` — this sweeper honours that promise. Finds open
+ * disputes whose autoRefundDate has passed and whose plan still holds funds
+ * (status disputed/defaulted), then executes the SAME refund internals as
+ * requestFullRefund. Registered in scheduler.ts. Idempotent: a swept dispute
+ * leaves "open" status, and a plan already refunded has no refundable amount.
+ */
+export async function sweepAutoRefunds(): Promise<{ candidates: number; refunded: number; skipped: number; failed: number }> {
+  const db = await getDb();
+  if (!db) {
+    logger.error("[PropertyEscrow] sweepAutoRefunds: DB unavailable — sweep aborted (fail-loud)");
+    return { candidates: 0, refunded: 0, skipped: 0, failed: 0 };
+  }
+
+  const now = new Date();
+  const dueDisputes = await db
+    .select()
+    .from(propertyEscrowDisputes)
+    .where(and(
+      eq(propertyEscrowDisputes.status, "open"),
+      lte(propertyEscrowDisputes.autoRefundDate, now),
+    ))
+    .limit(100);
+
+  let refunded = 0, skipped = 0, failed = 0;
+  for (const dispute of dueDisputes) {
+    try {
+      const [plan] = await db.select().from(propertyEscrowPlans).where(eq(propertyEscrowPlans.id, dispute.escrowPlanId)).limit(1);
+      // Funds are only "held" while the plan is frozen in a disputed/defaulted
+      // state — anything else (active after cure, already refunded) is skipped.
+      if (!plan || !["disputed", "defaulted"].includes(plan.status ?? "")) {
+        skipped++;
+        continue;
+      }
+      const amount = await executeFullEscrowRefund(db, plan, {
+        reason: `Auto-refund: dispute ${dispute.disputeId} unresolved after ${GRACE_PERIOD_DAYS}-day grace period`,
+        actorUserId: dispute.raisedBy,
+        auditAction: "ESCROW_AUTO_REFUND",
+      });
+      if (amount <= 0) {
+        skipped++;
+        logger.info({ disputeId: dispute.disputeId, planId: plan.planId }, "[PropertyEscrow] Auto-refund skipped — no refundable amount");
+        continue;
+      }
+      await db.update(propertyEscrowDisputes).set({
+        status: "refund_completed",
+        resolution: `Auto-refunded $${amount.toFixed(2)} to buyer — grace period elapsed without resolution (autoRefundDate ${dispute.autoRefundDate ? new Date(dispute.autoRefundDate).toISOString() : "n/a"})`,
+        refundAmountUsd: String(amount),
+        refundInitiatedAt: now,
+        refundCompletedAt: new Date(),
+        updatedAt: new Date(),
+      }).where(eq(propertyEscrowDisputes.id, dispute.id));
+      refunded++;
+      logger.info({ disputeId: dispute.disputeId, planId: plan.planId, amount }, "[PropertyEscrow] Auto-refund swept");
+      notifyOwner({
+        title: `Property Escrow Auto-Refund: ${dispute.disputeId}`,
+        content: `Grace period elapsed for dispute ${dispute.disputeId} (plan ${plan.planId}). $${amount.toFixed(2)} auto-refunded to buyer ${plan.buyerId}.`,
+      }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[PropertyEscrow] Auto-refund owner notification failed"));
+    } catch (err) {
+      failed++;
+      logger.error({ err: err instanceof Error ? err.message : String(err), disputeId: dispute.disputeId, escrowPlanId: dispute.escrowPlanId },
+        "[PropertyEscrow] Auto-refund sweep failed for dispute — will retry next interval");
+    }
+  }
+
+  logger.info({ candidates: dueDisputes.length, refunded, skipped, failed }, "[PropertyEscrow] sweepAutoRefunds complete");
+  return { candidates: dueDisputes.length, refunded, skipped, failed };
+}
 
 const propertyDisputeRouter = router({
   raise: protectedProcedure
@@ -892,8 +1118,8 @@ const propertyDisputeRouter = router({
           // Record refund transaction
           await db.insert(transactions).values({
             userId: plan.buyerId,
-            type: "refund" as any,
-            status: "completed" as any,
+            type: "refund",
+            status: "completed",
             fromAmount: String(input.refundAmountUsd),
             fromCurrency: "USD",
             toAmount: String(input.refundAmountUsd),
@@ -942,32 +1168,10 @@ const propertyDisputeRouter = router({
         }
       }
 
-      const refundAmount = Number(plan.totalPaidUsd) - Number(plan.totalReleasedUsd);
+      // W9/F11-2: delegate to the shared refund internals (also used by the
+      // auto-refund sweeper) — no duplicated refund logic.
+      const refundAmount = await executeFullEscrowRefund(db, plan, { reason: input.reason, actorUserId: ctx.user.id });
       if (refundAmount <= 0) throw new TRPCError({ code: "BAD_REQUEST", message: "No refundable amount remaining" });
-
-      // Credit buyer wallet
-      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
-      if (wallet) {
-        await db.update(wallets).set({
-          balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${refundAmount} AS VARCHAR)`,
-          updatedAt: new Date(),
-        }).where(eq(wallets.id, wallet.id)).returning();
-      }
-
-      await db.insert(transactions).values({
-        userId: ctx.user.id,
-        type: "refund" as any,
-        status: "completed" as any,
-        fromAmount: String(refundAmount),
-        fromCurrency: "USD",
-        toAmount: String(refundAmount),
-        toCurrency: "USD",
-        description: `Property escrow full refund — plan ${plan.planId}: ${input.reason}`,
-        reference: `ESCROW-FULLREFUND-${plan.planId}`,
-      } as any).returning();
-
-      await db.update(propertyEscrowPlans).set({ status: "refunded", cancelledAt: new Date(), updatedAt: new Date() }).where(eq(propertyEscrowPlans.id, plan.id)).returning();
-      await createAuditLog({ userId: ctx.user.id, action: "ESCROW_FULL_REFUND", metadata: { planId: plan.planId, refundAmount, reason: input.reason } });
 
       return { planId: plan.planId, refundAmount, status: "refunded", message: `$${refundAmount.toFixed(2)} refunded to your wallet` };
     }),
