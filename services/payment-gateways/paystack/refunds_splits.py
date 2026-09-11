@@ -40,7 +40,7 @@ class PaystackRefunds:
             "transaction": transaction
         }
         
-        if amount:
+        if amount is not None:
             payload["amount"] = amount
         
         if currency:

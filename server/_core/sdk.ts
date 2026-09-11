@@ -335,7 +335,21 @@ class SDKServer {
       }
     } catch (err: any) {
       if (err?.message?.includes("Account temporarily locked")) throw err;
-      // Swallow import/DB errors — fail open to avoid blocking legitimate users
+      // SEC (MEDIUM): previously swallowed import/DB errors — fail OPEN, so a
+      // DB blip (or induced error) disabled brute-force lockouts platform-wide
+      // and let locked/compromised accounts authenticate. Fail closed instead
+      // and alert on the error path.
+      logger.error({ err: err instanceof Error ? err.message : String(err), userId: user.id }, "[Auth] Lockout check failed — rejecting session (fail-closed)");
+      try {
+        const { emitSecurityEvent } = await import("../security.attacks.js");
+        emitSecurityEvent({
+          type: "auth.lockout_check_error",
+          severity: "high",
+          userId: user.id,
+          detail: "Account lockout check errored — session rejected (fail-closed)",
+        });
+      } catch { /* alerting must not mask the primary failure */ }
+      throw ForbiddenError("Unable to verify account status. Please try again shortly.");
     }
   }
 
