@@ -1,0 +1,35 @@
+{
+  "header": {
+    "returnType": "carp",
+    "tenantId": 42,
+    "periodStart": "2026-09-01",
+    "periodEnd": "2026-09-07",
+    "formatVersion": "v1-fixture"
+  },
+  "branches": [
+    {
+      "branchCode": "BR-LAG-01",
+      "stateCode": "LA",
+      "transactionCount": 2,
+      "buyCount": 1,
+      "sellCount": 1,
+      "buyFxMinor": 200000,
+      "sellFxMinor": 1500000
+    },
+    {
+      "branchCode": "BR-LAG-02",
+      "stateCode": "LA",
+      "transactionCount": 2,
+      "buyCount": 1,
+      "sellCount": 1,
+      "buyFxMinor": 1200000,
+      "sellFxMinor": 500000
+    }
+  ],
+  "summary": {
+    "branchCount": 2,
+    "transactionCount": 4,
+    "totalBuyFxMinor": 1400000,
+    "totalSellFxMinor": 2000000
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "header": {
+    "returnType": "extranet",
+    "tenantId": 42,
+    "periodStart": "2026-09-01",
+    "periodEnd": "2026-09-07",
+    "formatVersion": "v1-fixture"
+  },
+  "sections": {
+    "fifxLineCount": 4,
+    "trmsReportableCount": 3,
+    "branchCount": 2,
+    "balancesIncluded": true
+  }
+}

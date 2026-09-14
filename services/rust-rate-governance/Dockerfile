@@ -1,0 +1,49 @@
+# ─── Build Stage ──────────────────────────────────────────────────────────────
+# Same base + pattern as services/rust-tigerbeetle-bridge/Dockerfile, minus the
+# TigerBeetle-specific toolchain workarounds (no zig/libclang needed here —
+# pure axum compute service, no native dependencies).
+FROM rust:1.82-slim-bookworm AS builder
+
+LABEL org.opencontainers.image.vendor="RemitFlow" \
+      org.opencontainers.image.licenses="Proprietary" \
+      security.non-root="true"
+
+WORKDIR /app
+
+# Generate a lockfile inside the build so the dependency graph is pinned and
+# reproducible even though no Cargo.lock is checked into the repo.
+COPY Cargo.toml ./
+RUN cargo generate-lockfile && cargo fetch
+
+# Cache dependencies
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release
+RUN rm -rf src
+
+# Build actual source
+COPY src ./src
+RUN touch src/main.rs && cargo build --release
+
+# ─── Runtime Stage ────────────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+# wget is required by the Docker HEALTHCHECK (compose uses wget --spider).
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user
+RUN useradd -r -s /bin/false -u 1001 appuser
+USER appuser
+
+WORKDIR /app
+# Binary name matches [[bin]] name in Cargo.toml.
+COPY --from=builder /app/target/release/rate-governance .
+
+EXPOSE 8310
+
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=3 \
+  CMD wget --spider -q http://localhost:8310/healthz || exit 1
+
+ENTRYPOINT ["./rate-governance"]
