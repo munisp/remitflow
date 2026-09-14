@@ -241,8 +241,8 @@ func handleFXBTRequest(cfg fxbtConfig) http.HandlerFunc {
 // drizzle/0089_bdc_platform.sql.
 func buildEntitlementQuery(tenantID int64, bankCode string) (string, []any) {
 	q := `SELECT id, tenant_id, bank_code, week_start, cap_usd, used_usd, version
-      FROM bdc_nfem_entitlements
-      WHERE tenant_id = $1`
+	      FROM bdc_nfem_entitlements
+	      WHERE tenant_id = $1`
 	args := []any{tenantID}
 	if bankCode != "" {
 		q += ` AND bank_code = $2`
@@ -258,17 +258,17 @@ func buildBatchQuery(tenantID int64, bankCode string) (string, []any) {
 	args := []any{tenantID}
 	if bankCode != "" {
 		return `SELECT b.id, b.tenant_id, b.entitlement_id, b.amount_usd, b.rate, b.naira_paid,
-	              b.fxbt_reference, b.status, b.purchased_at, b.deadline_at, b.liquidated_at, b.created_at
-	       FROM bdc_nfem_purchase_batches b
-	       JOIN bdc_nfem_entitlements e ON e.id = b.entitlement_id
-	       WHERE b.tenant_id = $1 AND e.bank_code = $2
-	       ORDER BY b.created_at DESC LIMIT 100`, append(args, bankCode)
+		              b.fxbt_reference, b.status, b.purchased_at, b.deadline_at, b.liquidated_at, b.created_at
+		       FROM bdc_nfem_purchase_batches b
+		       JOIN bdc_nfem_entitlements e ON e.id = b.entitlement_id
+		       WHERE b.tenant_id = $1 AND e.bank_code = $2
+		       ORDER BY b.created_at DESC LIMIT 100`, append(args, bankCode)
 	}
 	return `SELECT b.id, b.tenant_id, b.entitlement_id, b.amount_usd, b.rate, b.naira_paid,
-              b.fxbt_reference, b.status, b.purchased_at, b.deadline_at, b.liquidated_at, b.created_at
-       FROM bdc_nfem_purchase_batches b
-       WHERE b.tenant_id = $1
-       ORDER BY b.created_at DESC LIMIT 100`, args
+	              b.fxbt_reference, b.status, b.purchased_at, b.deadline_at, b.liquidated_at, b.created_at
+	       FROM bdc_nfem_purchase_batches b
+	       WHERE b.tenant_id = $1
+	       ORDER BY b.created_at DESC LIMIT 100`, args
 }
 
 type entitlementDTO struct {
@@ -402,13 +402,13 @@ func buildLiquidationUpdate(mode string) string {
 	target, _ := liquidationTarget(mode)
 	if mode == "market" {
 		return `UPDATE bdc_nfem_purchase_batches
-	       SET status = '` + target + `', liquidated_at = now(), updated_at = now()
-	       WHERE id = $1 AND status = 'selling'`
+		       SET status = '` + target + `', liquidated_at = now(), updated_at = now()
+		       WHERE id = $1 AND status = 'selling'`
 	}
 	// 'return' mode: no liquidated_at — the FX goes back to the issuing bank.
 	return `UPDATE bdc_nfem_purchase_batches
-       SET status = '` + target + `', updated_at = now()
-       WHERE id = $1 AND status = 'selling'`
+	       SET status = '` + target + `', updated_at = now()
+	       WHERE id = $1 AND status = 'selling'`
 }
 
 func handleLiquidate(w http.ResponseWriter, r *http.Request) {
