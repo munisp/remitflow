@@ -1,0 +1,81 @@
+{
+  "header": {
+    "returnType": "fifx",
+    "tenantId": 42,
+    "periodStart": "2026-09-01",
+    "periodEnd": "2026-09-07",
+    "formatVersion": "v1-fixture"
+  },
+  "lines": [
+    {
+      "txnRef": "TXN-0001",
+      "date": "2026-09-01",
+      "txnType": "buy_fx",
+      "currency": "USD",
+      "fxAmountMinor": 200000,
+      "nairaAmountMinor": 316000000,
+      "rateMinor": 158000,
+      "purposeCode": "",
+      "paymentMethod": "cash",
+      "customerType": "resident"
+    },
+    {
+      "txnRef": "TXN-0002",
+      "date": "2026-09-02",
+      "txnType": "sell_fx",
+      "currency": "USD",
+      "fxAmountMinor": 1500000,
+      "nairaAmountMinor": 2370000000,
+      "rateMinor": 158000,
+      "purposeCode": "PTA",
+      "paymentMethod": "nip_transfer",
+      "customerType": "resident"
+    },
+    {
+      "txnRef": "TXN-0003",
+      "date": "2026-09-03",
+      "txnType": "sell_fx",
+      "currency": "GBP",
+      "fxAmountMinor": 500000,
+      "nairaAmountMinor": 995000000,
+      "rateMinor": 199000,
+      "purposeCode": "MEDICAL",
+      "paymentMethod": "nip_transfer",
+      "customerType": "non_resident"
+    },
+    {
+      "txnRef": "TXN-0004",
+      "date": "2026-09-04",
+      "txnType": "buy_fx",
+      "currency": "EUR",
+      "fxAmountMinor": 1200000,
+      "nairaAmountMinor": 2052000000,
+      "rateMinor": 171000,
+      "purposeCode": "",
+      "paymentMethod": "nip_transfer",
+      "customerType": "resident"
+    }
+  ],
+  "summary": {
+    "transactionCount": 4,
+    "buyCount": 2,
+    "sellCount": 2,
+    "totalsByCurrency": [
+      {
+        "currency": "EUR",
+        "fxAmountMinor": 1200000,
+        "nairaAmountMinor": 2052000000
+      },
+      {
+        "currency": "GBP",
+        "fxAmountMinor": 500000,
+        "nairaAmountMinor": 995000000
+      },
+      {
+        "currency": "USD",
+        "fxAmountMinor": 1700000,
+        "nairaAmountMinor": 2686000000
+      }
+    ]
+  }
+}

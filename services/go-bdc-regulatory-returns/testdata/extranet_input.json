@@ -1,0 +1,76 @@
+{
+  "tenantId": 42,
+  "returnType": "extranet",
+  "periodStart": "2026-09-01",
+  "periodEnd": "2026-09-07",
+  "data": {
+    "branches": [
+      { "branchCode": "BR-LAG-01", "stateCode": "LA", "status": "active" },
+      { "branchCode": "BR-LAG-02", "stateCode": "LA", "status": "active" }
+    ],
+    "balances": {
+      "shareholdersFundsMinor": 50000000000,
+      "nopUsdMinor": 10000000000,
+      "borrowingMinor": 5000000000,
+      "nopLimitPct": 30,
+      "borrowingLimitPct": 50
+    },
+    "transactions": [
+      {
+        "txnRef": "TXN-0002",
+        "date": "2026-09-02",
+        "txnType": "sell_fx",
+        "currency": "USD",
+        "fxAmountMinor": 1500000,
+        "nairaAmountMinor": 2370000000,
+        "rateMinor": 158000,
+        "purposeCode": "PTA",
+        "paymentMethod": "nip_transfer",
+        "customerType": "resident",
+        "branchCode": "BR-LAG-01",
+        "sofDeclarationId": "SOF-1001"
+      },
+      {
+        "txnRef": "TXN-0001",
+        "date": "2026-09-01",
+        "txnType": "buy_fx",
+        "currency": "USD",
+        "fxAmountMinor": 200000,
+        "nairaAmountMinor": 316000000,
+        "rateMinor": 158000,
+        "paymentMethod": "cash",
+        "customerType": "resident",
+        "branchCode": "BR-LAG-01",
+        "cashPortionMinor": 50000
+      },
+      {
+        "txnRef": "TXN-0004",
+        "date": "2026-09-04",
+        "txnType": "buy_fx",
+        "currency": "EUR",
+        "fxAmountMinor": 1200000,
+        "nairaAmountMinor": 2052000000,
+        "rateMinor": 171000,
+        "paymentMethod": "nip_transfer",
+        "customerType": "resident",
+        "branchCode": "BR-LAG-02",
+        "sofDeclarationId": "SOF-1003"
+      },
+      {
+        "txnRef": "TXN-0003",
+        "date": "2026-09-03",
+        "txnType": "sell_fx",
+        "currency": "GBP",
+        "fxAmountMinor": 500000,
+        "nairaAmountMinor": 995000000,
+        "rateMinor": 199000,
+        "purposeCode": "MEDICAL",
+        "paymentMethod": "nip_transfer",
+        "customerType": "non_resident",
+        "branchCode": "BR-LAG-02",
+        "pepFlag": true,
+        "sofDeclarationId": "SOF-1002"
+      }
+    ]
+  }
+}

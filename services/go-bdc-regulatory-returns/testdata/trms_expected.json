@@ -1,0 +1,46 @@
+{
+  "header": {
+    "returnType": "trms",
+    "tenantId": 42,
+    "periodStart": "2026-09-01",
+    "periodEnd": "2026-09-07",
+    "formatVersion": "v1-fixture"
+  },
+  "lines": [
+    {
+      "txnRef": "TXN-0002",
+      "date": "2026-09-02",
+      "currency": "USD",
+      "fxAmountMinor": 1500000,
+      "customerType": "resident",
+      "sofDeclarationId": "SOF-1001",
+      "pepFlag": false,
+      "reportReason": "threshold"
+    },
+    {
+      "txnRef": "TXN-0003",
+      "date": "2026-09-03",
+      "currency": "GBP",
+      "fxAmountMinor": 500000,
+      "customerType": "non_resident",
+      "sofDeclarationId": "SOF-1002",
+      "pepFlag": true,
+      "reportReason": "pep"
+    },
+    {
+      "txnRef": "TXN-0004",
+      "date": "2026-09-04",
+      "currency": "EUR",
+      "fxAmountMinor": 1200000,
+      "customerType": "resident",
+      "sofDeclarationId": "SOF-1003",
+      "pepFlag": false,
+      "reportReason": "threshold"
+    }
+  ],
+  "summary": {
+    "reportableCount": 3,
+    "totalReportableFxMinor": 3200000,
+    "pepCount": 1
+  }
+}

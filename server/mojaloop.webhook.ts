@@ -296,6 +296,17 @@ export function registerMojaloopWebhooks(app: Express) {
             logger.info(`[Mojaloop] Transfer ${txn.reference} completed via Mojaloop settlement`);
           }
         }
+        // BDC integration: settle any IMTO payout leg awaiting this transfer.
+        // confirmImtoSettlement is a guarded single-winner flip (pending → settled),
+        // idempotent on replay; telemetry-style — failure must not break the webhook ack.
+        try {
+          if (db2) {
+            const { confirmImtoSettlement } = await import("./routers/bdc/imto.js");
+            await confirmImtoSettlement(db2, transferId);
+          }
+        } catch (bdcErr) {
+          logger.warn({ err: bdcErr, transferId }, "[Mojaloop] BDC IMTO settlement confirmation failed (non-blocking)");
+        }
       } catch (advErr) {
         logger.warn({ err: advErr, transferId }, "[Mojaloop] Failed to advance transfer state");
       }

@@ -1,0 +1,15 @@
+{
+  "tenantId": 42,
+  "returnType": "fina",
+  "periodStart": "2026-09-01",
+  "periodEnd": "2026-09-07",
+  "data": {
+    "balances": {
+      "shareholdersFundsMinor": 50000000000,
+      "nopUsdMinor": 10000000000,
+      "borrowingMinor": 5000000000,
+      "nopLimitPct": 30,
+      "borrowingLimitPct": 50
+    }
+  }
+}
