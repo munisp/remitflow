@@ -48,6 +48,13 @@ const SavingsGoals = lazy(() => import("./pages/SavingsGoals"));
 const FXAlerts = lazy(() => import("./pages/FXAlerts"));
 const OperationsMap = lazy(() => import("./pages/OperationsMap"));
 const PlatformHealth = lazy(() => import("./pages/PlatformHealth"));
+// ── BDC console (F1) — route base /bdc, guarded per existing patterns ──
+const BdcRateBoard = lazy(() => import("./pages/bdc/BdcRateBoard"));
+const BdcTeller = lazy(() => import("./pages/bdc/BdcTeller"));
+const BdcDealerDesk = lazy(() => import("./pages/bdc/BdcDealerDesk"));
+const BdcBranchManager = lazy(() => import("./pages/bdc/BdcBranchManager"));
+const BdcMlroConsole = lazy(() => import("./pages/bdc/BdcMlroConsole"));
+const BdcMdDashboard = lazy(() => import("./pages/bdc/BdcMdDashboard"));
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -225,6 +232,17 @@ const App: React.FC = () => {
             <Route path="fx-alerts" element={<FXAlerts />} />
             <Route path="operations-map" element={<AdminRoute><OperationsMap /></AdminRoute>} />
             <Route path="platform-status" element={<PlatformHealth />} />
+            {/* BDC console (F1). /bdc/rates and /bdc/teller are open to any
+                authenticated tenant user (server-side bdc.* procedure guards
+                remain authoritative); the privileged consoles use the existing
+                AdminRoute pattern (authStore role union is admin|user|partner —
+                finer BDC roles are enforced by the bdc.* procedures). */}
+            <Route path="bdc/rates" element={<BdcRateBoard />} />
+            <Route path="bdc/teller" element={<BdcTeller />} />
+            <Route path="bdc/dealer" element={<AdminRoute><BdcDealerDesk /></AdminRoute>} />
+            <Route path="bdc/branch" element={<AdminRoute><BdcBranchManager /></AdminRoute>} />
+            <Route path="bdc/mlro" element={<AdminRoute><BdcMlroConsole /></AdminRoute>} />
+            <Route path="bdc/dashboard" element={<AdminRoute><BdcMdDashboard /></AdminRoute>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/" replace />} />
