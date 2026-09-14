@@ -31,6 +31,11 @@ import {
   arAgingTaskQueue,
   runArAgingSweepActivity,
 } from "./arAgingWorkflow";
+// BDC integration: NFEM 24h lifecycle + returns submission + settlement recon
+import {
+  BDC_WORKFLOW_TASK_QUEUE,
+  bdcActivities,
+} from "./activities-bdc";
 
 // V2-R2: modules dynamically import()ed inside the W10 activity/schedule
 // bodies (enumerated from server/temporal/apApprovalWorkflow.ts and
@@ -53,6 +58,17 @@ const AR_WORKFLOW_IGNORE_MODULES = [
   "../middleware/kafka.js",
   "../_core/logger.js",
   "@temporalio/client",
+];
+// BDC: modules dynamically import()ed inside server/temporal/activities-bdc.ts
+// bodies — stubbed in the workflow BUNDLE ONLY; activities run normally.
+const BDC_WORKFLOW_IGNORE_MODULES = [
+  "../db.js",
+  "../../drizzle/schema.js",
+  "drizzle-orm",
+  "../middleware/kafka.js",
+  "../_core/logger.js",
+  "../_core/serviceProxy.js",
+  "./temporalClient.js",
 ];
 
 const TEMPORAL_ADDRESS = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
@@ -153,6 +169,21 @@ async function run(): Promise<void> {
     interceptors: { activity: [makeTemporalOtelActivityInterceptors()] },
   });
 
+  // ── BDC workers: NFEM 24h lifecycle, returns submission, settlement recon ──
+  const bdcWorker = await Worker.create({
+    connection,
+    namespace: NAMESPACE,
+    taskQueue: BDC_WORKFLOW_TASK_QUEUE,
+    workflowsPath: new URL("./workflows-bdc.js", import.meta.url).pathname,
+    bundlerOptions: { ignoreModules: BDC_WORKFLOW_IGNORE_MODULES },
+    activities: bdcActivities,
+    maxConcurrentActivityTaskExecutions: 5,
+    maxConcurrentWorkflowTaskExecutions: 5,
+    maxCachedWorkflows: 100,
+    shutdownGraceTime: "30 seconds",
+    interceptors: { activity: [makeTemporalOtelActivityInterceptors()] },
+  });
+
   logger.info(`[Temporal Worker] Worker started on task queue: ${TASK_QUEUE}`);
   logger.info("[Temporal Worker] Registered workflows: TransferWorkflow, KYCVerificationWorkflow, RecurringPaymentWorkflow");
   logger.info(`[Temporal Worker] Registered activities: ${Object.keys(activities).join(", ")}`);
@@ -163,7 +194,7 @@ async function run(): Promise<void> {
   const shutdown = async () => {
     logger.info("[Temporal Worker] Shutting down gracefully...");
     workerReady = false;
-    await Promise.all([worker.shutdown(), apWorker.shutdown(), arWorker.shutdown()]);
+    await Promise.all([worker.shutdown(), apWorker.shutdown(), arWorker.shutdown(), bdcWorker.shutdown()]);
     await connection.close();
     healthServer.close();
     logger.info("[Temporal Worker] Shutdown complete");
@@ -173,7 +204,7 @@ async function run(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  await Promise.all([worker.run(), apWorker.run(), arWorker.run()]);
+  await Promise.all([worker.run(), apWorker.run(), arWorker.run(), bdcWorker.run()]);
 }
 
 run().catch(err => {
