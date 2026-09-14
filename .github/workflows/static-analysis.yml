@@ -16,13 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-      - run: npm ci
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
       - name: Run knip (unused exports, deps, files)
-        run: npx knip --no-exit-code | tee knip-report.txt
+        run: pnpm exec knip --no-exit-code | tee knip-report.txt
       - name: Check for critical orphans
         run: |
           # Fail if there are unused exports in server/routers (indicates orphan features)
@@ -42,13 +43,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-      - run: npm ci
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
       - name: Check circular dependencies
-        run: npx madge --circular --extensions ts,tsx server/ client/src/ 2>/dev/null | tee circular-deps.txt || true
+        run: pnpm exec madge --circular --extensions ts,tsx server/ client/src/ 2>/dev/null | tee circular-deps.txt || true
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v7
@@ -62,13 +64,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-      - run: npm ci
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
       - name: Run orphan audit script
-        run: node scripts/audit-orphans.mjs | tee orphan-audit.txt
+        # TODO: scripts/audit-orphans.mjs does not exist in this repo.
+        # Informational only — knip (above) provides partial orphan coverage.
+        continue-on-error: true
+        run: |
+          echo "::warning::scripts/audit-orphans.mjs is not implemented — orphan audit unavailable" | tee orphan-audit.txt
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v7
@@ -112,13 +119,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-      - run: npm ci
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
       - name: Build frontend
-        run: npm run build
+        run: pnpm run build
       - name: Run Lighthouse CI
         uses: treosh/lighthouse-ci-action@v12
         with:

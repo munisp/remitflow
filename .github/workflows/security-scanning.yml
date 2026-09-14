@@ -16,38 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # Replaced archived returntocorp/semgrep-action@v1 with the Semgrep CLI.
+      - name: Install Semgrep
+        run: pip install semgrep
       - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: >-
-            p/security-audit
-            p/secrets
-            p/owasp-top-ten
-            p/typescript
-            p/python
-            p/golang
-            p/rust
-        env:
-          SEMGREP_RULES: >-
-            rules:
-              - id: hardcoded-credentials
-                pattern: |
-                  $KEY = "..."
-                message: "Possible hardcoded credential detected"
-                severity: ERROR
-                languages: [typescript, python, go]
-              - id: unsafe-sql-interpolation
-                pattern: |
-                  sql`... ${$VAR} ...`
-                message: "Raw SQL interpolation — use parameterized queries"
-                severity: WARNING
-                languages: [typescript]
-              - id: admin-bypass
-                pattern: |
-                  if (...) { return true; }
-                message: "Potential authorization bypass"
-                severity: WARNING
-                languages: [typescript, python, go]
+        run: semgrep scan --config auto --error
 
   gitleaks:
     name: Secret Scanning (Gitleaks)
@@ -84,16 +57,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
-      - name: NPM Audit
-        run: |
-          npm audit --audit-level=high || true
-      - name: Check for known vulnerable packages
-        run: |
-          echo "Checking for critical CVEs in dependencies..."
-          npx audit-ci --high
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - name: Dependency audit (fail on high/critical)
+        run: pnpm audit --audit-level=high
+      # NOTE: npx audit-ci was removed — it requires an npm package-lock.json
+      # and cannot work in this pnpm-based repo. pnpm audit above is the gate.
 
   branch-protection:
     name: Branch Protection Enforcement

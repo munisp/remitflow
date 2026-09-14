@@ -6215,3 +6215,625 @@ export const operationalGeoCorridors = pgTable("operational_geo_corridors", {
 
 export type OperationalGeoLocation = typeof operationalGeoLocations.$inferSelect;
 export type OperationalGeoCorridor = typeof operationalGeoCorridors.$inferSelect;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// WAVE 10 (SPEC-wave10) — Melio-feature tables. ADDITIVE ONLY: no existing
+// table or enum modified. Status fields are varchar (validated in app layer
+// per SPEC-wave10 status vocabularies) to avoid touching pgEnum types.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const vendors = pgTable("vendors", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  ownerUserId: integer("owner_user_id").notNull(),
+  legalName: varchar("legal_name", { length: 255 }).notNull(),
+  displayName: varchar("display_name", { length: 255 }),
+  country: varchar("country", { length: 2 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  payoutMethod: jsonb("payout_method").notNull().default({}),
+  kybStatus: varchar("kyb_status", { length: 32 }).notNull().default("unverified"),
+  tin: varchar("tin", { length: 64 }),
+  whtRate: numeric("wht_rate", { precision: 5, scale: 4 }),
+  taxDocStatus: varchar("tax_doc_status", { length: 32 }).notNull().default("none"),
+  metadata: jsonb("metadata").notNull().default({}),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("vendors_tenant_idx").on(t.tenantId, t.kybStatus),
+]);
+
+export const vendorBills = pgTable("vendor_bills", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  vendorId: bigint("vendor_id", { mode: "number" }).notNull().references(() => vendors.id),
+  billNumber: varchar("bill_number", { length: 128 }),
+  description: text("description"),
+  amount: numeric("amount", { precision: 18, scale: 4 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  dueDate: timestamp("due_date"),
+  status: varchar("status", { length: 32 }).notNull().default("captured"),
+  source: varchar("source", { length: 16 }).notNull().default("manual"),
+  ocrConfidence: numeric("ocr_confidence", { precision: 5, scale: 4 }),
+  approvalRequestId: bigint("approval_request_id", { mode: "number" }),
+  scheduledAt: timestamp("scheduled_at"),
+  paidAt: timestamp("paid_at"),
+  paymentRail: varchar("payment_rail", { length: 32 }),
+  paymentRef: varchar("payment_ref", { length: 255 }),
+  speedTier: varchar("speed_tier", { length: 16 }).notNull().default("standard"),
+  idempotencyKey: varchar("idempotency_key", { length: 128 }),
+  failureReason: text("failure_reason"),
+  metadata: jsonb("metadata").notNull().default({}),
+  createdBy: integer("created_by").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("vendor_bills_idem_uidx").on(t.idempotencyKey),
+  index("vendor_bills_tenant_status_idx").on(t.tenantId, t.status),
+  index("vendor_bills_vendor_idx").on(t.vendorId, t.status),
+]);
+
+export const billDocuments = pgTable("bill_documents", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  billId: bigint("bill_id", { mode: "number" }).notNull().references(() => vendorBills.id),
+  storageKey: varchar("storage_key", { length: 512 }).notNull(),
+  mime: varchar("mime", { length: 64 }).notNull(),
+  ocrRaw: jsonb("ocr_raw"),
+  uploadedBy: integer("uploaded_by").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  index("bill_documents_bill_idx").on(t.billId),
+]);
+
+export const approvalPolicies = pgTable("approval_policies", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  name: varchar("name", { length: 128 }).notNull(),
+  scope: varchar("scope", { length: 32 }).notNull().default("vendor_bill"),
+  minAmount: numeric("min_amount", { precision: 18, scale: 4 }).notNull().default("0"),
+  currency: varchar("currency", { length: 3 }),
+  requiredApprovals: integer("required_approvals").notNull().default(1),
+  approverUserIds: jsonb("approver_user_ids").notNull().default([]),
+  approverRoles: jsonb("approver_roles").notNull().default([]),
+  allowSelfApproval: boolean("allow_self_approval").notNull().default(false),
+  active: boolean("active").notNull().default(true),
+  createdBy: integer("created_by").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("approval_policies_tenant_scope_idx").on(t.tenantId, t.scope, t.active),
+]);
+
+export const approvalRequests = pgTable("approval_requests", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  policyId: bigint("policy_id", { mode: "number" }).notNull().references(() => approvalPolicies.id),
+  entityType: varchar("entity_type", { length: 32 }).notNull(),
+  entityId: varchar("entity_id", { length: 64 }).notNull(),
+  amount: numeric("amount", { precision: 18, scale: 4 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("pending"),
+  stepsCompleted: integer("steps_completed").notNull().default(0),
+  stepsRequired: integer("steps_required").notNull(),
+  createdBy: integer("created_by").notNull(),
+  decidedBy: integer("decided_by"),
+  decidedAt: timestamp("decided_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("approval_requests_entity_idx").on(t.entityType, t.entityId, t.status),
+  index("approval_requests_tenant_idx").on(t.tenantId, t.status),
+]);
+
+export const approvalSteps = pgTable("approval_steps", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  requestId: bigint("request_id", { mode: "number" }).notNull().references(() => approvalRequests.id),
+  step: integer("step").notNull(),
+  approverUserId: integer("approver_user_id").notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("pending"),
+  decidedAt: timestamp("decided_at"),
+  comment: text("comment"),
+}, (t) => [
+  uniqueIndex("approval_steps_request_step_uidx").on(t.requestId, t.step),
+  index("approval_steps_approver_idx").on(t.approverUserId, t.status),
+]);
+
+export const invoicesV2 = pgTable("invoices_v2", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  customerName: varchar("customer_name", { length: 255 }).notNull(),
+  customerEmail: varchar("customer_email", { length: 255 }),
+  invoiceNumber: varchar("invoice_number", { length: 64 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  subtotal: numeric("subtotal", { precision: 18, scale: 4 }).notNull(),
+  taxAmount: numeric("tax_amount", { precision: 18, scale: 4 }).notNull().default("0"),
+  total: numeric("total", { precision: 18, scale: 4 }).notNull(),
+  amountPaid: numeric("amount_paid", { precision: 18, scale: 4 }).notNull().default("0"),
+  dueDate: timestamp("due_date"),
+  status: varchar("status", { length: 24 }).notNull().default("draft"),
+  paymentLinkTokenHash: varchar("payment_link_token_hash", { length: 64 }),
+  feeShifting: boolean("fee_shifting").notNull().default(false),
+  sentAt: timestamp("sent_at"),
+  paidAt: timestamp("paid_at"),
+  metadata: jsonb("metadata").notNull().default({}),
+  createdBy: integer("created_by").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("invoices_v2_link_token_uidx").on(t.paymentLinkTokenHash),
+  uniqueIndex("invoices_v2_tenant_number_uidx").on(t.tenantId, t.invoiceNumber),
+  index("invoices_v2_tenant_status_idx").on(t.tenantId, t.status),
+]);
+
+export const invoiceItems = pgTable("invoice_items", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  invoiceId: bigint("invoice_id", { mode: "number" }).notNull().references(() => invoicesV2.id),
+  description: varchar("description", { length: 512 }).notNull(),
+  quantity: numeric("quantity", { precision: 12, scale: 4 }).notNull(),
+  unitPrice: numeric("unit_price", { precision: 18, scale: 4 }).notNull(),
+  amount: numeric("amount", { precision: 18, scale: 4 }).notNull(),
+  sortOrder: integer("sort_order").notNull().default(0),
+}, (t) => [
+  index("invoice_items_invoice_idx").on(t.invoiceId),
+]);
+
+export const cardFundingIntents = pgTable("card_funding_intents", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  userId: integer("user_id").notNull(),
+  stripePaymentIntentId: varchar("stripe_payment_intent_id", { length: 128 }).notNull(),
+  purpose: varchar("purpose", { length: 32 }).notNull(),
+  purposeEntityId: varchar("purpose_entity_id", { length: 64 }).notNull(),
+  amount: numeric("amount", { precision: 18, scale: 4 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  feeAmount: numeric("fee_amount", { precision: 18, scale: 4 }).notNull().default("0"),
+  status: varchar("status", { length: 24 }).notNull().default("requires_capture"),
+  holdUntil: timestamp("hold_until"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("card_funding_intents_pi_uidx").on(t.stripePaymentIntentId),
+  index("card_funding_intents_purpose_idx").on(t.purpose, t.purposeEntityId, t.status),
+]);
+
+export const accountingConnections = pgTable("accounting_connections", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  provider: varchar("provider", { length: 32 }).notNull(),
+  status: varchar("status", { length: 24 }).notNull().default("pending_auth"),
+  accessTokenEncrypted: text("access_token_encrypted"),
+  refreshTokenEncrypted: text("refresh_token_encrypted"),
+  realmId: varchar("realm_id", { length: 128 }),
+  expiresAt: timestamp("expires_at"),
+  lastSyncAt: timestamp("last_sync_at"),
+  syncCursor: varchar("sync_cursor", { length: 255 }),
+  // Non-secret per-connection provider extras (odoo: {apiUrl, username}).
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+  createdBy: integer("created_by").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("accounting_connections_tenant_provider_uidx").on(t.tenantId, t.provider),
+]);
+
+export const accountingSyncLogs = pgTable("accounting_sync_logs", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  connectionId: bigint("connection_id", { mode: "number" }).notNull().references(() => accountingConnections.id),
+  direction: varchar("direction", { length: 8 }).notNull(),
+  entityType: varchar("entity_type", { length: 32 }).notNull(),
+  entityId: varchar("entity_id", { length: 64 }).notNull(),
+  externalId: varchar("external_id", { length: 128 }),
+  action: varchar("action", { length: 32 }).notNull(),
+  status: varchar("status", { length: 16 }).notNull(),
+  error: text("error"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  index("accounting_sync_logs_conn_idx").on(t.connectionId, t.createdAt),
+]);
+
+export const partnerPayoutRequests = pgTable("partner_payout_requests", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  partnerTenantId: integer("partner_tenant_id").notNull().references(() => tenants.id),
+  idempotencyKey: varchar("idempotency_key", { length: 128 }).notNull(),
+  payee: jsonb("payee").notNull(),
+  amount: numeric("amount", { precision: 18, scale: 4 }).notNull(),
+  currency: varchar("currency", { length: 3 }).notNull(),
+  corridor: varchar("corridor", { length: 16 }).notNull(),
+  rail: varchar("rail", { length: 32 }).notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("received"),
+  settleRef: varchar("settle_ref", { length: 255 }),
+  failureReason: text("failure_reason"),
+  tbHoldId: varchar("tb_hold_id", { length: 64 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("partner_payout_requests_idem_uidx").on(t.partnerTenantId, t.idempotencyKey),
+  index("partner_payout_requests_status_idx").on(t.status, t.createdAt),
+]);
+
+export const ocrJobs = pgTable("ocr_jobs", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  storageKey: varchar("storage_key", { length: 512 }).notNull(),
+  source: varchar("source", { length: 16 }).notNull().default("upload"),
+  status: varchar("status", { length: 16 }).notNull().default("queued"),
+  result: jsonb("result"),
+  confidence: numeric("confidence", { precision: 5, scale: 4 }),
+  billId: bigint("bill_id", { mode: "number" }),
+  error: text("error"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("ocr_jobs_tenant_status_idx").on(t.tenantId, t.status),
+]);
+
+export type Vendor = typeof vendors.$inferSelect;
+export type VendorBill = typeof vendorBills.$inferSelect;
+export type ApprovalPolicy = typeof approvalPolicies.$inferSelect;
+export type ApprovalRequest = typeof approvalRequests.$inferSelect;
+export type InvoiceV2 = typeof invoicesV2.$inferSelect;
+export type CardFundingIntent = typeof cardFundingIntents.$inferSelect;
+export type AccountingConnection = typeof accountingConnections.$inferSelect;
+export type PartnerPayoutRequest = typeof partnerPayoutRequests.$inferSelect;
+export type OcrJob = typeof ocrJobs.$inferSelect;
+
+// ==================== BDC Operating Platform (Wave: bdc-integration) ====================
+// Additive-only BDC (Bureau de Change) bounded context per SPEC-bdc §2.
+// Monetary convention (orchestrator amendment): numeric(18,2) major units —
+// matches wallets/transactions; SPEC *Minor/*Kobo columns renamed without the
+// suffix. Status fields are varchar with app-layer validation (NO new pgEnums);
+// allowed vocabularies are documented in inline comments.
+
+// 1. Operator profile per tenant (CBN licence, capital, prudential limits).
+export const bdcOperatorProfiles = pgTable("bdc_operator_profiles", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  tier: varchar("tier", { length: 8 }), // 'tier_1' | 'tier_2'
+  licenseNo: varchar("license_no", { length: 64 }),
+  stateCode: varchar("state_code", { length: 8 }),
+  shareholdersFunds: numeric("shareholders_funds", { precision: 18, scale: 2 }).notNull().default("0.00"),
+  nopLimitPct: integer("nop_limit_pct").notNull().default(30),
+  borrowingLimitPct: integer("borrowing_limit_pct").notNull().default(50),
+  // Weekly NFEM entitlement in USD; default 150000.00 = $150k (SPEC: 15000000 minor units).
+  weeklyNfemEntitlementUsd: numeric("weekly_nfem_entitlement_usd", { precision: 18, scale: 2 }).notNull().default("150000.00"),
+  licenseStatus: varchar("license_status", { length: 16 }).notNull().default("pending"), // 'pending'|'aip'|'provisional'|'active'|'suspended'
+  paDeadlineAt: timestamp("pa_deadline_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("bdc_operator_profiles_tenant_uidx").on(t.tenantId),
+]);
+export type BdcOperatorProfile = typeof bdcOperatorProfiles.$inferSelect;
+export type InsertBdcOperatorProfile = typeof bdcOperatorProfiles.$inferInsert;
+
+// 2. Branches (Tier-2: ≤5 per state, single stateCode — enforced in app layer).
+export const bdcBranches = pgTable("bdc_branches", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  code: varchar("code", { length: 16 }),
+  name: varchar("name", { length: 128 }),
+  address: text("address"),
+  stateCode: varchar("state_code", { length: 8 }),
+  lat: numeric("lat", { precision: 10, scale: 7 }),
+  lng: numeric("lng", { precision: 10, scale: 7 }),
+  isHeadOffice: boolean("is_head_office").default(false),
+  status: varchar("status", { length: 16 }).default("pending"), // 'pending'|'active'|'suspended'|'closed'
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("bdc_branches_tenant_code_uidx").on(t.tenantId, t.code),
+]);
+export type BdcBranch = typeof bdcBranches.$inferSelect;
+export type InsertBdcBranch = typeof bdcBranches.$inferInsert;
+
+// 3. Franchisees (Tier-1 operators only; 1km geofence vs branches — app layer).
+export const bdcFranchisees = pgTable("bdc_franchisees", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id), // franchisor tenant
+  name: varchar("name", { length: 128 }),
+  licenseRef: varchar("license_ref", { length: 64 }),
+  stateCode: varchar("state_code", { length: 8 }),
+  lat: numeric("lat", { precision: 10, scale: 7 }),
+  lng: numeric("lng", { precision: 10, scale: 7 }),
+  royaltyBps: integer("royalty_bps").default(0),
+  status: varchar("status", { length: 16 }).default("pending"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcFranchisee = typeof bdcFranchisees.$inferSelect;
+export type InsertBdcFranchisee = typeof bdcFranchisees.$inferInsert;
+
+// 4. Vaults (branch or head-office cash/FX stores).
+export const bdcVaults = pgTable("bdc_vaults", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  branchId: bigint("branch_id", { mode: "number" }).references(() => bdcBranches.id),
+  name: varchar("name", { length: 64 }),
+  vaultType: varchar("vault_type", { length: 16 }).default("branch_vault"), // 'branch_vault'|'head_vault'
+  status: varchar("status", { length: 16 }).default("active"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcVault = typeof bdcVaults.$inferSelect;
+export type InsertBdcVault = typeof bdcVaults.$inferInsert;
+
+// 5. Teller drawers (per-branch cash tills assigned to a holder user).
+export const bdcTellerDrawers = pgTable("bdc_teller_drawers", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  branchId: bigint("branch_id", { mode: "number" }).references(() => bdcBranches.id),
+  holderUserId: integer("holder_user_id").notNull(),
+  status: varchar("status", { length: 16 }).default("active"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcTellerDrawer = typeof bdcTellerDrawers.$inferSelect;
+export type InsertBdcTellerDrawer = typeof bdcTellerDrawers.$inferInsert;
+
+// 6. Denomination-level inventory per location (vault/drawer/CIT).
+//    version enables optimistic-concurrency guarded stock mutations.
+export const bdcDenominationInventory = pgTable("bdc_denomination_inventory", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  locationType: varchar("location_type", { length: 8 }), // 'vault'|'drawer'|'cit'
+  locationId: bigint("location_id", { mode: "number" }).notNull(),
+  currency: varchar("currency", { length: 3 }),
+  // Face value per note in major units (e.g. 100.00 = $100 bill).
+  denomination: numeric("denomination", { precision: 18, scale: 2 }).notNull(),
+  noteCount: integer("note_count").notNull().default(0),
+  version: integer("version").notNull().default(0),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("bdc_denomination_inventory_loc_ccy_denom_uidx").on(t.tenantId, t.locationType, t.locationId, t.currency, t.denomination),
+]);
+export type BdcDenominationInventory = typeof bdcDenominationInventory.$inferSelect;
+export type InsertBdcDenominationInventory = typeof bdcDenominationInventory.$inferInsert;
+
+// 7. Rate bands (max deviation from reference rate, in bps, per currency).
+//    UNIQUE per (tenantId, currency) where active — enforced in app layer.
+export const bdcRateBands = pgTable("bdc_rate_bands", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  currency: varchar("currency", { length: 3 }),
+  bandBps: integer("band_bps").notNull(),
+  active: boolean("active").default(true),
+  setByUserId: integer("set_by_user_id").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcRateBand = typeof bdcRateBands.$inferSelect;
+export type InsertBdcRateBand = typeof bdcRateBands.$inferInsert;
+
+// 8. Rate quotes (maker-checker; rate = naira per 1 FX unit).
+export const bdcRateQuotes = pgTable("bdc_rate_quotes", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  branchId: bigint("branch_id", { mode: "number" }),
+  currency: varchar("currency", { length: 3 }),
+  side: varchar("side", { length: 4 }), // 'buy'|'sell'
+  rate: numeric("rate", { precision: 18, scale: 2 }).notNull(),
+  referenceRate: numeric("reference_rate", { precision: 18, scale: 2 }).notNull(),
+  status: varchar("status", { length: 12 }).default("draft"), // 'draft'|'published'|'expired'|'suspended'
+  makerId: integer("maker_id").notNull(),
+  checkerId: integer("checker_id"),
+  publishedAt: timestamp("published_at"),
+  expiresAt: timestamp("expires_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcRateQuote = typeof bdcRateQuotes.$inferSelect;
+export type InsertBdcRateQuote = typeof bdcRateQuotes.$inferInsert;
+
+// 9. BDC customers (walk-in / platform-linked; BVN secretBox-encrypted).
+export const bdcCustomers = pgTable("bdc_customers", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  customerType: varchar("customer_type", { length: 12 }), // 'resident'|'non_resident'
+  fullName: varchar("full_name", { length: 255 }),
+  bvnEnc: text("bvn_enc"), // secretBox-encrypted via encryptField
+  tin: varchar("tin", { length: 32 }),
+  passportNo: varchar("passport_no", { length: 32 }),
+  mrzData: jsonb("mrz_data"),
+  riskRating: varchar("risk_rating", { length: 12 }).default("standard"), // 'low'|'standard'|'high'
+  pepFlag: boolean("pep_flag").default(false),
+  kycStatus: varchar("kyc_status", { length: 16 }).default("pending"), // 'pending'|'verified'|'rejected'
+  platformUserId: integer("platform_user_id"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcCustomer = typeof bdcCustomers.$inferSelect;
+export type InsertBdcCustomer = typeof bdcCustomers.$inferInsert;
+
+// 10. Source-of-funds declarations (mandatory ≥ $10k FX purchases).
+export const bdcSofDeclarations = pgTable("bdc_sof_declarations", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  customerId: bigint("customer_id", { mode: "number" }).references(() => bdcCustomers.id),
+  transactionId: bigint("transaction_id", { mode: "number" }),
+  amountUsd: numeric("amount_usd", { precision: 18, scale: 2 }).notNull(),
+  sourceDescription: text("source_description"),
+  documentRefs: jsonb("document_refs").default([]).notNull(),
+  status: varchar("status", { length: 12 }).default("submitted"), // 'submitted'|'approved'|'rejected'
+  reviewedBy: integer("reviewed_by"),
+  reviewedAt: timestamp("reviewed_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcSofDeclaration = typeof bdcSofDeclarations.$inferSelect;
+export type InsertBdcSofDeclaration = typeof bdcSofDeclarations.$inferInsert;
+
+// 11. BDC transactions (buy/sell FX, IMTO payout, NFEM purchase/return).
+//     paymentLeg: {method:'cash'|'nip_transfer'|'prepaid_card'|'domiciliary', reference:string|null}
+export const bdcTransactions = pgTable("bdc_transactions", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  branchId: bigint("branch_id", { mode: "number" }).references(() => bdcBranches.id),
+  txnType: varchar("txn_type", { length: 16 }), // 'buy_fx'|'sell_fx'|'imto_payout'|'nfem_purchase'|'nfem_return'
+  currency: varchar("currency", { length: 3 }),
+  fxAmount: numeric("fx_amount", { precision: 18, scale: 2 }).notNull(),
+  nairaAmount: numeric("naira_amount", { precision: 18, scale: 2 }).notNull(),
+  rate: numeric("rate", { precision: 18, scale: 2 }).notNull(),
+  purposeCode: varchar("purpose_code", { length: 32 }),
+  evidenceRefs: jsonb("evidence_refs").default([]).notNull(),
+  customerId: bigint("customer_id", { mode: "number" }).references(() => bdcCustomers.id),
+  paymentLeg: jsonb("payment_leg").notNull(),
+  cashPortion: numeric("cash_portion", { precision: 18, scale: 2 }).notNull().default("0.00"),
+  idempotencyKey: varchar("idempotency_key", { length: 96 }).notNull(),
+  tbTransferIds: jsonb("tb_transfer_ids").default([]).notNull(),
+  status: varchar("status", { length: 12 }).default("pending"), // 'pending'|'posted'|'settled'|'failed'|'reversed'
+  makerId: integer("maker_id").notNull(),
+  checkerId: integer("checker_id"),
+  failureReason: text("failure_reason"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("bdc_transactions_idempotency_key_uidx").on(t.idempotencyKey),
+  index("bdc_transactions_tenant_status_idx").on(t.tenantId, t.status),
+  index("bdc_transactions_tenant_created_at_idx").on(t.tenantId, t.createdAt),
+]);
+export type BdcTransaction = typeof bdcTransactions.$inferSelect;
+export type InsertBdcTransaction = typeof bdcTransactions.$inferInsert;
+
+// 12. NFEM weekly entitlements per bank (cap/used in USD; version-guarded).
+export const bdcNfemEntitlements = pgTable("bdc_nfem_entitlements", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  bankCode: varchar("bank_code", { length: 16 }),
+  weekStart: date("week_start").notNull(),
+  capUsd: numeric("cap_usd", { precision: 18, scale: 2 }).notNull(),
+  usedUsd: numeric("used_usd", { precision: 18, scale: 2 }).notNull().default("0.00"),
+  version: integer("version").notNull().default(0),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("bdc_nfem_entitlements_tenant_bank_week_uidx").on(t.tenantId, t.bankCode, t.weekStart),
+]);
+export type BdcNfemEntitlement = typeof bdcNfemEntitlements.$inferSelect;
+export type InsertBdcNfemEntitlement = typeof bdcNfemEntitlements.$inferInsert;
+
+// 13. NFEM purchase batches (24h liquidation deadline after funding).
+export const bdcNfemPurchaseBatches = pgTable("bdc_nfem_purchase_batches", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  entitlementId: bigint("entitlement_id", { mode: "number" }).references(() => bdcNfemEntitlements.id),
+  amountUsd: numeric("amount_usd", { precision: 18, scale: 2 }).notNull(),
+  rate: numeric("rate", { precision: 18, scale: 2 }).notNull(),
+  nairaPaid: numeric("naira_paid", { precision: 18, scale: 2 }).notNull(),
+  fxbtReference: varchar("fxbt_reference", { length: 64 }),
+  status: varchar("status", { length: 12 }).default("requested"), // 'requested'|'funded'|'selling'|'liquidated'|'returned'|'expired'
+  purchasedAt: timestamp("purchased_at"),
+  deadlineAt: timestamp("deadline_at"),
+  liquidatedAt: timestamp("liquidated_at"),
+  temporalWorkflowId: varchar("temporal_workflow_id", { length: 96 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcNfemPurchaseBatch = typeof bdcNfemPurchaseBatches.$inferSelect;
+export type InsertBdcNfemPurchaseBatch = typeof bdcNfemPurchaseBatches.$inferInsert;
+
+// 14. Position snapshots (EOD NOP/borrowing vs prudential caps).
+export const bdcPositionSnapshots = pgTable("bdc_position_snapshots", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  snapshotAt: timestamp("snapshot_at").notNull().defaultNow(),
+  nopUsd: numeric("nop_usd", { precision: 18, scale: 2 }).notNull(),
+  nopPct: numeric("nop_pct", { precision: 6, scale: 2 }),
+  borrowing: numeric("borrowing", { precision: 18, scale: 2 }).notNull().default("0.00"),
+  borrowingPct: numeric("borrowing_pct", { precision: 6, scale: 2 }),
+  breachFlags: jsonb("breach_flags").default([]).notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+});
+export type BdcPositionSnapshot = typeof bdcPositionSnapshots.$inferSelect;
+export type InsertBdcPositionSnapshot = typeof bdcPositionSnapshots.$inferInsert;
+
+// 15. CIT manifests (dual-custodian cash-in-transit transfers).
+//     items: [{currency, denomination, noteCount}]
+export const bdcCitManifests = pgTable("bdc_cit_manifests", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  fromLocation: jsonb("from_location").notNull(),
+  toLocation: jsonb("to_location").notNull(),
+  items: jsonb("items").notNull(),
+  custodianAId: integer("custodian_a_id").notNull(),
+  custodianBId: integer("custodian_b_id").notNull(),
+  status: varchar("status", { length: 12 }).default("draft"), // 'draft'|'in_transit'|'delivered'|'disputed'
+  dispatchedAt: timestamp("dispatched_at"),
+  deliveredAt: timestamp("delivered_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcCitManifest = typeof bdcCitManifests.$inferSelect;
+export type InsertBdcCitManifest = typeof bdcCitManifests.$inferInsert;
+
+// 16. Counterfeit note register (quarantine / handover to authorities).
+export const bdcCounterfeitRegister = pgTable("bdc_counterfeit_register", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  branchId: bigint("branch_id", { mode: "number" }).references(() => bdcBranches.id),
+  currency: varchar("currency", { length: 3 }),
+  denomination: numeric("denomination", { precision: 18, scale: 2 }),
+  noteSerial: varchar("note_serial", { length: 64 }),
+  detectedByUserId: integer("detected_by_user_id"),
+  disposition: varchar("disposition", { length: 24 }).default("quarantined"), // 'quarantined'|'handed_to_authorities'
+  notes: text("notes"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcCounterfeitRegister = typeof bdcCounterfeitRegister.$inferSelect;
+export type InsertBdcCounterfeitRegister = typeof bdcCounterfeitRegister.$inferInsert;
+
+// 17. Regulatory returns (FIFX/FinA/CARP/TRMS/extranet staging + submission).
+export const bdcRegulatoryReturns = pgTable("bdc_regulatory_returns", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  returnType: varchar("return_type", { length: 10 }), // 'fifx'|'fina'|'carp'|'trms'|'extranet'
+  periodStart: date("period_start").notNull(),
+  periodEnd: date("period_end").notNull(),
+  payload: jsonb("payload"),
+  formatVersion: varchar("format_version", { length: 16 }).default("v1"),
+  status: varchar("status", { length: 12 }).default("draft"), // 'draft'|'staged'|'submitted'|'acknowledged'|'quarantined'|'failed'
+  submittedAt: timestamp("submitted_at"),
+  ackRef: varchar("ack_ref", { length: 96 }),
+  ackAt: timestamp("ack_at"),
+  errorDetail: text("error_detail"),
+  idempotencyKey: varchar("idempotency_key", { length: 96 }).notNull(),
+  temporalWorkflowId: varchar("temporal_workflow_id", { length: 96 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("bdc_regulatory_returns_idempotency_key_uidx").on(t.idempotencyKey),
+]);
+export type BdcRegulatoryReturn = typeof bdcRegulatoryReturns.$inferSelect;
+export type InsertBdcRegulatoryReturn = typeof bdcRegulatoryReturns.$inferInsert;
+
+// 18. IMTO settlement accruals (per-payout commission + naira leg tracking).
+export const bdcImtoSettlements = pgTable("bdc_imto_settlements", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  imtoCode: varchar("imto_code", { length: 32 }),
+  mojaloopTransferId: varchar("mojaloop_transfer_id", { length: 96 }),
+  fxAmount: numeric("fx_amount", { precision: 18, scale: 2 }).notNull(),
+  nairaPaid: numeric("naira_paid", { precision: 18, scale: 2 }).notNull(),
+  commission: numeric("commission", { precision: 18, scale: 2 }).notNull().default("0.00"),
+  status: varchar("status", { length: 12 }).default("accrued"), // 'accrued'|'settled'|'disputed'
+  statementRef: varchar("statement_ref", { length: 64 }),
+  settledAt: timestamp("settled_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcImtoSettlement = typeof bdcImtoSettlements.$inferSelect;
+export type InsertBdcImtoSettlement = typeof bdcImtoSettlements.$inferInsert;
+
+// 19. IMTO commission schedules (tiered bps by USD amount band).
+export const bdcCommissionSchedules = pgTable("bdc_commission_schedules", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  imtoCode: varchar("imto_code", { length: 32 }),
+  tierMinUsd: numeric("tier_min_usd", { precision: 18, scale: 2 }).notNull().default("0.00"),
+  tierMaxUsd: numeric("tier_max_usd", { precision: 18, scale: 2 }).notNull(),
+  commissionBps: integer("commission_bps").notNull(),
+  active: boolean("active").default(true),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcCommissionSchedule = typeof bdcCommissionSchedules.$inferSelect;
+export type InsertBdcCommissionSchedule = typeof bdcCommissionSchedules.$inferInsert;

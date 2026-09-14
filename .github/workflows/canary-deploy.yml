@@ -69,7 +69,12 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Deploy canary instance
+        # HONEST STATUS: NOT IMPLEMENTED — this generates a canary-route.json
+        # in the runner workspace but never applies it to APISIX/k8s (no
+        # cluster credentials are configured). Informational only.
+        continue-on-error: true
         run: |
+          echo "::warning::Canary deploy is NOT IMPLEMENTED — no routing change is applied to APISIX/k8s"
           echo "Deploying canary with ${{ inputs.canary_percentage }}% traffic"
           echo "Image: ${{ needs.build-canary.outputs.image_tag }}"
           # Example: kubectl set image deployment/remitflow-canary ...
@@ -119,91 +124,63 @@ jobs:
           echo "Canary deployed at $(date -u)"
 
   # ─── Monitor Canary Health ───────────────────────────────────────────────────
+  # HONEST STATUS: NOT IMPLEMENTED. There is no Prometheus endpoint reachable
+  # from GitHub-hosted runners and no cluster credentials wired up. The
+  # previous version faked a 0% error rate when the (unreachable) Prometheus
+  # query failed, which would always "pass" and auto-promote. This job now
+  # does no monitoring and reports that explicitly.
   monitor-canary:
-    name: Monitor Canary Health
+    name: Monitor Canary Health (NOT IMPLEMENTED)
     runs-on: ubuntu-latest
     needs: [deploy-canary]
     steps:
       - uses: actions/checkout@v7
 
       - name: Monitor error rates
+        continue-on-error: true
         run: |
-          PROMOTE_TIMEOUT=${{ inputs.promote_timeout }}
-          ROLLBACK_THRESHOLD=${{ inputs.rollback_threshold }}
-          INTERVAL=30  # Check every 30 seconds
-          ELAPSED=0
-          MAX_SECONDS=$((PROMOTE_TIMEOUT * 60))
-
-          echo "Monitoring canary for ${PROMOTE_TIMEOUT} minutes"
-          echo "Rollback threshold: ${ROLLBACK_THRESHOLD}% error rate"
-          echo "---"
-
-          while [ $ELAPSED -lt $MAX_SECONDS ]; do
-            # Query Prometheus for canary error rate
-            # In production, replace with real Prometheus query
-            CANARY_ERRORS=$(curl -s "${PROMETHEUS_URL:-http://prometheus:9090}/api/v1/query?query=rate(http_requests_total{instance='canary',code=~'5..'}[5m])" 2>/dev/null | jq -r '.data.result[0].value[1] // "0"' 2>/dev/null || echo "0")
-            CANARY_TOTAL=$(curl -s "${PROMETHEUS_URL:-http://prometheus:9090}/api/v1/query?query=rate(http_requests_total{instance='canary'}[5m])" 2>/dev/null | jq -r '.data.result[0].value[1] // "1"' 2>/dev/null || echo "1")
-
-            # Calculate error rate (handle division by zero)
-            if [ "$CANARY_TOTAL" = "0" ] || [ "$CANARY_TOTAL" = "1" ]; then
-              ERROR_RATE="0"
-            else
-              ERROR_RATE=$(echo "scale=2; ($CANARY_ERRORS / $CANARY_TOTAL) * 100" | bc 2>/dev/null || echo "0")
-            fi
-
-            echo "[$(date -u +%H:%M:%S)] Canary error rate: ${ERROR_RATE}% (threshold: ${ROLLBACK_THRESHOLD}%)"
-
-            # Check if error rate exceeds threshold
-            EXCEEDS=$(echo "$ERROR_RATE > $ROLLBACK_THRESHOLD" | bc 2>/dev/null || echo "0")
-            if [ "$EXCEEDS" = "1" ]; then
-              echo "::error::Canary error rate ${ERROR_RATE}% exceeds threshold ${ROLLBACK_THRESHOLD}%!"
-              echo "CANARY_STATUS=rollback" >> $GITHUB_ENV
-              exit 1
-            fi
-
-            sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
-          done
-
-          echo "Canary passed monitoring period. Ready to promote."
-          echo "CANARY_STATUS=healthy" >> $GITHUB_ENV
+          echo "::warning::Canary monitoring is NOT IMPLEMENTED."
+          echo "No reachable Prometheus/metrics endpoint is configured, so no"
+          echo "error-rate data was collected. Do NOT treat this job's result"
+          echo "as evidence of canary health."
+          echo "Requested thresholds: rollback at ${{ inputs.rollback_threshold }}% error rate, promote after ${{ inputs.promote_timeout }}m"
+          echo "CANARY_STATUS=unknown" >> $GITHUB_ENV
 
   # ─── Promote or Rollback ─────────────────────────────────────────────────────
+  # HONEST STATUS: NOT IMPLEMENTED. These jobs only print messages — no
+  # kubectl/APISIX/Argo Rollouts commands are executed. Traffic is never
+  # actually shifted or rolled back by this workflow.
   promote:
-    name: Promote Canary to Production
+    name: Promote Canary to Production (NOT IMPLEMENTED)
     runs-on: ubuntu-latest
     needs: [monitor-canary]
     if: success()
     environment: production
     steps:
       - name: Promote canary to stable
+        continue-on-error: true
         run: |
-          echo "Promoting canary to 100% traffic"
-          # Example: kubectl set image deployment/remitflow remitflow=$CANARY_IMAGE
-          # Example: Update APISIX upstream to 100% canary
-          echo "Production deployment complete"
+          echo "::warning::Canary promotion is NOT IMPLEMENTED — no traffic change was made."
+          echo "TODO: implement kubectl/APISIX/Argo Rollouts promotion with cluster credentials."
 
       - name: Clean up canary routing
+        continue-on-error: true
         run: |
-          echo "Removing canary traffic split rules"
-          # Remove the traffic-split plugin from APISIX
-          echo "Canary cleanup complete"
+          echo "::warning::Canary routing cleanup is NOT IMPLEMENTED — nothing was removed."
 
   rollback:
-    name: Rollback Canary
+    name: Rollback Canary (NOT IMPLEMENTED)
     runs-on: ubuntu-latest
     needs: [monitor-canary]
     if: failure()
     steps:
       - name: Rollback to stable
+        continue-on-error: true
         run: |
-          echo "::warning::Rolling back canary deployment"
-          # Remove canary from routing
-          # Scale down canary replicas
-          echo "Rollback complete — all traffic on stable"
+          echo "::warning::Canary rollback is NOT IMPLEMENTED — no traffic change was made."
+          echo "TODO: implement rollback via Argo Rollouts/APISIX with cluster credentials."
 
       - name: Notify team
+        continue-on-error: true
         run: |
-          echo "Canary deployment rolled back due to elevated error rates"
-          # Send Slack/Discord notification
-          # Create GitHub issue for investigation
+          echo "::warning::Canary rollback notification only — integrate Slack/PagerDuty here."

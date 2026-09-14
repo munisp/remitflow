@@ -1,16 +1,13 @@
 name: RemitFlow v76 — Microservices CI/CD
 
+# DISABLED: this entire pipeline is non-functional — every matrix service
+# directory under microservices/ is an empty scaffold (Dockerfile-only, no
+# go.mod/Cargo.toml src/requirements.txt), the deploy job applies
+# k8s/microservices-v76.yaml which does not exist, and the observability job
+# mounts observability/ which does not exist. Manual-trigger only until the
+# microservices sources and k8s/observability manifests are restored.
 on:
-  push:
-    branches: [main, develop]
-    paths:
-      - "microservices/**"
-      - "k8s/microservices-v76.yaml"
-      - ".github/workflows/microservices-v76.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "microservices/**"
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io

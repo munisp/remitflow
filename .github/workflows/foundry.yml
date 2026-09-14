@@ -1,9 +1,11 @@
 name: Solidity Contract Tests
+
+# DISABLED: there is no contracts/ directory (and no foundry.toml) in this
+# repository, so every job in this workflow would fail. Manual-trigger only
+# until a Foundry project is added; delete this file if the smart-contract
+# workstream is abandoned.
 on:
-  push:
-    paths: ['contracts/**']
-  pull_request:
-    paths: ['contracts/**']
+  workflow_dispatch:
 
 jobs:
   test:

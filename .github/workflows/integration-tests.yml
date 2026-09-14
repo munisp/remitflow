@@ -26,12 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
-          cache: "npm"
+          cache: "pnpm"
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Run sandbox integration tests
         env:
@@ -39,7 +40,7 @@ jobs:
           ONFIDO_API_KEY_SANDBOX: ${{ secrets.ONFIDO_API_KEY_SANDBOX }}
           FLUTTERWAVE_SECRET_KEY_TEST: ${{ secrets.FLUTTERWAVE_SECRET_KEY_TEST }}
           SMILE_PARTNER_ID_SANDBOX: ${{ secrets.SMILE_PARTNER_ID_SANDBOX }}
-        run: npx vitest run tests/integration/sandbox-providers.test.ts --reporter=verbose
+        run: pnpm exec vitest run tests/integration/sandbox-providers.test.ts --reporter=verbose
 
       - uses: actions/upload-artifact@v7
         if: failure()
@@ -68,32 +69,33 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
-          cache: "npm"
+          cache: "pnpm"
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Run migrations up
         env:
           DATABASE_URL: postgres://test:test@localhost:5432/remitflow_test
-        run: npx tsx drizzle/migrate.ts up
+        run: pnpm exec tsx drizzle/migrate.ts up
 
       - name: Verify migration status
         env:
           DATABASE_URL: postgres://test:test@localhost:5432/remitflow_test
-        run: npx tsx drizzle/migrate.ts status
+        run: pnpm exec tsx drizzle/migrate.ts status
 
       - name: Run migrations down (rollback test)
         env:
           DATABASE_URL: postgres://test:test@localhost:5432/remitflow_test
-        run: npx tsx drizzle/migrate.ts down
+        run: pnpm exec tsx drizzle/migrate.ts down
 
       - name: Run migrations up again (idempotency)
         env:
           DATABASE_URL: postgres://test:test@localhost:5432/remitflow_test
-        run: npx tsx drizzle/migrate.ts up
+        run: pnpm exec tsx drizzle/migrate.ts up
 
   # ── E2E Playwright Tests ────────────────────────────────────────────────────
   e2e-tests:
@@ -102,26 +104,27 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: "20"
-          cache: "npm"
+          cache: "pnpm"
 
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
       - name: Install Playwright
-        run: npx playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps chromium
 
       - name: Start dev server
-        run: npm run dev &
+        run: pnpm run dev &
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL_STAGING }}
 
       - name: Wait for server
-        run: npx wait-on http://localhost:3000 --timeout 30000
+        run: pnpm exec wait-on http://localhost:3000 --timeout 30000
 
       - name: Run E2E tests
-        run: npx playwright test tests/e2e/ --project=chromium
+        run: pnpm exec playwright test tests/e2e/ --project=chromium
         env:
           BASE_URL: http://localhost:3000
 
@@ -154,7 +157,11 @@ jobs:
         run: |
           docker run --rm -d --name test-${{ matrix.service.name }} \
             -e NODE_ENV=test \
-            remitflow/${{ matrix.service.name }}:test || true
+            remitflow/${{ matrix.service.name }}:test
           sleep 5
-          docker logs test-${{ matrix.service.name }} 2>&1 | head -20 || true
-          docker stop test-${{ matrix.service.name }} 2>/dev/null || true
+          docker logs test-${{ matrix.service.name }} 2>&1 | head -20
+          if ! docker ps --format '{{.Names}}' | grep -qx "test-${{ matrix.service.name }}"; then
+            echo "::error::Container exited during boot — image is not runnable"
+            exit 1
+          fi
+          docker stop test-${{ matrix.service.name }}

@@ -63,10 +63,14 @@ jobs:
             exit 1
           fi
 
-      - name: Security scan
-        run: |
-          npm audit --audit-level=critical || true
-          echo "Security scan complete"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - name: Security scan (fail on critical vulnerabilities)
+        run: pnpm audit --audit-level=critical
 
       - id: gate
         run: echo "proceed=true" >> "$GITHUB_OUTPUT"
@@ -150,12 +154,14 @@ jobs:
             aws eks update-kubeconfig --name remitflow-production-${REGION%%-*} --region ${{ inputs.region }}
           fi
 
-      - name: Deploy
+      - name: Deploy (NOT IMPLEMENTED — informational)
+        # TODO: ops/deployment/deploy-production.sh does not exist (ops/deploy/
+        # contains only cache-bust.sh). Honest no-op instead of failing on a
+        # phantom path — production deploy automation is not wired up.
+        continue-on-error: true
         run: |
-          bash ops/deployment/deploy-production.sh \
-            --region=${{ inputs.region }} \
-            --version=${{ inputs.version }} \
-            --canary-weight=${{ inputs.canary_weight }}
+          echo "::warning::ops/deployment/deploy-production.sh is not implemented — no production deploy was performed"
+          echo "Requested: version=${{ inputs.version }} region=${{ inputs.region }} canary=${{ inputs.canary_weight }}%"
 
       - name: Post-deploy verification
         run: |

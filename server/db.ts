@@ -654,14 +654,18 @@ const UNLOCK_REQUEST_COOLDOWN_MS = 60 * 60 * 1000; // 1 request per hour
 export async function requestSelfUnlock(userId: number): Promise<{ ok: boolean; error?: string }> {
   const db = await getDb();
   if (!db) return { ok: false, error: "Database unavailable" };
+  // SEC (MEDIUM): uniform response — never reveal whether a given userId is
+  // locked (lockout enumeration) and NEVER deliver unlock tokens to the
+  // platform-owner notification channel (anyone with access to that channel
+  // could unlock any locked account). The token goes to the user's registered
+  // email only; unknown/unlocked/cooling-down accounts all return { ok: true }.
   const row = await getUserLockout(userId);
-  if (!row || !row.lockExpiresAt) return { ok: false, error: "Account is not locked" };
-  // Rate-limit: only 1 request per hour
+  if (!row || !row.lockExpiresAt) return { ok: true };
+  // Rate-limit: only 1 email per hour (silent — same uniform response)
   if (row.unlockRequestedAt) {
     const elapsed = Date.now() - new Date(row.unlockRequestedAt).getTime();
     if (elapsed < UNLOCK_REQUEST_COOLDOWN_MS) {
-      const waitMin = Math.ceil((UNLOCK_REQUEST_COOLDOWN_MS - elapsed) / 60000);
-      return { ok: false, error: `Please wait ${waitMin} more minute(s) before requesting another unlock.` };
+      return { ok: true };
     }
   }
   const token = randomBytes(32).toString("hex");
@@ -669,23 +673,34 @@ export async function requestSelfUnlock(userId: number): Promise<{ ok: boolean; 
   await db.update(userLockouts)
     .set({ unlockToken: token, unlockTokenExpiresAt: expiresAt, unlockRequestedAt: new Date(), updatedAt: new Date() })
     .where(eq(userLockouts.userId, userId));
-  // Send unlock link via owner notification (proxied to user in production)
+  // Send the unlock link to the user's REGISTERED email only.
   try {
-    const { notifyOwner } = await import("./_core/notification.js");
     const userRow = await db.select({ name: users.name, email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
-    const userName = userRow[0]?.name ?? `User #${userId}`;
-    // v153: Include full clickable unlock URL in the notification email body
-    // In production the VITE_APP_ORIGIN env var holds the deployed domain.
-    // Fallback to a relative path so it works in dev/staging too.
-    const appOrigin = (typeof process !== "undefined" && process.env.VITE_APP_ORIGIN)
-      ? process.env.VITE_APP_ORIGIN.replace(/\/$/, "")
-      : "";
-    const unlockUrl = `${appOrigin}/unlock?token=${token}`;
-    await notifyOwner({
-      title: `🔓 Unlock Request: ${userName}`,
-      content: `User ${userName} (ID: ${userId}) has requested a self-service account unlock.\n\nClick the link below to unlock your account:\n${unlockUrl}\n\nThis link expires at: ${expiresAt.toUTCString()}\n\nIf you did not request this, ignore this email — your account remains locked.`,
-    });
-  } catch { /* swallow */ }
+    const userEmail = userRow[0]?.email;
+    const userName = userRow[0]?.name ?? "there";
+    if (userEmail) {
+      // v153: Include full clickable unlock URL in the email body.
+      // In production the VITE_APP_ORIGIN env var holds the deployed domain.
+      // Fallback to a relative path so it works in dev/staging too.
+      const appOrigin = (typeof process !== "undefined" && process.env.VITE_APP_ORIGIN)
+        ? process.env.VITE_APP_ORIGIN.replace(/\/$/, "")
+        : "";
+      const unlockUrl = `${appOrigin}/unlock?token=${token}`;
+      const { sendEmail } = await import("./email.service.js");
+      await sendEmail({
+        to: userEmail,
+        subject: "RemitFlow — Account unlock link",
+        text: `Hi ${userName},\n\nWe received a request to unlock your RemitFlow account.\n\nClick the link below to unlock your account:\n${unlockUrl}\n\nThis link expires at: ${expiresAt.toUTCString()}\n\nIf you did not request this, ignore this email — your account remains locked.`,
+        html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:24px">
+          <h2 style="color:#10b981">Account Unlock Request</h2>
+          <p>Hi ${userName},</p>
+          <p>We received a request to unlock your RemitFlow account.</p>
+          <p><a href="${unlockUrl}" style="display:inline-block;background:#10b981;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none">Unlock my account</a></p>
+          <p style="color:#6b7280;font-size:0.875rem">This link expires at ${expiresAt.toUTCString()}. If you did not request this, ignore this email — your account remains locked.</p>
+        </div>`,
+      });
+    }
+  } catch { /* swallow — uniform response must not leak delivery state */ }
   return { ok: true };
 }
 

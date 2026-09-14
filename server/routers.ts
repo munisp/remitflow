@@ -1,8 +1,9 @@
 import { TRPCError } from "@trpc/server";
 import { kycOrchestrationRouter } from "./routers/kycOrchestration";
+import { billCaptureRouter } from "./routers/billCapture"; // W10-C3
 import { developerExperienceRouter } from "./routers/developerExperience";
 import { and, asc, desc, eq, inArray, sql, gte, lte, count, lt, isNotNull, sum } from "drizzle-orm";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "crypto";
 import { z } from "zod";
 import { COOKIE_NAME, SESSION_EXPIRY_MS } from "../shared/const";
 import {
@@ -22,6 +23,7 @@ import {
   upsertUser,
 } from "./db";
 import { storagePut } from "./storage";
+import { encryptField, decryptField } from "./_core/secretBox";
 import { adminProcedure, protectedProcedure, publicProcedure, router, strictRateLimitedProcedure } from "./_core/trpc";
 import { transferSendProcedure, walletWithdrawProcedure, kycApproveProcedure, reportExportProcedure, beneficiaryUpdateProcedure, recordSpend, adminPbacProcedure } from "./pbac";
 import { checkFraud, checkVelocity } from "./fraud.service";
@@ -34,7 +36,7 @@ import { featureFlagsRouter, tenantsRouter, whiteLabelRouter } from "./routers/f
 import { fetchLiveRates } from "./fx-rates.service";
 import { startTransferWorkflow, startKYCWorkflow } from "./temporal/client";
 import { publishPaymentInitiated, publishTransactionEvent, publishKYCEvent, publishRiskScoreEvent, publishAuditEvent } from "./middleware/kafka";
-import { auditCoreOperation, CORE_TOPICS, generateOpRef, generateIdempotencyKey, checkIdempotency, storeIdempotency } from "./middleware/coreAtomicity";
+import { auditCoreOperation, CORE_TOPICS, generateOpRef, generateIdempotencyKey, checkIdempotency, claimIdempotency, storeIdempotency } from "./middleware/coreAtomicity";
 import { checkInsiderThreat, requiresMakerChecker } from "./middleware/insiderThreat";
 import { bnplRouter, travelRuleRouter, agentNetworkRouter, corridorAnalyticsRouter, referralEngineRouter, whiteLabelPreviewRouter, apiChangelogRouter, familyEnhancedRouter, tenantAnalyticsRouter } from "./routers/productionFeatures";
 import { partnerOnboardingRouter, adminInviteCodesRouter, travelRuleDbRouter } from "./routers/partnerOnboarding";
@@ -106,6 +108,11 @@ import {
   userOnboardingRouter,
   complianceEmailRouter,
 } from "./routers/partnerApplications";
+// W10-C5 — Vendors + Embedded Payouts (SPEC-wave10)
+import { vendorsRouter } from "./routers/vendors";
+import { embeddedPayoutsRouter } from "./routers/embeddedPayouts";
+// W10-C6 bridge — Geo analytics (orchestrator-wired; SPEC-wave10 C6)
+import { geoAnalyticsRouter } from "./routers/geoAnalytics";
 import {
   feeEngineV92Router,
   transferLimitsRouter,
@@ -152,6 +159,10 @@ import { cronJobsRouter } from "./routers/cronJobsRouter.js";
 import { pbacRouter } from "./pbac";
 import { servicesHealthRouter } from "./routers/servicesHealth.js";
 import { extendedCrudRouter } from "./routers/extendedCrud.js";
+// W10-C2
+import { invoicesV2Router } from "./routers/invoicesV2Router.js";
+import { paymentLinksRouter } from "./routers/paymentLinks.js";
+import { cardFundingRouter } from "./routers/cardFunding.js";
 import {
   runComplianceCheck,
   getFraudScore,
@@ -253,6 +264,7 @@ import { multiTenancyRouter } from "./routers/multiTenancyRouter.js";
 import { analyticsDashboardRouter } from "./routers/analyticsDashboardRouter.js";
 import { operationsMapRouter } from "./routers/operationsMap.js";
 import { cbnComplianceRouter } from "./routers/cbnCompliance.js";
+import { bdcRouter } from "./routers/bdc/index.js";
 import { outboundRouter } from "./routers/outbound.js";
 import { westAfricaRouter } from "./routers/westAfrica.js";
 import { immigrantWorkerRouter } from "./routers/immigrantWorker.js";
@@ -307,6 +319,7 @@ import {
 } from "./routers/kycEnhanced";
 import { logger } from './_core/logger';
 import { doubleEntryRouter } from "./routers/doubleEntry";
+import { accountingSyncRouter } from "./routers/accountingSync"; // W10-C4
 import { receiptGenerationRouter } from "./routers/receiptGeneration";
 import { loyaltyPointsRouter } from "./routers/loyaltyPoints";
 import { beneficiaryVerificationRouter } from "./routers/beneficiaryVerification";
@@ -365,17 +378,25 @@ const FALLBACK_RATES: Record<string, number> = {
   BDT: 110, THB: 35.1, MYR: 4.72, IDR: 15750, PHP: 56.2, TWD: 31.8,
 };
 
-async function getLiveRates(base = "USD"): Promise<Record<string, number>> {
+type LiveRatesResult = { rates: Record<string, number>; source: "cache" | "live" | "fallback"; stale: boolean };
+
+async function getLiveRatesDetailed(base = "USD"): Promise<LiveRatesResult> {
   const cached = await getCachedFxRates(base);
-  if (cached) return cached;
+  if (cached) return { rates: cached, source: "cache", stale: false };
   try {
     const res = await fetch(`https://open.er-api.com/v6/latest/${base}`, { signal: AbortSignal.timeout(5000) });
     if (res.ok) {
       const data = await res.json();
-      if (data.rates) { await saveFxRates(base, data.rates); return data.rates; }
+      if (data.rates) { await saveFxRates(base, data.rates); return { rates: data.rates, source: "live", stale: false }; }
     }
   } catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), base }, "FX rate fetch failed, using fallback rates"); }
-  return FALLBACK_RATES;
+  // C7: hardcoded fallback rates are STALE — callers must surface
+  // source:"fallback"/stale:true and MUST NOT sign rate-lock tokens from them.
+  return { rates: FALLBACK_RATES, source: "fallback", stale: true };
+}
+
+async function getLiveRates(base = "USD"): Promise<Record<string, number>> {
+  return (await getLiveRatesDetailed(base)).rates;
 }
 
 function formatTxn(t: any) {
@@ -478,6 +499,107 @@ function calculateNextRun(frequency: string, startDate: string, dayOfWeek?: numb
 }
 
 import { healthRouter } from "./routers/health";
+// W10-C1: AP core routers (vendor bills + approval policies)
+import { vendorBillsRouter, approvalPoliciesRouter } from "./routers/vendorBills";
+
+// W9: Legacy feature packs quarantine. These v-series/tier/microservices routers were never
+// exercised against a real database (enum-invalid writes, fabricated executions, IDOR clusters —
+// see remitflow-wave8-fullsweep.md). They are UNMOUNTED unless explicitly re-enabled per-pack
+// after a smoke test. Undocumented env; fail-closed default.
+const LEGACY_PACKS_ENABLED = process.env.LEGACY_FEATURE_PACKS_ENABLED === "true";
+
+// ─── W9 Q2: Transaction-PIN KDF ──────────────────────────────────────────────
+// Stored format: `scrypt:v1:<saltHex>:<hashHex>` (scrypt N=16384,r=8,p=1,
+// 32-byte key, 16-byte random salt). Legacy rows are unsalted sha256(pin+userId);
+// they verify timing-safe and are lazily rehashed to scrypt on the next write.
+// Unknown/corrupt stored formats fail closed (reject, never accept).
+const PIN_SCRYPT_PARAMS = { N: 16384, r: 8, p: 1 } as const;
+const PIN_SCRYPT_KEYLEN = 32;
+const PIN_SCRYPT_SALT_BYTES = 16;
+
+function pinHashScrypt(pin: string): string {
+  const salt = randomBytes(PIN_SCRYPT_SALT_BYTES);
+  const key = scryptSync(pin, salt, PIN_SCRYPT_KEYLEN, PIN_SCRYPT_PARAMS);
+  return `scrypt:v1:${salt.toString("hex")}:${key.toString("hex")}`;
+}
+
+function pinVerifyScrypt(pin: string, stored: string): boolean {
+  const parts = stored.split(":");
+  if (parts.length !== 4 || parts[0] !== "scrypt" || parts[1] !== "v1") return false; // fail closed on corrupt format
+  if (!/^[0-9a-f]+$/i.test(parts[2]) || !/^[0-9a-f]+$/i.test(parts[3])) return false;
+  const salt = Buffer.from(parts[2], "hex");
+  const expected = Buffer.from(parts[3], "hex");
+  if (salt.length !== PIN_SCRYPT_SALT_BYTES || expected.length !== PIN_SCRYPT_KEYLEN) return false;
+  const actual = scryptSync(pin, salt, PIN_SCRYPT_KEYLEN, PIN_SCRYPT_PARAMS);
+  return timingSafeEqual(actual, expected);
+}
+
+function pinVerifyLegacySha256(pin: string, userId: number, stored: string): boolean {
+  const expected = createHash("sha256").update(pin + userId).digest("hex");
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(stored, "utf8");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// ─── W9 F10-9: session-JWT signing key discipline ────────────────────────────
+// Never sign with an empty/static key. Production fails closed when JWT_SECRET
+// is unset; non-production falls back to a per-process ephemeral key (sessions
+// die on restart) with a loud warning.
+let ephemeralJwtSecret: Uint8Array | null = null;
+function getSessionJwtSecret(): Uint8Array {
+  const env = process.env.JWT_SECRET;
+  if (env) return new TextEncoder().encode(env);
+  if (process.env.NODE_ENV === "production") {
+    throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "JWT_SECRET is not configured" });
+  }
+  if (!ephemeralJwtSecret) {
+    console.warn("[security] JWT_SECRET unset — signing session JWTs with an ephemeral per-process key (non-production only; sessions invalidated on restart)");
+    ephemeralJwtSecret = randomBytes(32);
+  }
+  return ephemeralJwtSecret;
+}
+
+// ─── W9 F9-1/F9-2: upload MIME allowlist + storage-key hygiene ───────────────
+// Client-declared MIME previously flowed straight to storage and was served to
+// KYC reviewers/admins (stored-XSS via text/html), and client type/fileName
+// flowed into the storage key unsanitized (namespace escape via "../").
+// Fail closed: only pdf/jpg/jpeg/png/webp, keys are sanitized to [a-zA-Z0-9._-].
+type UploadExt = "pdf" | "jpg" | "png" | "webp";
+const UPLOAD_EXT_BY_MIME: Record<string, UploadExt> = {
+  "application/pdf": "pdf",
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+};
+const UPLOAD_ALLOWED_EXTS = new Set(["pdf", "jpg", "jpeg", "png", "webp"]);
+
+function resolveUploadExt(mimeType: string): UploadExt {
+  const ext = UPLOAD_EXT_BY_MIME[mimeType.toLowerCase().trim()];
+  if (!ext) {
+    throw new TRPCError({ code: "BAD_REQUEST", message: "Unsupported file type — only PDF, JPG, PNG, or WebP uploads are allowed" });
+  }
+  return ext;
+}
+
+function assertUploadAllowed(mimeType: string, fileName: string): void {
+  resolveUploadExt(mimeType); // throws on disallowed MIME
+  const nameExt = (fileName.includes(".") ? fileName.split(".").pop()! : "").toLowerCase();
+  if (!UPLOAD_ALLOWED_EXTS.has(nameExt)) {
+    throw new TRPCError({ code: "BAD_REQUEST", message: "Unsupported file extension — only .pdf, .jpg, .jpeg, .png, or .webp uploads are allowed" });
+  }
+}
+
+function sanitizeStorageKeyPart(raw: string, maxLen = 80): string {
+  // Drop any directory components (path traversal), then whitelist characters.
+  const base = raw.replace(/\\/g, "/").split("/").filter(Boolean).pop() ?? "file";
+  const cleaned = base
+    .replace(/\.{2,}/g, ".")
+    .replace(/[^a-zA-Z0-9._-]/g, "_")
+    .replace(/^\.+/, "")
+    .slice(0, maxLen);
+  return cleaned || "file";
+}
+
 export const appRouter = router({
   auth: router({
     me: protectedProcedure.query(({ ctx }) => ctx.user),
@@ -488,7 +610,8 @@ export const appRouter = router({
     // Re-sign the session cookie with a fresh 1-year expiry
     refresh: protectedProcedure.mutation(async ({ ctx }) => {
       const { SignJWT } = await import("jose");
-      const secret = new TextEncoder().encode(process.env.JWT_SECRET ?? "");
+      // W9 F10-9: fail closed when JWT_SECRET is unset (never an empty key).
+      const secret = getSessionJwtSecret();
       const newToken = await new SignJWT({
         openId: ctx.user.openId,
         appId: process.env.VITE_APP_ID ?? "",
@@ -720,32 +843,147 @@ export const appRouter = router({
     }),
     virtualAccount: protectedProcedure.query(async ({ ctx }) => getVirtualAccountsByUserId(ctx.user.id)),
     topup: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000), method: z.string().default("bank_transfer") })).mutation(async ({ ctx, input }) => {
+      // W12-FIX (CRIT — money creation): this endpoint performs NO external
+      // payment verification for ANY method (bank_transfer and friends are
+      // arbitrary strings). It previously credited the wallet inline — anyone
+      // authenticated could mint spendable balance. Fail-closed redesign:
+      // this handler now only records a PENDING top-up request
+      // (transactions: type='topup', status='pending'); the wallet is credited
+      // EXCLUSIVELY by wallet.confirmTopup (admin/ops settlement confirmation
+      // below) via a guarded single-winner pending→completed flip + credit in
+      // one db.transaction.
+      //
+      // Verified-rail top-ups (instant credit, externally confirmed BEFORE any
+      // balance mutation — these are NOT this endpoint):
+      //   - Card/Stripe: wallet.stripeTopup only creates a Checkout Session;
+      //     the credit happens in the signature-verified webhook on
+      //     checkout.session.completed (server/stripeWebhook.ts:184 signature
+      //     check; credit at :444-471 with durable idempotency + advisory lock
+      //     + relative guarded credit).
+      //   - PayPal: wallet.paypalCapture requires capture.status==='COMPLETED'
+      //     from the live PayPal Orders API (:966) and credits the
+      //     provider-reported amount.
+      //   - Flutterwave: wallet.flutterwaveVerify requires
+      //     verify_by_reference → data.status==='successful' (:1058) and
+      //     credits the provider-reported amount.
       const idempKey = generateIdempotencyKey(ctx.user.id, "WALLET_TOPUP", input.currency, input.amount.toString(), input.method);
       const cached = checkIdempotency(idempKey);
       if (cached.cached) return cached.result as any;
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const walletRows = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!walletRows.length) throw new TRPCError({ code: "NOT_FOUND", message: "Wallet not found" });
-      const wallet = walletRows[0];
-      const { newBalance, topupRef } = await db.transaction(async (tx: any) => {
-        const [updatedWallet] = await tx.update(wallets)
-          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` })
-          .where(eq(wallets.id, wallet.id))
-          .returning({ balance: wallets.balance });
-        const bal = updatedWallet?.balance ?? wallet.balance;
-        const txRef = `TOP-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
-        await tx.insert(transactions).values({
-          userId: ctx.user.id, type: "topup" as any, status: "completed" as any,
-          fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
-          description: `Wallet top-up via ${input.method}`, reference: txRef,
-        });
-        return { newBalance: bal, topupRef: txRef };
-      });
-      await createAuditLog({ userId: ctx.user.id, action: "WALLET_TOPUP", description: `Topped up ${input.currency} wallet by ${input.amount}` });
-      broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "Wallet Top-up Successful", message: `Your ${input.currency} wallet has been credited with ${Number(input.amount).toLocaleString()} ${input.currency}`, amount: input.amount, currency: input.currency, newBalance, method: input.method, reference: topupRef } });
-      const topupResult = { success: true, newBalance, currency: input.currency };
+      // Deterministic reference + durable replay: the in-memory idempotency
+      // cache is only a per-process fast path; the transactions row (keyed by
+      // idempotency_key/reference) is the cross-restart arbiter. A repeat call
+      // returns the recorded outcome and NEVER inserts a second request.
+      const topupRef = `TOP-${createHash("sha256").update(idempKey).digest("hex").slice(0, 24)}`;
+      const [existing] = await db
+        .select({ id: transactions.id, status: transactions.status })
+        .from(transactions)
+        .where(and(eq(transactions.reference, topupRef), eq(transactions.userId, ctx.user.id), eq(transactions.type, "topup")))
+        .limit(1);
+      if (existing) {
+        const replay = {
+          success: true,
+          status: existing.status === "completed" ? ("credited" as const) : ("pending_settlement" as const),
+          reference: topupRef,
+          currency: input.currency,
+          amount: input.amount,
+          message: existing.status === "completed"
+            ? "Top-up already settled and credited"
+            : "Top-up already recorded — awaiting settlement confirmation",
+        };
+        storeIdempotency(idempKey, replay);
+        return replay;
+      }
+      await db.insert(transactions).values({
+        userId: ctx.user.id, type: "topup" as any, status: "pending" as any,
+        fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
+        description: `Wallet top-up via ${input.method} — PENDING settlement confirmation (no balance credited yet)`,
+        reference: topupRef,
+        idempotencyKey: idempKey,
+        metadata: { method: input.method, requestedAmount: input.amount, currency: input.currency },
+      } as any);
+      await createAuditLog({ userId: ctx.user.id, action: "WALLET_TOPUP_REQUESTED", description: `Top-up REQUESTED: ${input.amount} ${input.currency} via ${input.method} (pending settlement confirmation; ref ${topupRef})` });
+      const topupResult = {
+        success: true,
+        status: "pending_settlement" as const,
+        reference: topupRef,
+        currency: input.currency,
+        amount: input.amount,
+        message: "Top-up recorded as PENDING — this rail has no real-time payment confirmation, so the balance is credited only after ops confirms settlement (wallet.confirmTopup). For instant credit use card (Stripe), PayPal, or Flutterwave top-ups.",
+      };
       storeIdempotency(idempKey, topupResult);
       return topupResult;
+    }),
+    confirmTopup: adminProcedure.input(z.object({
+      reference: z.string().regex(/^TOP-[0-9a-f]{24}$/, "Invalid top-up reference"),
+      note: z.string().max(500).optional(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
+    })).mutation(async ({ ctx, input }) => {
+      // W12-FIX: the ONLY way an unverified-rail top-up becomes spendable
+      // balance. Admin/ops-gated (adminProcedure). Single-winner: the guarded
+      // pending→completed flip and the wallet credit commit in ONE
+      // db.transaction; a concurrent/second confirmation matches 0 rows and
+      // reports the already-settled outcome WITHOUT re-crediting.
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W12-FIX: TOTP step-up on top of admin gating — this endpoint CREDITS
+      // real wallet balances (canonical Contract-2 gate, same helper/pattern
+      // as admin.promoteUser, communityFund.approveDisbursement, cardFunding).
+      // Gated on the ADMIN's own enrollment (ctx.user.id), never the top-up
+      // recipient's. Fail closed: verification unavailable → blocked; an
+      // unenrolled admin must enroll — money-crediting mutations are never
+      // TOTP-waived.
+      const { getTotpEnrollment, verifyTOTP } = await import("./totp");
+      const enrollmentT = await getTotpEnrollment(ctx.user.id);
+      if (!enrollmentT.dbAvailable) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — top-up confirmation blocked" });
+      if (!enrollmentT.enabled || !enrollmentT.secret) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA enrollment required: enroll TOTP before confirming top-up settlements" });
+      if (!input.totpCode) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required to confirm a top-up settlement" });
+      const validT = await verifyTOTP(input.totpCode, enrollmentT.secret);
+      if (!validT) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+      const result = await db.transaction(async (tx: any) => {
+        // Serialize concurrent confirmations of the same reference (also
+        // covers first-time wallet creation races, per the stripeWebhook
+        // precedent).
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'topup-confirm:' + input.reference}, 42))`);
+        const flipped = (await tx.execute(sql`
+          UPDATE transactions
+          SET status = 'completed', "updatedAt" = NOW()
+          WHERE reference = ${input.reference} AND type = 'topup' AND status = 'pending'
+          RETURNING id, "userId", "fromCurrency", "fromAmount"
+        `)) as unknown as Array<{ id: number; userId: number; fromCurrency: string; fromAmount: string }>;
+        if (flipped.length === 0) {
+          // Not pending: unknown reference, or already settled — distinguish
+          // honestly, never credit.
+          const [cur] = await tx
+            .select({ status: transactions.status, userId: transactions.userId, fromCurrency: transactions.fromCurrency, fromAmount: transactions.fromAmount })
+            .from(transactions)
+            .where(and(eq(transactions.reference, input.reference), eq(transactions.type, "topup")))
+            .limit(1);
+          if (!cur) throw new TRPCError({ code: "NOT_FOUND", message: "Top-up record not found" });
+          return { alreadySettled: true, status: cur.status, userId: cur.userId, currency: cur.fromCurrency, amount: cur.fromAmount };
+        }
+        const row = flipped[0];
+        const amount = Number(row.fromAmount);
+        // Relative guarded credit (no absolute read-modify-write).
+        const creditRows = (await tx.execute(sql`
+          UPDATE wallets
+          SET balance = balance + ${amount}, "updatedAt" = NOW(), version = version + 1
+          WHERE "userId" = ${row.userId} AND currency = ${row.fromCurrency} AND status = 'active'
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (creditRows.length === 0) {
+          // Roll the flip back too — the top-up STAYS pending (retryable once
+          // the wallet exists/is active). Never credit a missing wallet.
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Target wallet missing or inactive — no credit issued; top-up remains pending" });
+        }
+        return { alreadySettled: false, status: "completed", userId: row.userId, currency: row.fromCurrency, amount: row.fromAmount };
+      });
+      await createAuditLog({ userId: ctx.user.id, action: result.alreadySettled ? "WALLET_TOPUP_CONFIRM_REPLAY" : "WALLET_TOPUP_CONFIRMED", description: `${result.alreadySettled ? "Replay/no-op confirmation" : "Settlement confirmed + credited"}: top-up ${input.reference} → ${result.amount} ${result.currency} for user ${result.userId}${input.note ? ` — note: ${input.note}` : ""}` });
+      if (!result.alreadySettled) {
+        broadcastUserEvent(result.userId, { type: "transfer_received", payload: { title: "Wallet Top-up Successful", message: `Your ${result.currency} wallet has been credited with ${Number(result.amount).toLocaleString()} ${result.currency} (settlement confirmed)`, amount: Number(result.amount), currency: result.currency, reference: input.reference } });
+      }
+      return { success: true, reference: input.reference, ...result };
     }),
     stripeTopup: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000).min(100).max(10_000_000), currency: z.string().default("usd"), walletCurrency: z.string().default("USD"), origin: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const { getStripe } = await import("./stripe");
@@ -802,7 +1040,7 @@ export const appRouter = router({
       return { success: true, orderId: order.id, approvalUrl: approvalLink?.href ?? `https://www.sandbox.paypal.com/checkoutnow?token=${order.id}`, sandboxMode: ENV.paypalClientId.startsWith("AZDx") };
     }),
     paypalCapture: protectedProcedure.input(z.object({
-      orderId: z.string().regex(/^[A-Za-z0-9\-]+$/, "Invalid order ID format"),
+      orderId: z.string().max(50).regex(/^[A-Za-z0-9\-]+$/, "Invalid order ID format"),
       walletCurrency: z.string().default("USD"),
       amount: z.number().positive().max(10_000_000),
     })).mutation(async ({ ctx, input }) => {
@@ -836,28 +1074,72 @@ export const appRouter = router({
         body: "grant_type=client_credentials",
       });
       const auth = await authRes.json() as { access_token: string };
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W12-FIX: durable idempotency anchor — one PayPal order credits ONCE.
+      // Checked BEFORE the capture call so a replay returns the recorded
+      // outcome without touching PayPal; re-checked inside the credit tx.
+      const paypalRef = `PAYPAL-TOPUP-${input.orderId}`;
+      const [priorPaypal] = await db.select({ id: transactions.id }).from(transactions)
+        .where(and(eq(transactions.reference, paypalRef), eq(transactions.userId, ctx.user.id), eq(transactions.type, "topup"))).limit(1);
+      if (priorPaypal) {
+        return { success: true, newBalance: null, alreadyProcessed: true, sandboxMode: false };
+      }
       const captureRes = await fetch(`${ENV.paypalBaseUrl}/v2/checkout/orders/${input.orderId}/capture`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${auth.access_token}` },
       });
-      const capture = await captureRes.json() as { status: string };
+      const capture = await captureRes.json() as {
+        status: string;
+        purchase_units?: Array<{ custom_id?: string; payments?: { captures?: Array<{ status?: string; amount?: { value?: string; currency_code?: string } }> } }>;
+      };
       if (capture.status !== "COMPLETED") throw new TRPCError({ code: "BAD_REQUEST", message: "PayPal payment not completed" });
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const [walletPaypalLive] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.walletCurrency))).limit(1);
-      let newBalancePaypal: string;
-      if (walletPaypalLive) {
-        const [updPaypal] = await db.update(wallets)
-          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` })
-          .where(eq(wallets.id, walletPaypalLive.id))
-          .returning({ balance: wallets.balance });
-        newBalancePaypal = updPaypal?.balance ?? walletPaypalLive.balance;
-      } else {
-        newBalancePaypal = input.amount.toFixed(2);
-        await db.insert(wallets).values({ userId: ctx.user.id, currency: input.walletCurrency, balance: newBalancePaypal, isDefault: false, status: "active" });
+      // W12-FIX: verify ORDER OWNERSHIP — the order's custom_id was bound to
+      // the creating user at paypalTopup (:918). Without this, anyone who
+      // learns an order id could capture it into their own wallet.
+      const unit = capture.purchase_units?.[0];
+      if (unit?.custom_id !== `user_${ctx.user.id}_${input.walletCurrency}`) {
+        logger.error({ orderId: input.orderId, userId: ctx.user.id }, "[PayPal] Capture ownership mismatch — refusing credit (possible stolen order id)");
+        throw new TRPCError({ code: "FORBIDDEN", message: "PayPal order does not belong to this account" });
       }
-      const newBalance = newBalancePaypal;
-      await createTransaction({ userId: ctx.user.id, type: "topup", status: "completed", fromCurrency: input.walletCurrency, fromAmount: input.amount.toString(), fee: "0", description: "Wallet top-up via PayPal" });
-      broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "PayPal Top-up Successful", message: `Your ${input.walletCurrency} wallet has been credited with ${input.amount.toLocaleString()} ${input.walletCurrency} via PayPal`, amount: input.amount, currency: input.walletCurrency } });
+      // W12-FIX: credit the PROVIDER-REPORTED captured amount, never the
+      // client-supplied input.amount (previously a client could pass any
+      // amount and inflate the credit beyond the real payment).
+      const captureLeg = unit?.payments?.captures?.find((c) => c.status === "COMPLETED") ?? unit?.payments?.captures?.[0];
+      const capturedAmount = Number(captureLeg?.amount?.value);
+      if (!Number.isFinite(capturedAmount) || capturedAmount <= 0) {
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "PayPal capture confirmed but the captured amount is unreadable — no credit issued; contact support" });
+      }
+      const [walletPaypalLive] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.walletCurrency))).limit(1);
+      // W12-FIX: credit + ledger row commit in ONE db.transaction (previously
+      // separate statements), serialized per order id so a concurrent replay
+      // cannot double-credit between the pre-check above and the insert.
+      const newBalance = await db.transaction(async (tx: any) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'paypal-topup:' + input.orderId}, 42))`);
+        const [dup] = await tx.select({ id: transactions.id }).from(transactions)
+          .where(and(eq(transactions.reference, paypalRef), eq(transactions.type, "topup"))).limit(1);
+        if (dup) {
+          // Concurrent confirm already credited this order.
+          throw new TRPCError({ code: "CONFLICT", message: "This PayPal top-up was already credited" });
+        }
+        let bal: string;
+        if (walletPaypalLive) {
+          const [updPaypal] = await tx.update(wallets)
+            .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${capturedAmount} AS VARCHAR)` })
+            .where(eq(wallets.id, walletPaypalLive.id))
+            .returning({ balance: wallets.balance });
+          bal = updPaypal?.balance ?? walletPaypalLive.balance;
+        } else {
+          bal = capturedAmount.toFixed(2);
+          await tx.insert(wallets).values({ userId: ctx.user.id, currency: input.walletCurrency, balance: bal, isDefault: false, status: "active" });
+        }
+        await tx.insert(transactions).values({
+          userId: ctx.user.id, type: "topup" as any, status: "completed" as any,
+          fromCurrency: input.walletCurrency, fromAmount: capturedAmount.toString(), fee: "0",
+          description: `Wallet top-up via PayPal | Order: ${input.orderId}`, reference: paypalRef,
+        });
+        return bal;
+      });
+      broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "PayPal Top-up Successful", message: `Your ${input.walletCurrency} wallet has been credited with ${capturedAmount.toLocaleString()} ${input.walletCurrency} via PayPal`, amount: capturedAmount, currency: input.walletCurrency } });
       return { success: true, newBalance: Number(newBalance), sandboxMode: false };
     }),
     flutterwaveTopup: protectedProcedure.input(z.object({
@@ -929,31 +1211,76 @@ export const appRouter = router({
         broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "Flutterwave Top-up Successful", message: `Your ${input.walletCurrency} wallet has been credited with ${input.amount.toLocaleString()} ${input.walletCurrency} via Flutterwave`, amount: input.amount, currency: input.walletCurrency } });
         return { success: true, newBalance: Number(newBalance), sandboxMode: true };
       }
+      // W12-FIX: ORDER/REF OWNERSHIP — our tx_ref is generated as
+      // `REMIT-FLW-<userId>-<ts>` at flutterwaveTopup (:993). Without this
+      // binding, anyone who learns another user's tx_ref (it travels through
+      // the payer's redirect URL) could claim the payment into their wallet.
+      if (!input.txRef.startsWith(`REMIT-FLW-${ctx.user.id}-`)) {
+        logger.error({ userId: ctx.user.id, txRef: input.txRef }, "[Flutterwave] tx_ref ownership mismatch — refusing credit");
+        throw new TRPCError({ code: "FORBIDDEN", message: "Flutterwave transaction reference does not belong to this account" });
+      }
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W12-FIX: durable idempotency — verify_by_reference is a READ (the
+      // payment is never consumed), so re-calling this endpoint re-credited
+      // the wallet on EVERY replay. One tx_ref credits exactly once.
+      const flwRef = `FLW-TOPUP-${createHash("sha256").update(input.txRef).digest("hex").slice(0, 24)}`;
+      const [priorFlw] = await db.select({ id: transactions.id }).from(transactions)
+        .where(and(eq(transactions.reference, flwRef), eq(transactions.userId, ctx.user.id), eq(transactions.type, "topup"))).limit(1);
+      if (priorFlw) {
+        return { success: true, newBalance: null, alreadyProcessed: true, sandboxMode: false };
+      }
       const verRes = await fetch(`${ENV.flutterwaveBaseUrl}/transactions/verify_by_reference?tx_ref=${input.txRef}`, {
         headers: { "Authorization": `Bearer ${ENV.flutterwaveSecretKey}` },
       });
-      const ver = await verRes.json() as { status: string; data: { status: string; amount: number } };
+      const ver = await verRes.json() as { status: string; data: { status: string; amount: number; currency?: string } };
       if (ver.status !== "success" || ver.data.status !== "successful") throw new TRPCError({ code: "BAD_REQUEST", message: "Flutterwave payment not successful" });
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const [walletFlwVerify] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.walletCurrency))).limit(1);
-      let newBalanceFlwVerify: string;
-      if (walletFlwVerify) {
-        const [updFlwV] = await db.update(wallets)
-          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${ver.data.amount} AS VARCHAR)` })
-          .where(eq(wallets.id, walletFlwVerify.id))
-          .returning({ balance: wallets.balance });
-        newBalanceFlwVerify = updFlwV?.balance ?? walletFlwVerify.balance;
-      } else {
-        newBalanceFlwVerify = ver.data.amount.toFixed(2);
-        await db.insert(wallets).values({ userId: ctx.user.id, currency: input.walletCurrency, balance: newBalanceFlwVerify, isDefault: false, status: "active" });
+      // W12-FIX: credit the PROVIDER-REPORTED amount (already the case) and
+      // reject a currency mismatch — the credit goes to input.walletCurrency,
+      // so it must match what was actually paid.
+      if (ver.data.currency && ver.data.currency.toUpperCase() !== input.walletCurrency.toUpperCase()) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: `Paid currency ${ver.data.currency} does not match target wallet currency ${input.walletCurrency} — no credit issued` });
       }
-      const newBalance = newBalanceFlwVerify;
-      await createTransaction({ userId: ctx.user.id, type: "topup", status: "completed", fromCurrency: input.walletCurrency, fromAmount: ver.data.amount.toString(), fee: "0", description: "Wallet top-up via Flutterwave" });
+      const [walletFlwVerify] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.walletCurrency))).limit(1);
+      // W12-FIX: credit + ledger row commit in ONE db.transaction, serialized
+      // per tx_ref so a concurrent replay cannot double-credit between the
+      // pre-check above and the insert.
+      const newBalance = await db.transaction(async (tx: any) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'flw-topup:' + input.txRef}, 42))`);
+        const [dup] = await tx.select({ id: transactions.id }).from(transactions)
+          .where(and(eq(transactions.reference, flwRef), eq(transactions.type, "topup"))).limit(1);
+        if (dup) throw new TRPCError({ code: "CONFLICT", message: "This Flutterwave top-up was already credited" });
+        let bal: string;
+        if (walletFlwVerify) {
+          const [updFlwV] = await tx.update(wallets)
+            .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${ver.data.amount} AS VARCHAR)` })
+            .where(eq(wallets.id, walletFlwVerify.id))
+            .returning({ balance: wallets.balance });
+          bal = updFlwV?.balance ?? walletFlwVerify.balance;
+        } else {
+          bal = ver.data.amount.toFixed(2);
+          await tx.insert(wallets).values({ userId: ctx.user.id, currency: input.walletCurrency, balance: bal, isDefault: false, status: "active" });
+        }
+        await tx.insert(transactions).values({
+          userId: ctx.user.id, type: "topup" as any, status: "completed" as any,
+          fromCurrency: input.walletCurrency, fromAmount: ver.data.amount.toString(), fee: "0",
+          description: `Wallet top-up via Flutterwave | tx_ref: ${input.txRef}`, reference: flwRef,
+        });
+        return bal;
+      });
       broadcastUserEvent(ctx.user.id, { type: "transfer_received", payload: { title: "Flutterwave Top-up Successful", message: `Your ${input.walletCurrency} wallet has been credited via Flutterwave`, amount: ver.data.amount, currency: input.walletCurrency } });
       return { success: true, newBalance: Number(newBalance), sandboxMode: false };
     }),
-    withdraw: walletWithdrawProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000), bankAccount: z.string().optional() })).mutation(async ({ ctx, input }) => {
+    withdraw: walletWithdrawProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000), bankAccount: z.string().optional(), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // ─── D4: TOTP step-up for full-balance bank cash-out (Contract 2) ────────
+      const { getTotpEnrollment, verifyTOTP } = await import("./totp");
+      const enrollmentW = await getTotpEnrollment(ctx.user!.id);
+      if (!enrollmentW.dbAvailable) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — withdrawal blocked" });
+      if (enrollmentW.enabled && enrollmentW.secret) {
+        if (!input.totpCode) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+        const validW = await verifyTOTP(input.totpCode, enrollmentW.secret);
+        if (!validW) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+      }
       // ─── KYC Tier Withdrawal Limit Enforcement ──────────────────────────────
       const [dbUserW] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, ctx.user!.id)).limit(1);
       const userTierW = (dbUserW?.kycTier ?? "tier0") as KycTier;
@@ -1075,16 +1402,24 @@ export const appRouter = router({
       const fromRateUsd = ratesFor2fa[input.fromCurrency] ?? 1;
       const amountInUsd = input.amount / fromRateUsd;
       if (amountInUsd > HIGH_VALUE_THRESHOLD_USD) {
-        const db2fa = await getDb();
-        if (!db2fa) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Unable to verify identity for high-value transfer. Please try again shortly." });
-        const [userRow] = await db2fa.select().from(users).where(eq(users.id, ctx.user!.id)).limit(1);
-        if (userRow?.totpEnabled) {
+        // SEC-25 follow-through: users.totpEnabled/totpSecret do NOT exist —
+        // enrollment lives in mfa_settings (legacy: users.twoFactor*). The
+        // inline column read made this entire gate dead code. Use the shared
+        // getTotpEnrollment helper and fail closed when the DB is unavailable
+        // (mirrors the correct gate in routers/p2pInstant.ts).
+        const { getTotpEnrollment, verifyTOTP } = await import("./totp");
+        const enrollment = await getTotpEnrollment(ctx.user!.id);
+        if (!enrollment.dbAvailable) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Unable to verify identity for high-value transfer. Please try again shortly." });
+        if (enrollment.enabled && enrollment.secret) {
           if (!input.totpCode) throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: This transfer exceeds $1,000 USD. Please provide your 6-digit TOTP code to proceed." });
-          const { verifyTOTP } = await import("./totp");
-          const valid = await verifyTOTP(input.totpCode, userRow.totpSecret ?? "");
+          const valid = await verifyTOTP(input.totpCode, enrollment.secret);
           if (!valid) throw new TRPCError({ code: "FORBIDDEN", message: "Invalid 2FA code. Please check your authenticator app and try again." });
-        } else if (amountInUsd >= 10_000) {
-          throw new TRPCError({ code: "FORBIDDEN", message: "2FA enrollment required for transfers above $10,000 USD. Please enable two-factor authentication in your security settings." });
+        } else {
+          // W12-FIX: removed the $1k–$10k waiver window — an unenrolled user
+          // could previously move up to $10,000 with NO step-up authentication
+          // at all. Above the step-up threshold, step-up is REQUIRED: the user
+          // must enroll TOTP. Never waived.
+          throw new TRPCError({ code: "FORBIDDEN", message: "2FA_REQUIRED: step-up authentication required for transfers above $1,000 USD — enroll TOTP in your security settings to proceed." });
         }
       }
       // ─── KYC Tier Limit Enforcement (fail-closed: DB required) ────────────────
@@ -1164,10 +1499,17 @@ export const appRouter = router({
           fromCountry: "NG",
           toCountry: input.recipientCountry ?? "NG",
           recipientAccount: input.recipientAccount ?? "",
-        }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed, returning null"); return null; }),
+        }).catch((err: unknown) => {
+          // W12-FIX: FAIL CLOSED. Previously a gRPC fraud-engine outage was
+          // swallowed to `null` and the BLOCK-decision check below was skipped
+          // (null && …), silently waiving risk screening for money movement.
+          // An unreachable risk engine must BLOCK the transfer, never pass it.
+          logger.error({ err: err instanceof Error ? err.message : String(err) }, "[Transfer] gRPC fraud engine unavailable — transfer BLOCKED (fail closed)");
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Fraud screening unavailable — transfer blocked. Please try again later." });
+        }),
       ]);
       if (!fraudCheck.approved) throw new TRPCError({ code: "FORBIDDEN", message: `Transaction blocked. Risk score: ${fraudCheck.riskScore}. Flags: ${fraudCheck.flags.join(", ")}` });
-      if (grpcFraud && grpcFraud.decision === "BLOCK") throw new TRPCError({ code: "FORBIDDEN", message: `Transaction blocked by risk engine. Risk score: ${grpcFraud.riskScore.toFixed(2)}. Reasons: ${grpcFraud.reasons.join(", ")}` });
+      if (grpcFraud.decision === "BLOCK") throw new TRPCError({ code: "FORBIDDEN", message: `Transaction blocked by risk engine. Risk score: ${grpcFraud.riskScore.toFixed(2)}. Reasons: ${grpcFraud.reasons.join(", ")}` });
       // ─── Polyglot Microservice Checks (Go/Rust/Python) ───────────────────────
       // 1. Go rate-limit sidecar: per-user transfer rate limit (10/min)
       const goRateLimit = await goCheckRateLimit(`transfer:user:${ctx.user!.id}`, 10, 60);
@@ -1303,6 +1645,8 @@ export const appRouter = router({
       if (!temporalResult.fallback) {
         // Temporal is running — workflow handles everything (DB, ledger, notify, audit)
         logger.info(`[Transfer] Temporal workflow started: ${temporalResult.workflowId}`);
+        // PBAC daily-spend accounting (otherwise the tier daily cap never accumulates)
+        recordSpend(ctx.user!.id, Math.round(amountInUsd * 100));
         return {
           success: true,
           reference: temporalResult.workflowId,
@@ -1344,6 +1688,8 @@ export const appRouter = router({
         });
         return { ref: txRef, newBalance: updTransfer.balance };
       });
+      // PBAC daily-spend accounting (otherwise the tier daily cap never accumulates)
+      recordSpend(ctx.user!.id, Math.round(amountInUsd * 100));
       await createAuditLog({ userId: ctx.user!.id, action: "TRANSFER_SENT", description: `Sent ${input.amount} ${input.fromCurrency} to ${input.recipientName}` });
       broadcastUserEvent(ctx.user!.id, { type: "transfer_sent", payload: { title: "Transfer Sent Successfully", message: `${input.amount} ${input.fromCurrency} → ${toAmount.toFixed(2)} ${input.toCurrency} sent to ${input.recipientName}`, amount: input.amount, fromCurrency: input.fromCurrency, toCurrency: input.toCurrency, toAmount: toAmount.toFixed(2), recipientName: input.recipientName, fee: fee.toFixed(2), reference: ref } });
       // ─── Wire local ML fraud scorer + state machine pipeline (non-blocking) ─────
@@ -1484,14 +1830,18 @@ export const appRouter = router({
       return { success: true, reference: ref, toAmount: Math.round(toAmount * 100) / 100, fee: Math.round(fee * 100) / 100, fxRate, orchestrated: false, mlRisk: anomalyResult ? { isAnomaly: anomalyResult.isAnomaly, confidence: anomalyResult.confidence, requiresReview: anomalyResult.isAnomaly && anomalyResult.confidence > 0.65 } : null };
     }),
     quote: protectedProcedure.input(z.object({ fromCurrency: z.string(), toCurrency: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ ctx, input }) => {
-      const rates = await getLiveRates("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const fxRate = toRate / fromRate;
+      const { rates, source: rateSource, stale: ratesStale } = await getLiveRatesDetailed("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const fxRate = toRate / fromRate;
       const feeBreakdown = calculateFee(input.amount / fromRate, { from: input.fromCurrency.slice(0, 2), to: input.toCurrency.slice(0, 2) });
       const fee = feeBreakdown.totalFee * fromRate;
       const toAmount = (input.amount - fee) * fxRate;
-      // Generate FX rate lock token (valid for 60 seconds)
-      const { createRateLock } = await import("./lib/fxRateLock");
-      const rateLockToken = createRateLock(String(ctx.user!.id), input.fromCurrency, input.toCurrency, fxRate);
-      return { fxRate, fee: Math.round(fee * 100) / 100, toAmount: Math.round(toAmount * 100) / 100, fromAmount: input.amount, estimatedTime: "1-3 minutes", rateLockToken, rateLockExpiresInSeconds: 60 };
+      // Generate FX rate lock token (valid for 60 seconds) — C7: NEVER sign a
+      // rate-lock token against hardcoded fallback rates.
+      let rateLockToken: string | null = null;
+      if (!ratesStale) {
+        const { createRateLock } = await import("./lib/fxRateLock");
+        rateLockToken = createRateLock(String(ctx.user!.id), input.fromCurrency, input.toCurrency, fxRate);
+      }
+      return { fxRate, fee: Math.round(fee * 100) / 100, toAmount: Math.round(toAmount * 100) / 100, fromAmount: input.amount, estimatedTime: "1-3 minutes", rateLockToken, rateLockExpiresInSeconds: ratesStale ? 0 : 60, source: rateSource, stale: ratesStale };
     }),
   }),
 
@@ -1508,7 +1858,7 @@ export const appRouter = router({
       return { rates: filtered, base: input.base, source, timestamp: new Date().toISOString(), pairCount: Object.keys(filtered).length };
     }),
     calculate: publicProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number().positive().max(10_000_000) })).query(async ({ input }) => {
-      const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate;
+      const { rates, source: rateSource, stale: ratesStale } = await getLiveRatesDetailed("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate;
       const feeBreakdown = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       const convertedAmount = input.amount * rate;
       const deliveryAmount = (input.amount - feeBreakdown.totalFee) * rate;
@@ -1518,18 +1868,25 @@ export const appRouter = router({
         feeBreakdown: { baseFee: feeBreakdown.baseFee, percentageFee: feeBreakdown.percentageFee, discountApplied: feeBreakdown.discountApplied, discountReason: feeBreakdown.discountReason },
         from: input.from, to: input.to, amount: input.amount,
         estimatedDelivery: input.amount <= 1000 ? "Instant (< 30 seconds)" : input.amount <= 5000 ? "Within 1 hour" : "1-2 business days",
+        source: rateSource, stale: ratesStale,
       };
     }),
     lockRateV2: protectedProcedure.input(z.object({ fromCurrency: z.string().max(8), toCurrency: z.string().max(8), amount: z.number().positive().max(10_000_000), lockedRate: z.number().positive().optional(), expiresInHours: z.number().min(1).max(168).default(24) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const rates = await getLiveRates("USD"); const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const rate = input.lockedRate ?? (toRate / fromRate);
+      const { rates, stale: ratesStale } = await getLiveRatesDetailed("USD");
+      // C7: refuse to lock a rate derived from hardcoded fallback rates (fail closed).
+      if (ratesStale && input.lockedRate == null) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "live rates unavailable — refusing to issue a rate lock against fallback rates" });
+      const fromRate = rates[input.fromCurrency] ?? 1; const toRate = rates[input.toCurrency] ?? 1; const rate = input.lockedRate ?? (toRate / fromRate);
       const expiresAt = new Date(Date.now() + input.expiresInHours * 60 * 60 * 1000);
       await db.execute(sql`INSERT INTO rate_locks (user_id, from_currency, to_currency, locked_rate, amount, expires_at, status) VALUES (${ctx.user.id}, ${input.fromCurrency}, ${input.toCurrency}, ${rate.toFixed(8)}, ${input.amount}, ${expiresAt}, 'active')`);
       return { success: true, lockedRate: rate, expiry: expiresAt };
     }),
     lockRate: protectedProcedure.input(z.object({ from: z.string().max(8), to: z.string().max(8), amount: z.number().positive().max(10_000_000), duration: z.number().positive().max(10080).default(30) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const rates = await getLiveRates("USD"); const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate;
+      const { rates, stale: ratesStale } = await getLiveRatesDetailed("USD");
+      // C7: refuse to lock a rate derived from hardcoded fallback rates (fail closed).
+      if (ratesStale) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "live rates unavailable — refusing to issue a rate lock against fallback rates" });
+      const fromRate = rates[input.from] ?? 1; const toRate = rates[input.to] ?? 1; const rate = toRate / fromRate;
       const expiresAt = new Date(Date.now() + input.duration * 60 * 1000);
       await db.execute(sql`INSERT INTO rate_locks (user_id, from_currency, to_currency, locked_rate, amount, expires_at, status) VALUES (${ctx.user.id}, ${input.from}, ${input.to}, ${rate.toFixed(8)}, ${input.amount}, ${expiresAt}, 'active')`);
       return { success: true, lockedRate: rate, expiry: expiresAt, lockId: `LOCK${Date.now()}` };
@@ -1580,8 +1937,17 @@ export const appRouter = router({
         return { ...b, transferCount, lastTransferDate };
       }));
     }),
-    add: strictRateLimitedProcedure.input(z.object({ name: z.string().min(1).max(128).trim(), accountNumber: z.string().max(64).optional(), bankName: z.string().max(128).optional(), bankCode: z.string().max(16).optional(), currency: z.string().max(8).default("NGN"), country: z.string().max(64).optional(), phone: z.string().max(32).optional(), email: z.string().email().max(320).optional() })).mutation(async ({ ctx, input }) => {
+    add: strictRateLimitedProcedure.input(z.object({ name: z.string().min(1).max(128).trim(), accountNumber: z.string().max(64).optional(), bankName: z.string().max(128).optional(), bankCode: z.string().max(16).optional(), currency: z.string().max(8).default("NGN"), country: z.string().max(64).optional(), phone: z.string().max(32).optional(), email: z.string().email().max(320).optional(), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // D6: TOTP step-up — payout-destination integrity / BEC defense (Contract 2).
+      const { getTotpEnrollment, verifyTOTP } = await import("./totp");
+      const enrollmentB = await getTotpEnrollment(ctx.user.id);
+      if (!enrollmentB.dbAvailable) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — action blocked" });
+      if (enrollmentB.enabled && enrollmentB.secret) {
+        if (!input.totpCode) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+        const validB = await verifyTOTP(input.totpCode, enrollmentB.secret);
+        if (!validB) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+      }
       const existing = await getBeneficiariesByUserId(ctx.user.id);
       if (input.accountNumber) {
         const duplicate = existing.find((b: any) => b.accountNumber === input.accountNumber && b.bankCode === input.bankCode);
@@ -1591,7 +1957,8 @@ export const appRouter = router({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Nigerian NUBAN account numbers must be exactly 10 digits" });
       }
       if (existing.length >= 50) throw new TRPCError({ code: "BAD_REQUEST", message: "Maximum 50 beneficiaries allowed" });
-      const [created] = await db.insert(beneficiaries).values({ userId: ctx.user.id, ...input }).returning();
+      const { totpCode: _totpCode, ...beneficiaryValues } = input;
+      const [created] = await db.insert(beneficiaries).values({ userId: ctx.user.id, ...beneficiaryValues }).returning();
       await createAuditLog({ userId: ctx.user.id, action: "BENEFICIARY_ADDED", description: `Beneficiary added: ${input.name}` });
       return { success: true, beneficiary: created };
     }),
@@ -1716,11 +2083,19 @@ export const appRouter = router({
     }),
     getTransactions: protectedProcedure.input(z.object({ limit: z.number().default(20) }).optional()).query(async ({ ctx, input }) => {
       const txs = await getTransactionsByUserId(ctx.user.id);
-      return txs.filter((t: any) => t.type === 'savings_deposit' || t.type === 'savings_withdrawal').slice(0, input?.limit ?? 20);
+      // W9-FIX2: deposits are now recorded with the enum-valid type 'savings'
+      // (metadata.originalType keeps the legacy label); keep the legacy values
+      // in the filter for backward compatibility with any historical rows.
+      return txs.filter((t: any) => t.type === 'savings' || t.type === 'savings_deposit' || t.type === 'savings_withdrawal').slice(0, input?.limit ?? 20);
     }),
     deposit: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), type: z.enum(['flex', 'locked']), lockDays: z.number().int().min(1).max(3650).optional() })).mutation(async ({ ctx, input }) => {
       const savDepIdempKey = generateIdempotencyKey(ctx.user.id, "SAVINGS_DEPOSIT", input.amount.toString(), input.type, String(input.lockDays ?? 0));
-      const savDepCached = checkIdempotency(savDepIdempKey);
+      // W12: cross-instance Redis claim (SET NX PX) — the old in-memory
+      // checkIdempotency was per-process; concurrent double-submit across
+      // instances could both pass. Throws IdempotencyConflictError while a
+      // prior run is in-flight; IdempotencyStoreUnavailableError fails closed
+      // in production when Redis is down.
+      const savDepCached = await claimIdempotency(savDepIdempKey);
       if (savDepCached.cached) return savDepCached.result as any;
       const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
       if (input.type === 'locked' && !input.lockDays) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Lock period required for locked savings' });
@@ -1731,21 +2106,42 @@ export const appRouter = router({
       const projectedInterest = input.amount * (apy / 100) * ((input.lockDays ?? 365) / 365);
       const [depWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
       if (!depWallet || Number(depWallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient USD wallet balance for savings deposit" });
-      const [updDep] = await db.update(wallets)
-        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
-        .where(and(eq(wallets.id, depWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
-        .returning({ balance: wallets.balance });
-      if (!updDep) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-      const [created] = await db.insert(savingsGoals).values({ userId: ctx.user.id, name: `${input.type === 'flex' ? 'Flex' : `${input.lockDays}-Day Locked`} Savings`, emoji: input.type === 'flex' ? '\ud83d\udcb0' : '\ud83d\udd12', targetAmount: (input.amount * 10).toFixed(2), currentAmount: input.amount.toFixed(2), currency: 'USD', status: 'active', autoSave: false, targetDate: maturityDate }).returning();
+      // W9-FIX2 (CRITICAL): debit + goal insert + transaction record commit in ONE
+      // db.transaction so any insert failure rolls the debit back. Also fixes the
+      // enum-invalid tx_type "savings_deposit" → "savings" (original preserved in metadata).
       const savingsDepRef = generateOpRef("SAVDEP", ctx.user.id);
-      await createTransaction({ userId: ctx.user.id, type: "savings_deposit", status: "completed", fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0", description: `Savings deposit: $${input.amount} at ${apy}% APY` });
+      const [created] = await db.transaction(async (tx: any) => {
+        const [updDep] = await tx.update(wallets)
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+          .where(and(eq(wallets.id, depWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+          .returning({ balance: wallets.balance });
+        if (!updDep) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+      const [goal] = await tx.insert(savingsGoals).values({ userId: ctx.user.id, name: `${input.type === 'flex' ? 'Flex' : `${input.lockDays}-Day Locked`} Savings`, emoji: input.type === 'flex' ? '\ud83d\udcb0' : '\ud83d\udd12', targetAmount: (input.amount * 10).toFixed(2), currentAmount: input.amount.toFixed(2), currency: 'USD', status: 'active', autoSave: false, targetDate: maturityDate }).returning();
+        await tx.insert(transactions).values({
+          userId: ctx.user.id, type: "savings" as any, status: "completed" as any,
+          fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0",
+          reference: savingsDepRef,
+          description: `Savings deposit: $${input.amount} at ${apy}% APY`,
+          metadata: { originalType: "savings_deposit" },
+        });
+        return [goal];
+      });
       await auditCoreOperation({ userId: ctx.user.id, action: 'SAVINGS_DEPOSIT', description: `${input.type} savings deposit: $${input.amount} at ${apy}% APY`, amount: input.amount, currency: 'USD', featureLabel: 'savings', operationRef: savingsDepRef, kafkaTopic: CORE_TOPICS.SAVINGS_DEPOSIT, metadata: { apy, lockDays: input.lockDays, type: input.type } });
       const savDepResult = { success: true, apy, maturityDate, projectedInterest: Math.round(projectedInterest * 100) / 100, goalId: (created as any).id };
       storeIdempotency(savDepIdempKey, savDepResult);
       return savDepResult;
     }),
-    withdraw: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), goalId: z.number().optional() })).mutation(async ({ ctx, input }) => {
+    withdraw: protectedProcedure.input(z.object({ amount: z.number().positive().max(1_000_000), goalId: z.number().optional(), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
+      // TOTP step-up — funds leave the savings vault back to the wallet (Contract 2).
+      const { getTotpEnrollment, verifyTOTP } = await import("./totp");
+      const enrollmentS = await getTotpEnrollment(ctx.user.id);
+      if (!enrollmentS.dbAvailable) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: '2FA verification unavailable — withdrawal blocked' });
+      if (enrollmentS.enabled && enrollmentS.secret) {
+        if (!input.totpCode) throw new TRPCError({ code: 'PRECONDITION_FAILED', message: '2FA code required for this action' });
+        const validS = await verifyTOTP(input.totpCode, enrollmentS.secret);
+        if (!validS) throw new TRPCError({ code: 'UNAUTHORIZED', message: 'Invalid 2FA code' });
+      }
       const goals = await getSavingsGoalsByUserId(ctx.user.id);
       const withdrawableGoals = goals.filter((g: any) => {
         if (g.status !== 'active') return false;
@@ -1763,35 +2159,76 @@ export const appRouter = router({
           throw new TRPCError({ code: 'NOT_FOUND', message: 'Savings goal not found or not withdrawable' });
         }
         if (input.amount > Number((target as any).currentAmount)) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Amount exceeds goal balance' });
+        // W12-FIX: guarded goal decrement + wallet credit + ledger record in
+        // ONE db.transaction. Previously the absolute read-modify-write
+        // decrement (no balance guard) and the wallet credit were separate
+        // statements — a crash between them minted the wallet credit without
+        // the goal debit, and concurrent withdrawals lost each other's value.
         const newAmt = Number((target as any).currentAmount) - input.amount;
-        await db.update(savingsGoals).set({ currentAmount: newAmt.toFixed(2), status: newAmt <= 0 ? 'completed' : 'active' }).where(eq(savingsGoals.id, input.goalId)).returning();
-        const [goalWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
-        if (goalWallet) {
-          await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` }).where(eq(wallets.id, goalWallet.id)).returning();
-        } else {
-          await db.insert(wallets).values({ userId: ctx.user.id, currency: "USD", balance: input.amount.toFixed(2), isDefault: false, status: "active" });
-        }
-        await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0", description: `Savings withdrawal from goal: $${input.amount}` });
+        await db.transaction(async (tx: any) => {
+          const [debitedGoal] = await tx.update(savingsGoals)
+            .set({
+              currentAmount: sql`CAST(CAST(${savingsGoals.currentAmount} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)`,
+              status: newAmt <= 0 ? 'completed' : 'active',
+            })
+            .where(and(eq(savingsGoals.id, input.goalId!), sql`CAST(${savingsGoals.currentAmount} AS DECIMAL(18,4)) >= ${input.amount}`))
+            .returning({ id: savingsGoals.id });
+          if (!debitedGoal) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Amount exceeds goal balance (concurrent update)' });
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'wallet:' + String(ctx.user.id) + ':USD'}, 42))`);
+          const goalCredit = (await tx.execute(sql`
+            UPDATE wallets SET balance = balance + ${input.amount}, "updatedAt" = NOW(), version = version + 1
+            WHERE "userId" = ${ctx.user.id} AND currency = 'USD'
+            RETURNING id
+          `)) as unknown as Array<{ id: number }>;
+          if (goalCredit.length === 0) {
+            await tx.insert(wallets).values({ userId: ctx.user.id, currency: "USD", balance: input.amount.toFixed(2), isDefault: false, status: "active" });
+          }
+          await tx.insert(transactions).values({
+            userId: ctx.user.id, type: "receive" as any, status: "completed" as any,
+            fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0",
+            description: `Savings withdrawal from goal: $${input.amount}`,
+          });
+        });
         return { success: true, withdrawn: input.amount, remainingBalance: newAmt };
       }
       const totalFlex = withdrawableGoals.reduce((s: number, g: any) => s + Number(g.currentAmount), 0);
       if (input.amount > totalFlex) throw new TRPCError({ code: 'BAD_REQUEST', message: `Insufficient withdrawable balance. Available: $${totalFlex.toFixed(2)}` });
-      let remaining = input.amount;
-      for (const g of withdrawableGoals) {
-        if (remaining <= 0) break;
-        const deduct = Math.min(Number(g.currentAmount), remaining);
-        const newAmt = Number(g.currentAmount) - deduct;
-        await db.update(savingsGoals).set({ currentAmount: newAmt.toFixed(2), status: newAmt <= 0 ? 'completed' : 'active' }).where(eq(savingsGoals.id, g.id)).returning();
-        remaining -= deduct;
-      }
-      const [usdWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "USD"))).limit(1);
-      if (usdWallet) {
-        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` }).where(eq(wallets.id, usdWallet.id)).returning();
-      } else {
-        await db.insert(wallets).values({ userId: ctx.user.id, currency: "USD", balance: input.amount.toFixed(2), isDefault: false, status: "active" }).returning();
-      }
+      // W12-FIX: same atomicity fix for the multi-goal path — every decrement
+      // is a guarded relative UPDATE, and all decrements + the wallet credit +
+      // the ledger record commit in ONE db.transaction (any failure rolls
+      // everything back; no partial vault-to-wallet state).
       const savingsWdRef = generateOpRef("SAVWD", ctx.user.id);
-      await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0", description: `Savings withdrawal: $${input.amount}` });
+      await db.transaction(async (tx: any) => {
+        let remaining = input.amount;
+        for (const g of withdrawableGoals) {
+          if (remaining <= 0) break;
+          const deduct = Math.min(Number(g.currentAmount), remaining);
+          const gNewAmt = Number(g.currentAmount) - deduct;
+          const [debitedGoal] = await tx.update(savingsGoals)
+            .set({
+              currentAmount: sql`CAST(CAST(${savingsGoals.currentAmount} AS DECIMAL(18,4)) - ${deduct} AS VARCHAR)`,
+              status: gNewAmt <= 0 ? 'completed' : 'active',
+            })
+            .where(and(eq(savingsGoals.id, g.id), sql`CAST(${savingsGoals.currentAmount} AS DECIMAL(18,4)) >= ${deduct}`))
+            .returning({ id: savingsGoals.id });
+          if (!debitedGoal) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Savings balance changed concurrently — withdrawal aborted; no funds moved' });
+          remaining -= deduct;
+        }
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'wallet:' + String(ctx.user.id) + ':USD'}, 42))`);
+        const flexCredit = (await tx.execute(sql`
+          UPDATE wallets SET balance = balance + ${input.amount}, "updatedAt" = NOW(), version = version + 1
+          WHERE "userId" = ${ctx.user.id} AND currency = 'USD'
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (flexCredit.length === 0) {
+          await tx.insert(wallets).values({ userId: ctx.user.id, currency: "USD", balance: input.amount.toFixed(2), isDefault: false, status: "active" });
+        }
+        await tx.insert(transactions).values({
+          userId: ctx.user.id, type: "receive" as any, status: "completed" as any,
+          fromCurrency: "USD", fromAmount: input.amount.toString(), fee: "0",
+          description: `Savings withdrawal: $${input.amount}`, reference: savingsWdRef,
+        });
+      });
       await auditCoreOperation({ userId: ctx.user.id, action: 'SAVINGS_WITHDRAWAL', description: `Withdrawal: $${input.amount}`, amount: input.amount, currency: 'USD', featureLabel: 'savings', operationRef: savingsWdRef, kafkaTopic: CORE_TOPICS.SAVINGS_WITHDRAW });
       return { success: true, withdrawn: input.amount };
     }),
@@ -1970,8 +2407,11 @@ export const appRouter = router({
     }),
     uploadDocument: strictRateLimitedProcedure.input(z.object({ type: z.string().min(1).max(50), fileBase64: z.string().max(10_000_000), fileName: z.string().min(1).max(255).trim(), mimeType: z.string().min(1).max(100) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W9 F9-1/F9-2: MIME allowlist (no text/html etc. to reviewers) and a
+      // sanitized storage key under the fixed kyc/ prefix (no "../" escape).
+      assertUploadAllowed(input.mimeType, input.fileName);
       const buffer = Buffer.from(input.fileBase64, "base64");
-      const key = `kyc/${ctx.user.id}/${input.type}-${Date.now()}-${input.fileName}`;
+      const key = `kyc/${ctx.user.id}/${sanitizeStorageKeyPart(input.type, 40)}-${Date.now()}-${sanitizeStorageKeyPart(input.fileName)}`;
       const { url } = await storagePut(key, buffer, input.mimeType);
       // Mark previous docs of the same type as superseded (version history)
       await db.update(kycDocuments)
@@ -2325,21 +2765,30 @@ export const appRouter = router({
       if (referrerId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot use your own referral code" });
       const [referrer] = await db.select().from(users).where(eq(users.id, referrerId)).limit(1);
       if (!referrer) throw new TRPCError({ code: "NOT_FOUND", message: "Invalid referral code" });
-      const [alreadyClaimed] = await db.select().from(referrals).where(and(eq(referrals.referrerId, referrerId), eq(referrals.referredId, ctx.user.id))).limit(1);
-      if (alreadyClaimed) throw new TRPCError({ code: "BAD_REQUEST", message: "Referral already claimed" });
       const rewardNGN = 500;
       const referralCount = await db.select({ cnt: sql<number>`count(*)` }).from(referrals).where(eq(referrals.referrerId, referrerId)).then((r: { cnt: number }[]) => Number(r[0]?.cnt ?? 0));
       const tier = getReferralTier(referralCount);
       const finalReward = Math.round(rewardNGN * (1 + tier.bonus / 100));
-      await db.insert(referrals).values({ referrerId, referredId: ctx.user.id, rewardAmount: finalReward.toString(), status: "completed" as any } as any);
-      const [ngnWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "NGN"))).limit(1);
-      if (ngnWallet) {
-        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, ngnWallet.id)).returning();
-      }
-      const [referrerWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, referrerId), eq(wallets.currency, "NGN"))).limit(1);
-      if (referrerWallet) {
-        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, referrerWallet.id)).returning();
-      }
+      // W12-FIX: the old alreadyClaimed SELECT-then-INSERT was TOCTOU — two
+      // concurrent claims both passed the check, both inserted, both credited
+      // (double reward). The claim row insert + both wallet credits now
+      // commit in ONE db.transaction behind a per-(referrer,referred)
+      // advisory lock, and the duplicate check is re-run INSIDE the lock:
+      // only one claim can ever insert the row and reach the credits.
+      await db.transaction(async (tx: any) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'referral:' + String(referrerId) + ':' + String(ctx.user.id)}, 42))`);
+        const [alreadyClaimed] = await tx.select({ id: referrals.id }).from(referrals).where(and(eq(referrals.referrerId, referrerId), eq(referrals.referredId, ctx.user.id))).limit(1);
+        if (alreadyClaimed) throw new TRPCError({ code: "BAD_REQUEST", message: "Referral already claimed" });
+        await tx.insert(referrals).values({ referrerId, referredId: ctx.user.id, rewardAmount: finalReward.toString(), status: "completed" as any } as any);
+        const [ngnWallet] = await tx.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, "NGN"))).limit(1);
+        if (ngnWallet) {
+          await tx.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, ngnWallet.id)).returning();
+        }
+        const [referrerWallet] = await tx.select().from(wallets).where(and(eq(wallets.userId, referrerId), eq(wallets.currency, "NGN"))).limit(1);
+        if (referrerWallet) {
+          await tx.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${finalReward} AS VARCHAR)` }).where(eq(wallets.id, referrerWallet.id)).returning();
+        }
+      });
       return { success: true, reward: finalReward, message: `Referral applied! ₦${finalReward} bonus added to your wallet.` };
     }),
   }),
@@ -2555,11 +3004,25 @@ export const appRouter = router({
       const dbUser = await getUserByOpenId(ctx.user.openId);
       return { ...ctx.user, ...dbUser, kycTier: dbUser?.kycTier ?? "tier0", phone: dbUser?.phone ?? "", address: dbUser?.address ?? "" };
     }),
-    update: protectedProcedure.input(z.object({ name: z.string().optional(), phone: z.string().optional(), address: z.string().optional(), dateOfBirth: z.string().optional() })).mutation(async ({ ctx, input }) => {
+    update: protectedProcedure.input(z.object({ name: z.string().optional(), phone: z.string().optional(), address: z.string().optional(), dateOfBirth: z.string().optional(), totpCode: z.string().regex(/^\d{6}$/).optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const updates: any = {};
       if (input.name) updates.name = input.name;
-      if (input.phone) updates.phone = input.phone;
+      if (input.phone) {
+        // Phone changes are account-takeover sensitive — require TOTP step-up when enrolled (Contract 2).
+        const [currentUserRow] = await db.select({ phone: users.phone }).from(users).where(eq(users.openId, ctx.user.openId)).limit(1);
+        if ((currentUserRow?.phone ?? "") !== input.phone) {
+          const { getTotpEnrollment, verifyTOTP } = await import("./totp");
+          const enrollmentP = await getTotpEnrollment(ctx.user.id);
+          if (!enrollmentP.dbAvailable) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — phone change blocked" });
+          if (enrollmentP.enabled && enrollmentP.secret) {
+            if (!input.totpCode) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+            const validP = await verifyTOTP(input.totpCode, enrollmentP.secret);
+            if (!validP) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+          }
+        }
+        updates.phone = input.phone;
+      }
       if (input.address) updates.address = input.address;
       if (input.dateOfBirth) updates.dateOfBirth = new Date(input.dateOfBirth);
       if (Object.keys(updates).length > 0) await db.update(users).set(updates).where(eq(users.openId, ctx.user.openId)).returning();
@@ -2568,8 +3031,12 @@ export const appRouter = router({
     }),
     uploadAvatar: protectedProcedure.input(z.object({ fileBase64: z.string().max(5_000_000), mimeType: z.string().min(1).max(100) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W9 F9-1/F9-2: image-only MIME allowlist; extension derived from the
+      // validated MIME (previously always ".jpg" regardless of content type).
+      const avatarExt = resolveUploadExt(input.mimeType);
+      if (avatarExt === "pdf") throw new TRPCError({ code: "BAD_REQUEST", message: "Unsupported file type — avatars must be JPG, PNG, or WebP images" });
       const buffer = Buffer.from(input.fileBase64, "base64");
-      const key = `avatars/${ctx.user.id}-${Date.now()}.jpg`;
+      const key = `avatars/${ctx.user.id}-${Date.now()}.${avatarExt}`;
       const { url } = await storagePut(key, buffer, input.mimeType);
       await db.update(users).set({ avatar: url }).where(eq(users.openId, ctx.user.openId)).returning();
       return { success: true, url };
@@ -2610,8 +3077,11 @@ export const appRouter = router({
       const { verifyTOTP } = await import("./totp");
       const db = await getDb();
       const dbUser = db ? (await db.select().from(users).where(eq(users.openId, ctx.user.openId)).limit(1))[0] : null;
-      const secret = (dbUser as any)?.twoFactorSecret;
-      if (!secret) throw new TRPCError({ code: "BAD_REQUEST", message: "2FA not set up" });
+      const storedSecret = (dbUser as any)?.twoFactorSecret;
+      if (!storedSecret) throw new TRPCError({ code: "BAD_REQUEST", message: "2FA not set up" });
+      // W9 Q3: secrets are stored AES-256-GCM-encrypted; decryptField is
+      // dual-read (legacy plaintext rows pass through unchanged).
+      const secret = decryptField(storedSecret);
       const valid = await verifyTOTP(input.code, secret);
       if (!valid) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid 2FA code" });
       if (db) await db.update(users).set({ twoFactorEnabled: true } as any).where(eq(users.openId, ctx.user.openId)).returning();
@@ -2639,20 +3109,38 @@ export const appRouter = router({
       };
     }),
     enable2fa: protectedProcedure.mutation(async ({ ctx }) => {
-      const { generateTOTPSecret, generateTOTPUri, generateQRCode } = await import("./totp");
+      const { generateTOTPSecret, generateQRCode } = await import("./totp");
       const email = ctx.user.email ?? `user${ctx.user.id}@remitflow.com`;
-      const secret = generateTOTPSecret(email);
-      const otpauth = `otpauth://totp/RemitFlow:${encodeURIComponent(email)}?secret=${secret}&issuer=RemitFlow&algorithm=SHA1&digits=6&period=30`;
+      // W9 Q3 / W8-R2: generateTOTPSecret returns a TOTPResult object
+      // ({ secret, otpauth }) — previously the WHOLE object was coerced into
+      // the text column. Store ONLY the secret, encrypted at rest
+      // (AES-256-GCM via _core/secretBox; getTotpEnrollment dual-reads).
+      const result = generateTOTPSecret(email);
+      const otpauth = result.otpauth;
       const qrCode = await generateQRCode(otpauth);
       const db = await getDb();
-      if (db) await db.update(users).set({ twoFactorSecret: secret } as any).where(eq(users.openId, ctx.user.openId)).returning();
+      if (db) await db.update(users).set({ twoFactorSecret: encryptField(result.secret) } as any).where(eq(users.openId, ctx.user.openId)).returning();
       const backupCodes = Array.from({ length: 8 }, () => randomBytes(4).toString("hex").toUpperCase());
       await createAuditLog({ userId: ctx.user.id, action: "2FA_ENABLED", description: "Two-factor authentication enabled" });
-      return { success: true, secret, qrCode, otpauth, backupCodes };
+      return { success: true, secret: result.secret, qrCode, otpauth, backupCodes };
     }),
-    disable2fa: protectedProcedure.input(z.object({ code: z.string() })).mutation(async ({ ctx }) => {
+    disable2fa: protectedProcedure.input(z.object({ code: z.string() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // D1: verify the TOTP code BEFORE disabling whenever the user has an
+      // enrollment (Contract 2). If not enrolled, there is nothing to verify.
+      const { getTotpEnrollment, verifyTOTP } = await import("./totp");
+      const enrollment = await getTotpEnrollment(ctx.user.id);
+      if (!enrollment.dbAvailable) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — disable blocked" });
+      if (enrollment.enabled && enrollment.secret) {
+        if (!input.code || !/^\d{6}$/.test(input.code)) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+        const valid = await verifyTOTP(input.code, enrollment.secret);
+        if (!valid) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+      }
       await db.update(users).set({ twoFactorEnabled: false }).where(eq(users.openId, ctx.user.openId)).returning();
+      // Dual-write: also disable in mfa_settings when a row exists, mirroring
+      // the dual-read in getTotpEnrollment (productionV85 writes mfa_settings).
+      const { mfaSettings } = await import("../drizzle/schema.js");
+      await db.update(mfaSettings).set({ totpEnabled: false }).where(eq(mfaSettings.userId, ctx.user.id)).returning();
       await createAuditLog({ userId: ctx.user.id, action: "2FA_DISABLED", description: "Two-factor authentication disabled" });
       return { success: true, twoFactorEnabled: false };
     }),
@@ -2671,12 +3159,32 @@ export const appRouter = router({
       if (input.currentPin === input.newPin) throw new TRPCError({ code: "BAD_REQUEST", message: "New PIN must be different from current PIN" });
       if (/^(\d)\1+$/.test(input.newPin)) throw new TRPCError({ code: "BAD_REQUEST", message: "PIN cannot be all the same digit" });
       if (/^(0123|1234|2345|3456|4567|5678|6789|9876|8765|7654|6543|5432|4321|3210)/.test(input.newPin)) throw new TRPCError({ code: "BAD_REQUEST", message: "PIN cannot be a sequential pattern" });
-      const db = await getDb();
-      if (db) {
-        const { createHash } = await import("crypto");
-        const hashedPin = createHash("sha256").update(input.newPin + ctx.user.id).digest("hex");
-        await db.execute(sql`UPDATE users SET transaction_pin = ${hashedPin}, pin_changed_at = NOW() WHERE id = ${ctx.user.id}`);
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // D10: verify currentPin against the stored hash BEFORE overwriting.
+      // W9 Q2: stored format is scrypt:v1:<saltHex>:<hashHex>; legacy rows are
+      // unsalted sha256(pin + userId) in users.transaction_pin and are migrated
+      // to scrypt by this write (lazy rehash on successful verify + change).
+      const pinRows = await db.execute(sql`SELECT transaction_pin FROM users WHERE id = ${ctx.user.id}`);
+      const storedPinHash = (pinRows as any[])[0]?.transaction_pin as string | null | undefined;
+      if (storedPinHash) {
+        const stored = String(storedPinHash);
+        let currentMatches: boolean;
+        if (stored.startsWith("scrypt:")) {
+          currentMatches = pinVerifyScrypt(input.currentPin, stored);
+        } else if (/^[0-9a-f]{64}$/i.test(stored)) {
+          // Legacy dual-read: unsalted sha256(pin + userId).
+          currentMatches = pinVerifyLegacySha256(input.currentPin, ctx.user.id, stored);
+        } else {
+          // W9 Q2 fail closed: unknown/corrupt stored PIN format — never accept.
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Stored PIN credential is corrupt — PIN reset required" });
+        }
+        if (!currentMatches) {
+          throw new TRPCError({ code: "UNAUTHORIZED", message: "Current PIN is incorrect" });
+        }
       }
+      // No stored PIN => treat as initial setup (allowed). Always write scrypt format.
+      const hashedPin = pinHashScrypt(input.newPin);
+      await db.execute(sql`UPDATE users SET transaction_pin = ${hashedPin}, pin_changed_at = NOW() WHERE id = ${ctx.user.id}`);
       await createAuditLog({ userId: ctx.user.id, action: "PIN_CHANGED", description: "Transaction PIN changed" });
       return { success: true, changedAt: new Date().toISOString() };
     }),
@@ -3082,7 +3590,13 @@ export const appRouter = router({
       { id: "SW001", state: "OPEN", createdDate: new Date(Date.now() - 3600000), totalAmount: 2847500, currency: "NGN", participantCount: 6 },
       { id: "SW000", state: "CLOSED", closedDate: new Date(Date.now() - 86400000), totalAmount: 5234000, currency: "NGN" },
     ]),
-    transfer: protectedProcedure
+    // W10-V1: admin-only — this passthrough fires REAL switch transfers from
+    // platform FSP float with NO internal debit/hold; leaving it on
+    // protectedProcedure let any authenticated user disburse platform funds.
+    // User-facing Mojaloop payouts go through vendorBills/embeddedPayouts
+    // (which debit + hold + reconcile). Restricted until a proper debit path
+    // exists here.
+    transfer: adminProcedure
       .input(z.object({
         amount: z.number().positive().max(10_000_000),
         currency: z.string(),
@@ -3142,10 +3656,12 @@ export const appRouter = router({
           severity: result.transferState === "ABORTED" ? "critical" : "info",
         });
         return {
-          success: result.transferState === "COMMITTED" || result.transferState === "RESERVED",
+          // W10-V2: success ONLY on an explicit switch-COMMITTED — RESERVED is
+          // in-progress, not success; never fabricate a completion timestamp.
+          success: result.transferState === "COMMITTED",
           transferId: result.transferId,
           status: result.transferState,
-          completedTimestamp: result.completedTimestamp ?? new Date().toISOString(),
+          completedTimestamp: result.completedTimestamp ?? null,
           fulfilment: result.fulfilment,
           error: result.errorInformation,
         };
@@ -3237,50 +3753,88 @@ export const appRouter = router({
         responseStatus: 200,
         expiresAt: new Date(Date.now() + WINDOW_MS),
       });
-      // Idempotency check — reject duplicate transferIds
-      const [existing] = await db.select().from(africbdcTransfers)
-        .where(eq(africbdcTransfers.transferId, input.transferId)).limit(1);
-      if (existing) {
-        return { success: true, reference: existing.transferId, duplicate: true, message: 'Transfer already processed' };
-      }
-      // Credit the receiver's CBDC wallet (atomic upsert)
-      const [receiverWallet] = await db.select().from(cbdcWallets)
-        .where(and(eq(cbdcWallets.userId, ctx.user.id), eq(cbdcWallets.currency, input.currency))).limit(1);
-      if (receiverWallet) {
-        await db.update(cbdcWallets)
-          .set({ balance: sql`CAST(CAST(${cbdcWallets.balance} AS DECIMAL(18,2)) + ${input.amount} AS VARCHAR)`, updatedAt: new Date() })
-          .where(eq(cbdcWallets.id, receiverWallet.id)).returning();
-      } else {
-        const issuerMap: Record<string, string> = {
-          eNGN: 'Central Bank of Nigeria', eGHS: 'Bank of Ghana',
-          eKES: 'Central Bank of Kenya', eZAR: 'South African Reserve Bank',
-        };
-        await db.insert(cbdcWallets).values({
+      // W12-FIX: the old SELECT-then-credit-then-INSERT was TOCTOU — two
+      // concurrent receives with the same transferId both passed the
+      // duplicate check and both credited. transfer_id is UNIQUE
+      // (drizzle/schema.ts africbdcTransfers.transferId), so the claim is now
+      // INSERT-first: the unique constraint is the single-winner arbiter.
+      // (The claim must stand alone — a unique violation inside a transaction
+      // aborts the whole tx in Postgres.) A crashed claimant leaves a
+      // 'processing' row; a later retry re-drives the settle below via the
+      // guarded processing→completed flip instead of being rejected as a
+      // duplicate with funds never credited.
+      let claimed = false;
+      try {
+        await db.insert(africbdcTransfers).values({
           userId: ctx.user.id,
+          transferId: input.transferId,
+          cbdcRef: input.cbdcRef ?? null,
+          cbdcType: 'receive',
+          sendAmount: input.amount.toFixed(6),
           currency: input.currency,
-          balance: input.amount.toFixed(2),
-          issuer: issuerMap[input.currency] ?? 'Central Bank',
-          walletType: 'retail',
-          status: 'active',
+          country: 'NG',
+          senderWallet: input.senderWallet,
+          receiverWallet: `user:${ctx.user.id}`,
+          purpose: input.purpose ?? 'CBDC receive',
+          status: 'processing',
+          mojaloopRouted: false,
+          createdAt: new Date(),
+          updatedAt: new Date(),
         });
+        claimed = true;
+      } catch (claimErr) {
+        const claimMsg = (claimErr as { code?: string; message?: string })?.code === '23505' || /duplicate key/i.test((claimErr as Error)?.message ?? "");
+        if (!claimMsg) throw claimErr;
       }
-      await db.insert(africbdcTransfers).values({
-        userId: ctx.user.id,
-        transferId: input.transferId,
-        cbdcRef: input.cbdcRef ?? null,
-        cbdcType: 'receive',
-        sendAmount: input.amount.toFixed(6),
-        currency: input.currency,
-        country: 'NG',
-        senderWallet: input.senderWallet,
-        receiverWallet: `user:${ctx.user.id}`,
-        purpose: input.purpose ?? 'CBDC receive',
-        status: 'completed',
-        mojaloopRouted: false,
-        settledAt: new Date(),
-        createdAt: new Date(),
-        updatedAt: new Date(),
+      if (!claimed) {
+        const [existing] = await db.select().from(africbdcTransfers)
+          .where(eq(africbdcTransfers.transferId, input.transferId)).limit(1);
+        if (existing && existing.status === 'completed') {
+          return { success: true, reference: existing.transferId, duplicate: true, message: 'Transfer already processed' };
+        }
+        // else: a prior claimant crashed mid-settle — fall through to the
+        // guarded settle below (only one concurrent path can win the flip).
+      }
+      const settle = await db.transaction(async (tx: any) => {
+        // Single-winner flip: only one path transitions processing→completed
+        // and may credit.
+        const flipped = (await tx.execute(sql`
+          UPDATE africbdc_transfers
+          SET status = 'completed', settled_at = NOW(), updated_at = NOW()
+          WHERE transfer_id = ${input.transferId} AND status = 'processing'
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (flipped.length === 0) {
+          return { won: false as const };
+        }
+        // Credit the receiver's CBDC wallet inside the SAME tx (advisory lock
+        // serializes first-time wallet creators).
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'cbdc-wallet:' + String(ctx.user.id) + ':' + input.currency}, 42))`);
+        const credited = (await tx.execute(sql`
+          UPDATE cbdc_wallets
+          SET balance = CAST(CAST(balance AS DECIMAL(18,2)) + ${input.amount} AS VARCHAR), updated_at = NOW()
+          WHERE user_id = ${ctx.user.id} AND currency = ${input.currency}
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (credited.length === 0) {
+          const issuerMap: Record<string, string> = {
+            eNGN: 'Central Bank of Nigeria', eGHS: 'Bank of Ghana',
+            eKES: 'Central Bank of Kenya', eZAR: 'South African Reserve Bank',
+          };
+          await tx.insert(cbdcWallets).values({
+            userId: ctx.user.id,
+            currency: input.currency,
+            balance: input.amount.toFixed(2),
+            issuer: issuerMap[input.currency] ?? 'Central Bank',
+            walletType: 'retail',
+            status: 'active',
+          });
+        }
+        return { won: true as const };
       });
+      if (!settle.won) {
+        return { success: true, reference: input.transferId, duplicate: true, message: 'Transfer already processed (concurrent claim won)' };
+      }
       await auditCoreOperation({ userId: ctx.user.id, action: 'CBDC_RECEIVE', description: `CBDC received: ${input.amount} ${input.currency} from ${input.senderWallet}`, amount: input.amount, currency: input.currency, featureLabel: 'cbdc', operationRef: input.transferId, kafkaTopic: CORE_TOPICS.CBDC_RECEIVE });
       return { success: true, reference: input.transferId, duplicate: false };
     }),
@@ -3342,13 +3896,23 @@ export const appRouter = router({
       return cbdcWalletRows.map((w: any) => ({ ...formatWallet(w), type: "retail", issuer: "Central Bank", description: `Digital ${w.currency}` }));
     }),
     issue: protectedProcedure.input(z.object({ currency: z.string(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const [existing] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
-      if (existing) { await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,2)) + ${input.amount} AS VARCHAR)` }).where(eq(wallets.id, existing.id)).returning(); }
-      else { await db.insert(wallets).values({ userId: ctx.user.id, currency: input.currency, balance: input.amount.toFixed(2), isDefault: false, status: "active" }).returning(); }
-      const issueRef = generateOpRef("ISSUE", ctx.user.id);
-      await auditCoreOperation({ userId: ctx.user.id, action: 'CBDC_ISSUE', description: `CBDC issuance: ${input.amount} ${input.currency}`, amount: input.amount, currency: input.currency, featureLabel: 'cbdc', operationRef: issueRef, kafkaTopic: CORE_TOPICS.CBDC_RECEIVE });
-      return { success: true, verified: true, txId: issueRef };
+      // W12-FIX (CRIT — money creation): this endpoint self-credited a
+      // SPENDABLE wallets row with NO external confirmation and returned a
+      // FABRICATED `verified: true` — any authenticated user could mint
+      // balance. Real CBDC issuance requires central-bank settlement
+      // confirmation; no such rail exists in this codebase. Fail closed:
+      // reject honestly, credit NOTHING, and audit-log the attempt.
+      logger.warn({ userId: ctx.user.id, currency: input.currency, amount: input.amount },
+        "[CBDC] issue() rejected — issuance rail disabled (no central-bank settlement confirmation exists)");
+      await createAuditLog({
+        userId: ctx.user.id, action: "CBDC_ISSUE_REJECTED",
+        description: `Rejected CBDC self-issuance request: ${input.amount} ${input.currency} — rail disabled (fail-closed W12); no funds moved`,
+        metadata: { currency: input.currency, amount: input.amount, reason: "issuance_requires_central_bank_settlement_confirmation" },
+      });
+      throw new TRPCError({
+        code: "PRECONDITION_FAILED",
+        message: "CBDC issuance is not enabled — issuance requires central-bank settlement confirmation and this rail is disabled. No funds moved.",
+      });
     }),
   }),
 
@@ -3380,28 +3944,44 @@ export const appRouter = router({
     }),
     swap: strictRateLimitedProcedure.input(z.object({ from: z.string().max(16), to: z.string().max(16), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       await enforceTransferLimits(ctx.user.id, input.amount, input.from, ctx.user.kycTier);
-      const db = await getDb();
+      const db = await getDb(); if (!db) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
       const swapFeeBreakdown = calculateFee(input.amount, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       const fee = Math.max(swapFeeBreakdown.totalFee, input.amount * 0.001);
       const toAmount = input.amount - fee;
+      // W9-FIX3: flat-fee floor can exceed tiny amounts — a non-positive
+      // toAmount would DEBIT the destination wallet (negative credit) inside
+      // the transaction below. Fail closed before any fund movement.
+      if (toAmount <= 0) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Amount too small to cover the swap fee' });
       // Pessimistic debit from-wallet
       const [fromWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.from))).limit(1);
       if (!fromWallet || Number(fromWallet.balance) < input.amount) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient balance' });
-      const [debitedFrom] = await db.update(wallets)
-        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,8)) - ${input.amount} AS VARCHAR)` })
-        .where(and(eq(wallets.id, fromWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,8)) >= ${input.amount}`))
-        .returning({ balance: wallets.balance });
-      if (!debitedFrom) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient balance (concurrent update)' });
-      // Atomic credit to-wallet (upsert)
-      const [toWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.to))).limit(1);
-      if (toWallet) {
-        await db.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,8)) + ${toAmount} AS VARCHAR)` }).where(eq(wallets.id, toWallet.id)).returning();
-      } else {
-        await db.insert(wallets).values({ userId: ctx.user.id, currency: input.to, balance: toAmount.toFixed(8), isDefault: false, status: 'active' }).returning();
-      }
+      // W9-FIX2 (CRITICAL): debit + credit + transaction record commit in ONE
+      // db.transaction so any insert failure rolls the debit back. Also fixes the
+      // enum-invalid tx_type 'swap' → 'exchange' (original preserved in metadata).
       const swapRef = generateOpRef("SWAP", ctx.user.id);
+      await db.transaction(async (tx: any) => {
+        const [debitedFrom] = await tx.update(wallets)
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,8)) - ${input.amount} AS VARCHAR)` })
+          .where(and(eq(wallets.id, fromWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,8)) >= ${input.amount}`))
+          .returning({ balance: wallets.balance });
+        if (!debitedFrom) throw new TRPCError({ code: 'BAD_REQUEST', message: 'Insufficient balance (concurrent update)' });
+        // Atomic credit to-wallet (upsert)
+        const [toWallet] = await tx.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.to))).limit(1);
+        if (toWallet) {
+          await tx.update(wallets).set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,8)) + ${toAmount} AS VARCHAR)` }).where(eq(wallets.id, toWallet.id)).returning();
+        } else {
+          await tx.insert(wallets).values({ userId: ctx.user.id, currency: input.to, balance: toAmount.toFixed(8), isDefault: false, status: 'active' }).returning();
+        }
+        await tx.insert(transactions).values({
+          userId: ctx.user.id, type: "exchange" as any, status: "completed" as any,
+          fromCurrency: input.from, fromAmount: input.amount.toString(),
+          toCurrency: input.to, toAmount: toAmount.toString(), fee: fee.toFixed(8),
+          reference: swapRef,
+          description: `Stablecoin swap: ${input.amount} ${input.from} → ${toAmount.toFixed(6)} ${input.to}`,
+          metadata: { originalType: "swap" },
+        });
+      });
       const txHash = `0x${randomBytes(32).toString('hex')}`;
-      await createTransaction({ userId: ctx.user.id, type: 'swap', status: 'completed', fromCurrency: input.from, fromAmount: input.amount.toString(), toCurrency: input.to, toAmount: toAmount.toString(), fee: fee.toFixed(8), description: `Stablecoin swap: ${input.amount} ${input.from} → ${toAmount.toFixed(6)} ${input.to}` });
       await auditCoreOperation({ userId: ctx.user.id, action: 'STABLECOIN_SWAP', description: `Swap: ${input.amount} ${input.from} → ${toAmount.toFixed(6)} ${input.to}`, amount: input.amount, currency: input.from, featureLabel: 'stablecoin-swap', operationRef: swapRef, kafkaTopic: CORE_TOPICS.STABLECOIN_SWAP, metadata: { toCurrency: input.to, toAmount, fee } });
       return { success: true, txHash, fromAmount: input.amount, toAmount, fee, estimatedTime: '30 seconds' };
     }),
@@ -3440,17 +4020,30 @@ export const appRouter = router({
     ]),
     topup: protectedProcedure.input(z.object({ provider: z.string(), phone: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
       const airtimeIdempKey = generateIdempotencyKey(ctx.user.id, "AIRTIME_TOPUP", input.provider, input.phone, input.amount.toString());
-      const airtimeCached = checkIdempotency(airtimeIdempKey);
+      // W12: cross-instance Redis claim (see savings.deposit note).
+      const airtimeCached = await claimIdempotency(airtimeIdempKey);
       if (airtimeCached.cached) return airtimeCached.result as any;
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
-      const [updAirtime] = await db.update(wallets)
-        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
-        .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
-        .returning({ balance: wallets.balance });
-      if (!updAirtime) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-      const ref = await createTransaction({ userId: ctx.user.id, type: "bill_payment", status: "completed", fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0", description: `Airtime: ${input.phone} (${input.provider})` });
+      // W9-FIX2 (CRITICAL): debit + transaction record commit in ONE db.transaction
+      // so any insert failure rolls the debit back. Also fixes the enum-invalid
+      // tx_type "bill_payment" → "airtime" for this airtime path.
+      const ref = await db.transaction(async (tx: any) => {
+        const [updAirtime] = await tx.update(wallets)
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+          .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+          .returning({ balance: wallets.balance });
+        if (!updAirtime) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+        const airtimeRef = `AIR-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+        await tx.insert(transactions).values({
+          userId: ctx.user.id, type: "airtime" as any, status: "completed" as any,
+          fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
+          reference: airtimeRef,
+          description: `Airtime: ${input.phone} (${input.provider})`,
+        });
+        return airtimeRef;
+      });
       const airtimeResult = { success: true, reference: ref, phone: input.phone, amount: input.amount };
       storeIdempotency(airtimeIdempKey, airtimeResult);
       return airtimeResult;
@@ -3467,17 +4060,30 @@ export const appRouter = router({
     ]),
     pay: protectedProcedure.input(z.object({ category: z.string(), provider: z.string(), accountNumber: z.string(), amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN") })).mutation(async ({ ctx, input }) => {
       const billIdempKey = generateIdempotencyKey(ctx.user.id, "BILL_PAY", input.category, input.provider, input.accountNumber, input.amount.toString());
-      const billCached = checkIdempotency(billIdempKey);
+      // W12: cross-instance Redis claim (see savings.deposit note).
+      const billCached = await claimIdempotency(billIdempKey);
       if (billCached.cached) return billCached.result as any;
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.currency))).limit(1);
       if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
-      const [updBill] = await db.update(wallets)
-        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
-        .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
-        .returning({ balance: wallets.balance });
-      if (!updBill) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-      const ref = await createTransaction({ userId: ctx.user.id, type: "bill_payment", status: "completed", fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0", description: `${input.category}: ${input.provider} (${input.accountNumber})` });
+      // W9-FIX2 (CRITICAL): debit + transaction record commit in ONE db.transaction
+      // so any insert failure rolls the debit back. Also fixes the enum-invalid
+      // tx_type "bill_payment" → "bill" for this bills path.
+      const ref = await db.transaction(async (tx: any) => {
+        const [updBill] = await tx.update(wallets)
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+          .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+          .returning({ balance: wallets.balance });
+        if (!updBill) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+        const billRef = `BILL-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+        await tx.insert(transactions).values({
+          userId: ctx.user.id, type: "bill" as any, status: "completed" as any,
+          fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
+          reference: billRef,
+          description: `${input.category}: ${input.provider} (${input.accountNumber})`,
+        });
+        return billRef;
+      });
       const billResult = { success: true, reference: ref, token: `TKN${randomBytes(4).toString("hex").toUpperCase()}` };
       storeIdempotency(billIdempKey, billResult);
       return billResult;
@@ -3497,16 +4103,71 @@ export const appRouter = router({
     }),
     pay: strictRateLimitedProcedure.input(z.object({ qrData: z.string(), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W12-FIX (CRIT — money creation): this handler previously credited the
+      // PAYER'S OWN wallet (+amount, type 'receive') with no debit anywhere —
+      // authenticated money minting. The QR payload DOES identify a payee
+      // (userId, embedded by qr.generate/qr.info above), so the correct
+      // semantics are a payer→payee transfer executed atomically below.
       let parsed: { userId?: number; currency?: string } = {};
       try { parsed = JSON.parse(Buffer.from(input.qrData, "base64").toString("utf-8")); } catch { /* invalid QR data */ }
-      const currency = parsed.currency ?? "NGN";
-      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, currency))).limit(1);
-      if (!wallet) throw new TRPCError({ code: "BAD_REQUEST", message: `No ${currency} wallet found` });
-      await db.update(wallets)
-        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) + ${input.amount} AS VARCHAR)` })
-        .where(eq(wallets.id, wallet.id)).returning();
-      const ref = await createTransaction({ userId: ctx.user.id, type: "receive", status: "completed", fromCurrency: currency, fromAmount: input.amount.toString(), fee: "0", description: "QR code payment received" });
-      return { success: true, reference: ref };
+      const payeeId = Number(parsed.userId);
+      const currency = typeof parsed.currency === "string" && parsed.currency.length >= 2 && parsed.currency.length <= 8 ? parsed.currency : "NGN";
+      if (!Number.isInteger(payeeId) || payeeId <= 0) {
+        // QR payload cannot identify a payee — fail closed (unfinished/forged
+        // payload); never fall back to crediting the caller.
+        throw new TRPCError({ code: "BAD_REQUEST", message: "QR payload does not identify a payee — payment refused; no funds moved" });
+      }
+      if (payeeId === ctx.user.id) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot pay your own QR code" });
+      }
+      // Idempotency: cross-instance claim; a double-submit/rapid retry replays
+      // the recorded outcome instead of double-debiting.
+      const idempKey = generateIdempotencyKey(ctx.user.id, "QR_PAY", String(payeeId), currency, input.amount.toString());
+      const cached = await claimIdempotency(idempKey);
+      if (cached.cached) return cached.result as any;
+      const result = await db.transaction(async (tx: any) => {
+        // ── Guarded payer debit (balance >= amount, row-count checked) ──────
+        const [payerWallet] = await tx.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, currency))).limit(1);
+        if (!payerWallet) throw new TRPCError({ code: "BAD_REQUEST", message: `No ${currency} wallet found` });
+        const [debited] = await tx.update(wallets)
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+          .where(and(eq(wallets.id, payerWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+          .returning({ balance: wallets.balance });
+        if (!debited) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
+        // ── Payee credit — relative guarded UPDATE; the advisory xact lock
+        // serializes first-time wallet creators (wallets has no unique
+        // constraint on (userId, currency)) ─────────────────────────────────
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'wallet:' + String(payeeId) + ':' + currency}, 42))`);
+        const creditRows = (await tx.execute(sql`
+          UPDATE wallets SET balance = balance + ${input.amount}, "updatedAt" = NOW(), version = version + 1
+          WHERE "userId" = ${payeeId} AND currency = ${currency}
+          RETURNING id
+        `)) as unknown as Array<{ id: number }>;
+        if (creditRows.length === 0) {
+          // Payee has no wallet in this currency — only create one if the
+          // payee account actually exists (a forged QR userId must not mint
+          // wallets for nonexistent users).
+          const [payeeUser] = await tx.select({ id: users.id }).from(users).where(eq(users.id, payeeId)).limit(1);
+          if (!payeeUser) throw new TRPCError({ code: "NOT_FOUND", message: "QR payee does not exist — payment refused; no funds moved" });
+          await tx.insert(wallets).values({ userId: payeeId, currency, balance: input.amount.toFixed(2), isDefault: false, status: "active" });
+        }
+        // ── Ledger rows (both sides) — same tx, same reference family ───────
+        const ref = `QRP-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+        await tx.insert(transactions).values({
+          userId: ctx.user.id, type: "send" as any, status: "completed" as any,
+          fromCurrency: currency, fromAmount: input.amount.toString(), fee: "0",
+          description: `QR payment to user ${payeeId}`, reference: ref,
+        });
+        await tx.insert(transactions).values({
+          userId: payeeId, type: "receive" as any, status: "completed" as any,
+          fromCurrency: currency, fromAmount: input.amount.toString(), fee: "0",
+          description: `QR payment from user ${ctx.user.id}`, reference: `${ref}-IN`,
+        });
+        return { success: true, reference: ref, amount: input.amount, currency, paidToUserId: payeeId };
+      });
+      broadcastUserEvent(payeeId, { type: "transfer_received", payload: { title: "QR Payment Received", message: `You received ${input.amount.toLocaleString()} ${currency} via QR payment`, amount: input.amount, currency, reference: result.reference } });
+      storeIdempotency(idempKey, result);
+      return result;
     }),
   }),
 
@@ -3531,7 +4192,7 @@ export const appRouter = router({
   }),
 
   compliance: router({
-    fcaDashboard: protectedProcedure.query(async ({ ctx }) => { const docs = await getKycDocsByUserId(ctx.user.id); return { status: 'compliant', complianceScore: 94, registrationNumber: 'FCA-REG-123456', lastAudit: new Date(Date.now() - 86400000 * 30), nextAudit: new Date(Date.now() + 86400000 * 60), findings: [], riskScore: 'low', amlChecks: { passed: 1247, failed: 3, pending: 12 }, sarFiled: 2, pep: 0, sanctions: 0, kycCompliance: docs.filter((d: any) => d.status === 'approved').length > 0 }; }),
+    fcaDashboard: protectedProcedure.query(async ({ ctx }) => { const docs = await getKycDocsByUserId(ctx.user.id); return { status: 'compliant', complianceScore: 94, registrationNumber: 'FCA-REG-123456', lastAudit: new Date(Date.now() - 86400000 * 30), nextAudit: new Date(Date.now() + 86400000 * 60), findings: [], riskScore: 'low', amlChecks: { passed: 1247, failed: 3, pending: 12 }, sarFiled: 2, pep: 0, sanctions: 0, kycCompliance: docs.filter((d: any) => d.status === 'approved').length > 0, source: 'static_placeholder' }; }),
     travelRule: protectedProcedure.query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 20 });
       const highValue = txns.filter((t: any) => Number(t.fromAmount) >= 1000);
@@ -3835,8 +4496,22 @@ export const appRouter = router({
     }),
     addWebhook: protectedProcedure.input(z.object({ url: z.string().url(), events: z.array(z.string()) })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // W9 F9-7: SSRF guard — reject non-http(s), localhost, and
+      // private/reserved destinations (incl. DNS resolution of every address)
+      // before persisting a webhook we will later POST to.
+      const { assertPublicWebhookUrl } = await import("./lib/http-client");
+      try {
+        await assertPublicWebhookUrl(input.url);
+      } catch {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Webhook URL rejected: must be a public https endpoint" });
+      }
+      // W9 F9-7: tenant comes from the authenticated user's record, never from
+      // client input (default tenant id 1 when the user has none).
+      const [userRow] = await db.select().from(users).where(eq(users.id, ctx.user.id)).limit(1);
+      const tenantId = (userRow as any)?.tenantId ?? 1;
       const secret = `whsec_${randomBytes(16).toString("hex")}`;
-      const [row] = await db.insert(webhooksTable).values({ tenantId: 1, url: input.url, events: input.events, signingSecret: secret, isActive: true, createdBy: ctx.user.id }).returning();
+      const [row] = await db.insert(webhooksTable).values({ tenantId, url: input.url, events: input.events, signingSecret: secret, isActive: true, createdBy: ctx.user.id }).returning();
       return { success: true, id: row.id, secret };
     }),
     deleteWebhook: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
@@ -4184,10 +4859,22 @@ export const appRouter = router({
         return { docs };
       }),
     promoteUser: adminProcedure
-      .input(z.object({ userId: z.number(), role: z.enum(["admin", "user"]) }))
+      .input(z.object({ userId: z.number(), role: z.enum(["admin", "user"]), totpCode: z.string().regex(/^\d{6}$/).optional() }))
       .mutation(async ({ ctx, input }) => {
+        // W9 F8-11: self-guard — an admin cannot change their own role.
+        if (input.userId === ctx.user.id) throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot change your own role" });
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
+        // W9 F8-11: canonical Wave 7 TOTP step-up (SPEC-wave7.md C2) — role
+        // escalation is a privileged mutation; enrolled admins MUST pass TOTP.
+        const { getTotpEnrollment, verifyTOTP } = await import("./totp");
+        const enrollment = await getTotpEnrollment(ctx.user.id);
+        if (!enrollment.dbAvailable) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — action blocked" });
+        if (enrollment.enabled && enrollment.secret) {
+          if (!input.totpCode) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+          const valid = await verifyTOTP(input.totpCode, enrollment.secret);
+          if (!valid) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+        }
         await db.update(users).set({ role: input.role }).where(eq(users.id, input.userId)).returning();
         // Audit trail
         logAdminAction({
@@ -5960,8 +6647,13 @@ Case: #${input.caseId}`,
       if (!proposal) throw new TRPCError({ code: "NOT_FOUND", message: "Proposal not found" });
       if (proposal.submittedByUserId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN", message: "Only the proposal submitter can request disbursement" });
       if (proposal.status !== "approved" && Number(proposal.votesFor ?? 0) < 10) throw new TRPCError({ code: "BAD_REQUEST", message: "Proposal must be approved before disbursement" });
-      await db.update(fundProposals).set({ status: "funded", updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId)).returning();
-      await db.insert(notifications).values({ userId: ctx.user.id, type: "disbursement_requested", title: "Disbursement Requested", message: `Your proposal "${proposal.title}" has been submitted for disbursement review.`, isRead: false, createdAt: new Date() });
+      // W9-FIX2 (CRITICAL-class): status flip + notification insert commit atomically
+      // in one db.transaction; type mapped from enum-invalid "disbursement_requested"
+      // to notifTypeEnum member "system" (governance notice — semantics kept in title/message).
+      await db.transaction(async (tx: any) => {
+        await tx.update(fundProposals).set({ status: "funded", updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId)).returning();
+        await tx.insert(notifications).values({ userId: ctx.user.id, type: "system", title: "Disbursement Requested", message: `Your proposal "${proposal.title}" has been submitted for disbursement review.`, isRead: false, createdAt: new Date() });
+      });
       const { notifyOwner: _notifyOwner } = await import("./_core/notification.js");
       await _notifyOwner({ title: "Fund Disbursement Request", content: `Proposal "${proposal.title}" (ID: ${proposal.id}) has been submitted for disbursement by ${ctx.user.name ?? ctx.user.email}. Amount: ${proposal.requestedAmount} ${proposal.currency}. Method: ${input.disbursementMethod}.` }).catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
       return { success: true, proposalId: input.proposalId };
@@ -5971,17 +6663,33 @@ Case: #${input.caseId}`,
       proposalId: z.number(),
       action: z.enum(["approve", "reject"]),
       adminNotes: z.string().optional(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      // TOTP step-up on top of admin gating — releases community fund money (Contract 2).
+      const { getTotpEnrollment, verifyTOTP } = await import("./totp");
+      const enrollmentD = await getTotpEnrollment(ctx.user.id);
+      if (!enrollmentD.dbAvailable) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "2FA verification unavailable — disbursement blocked" });
+      if (enrollmentD.enabled && enrollmentD.secret) {
+        if (!input.totpCode) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "2FA code required for this action" });
+        const validD = await verifyTOTP(input.totpCode, enrollmentD.secret);
+        if (!validD) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid 2FA code" });
+      }
       const { fundProposals, communityFunds, notifications } = await import("../drizzle/schema.js");
       const [proposal] = await db.select().from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1);
       if (!proposal) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       const newStatus = input.action === "approve" ? "completed" : "rejected";
-      await db.update(fundProposals).set({ status: newStatus as any, fundedAt: input.action === "approve" ? new Date() : undefined, updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId)).returning();
-      if (input.action === "approve") {
-        await db.update(communityFunds).set({ beneficiaryCount: sql`${communityFunds.beneficiaryCount} + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, proposal.fundId)).returning();
-      }
-      await db.insert(notifications).values({ userId: proposal.submittedByUserId, type: "disbursement_" + input.action + "d", title: `Disbursement ${input.action === "approve" ? "Approved" : "Rejected"}`, message: `Your proposal "${proposal.title}" disbursement has been ${input.action === "approve" ? "approved and processed" : "rejected"}. ${input.adminNotes ? "Note: " + input.adminNotes : ""}`, isRead: false, createdAt: new Date() });
+      // W9-FIX2 (CRITICAL-class): status flip + fund counter + notification insert
+      // commit atomically in one db.transaction; type mapped from enum-invalid
+      // "disbursement_<action>d" to notifTypeEnum members ("transaction" for the
+      // money-releasing approval, "system" for the governance rejection).
+      await db.transaction(async (tx: any) => {
+        await tx.update(fundProposals).set({ status: newStatus as any, fundedAt: input.action === "approve" ? new Date() : undefined, updatedAt: new Date() }).where(eq(fundProposals.id, input.proposalId)).returning();
+        if (input.action === "approve") {
+          await tx.update(communityFunds).set({ beneficiaryCount: sql`${communityFunds.beneficiaryCount} + 1`, updatedAt: new Date() }).where(eq(communityFunds.id, proposal.fundId)).returning();
+        }
+        await tx.insert(notifications).values({ userId: proposal.submittedByUserId, type: (input.action === "approve" ? "transaction" : "system") as any, title: `Disbursement ${input.action === "approve" ? "Approved" : "Rejected"}`, message: `Your proposal "${proposal.title}" disbursement has been ${input.action === "approve" ? "approved and processed" : "rejected"}. ${input.adminNotes ? "Note: " + input.adminNotes : ""}`, isRead: false, createdAt: new Date() });
+      });
       return { success: true, status: newStatus };
     }),
 
@@ -6154,7 +6862,10 @@ Case: #${input.caseId}`,
           is_round_number: input.isRoundNumber,
         });
       } catch (err: any) {
-        return { transaction_id: input.transactionId, decision: "PASS" as const, risk_score: 0, matched_rules: [], screened_at: new Date().toISOString(), screen_id: "fallback", _fallback: true, error: err.message };
+        // W9-FIX2: FAIL CLOSED — an AML screening outage must never masquerade as
+        // a PASS with risk_score 0. Surface UNAVAILABLE so callers block/retry.
+        logger.error({ err: err?.message, transactionId: input.transactionId }, "[AML] Screening service error — failing closed");
+        throw new TRPCError({ code: "UNAVAILABLE", message: "AML screening unavailable — transaction cannot be cleared right now" });
       }
     }),
     /** Check a name against the sanctions list */
@@ -6163,7 +6874,10 @@ Case: #${input.caseId}`,
       try {
         return await amlClient.sanctionsCheck({ name: input.name, country: input.country });
       } catch (err: any) {
-        return { name: input.name, is_match: false, match_type: null, confidence: 0, screened_at: new Date().toISOString(), _fallback: true, error: err.message };
+        // W9-FIX2: FAIL CLOSED — a sanctions-check outage must never masquerade as
+        // is_match:false. Surface UNAVAILABLE so callers block/retry.
+        logger.error({ err: err?.message }, "[Sanctions] Screening service error — failing closed");
+        throw new TRPCError({ code: "UNAVAILABLE", message: "Sanctions screening unavailable — check cannot be completed right now" });
       }
     }),
     /** Get a live FX quote from the Go FX engine */
@@ -6186,14 +6900,16 @@ Case: #${input.caseId}`,
   // ─── Community Feed (Go SSE microservice) ─────────────────────────────────
   communityFeed: router({
     recent: publicProcedure.query(async () => {
+      // C8: go-community-feed is a deleted scaffold — fail closed instead of
+      // silently returning fabricated empty data.
       const { communityFeedClient } = await import("./services/community-feed-client.js");
       try { return await communityFeedClient.getRecent(); }
-      catch { return { events: [], count: 0, _fallback: true }; }
+      catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "community-feed service not deployed" }); }
     }),
     stats: publicProcedure.query(async () => {
       const { communityFeedClient } = await import("./services/community-feed-client.js");
       try { return await communityFeedClient.getStats(); }
-      catch { return { connectedClients: 0, totalEvents: 0, eventsPerMinute: 0, uptimeSeconds: 0, _fallback: true }; }
+      catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "community-feed service not deployed" }); }
     }),
     publish: protectedProcedure
       .input(z.object({
@@ -6204,7 +6920,7 @@ Case: #${input.caseId}`,
       .mutation(async ({ input }) => {
         const { communityFeedClient } = await import("./services/community-feed-client.js");
         try { return await communityFeedClient.publish(input); }
-        catch { return { ok: false, eventId: "fallback", _fallback: true }; }
+        catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "community-feed service not deployed" }); }
       }),
     health: publicProcedure.query(async () => {
       const { communityFeedClient } = await import("./services/community-feed-client.js");
@@ -6230,34 +6946,25 @@ Case: #${input.caseId}`,
             createdBy: ctx.user.id.toString(),
           });
         } catch {
-          const slug = `${input.resourceType.slice(0,3)}-${input.resourceId.slice(0,8)}`;
-          const shortUrl = `https://remitflow.example.com/share/${slug}`;
-          return {
-            id: `fallback-${Date.now()}`, slug, shortUrl, ogUrl: shortUrl,
-            shareUrls: {
-              whatsapp: `https://wa.me/?text=${encodeURIComponent(input.title + ' ' + shortUrl)}`,
-              twitter: `https://twitter.com/intent/tweet?text=${encodeURIComponent(input.title)}&url=${encodeURIComponent(shortUrl)}`,
-              facebook: `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(shortUrl)}`,
-              telegram: `https://t.me/share/url?url=${encodeURIComponent(shortUrl)}&text=${encodeURIComponent(input.title)}`,
-              copy: shortUrl,
-            }, _fallback: true,
-          };
+          // C9: no share-link service exists anywhere — fail closed instead of
+          // fabricating share URLs/slugs that would 404 for recipients.
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: "share-link service not deployed" });
         }
       }),
     resolve: publicProcedure.input(z.object({ slug: z.string() })).query(async ({ input }) => {
       const { shareLinkClient } = await import("./services/share-link-client.js");
       try { return await shareLinkClient.resolve(input.slug); }
-      catch { return { found: false, _fallback: true }; }
+      catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "share-link service not deployed" }); }
     }),
     stats: publicProcedure.input(z.object({ slug: z.string() })).query(async ({ input }) => {
       const { shareLinkClient } = await import("./services/share-link-client.js");
       try { return await shareLinkClient.stats(input.slug); }
-      catch { return { slug: input.slug, clicks: 0, views: 0, isActive: false, _fallback: true }; }
+      catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "share-link service not deployed" }); }
     }),
     list: publicProcedure.query(async () => {
       const { shareLinkClient } = await import("./services/share-link-client.js");
       try { return await shareLinkClient.list(); }
-      catch { return { links: [], count: 0, _fallback: true }; }
+      catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "share-link service not deployed" }); }
     }),
     health: publicProcedure.query(async () => {
       const { shareLinkClient } = await import("./services/share-link-client.js");
@@ -6277,42 +6984,42 @@ Case: #${input.caseId}`,
       .mutation(async ({ input, ctx }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.track({ ...input, userId: ctx.user.id.toString() }); }
-        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics track failed, using fallback"); return { ok: false, tab: input.tab, totalEvents: 0, _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics track failed"); throw new TRPCError({ code: "PRECONDITION_FAILED", message: "nav-analytics service not deployed" }); }
       }),
     summary: publicProcedure
       .input(z.object({ hours: z.number().int().min(1).max(168).default(24) }))
       .query(async ({ input }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.getSummary(input.hours); }
-        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics summary failed, using fallback"); return { periodHours: input.hours, totalTaps: 0, uniqueUsers: 0, tabs: [], platforms: {}, topCountries: [], _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics summary failed"); throw new TRPCError({ code: "PRECONDITION_FAILED", message: "nav-analytics service not deployed" }); }
       }),
     heatmap: publicProcedure
       .input(z.object({ hours: z.number().int().min(1).max(720).default(168) }))
       .query(async ({ input }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.getHeatmap(input.hours); }
-        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics heatmap failed, using fallback"); return { periodHours: input.hours, hours: [], heatmap: {}, labels: {}, _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics heatmap failed"); throw new TRPCError({ code: "PRECONDITION_FAILED", message: "nav-analytics service not deployed" }); }
       }),
     recommendations: publicProcedure
       .input(z.object({ segment: z.string().default("new_user") }))
       .query(async ({ input }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.getRecommendations(input.segment); }
-        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics recommendations failed, using fallback"); return { segment: input.segment, totalEventsAnalyzed: 0, recommendedOrder: [], model: "fallback", _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics recommendations failed"); throw new TRPCError({ code: "PRECONDITION_FAILED", message: "nav-analytics service not deployed" }); }
       }),
     topFeatures: publicProcedure
       .input(z.object({ hours: z.number().int().min(1).max(168).default(24) }))
       .query(async ({ input }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.getTopFeatures(input.hours); }
-        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics topFeatures failed, using fallback"); return { periodHours: input.hours, topFeatures: [], _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics topFeatures failed"); throw new TRPCError({ code: "PRECONDITION_FAILED", message: "nav-analytics service not deployed" }); }
       }),
     retention: publicProcedure
       .input(z.object({ days: z.number().int().min(1).max(30).default(7) }))
       .query(async ({ input }) => {
         const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
         try { return await navAnalyticsClient.getRetention(input.days); }
-        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics retention failed, using fallback"); return { days: input.days, retention: [], labels: {}, _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "nav-analytics" }, "Nav analytics retention failed"); throw new TRPCError({ code: "PRECONDITION_FAILED", message: "nav-analytics service not deployed" }); }
       }),
     health: publicProcedure.query(async () => {
       const { navAnalyticsClient } = await import("./services/nav-analytics-client.js");
@@ -6390,28 +7097,42 @@ Case: #${input.caseId}`,
       const { portfolioCalcClient } = await import("./services/portfolio-calc-client.js");
       try {
         return await portfolioCalcClient.analyze({ holdings: holdings.map((h: any) => ({ symbol: h.asset.symbol, name: h.asset.name, asset_type: h.asset.assetType, quantity: Number(h.inv.quantity), purchase_price: Number(h.inv.purchasePrice), current_price: Number(h.asset.currentPrice ?? 0), currency: h.inv.currency ?? "USD", sector: h.asset.sector ?? undefined, country: h.asset.country ?? undefined })) });
-      } catch { return null; }
+      } catch {
+        // C10: portfolio-calc service does not exist — fail closed, never
+        // silently return null for an analysis the user asked for.
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "portfolio-calc service not deployed" });
+      }
     }),
     getRecommendations: protectedProcedure
       .input(z.object({ riskTolerance: z.enum(["conservative", "moderate", "aggressive"]).default("moderate"), horizon: z.enum(["short", "medium", "long"]).default("medium"), monthlyBudget: z.number().positive().default(100), homeCountry: z.string().optional() }).optional())
       .query(async ({ input, ctx }) => {
         const { investmentMlClient } = await import("./services/investment-ml-client.js");
         try { return await investmentMlClient.recommend({ user_id: ctx.user.id, risk_tolerance: input?.riskTolerance ?? "moderate", investment_horizon: input?.horizon ?? "medium", monthly_budget_usd: input?.monthlyBudget ?? 100, home_country: input?.homeCountry }); }
-        catch { return { user_id: ctx.user.id, recommendations: [], portfolio_strategy: "Service unavailable", diaspora_insight: "", generated_at: new Date().toISOString(), _fallback: true }; }
+        catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "investment-ml service not deployed" }); }
       }),
     getPriceFeed: publicProcedure
       .input(z.object({ assetType: z.string().optional() }).optional())
-      .query(async ({ input }) => {
-        const { investmentFeedClient } = await import("./services/investment-feed-client.js");
-        try { return await investmentFeedClient.getPrices(input?.assetType); }
-        catch { return { prices: [], count: 0, timestamp: new Date().toISOString(), _fallback: true }; }
+      .query(async () => {
+        // DEAD-PATH REMOVED: this proxied a phantom go-investment-feed
+        // /prices endpoint that never existed (and silently returned empty
+        // fallback data). The real feed serves NO price data — it only
+        // refreshes the database (POST /refresh → ngxStocks.ingestPrices).
+        // Fail closed; read prices from the DB-backed, staleness-flagged
+        // ngxStocks.list/getByTicker instead.
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Live price proxy removed — go-investment-feed only refreshes the database. Use ngxStocks.list/getByTicker for DB-backed prices.",
+        });
       }),
     getQuote: publicProcedure
       .input(z.object({ symbol: z.string() }))
-      .query(async ({ input }) => {
-        const { investmentFeedClient } = await import("./services/investment-feed-client.js");
-        try { return await investmentFeedClient.getQuote(input.symbol); }
-        catch { return null; }
+      .query(async () => {
+        // DEAD-PATH REMOVED: proxied the same phantom /quote endpoint (and
+        // silently returned null). No quote endpoint exists on the real feed.
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Quote proxy removed — go-investment-feed has no quote endpoint. Use ngxStocks.getByTicker for DB-backed prices.",
+        });
       }),
     addToWatchlist: protectedProcedure
       .input(z.object({ assetId: z.number().int(), alertPrice: z.number().optional() }))
@@ -6440,21 +7161,21 @@ Case: #${input.caseId}`,
       .mutation(async ({ input }) => {
         const { portfolioCalcClient } = await import("./services/portfolio-calc-client.js");
         try { return await portfolioCalcClient.dcaProjection({ monthly_amount: input.monthlyAmount, current_price: input.currentPrice, months: input.months, expected_annual_return: input.expectedAnnualReturn }); }
-        catch { return { total_invested: 0, projected_value: 0, projected_gain: 0, projected_gain_pct: 0, projections: [], _fallback: true }; }
+        catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "portfolio-calc service not deployed" }); }
       }),
     scoreRisk: protectedProcedure
       .input(z.object({ age: z.number().int().optional(), monthlyIncome: z.number().positive().optional(), monthlyExpenses: z.number().positive().optional(), existingSavings: z.number().min(0).optional(), experience: z.enum(["beginner", "intermediate", "advanced"]).default("beginner"), riskPreference: z.enum(["conservative", "moderate", "aggressive"]).default("moderate"), dependents: z.number().int().min(0).default(0), employmentStatus: z.enum(["employed", "self_employed", "unemployed", "retired"]).default("employed"), homeCountry: z.string().optional() }).optional())
       .query(async ({ input }) => {
         const { investmentMlClient } = await import("./services/investment-ml-client.js");
         try { return await investmentMlClient.scoreRisk({ age: input?.age, monthly_income_usd: input?.monthlyIncome ?? 1000, monthly_expenses_usd: input?.monthlyExpenses ?? 700, existing_savings_usd: input?.existingSavings ?? 0, investment_experience: input?.experience ?? "beginner", risk_preference: input?.riskPreference ?? "moderate", dependents: input?.dependents ?? 0, employment_status: input?.employmentStatus ?? "employed", home_country: input?.homeCountry }); }
-        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "investment" }, "Risk scoring failed, using moderate fallback"); return { risk_score: 50, risk_label: "Moderate", recommended_allocation: {}, max_investment_pct_income: 10, emergency_fund_months: 3, key_factors: [], scored_at: new Date().toISOString(), _fallback: true }; }
+        catch (err) { logger.warn({ err: err instanceof Error ? err.message : String(err), service: "investment" }, "Risk scoring failed"); throw new TRPCError({ code: "PRECONDITION_FAILED", message: "investment-ml service not deployed" }); }
       }),
     getSentiment: publicProcedure
       .input(z.object({ symbols: z.array(z.string()).min(1).max(20) }))
       .query(async ({ input }) => {
         const { investmentMlClient } = await import("./services/investment-ml-client.js");
         try { return await investmentMlClient.getSentiment({ symbols: input.symbols }); }
-        catch { return { sentiments: [], market_mood: "Neutral", analyzed_at: new Date().toISOString(), _fallback: true }; }
+        catch { throw new TRPCError({ code: "PRECONDITION_FAILED", message: "investment-ml service not deployed" }); }
       }),
     getOrderHistory: protectedProcedure
       .input(z.object({ limit: z.number().int().min(1).max(100).default(50) }).optional())
@@ -6464,9 +7185,21 @@ Case: #${input.caseId}`,
         return db.select({ order: investmentOrders, asset: investmentAssets }).from(investmentOrders).innerJoin(investmentAssets, eq(investmentOrders.assetId, investmentAssets.id)).where(eq(investmentOrders.userId, ctx.user.id)).orderBy(desc(investmentOrders.createdAt)).limit(input?.limit ?? 50);
       }),
     feedHealth: publicProcedure.query(async () => {
+      // Real contract: GET :8080/health (unauthenticated liveness probe).
       const { investmentFeedClient } = await import("./services/investment-feed-client.js");
       try { const h = await investmentFeedClient.health(); return { ...h, online: true, service: "go-investment-feed" }; }
       catch { return { status: "offline", online: false, service: "go-investment-feed", _fallback: true }; }
+    }),
+    refreshFeed: adminProcedure.mutation(async () => {
+      // Ops trigger for a manual price refresh — proxies the real
+      // go-investment-feed POST /refresh (X-Internal-Key from
+      // INTERNAL_SERVICE_KEY; the client fails closed when it is unset).
+      // The feed pulls the upstream NGX source and forwards validated quotes
+      // to ngxStocks.ingestPrices. NO silent fallback: a feed/key failure
+      // propagates as an error.
+      const { investmentFeedClient } = await import("./services/investment-feed-client.js");
+      const res = await investmentFeedClient.refresh();
+      return { ...res, service: "go-investment-feed" };
     }),
     calcHealth: publicProcedure.query(async () => {
       const { portfolioCalcClient } = await import("./services/portfolio-calc-client.js");
@@ -6757,43 +7490,49 @@ Case: #${input.caseId}`,
   notificationLog: notificationLogRouter,
   investmentKycGate: investmentKycGateRouter,
   // v76 Microservices integration
-  ngxLivePrices: ngxLivePricesRouter,
-  corridorPricingV2: corridorPricingRouter,
-  fxEngine: fxEngineRouter,
-  txProcessor: txProcessorRouter,
-  complianceEngine: complianceEngineRouter,
-  fraudDetection: fraudDetectionRouter,
-  amlCompliance: amlComplianceRouter,
-  analyticsEngine: analyticsEngineRouter,
-  microserviceHealth: microserviceHealthRouter,
+  // ─── W9 LEGACY PACK QUARANTINE ────────────────────────────────────────────
+  // The v-series/tier/microservices/missingTables feature-pack routers below were
+  // never exercised against a real database (enum-invalid writes, fabricated
+  // executions, IDOR clusters — see remitflow-wave8-fullsweep.md, SPEC-wave9.md Q1).
+  // They are UNMOUNTED unless LEGACY_FEATURE_PACKS_ENABLED="true" is set after a
+  // per-pack smoke test. Undocumented env; fail-closed default.
+  ...(LEGACY_PACKS_ENABLED ? { ngxLivePrices: ngxLivePricesRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { corridorPricingV2: corridorPricingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fxEngine: fxEngineRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { txProcessor: txProcessorRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { complianceEngine: complianceEngineRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fraudDetection: fraudDetectionRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { amlCompliance: amlComplianceRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { analyticsEngine: analyticsEngineRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { microserviceHealth: microserviceHealthRouter } : {}),
   // v82 Production Features
-  vapidPush: vapidPushRouter,
-  apiUsage: apiUsageRouter,
-  treasury: treasuryRouter,
-  slaMonitoring: slaMonitoringRouter,
-  documentVault: documentVaultRouter,
-  chargebacks: chargebackRouter,
-  developerSandbox: developerSandboxRouter,
-  smartRouting: smartRoutingRouter,
-  complianceReporting: complianceReportingRouter,
-  rateEngine: rateEngineRouter,
-  offlineQueue: offlineQueueRouter,
-  notificationCenter: notificationCenterRouter,
-  fxHedging: fxHedgingRouter,
-  paymentOrchestration: paymentOrchestrationRouter,
-  biometricEnrollment: biometricEnrollmentRouter,
-  ledger: ledgerRouter,
-  transferGoals: transferGoalsRouter,
-  deepLinks: deepLinksRouter,
-  analyticsPipeline: analyticsPipelineRouter,
-  corridorLiveRates: corridorLiveRatesRouter,
-  beneficiaryGroups: beneficiaryGroupsRouter,
-  whiteLabelConfig: whiteLabelConfigRouter,
-  pushNotifications: pushNotificationsRouterV84,
+  ...(LEGACY_PACKS_ENABLED ? { vapidPush: vapidPushRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { apiUsage: apiUsageRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { treasury: treasuryRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { slaMonitoring: slaMonitoringRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { documentVault: documentVaultRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { chargebacks: chargebackRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { developerSandbox: developerSandboxRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { smartRouting: smartRoutingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { complianceReporting: complianceReportingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rateEngine: rateEngineRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { offlineQueue: offlineQueueRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { notificationCenter: notificationCenterRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fxHedging: fxHedgingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { paymentOrchestration: paymentOrchestrationRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { biometricEnrollment: biometricEnrollmentRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { ledger: ledgerRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { transferGoals: transferGoalsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { deepLinks: deepLinksRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { analyticsPipeline: analyticsPipelineRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { corridorLiveRates: corridorLiveRatesRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { beneficiaryGroups: beneficiaryGroupsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { whiteLabelConfig: whiteLabelConfigRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { pushNotifications: pushNotificationsRouterV84 } : {}),
   pushNotificationsV93: pushNotificationsRouterV93,
-  apiUsageLogs: apiUsageRouterV84,
-  complianceReports: complianceRouterV84,
-  stripeReceipts: stripeReceiptsRouter,
+  ...(LEGACY_PACKS_ENABLED ? { apiUsageLogs: apiUsageRouterV84 } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { complianceReports: complianceRouterV84 } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { stripeReceipts: stripeReceiptsRouter } : {}),
   sandboxScenarios: sandboxScenariosRouter,
   complianceAlerts: complianceAlertsRouter,
   securityEvents: securityEventsRouter,
@@ -6804,28 +7543,28 @@ Case: #${input.caseId}`,
   receiptPdf: receiptPdfRouter,
   adminBulk: adminBulkRouter,
   // v86 Production Features
-  promoCodesAdmin: promoCodesAdminRouter,
-  promoValidate: promoValidateRouter,
-  volumeWidget: volumeWidgetRouter,
-  fxCalculator: fxCalculatorRouter,
-  notifPrefs: notifPrefsRouter,
-  scheduledTransfersV2: scheduledTransfersV86Router,
+  ...(LEGACY_PACKS_ENABLED ? { promoCodesAdmin: promoCodesAdminRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { promoValidate: promoValidateRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { volumeWidget: volumeWidgetRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fxCalculator: fxCalculatorRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { notifPrefs: notifPrefsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { scheduledTransfersV2: scheduledTransfersV86Router } : {}),
   // v87 AI/ML/LLM Integration Layer
-  aiHub: aiHubRouter,
-  qdrant: qdrantRouter,
-  falkordb: falkordbRouter,
-  ollama: ollamaRouter,
-  artAgent: artAgentRouter,
-  kgqa: kgqaRouter,
-  lakehouse: lakehouseRouter,
-  cocoindex: cocoindexRouter,
-  mlInsights: mlInsightsRouter,
+  ...(LEGACY_PACKS_ENABLED ? { aiHub: aiHubRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { qdrant: qdrantRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { falkordb: falkordbRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { ollama: ollamaRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { artAgent: artAgentRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { kgqa: kgqaRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { lakehouse: lakehouseRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { cocoindex: cocoindexRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { mlInsights: mlInsightsRouter } : {}),
   // v89 Data Pipelines (NiFi + dbt + Airflow)
   dataPipelines: dataPipelinesRouter,
   // v89 Production Features
-  v89: productionV89Router,
+  ...(LEGACY_PACKS_ENABLED ? { v89: productionV89Router } : {}),
   // v90 Production Features
-  v90: productionV90Router,
+  ...(LEGACY_PACKS_ENABLED ? { v90: productionV90Router } : {}),
   // v91 Partner Applications & Approval Workflow
   partnerApplications: partnerApplicationsRouter,
   partnerApiKeys: partnerApiKeysRouter,
@@ -6833,37 +7572,37 @@ Case: #${input.caseId}`,
   userOnboarding: userOnboardingRouter,
   complianceEmail: complianceEmailRouter,
   // v92 Production Feature Completions
-  feeEngineV92: feeEngineV92Router,
-  transferLimits: transferLimitsRouter,
-  fxRateLock: fxRateLockRouter,
-  complianceTriggers: complianceTriggersRouter,
-  beneficiaryCrud: beneficiaryCrudRouter,
-  walletCrud: walletCrudRouter,
-  txSearch: transactionSearchRouter,
-  kycAdmin: kycAdminRouter,
-  partnerAnalytics: partnerAnalyticsRouter,
-  emailDelivery: emailDeliveryRouter,
-  auditLog: auditLogRouter,
+  ...(LEGACY_PACKS_ENABLED ? { feeEngineV92: feeEngineV92Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { transferLimits: transferLimitsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fxRateLock: fxRateLockRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { complianceTriggers: complianceTriggersRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { beneficiaryCrud: beneficiaryCrudRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { walletCrud: walletCrudRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { txSearch: transactionSearchRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { kycAdmin: kycAdminRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { partnerAnalytics: partnerAnalyticsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { emailDelivery: emailDeliveryRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { auditLog: auditLogRouter } : {}),
   // v94 features
-  abTesting: abTestingRouter,
-  referralBonus: referralBonusRouter,
-  documentVaultV94: documentVaultV94Router,
-  rateAlertHistory: rateAlertHistoryRouter,
+  ...(LEGACY_PACKS_ENABLED ? { abTesting: abTestingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { referralBonus: referralBonusRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { documentVaultV94: documentVaultV94Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rateAlertHistory: rateAlertHistoryRouter } : {}),
   // v97 Production Features
-  velocityCheckAdmin: velocityCheckAdminRouter,
-  kycLifecycle: kycLifecycleRouter,
-  documentVaultRenewal: documentVaultRenewalRouter,
-  featureFlagEval: featureFlagEvaluationRouter,
-  systemConfigHotReload: systemConfigHotReloadRouter,
-  webhookRetry: webhookRetryRouter,
-  apiKeyRotation: apiKeyRotationRouter,
-  batchPaymentV97: batchPaymentV97Router,
-  adminComplianceTrigger: adminComplianceTriggerRouter,
+  ...(LEGACY_PACKS_ENABLED ? { velocityCheckAdmin: velocityCheckAdminRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { kycLifecycle: kycLifecycleRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { documentVaultRenewal: documentVaultRenewalRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { featureFlagEval: featureFlagEvaluationRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { systemConfigHotReload: systemConfigHotReloadRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { webhookRetry: webhookRetryRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { apiKeyRotation: apiKeyRotationRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { batchPaymentV97: batchPaymentV97Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { adminComplianceTrigger: adminComplianceTriggerRouter } : {}),
   // v98 Production Features
-  v98: v98Router,
-  v99: v99Router,
-  v100: v100Router,
-  v101: v101Router,
+  ...(LEGACY_PACKS_ENABLED ? { v98: v98Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { v99: v99Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { v100: v100Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { v101: v101Router } : {}),
   loadTest: loadTestRouter,
   // v108 Revenue Share
   revenueShare: revenueShareRouter,
@@ -6872,49 +7611,49 @@ Case: #${input.caseId}`,
   pbac: pbacRouter,
   cronJobs: cronJobsRouter,
   // Extended microservices (v113)
-  cips: cipsRouter,
-  upi: upiRouter,
-  pix: pixRouter,
-  kafkaAdmin: kafkaAdminRouter,
-  temporalAdmin: temporalAdminRouter,
-  permify: permifyRouter,
-  tigerBeetle: tigerBeetleRouter,
-  openSearch: openSearchRouter,
-  lakehouseExt: lakehouseRouter,
-  amlEngine: amlEngineRouter,
-  fraudMl: fraudMlRouter,
-  transferEngine: transferEngineRouter,
+  ...(LEGACY_PACKS_ENABLED ? { cips: cipsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { upi: upiRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { pix: pixRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { kafkaAdmin: kafkaAdminRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { temporalAdmin: temporalAdminRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { permify: permifyRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { tigerBeetle: tigerBeetleRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { openSearch: openSearchRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { lakehouseExt: lakehouseRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { amlEngine: amlEngineRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fraudMl: fraudMlRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { transferEngine: transferEngineRouter } : {}),
   transferCore: transferCoreRouter,
-  pdfReceipt: pdfReceiptRouter,
-  searchIndexer: searchIndexerRouter,
-  rateLimiter: rateLimiterRouter,
-  keycloak: keycloakRouter,
-  mojaloopConnector: mojaloopConnectorRouter,
-  extendedServicesHealth: extendedServicesHealthRouter,
+  ...(LEGACY_PACKS_ENABLED ? { pdfReceipt: pdfReceiptRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { searchIndexer: searchIndexerRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rateLimiter: rateLimiterRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { keycloak: keycloakRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { mojaloopConnector: mojaloopConnectorRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { extendedServicesHealth: extendedServicesHealthRouter } : {}),
   requestMoney: requestMoneyRouter,
   splitBill: splitBillRouter,
   rateLock: rateLockRouter,
   scheduledTransfersV3: scheduledTransfersV117Router,
   // v125 — Previously unreferenced tables wired
-  supportTickets: supportTicketsRouter,
-  directDebitV125: directDebitRouter,
-  consentV125: consentRouter,
-  paymentMetrics: paymentMetricsRouter,
-  bnplPlans: bnplMissingRouter,
-  stablecoinV125: stablecoinRouter,
-  mojaloopV125: mojaloopRouter,
-  kyb: kybRouter,
-  fxAlertHistory: fxAlertHistoryRouter,
-  chargeback: chargebackMissingRouter,
-  tenantConfigs: tenantConfigsRouter,
-  bulkBatch: bulkBatchRouter,
-  regulatoryReports: regulatoryReportsRouter,
-  fraudModelRuns: fraudModelRunsRouter,
-  onboardingProgress: onboardingProgressRouter,
-  chatSessionMeta: chatSessionMetaRouter,
-  chatAgentStatus: chatAgentStatusRouter,
-  chatCannedResponses: chatCannedResponsesRouter,
-  securityIncidents: securityIncidentsRouter,
+  ...(LEGACY_PACKS_ENABLED ? { supportTickets: supportTicketsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { directDebitV125: directDebitRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { consentV125: consentRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { paymentMetrics: paymentMetricsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { bnplPlans: bnplMissingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { stablecoinV125: stablecoinRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { mojaloopV125: mojaloopRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { kyb: kybRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fxAlertHistory: fxAlertHistoryRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { chargeback: chargebackMissingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { tenantConfigs: tenantConfigsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { bulkBatch: bulkBatchRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { regulatoryReports: regulatoryReportsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fraudModelRuns: fraudModelRunsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { onboardingProgress: onboardingProgressRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { chatSessionMeta: chatSessionMetaRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { chatAgentStatus: chatAgentStatusRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { chatCannedResponses: chatCannedResponsesRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { securityIncidents: securityIncidentsRouter } : {}),
   // v126 — Orphaned tables wired
   outboxEvents: outboxEventsRouter,
   slaIncidents: slaIncidentsRouter,
@@ -6924,34 +7663,34 @@ Case: #${input.caseId}`,
   partnerAppComments: partnerApplicationCommentsRouter,
   complianceEmailConfig: complianceEmailConfigRouter,
   // v127 — All remaining microservices wired
-  amlEngineV127: amlEngineV127Router,
-  fraudMlV127: fraudMlV127Router,
-  riskEngine: riskEngineRouter,
-  ledgerService: ledgerServiceRouter,
-  transferEngineV127: transferEngineV127Router,
-  kafkaProcessor: kafkaProcessorRouter,
-  goExportService: goExportServiceRouter,
-  rustAuditService: rustAuditServiceRouter,
-  rustRedisService: rustRedisServiceRouter,
-  rustTigerBeetle: rustTigerBeetleRouter,
-  pythonComplianceSvc: pythonComplianceSvcRouter,
-  pythonOpenSearch: pythonOpenSearchRouter,
-  pythonLakehouse: pythonLakehouseRouter,
-  goDaprService: goDaprServiceRouter,
-  goTemporalWorker: goTemporalWorkerRouter,
-  goRatelimitSidecar: goRatelimitSidecarRouter,
-  goPermifyService: goPermifyServiceRouter,
-  rustFluvioService: rustFluvioServiceRouter,
-  rustPdfReceipt: rustPdfReceiptRouter,
-  rustPgService: rustPgServiceRouter,
-  rustUpiAdapter: rustUpiAdapterRouter,
-  pythonPixAdapter: pythonPixAdapterRouter,
-  goKafkaService: goKafkaServiceRouter,
-  goCipsAdapter: goCipsAdapterRouter,
-  temporalWorkflows: temporalWorkflowsRouter,
-  searchIndexerV127: searchIndexerV127Router,
-  rateLimiterV127: rateLimiterV127Router,
-  v127ServicesHealth: v127ServicesHealthRouter,
+  ...(LEGACY_PACKS_ENABLED ? { amlEngineV127: amlEngineV127Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fraudMlV127: fraudMlV127Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { riskEngine: riskEngineRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { ledgerService: ledgerServiceRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { transferEngineV127: transferEngineV127Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { kafkaProcessor: kafkaProcessorRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { goExportService: goExportServiceRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rustAuditService: rustAuditServiceRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rustRedisService: rustRedisServiceRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rustTigerBeetle: rustTigerBeetleRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { pythonComplianceSvc: pythonComplianceSvcRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { pythonOpenSearch: pythonOpenSearchRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { pythonLakehouse: pythonLakehouseRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { goDaprService: goDaprServiceRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { goTemporalWorker: goTemporalWorkerRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { goRatelimitSidecar: goRatelimitSidecarRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { goPermifyService: goPermifyServiceRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rustFluvioService: rustFluvioServiceRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rustPdfReceipt: rustPdfReceiptRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rustPgService: rustPgServiceRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rustUpiAdapter: rustUpiAdapterRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { pythonPixAdapter: pythonPixAdapterRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { goKafkaService: goKafkaServiceRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { goCipsAdapter: goCipsAdapterRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { temporalWorkflows: temporalWorkflowsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { searchIndexerV127: searchIndexerV127Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { rateLimiterV127: rateLimiterV127Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { v127ServicesHealth: v127ServicesHealthRouter } : {}),
   svcHealth: servicesHealthRouter,
   ext: extendedCrudRouter,
   // v170 — SMS/USSD fallback for critical transfer confirmations
@@ -6970,35 +7709,35 @@ Case: #${input.caseId}`,
   nifi: nifiRouter,
   dbt: dbtRouter,
   airflow: airflowRouter,
-  rateAlertsV86: rateAlertsRouter,
-  fraudRulesCrud: fraudRulesCrudRouter,
-  multiCurrencyLedger: multiCurrencyLedgerRouter,
-  notificationCenterV2: notificationCenterV2Router,
-  partnerPayoutAutomation: partnerPayoutAutomationRouter,
-  smartRoutingV2: smartRoutingV2Router,
-  tenantWhiteLabel: tenantWhiteLabelRouter,
-  beneficiaryDedup: beneficiaryDedupRouter,
-  bulkPayment: bulkPaymentRouter,
-  disputeManagement: disputeManagementRouter,
-  embeddingIndex: embeddingIndexRouter,
-  fxStream: fxStreamRouter,
-  grafana: grafanaRouter,
-  kycWorkflow: kycWorkflowRouter,
-  openBanking: openBankingRouter,
-  paymentRails: paymentRailsRouter,
-  regulatoryReporting: regulatoryReportingRouter,
-  revenueAnalytics: revenueAnalyticsRouter,
-  sanctionsScreening: sanctionsScreeningRouter,
-  auditTrailV2: auditTrailV2Router,
-  beneficiaryGroupsV2: beneficiaryGroupsV2Router,
-  complianceScoring: complianceScoringRouter,
-  feeNegotiation: feeNegotiationRouter,
-  feeRulesEngine: feeRulesEngineRouter,
-  multiHopRouting: multiHopRoutingRouter,
-  partnerWebhooksV2: partnerWebhooksV2Router,
-  reconciliationV2: reconciliationV2Router,
-  systemHealth: systemHealthRouter,
-  transferLimitsV2: transferLimitsV2Router,
+  ...(LEGACY_PACKS_ENABLED ? { rateAlertsV86: rateAlertsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fraudRulesCrud: fraudRulesCrudRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { multiCurrencyLedger: multiCurrencyLedgerRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { notificationCenterV2: notificationCenterV2Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { partnerPayoutAutomation: partnerPayoutAutomationRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { smartRoutingV2: smartRoutingV2Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { tenantWhiteLabel: tenantWhiteLabelRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { beneficiaryDedup: beneficiaryDedupRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { bulkPayment: bulkPaymentRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { disputeManagement: disputeManagementRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { embeddingIndex: embeddingIndexRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { fxStream: fxStreamRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { grafana: grafanaRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { kycWorkflow: kycWorkflowRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { openBanking: openBankingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { paymentRails: paymentRailsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { regulatoryReporting: regulatoryReportingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { revenueAnalytics: revenueAnalyticsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { sanctionsScreening: sanctionsScreeningRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { auditTrailV2: auditTrailV2Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { beneficiaryGroupsV2: beneficiaryGroupsV2Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { complianceScoring: complianceScoringRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { feeNegotiation: feeNegotiationRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { feeRulesEngine: feeRulesEngineRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { multiHopRouting: multiHopRoutingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { partnerWebhooksV2: partnerWebhooksV2Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { reconciliationV2: reconciliationV2Router } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { systemHealth: systemHealthRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { transferLimitsV2: transferLimitsV2Router } : {}),
   
   fraudOrchestrator: fraudOrchestratorRouter,
   cbdcSettlement: cbdcSettlementRouter,
@@ -7007,6 +7746,7 @@ Case: #${input.caseId}`,
   analyticsDashboard: analyticsDashboardRouter,
   operationsMap: operationsMapRouter,
   cbnCompliance: cbnComplianceRouter,
+  bdc: bdcRouter,
   outbound: outboundRouter,
   westAfrica: westAfricaRouter,
   immigrantWorker: immigrantWorkerRouter,
@@ -7025,19 +7765,19 @@ Case: #${input.caseId}`,
   // v215 — Global Payroll & Diaspora Bond
   globalPayroll: globalPayrollRouter,
   diasporaBond: diasporaBondRouter,
-  contractorPayments: contractorRouter,
-  expenseManagement: expenseRouter,
-  merchantKybReview: merchantKybRouter,
-  bondSecondaryMarket: bondSecondaryBuyerRouter,
-  invoiceFinancing: invoiceFinancingRouter,
-  letterOfCredit: letterOfCreditRouter,
-  multiEntityTreasury: multiEntityTreasuryRouter,
-  payrollTaxFiling: payrollTaxFilingRouter,
-  businessSavings: businessSavingsRouter,
-  embeddedPayrollApi: embeddedPayrollApiRouter,
-  diasporaMortgage: diasporaMortgageRouter,
-  businessCreditScoring: businessCreditScoringRouter,
-  esgReporting: esgReportingRouter,
+  ...(LEGACY_PACKS_ENABLED ? { contractorPayments: contractorRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { expenseManagement: expenseRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { merchantKybReview: merchantKybRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { bondSecondaryMarket: bondSecondaryBuyerRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { invoiceFinancing: invoiceFinancingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { letterOfCredit: letterOfCreditRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { multiEntityTreasury: multiEntityTreasuryRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { payrollTaxFiling: payrollTaxFilingRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { businessSavings: businessSavingsRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { embeddedPayrollApi: embeddedPayrollApiRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { diasporaMortgage: diasporaMortgageRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { businessCreditScoring: businessCreditScoringRouter } : {}),
+  ...(LEGACY_PACKS_ENABLED ? { esgReporting: esgReportingRouter } : {}),
   // v220 — Orphan feature implementations (28 previously uncovered tables)
   paymentMethodsExt: paymentMethodsExtRouter,
   hnwExt: hnwExtRouter,
@@ -7135,6 +7875,8 @@ Case: #${input.caseId}`,
   complianceV2: complianceRouter,
   kycOrchestration: kycOrchestrationRouter,
   developerExperience: developerExperienceRouter,
+  // W10-C3: Bill capture OCR (inbound email → ocr_jobs → python-bill-capture)
+  billCapture: billCaptureRouter,
   // fxRates namespace — provides getRate procedure for currency pair lookups
   fxRates: router({
     getRate: protectedProcedure
@@ -7157,5 +7899,18 @@ Case: #${input.caseId}`,
         return { sendCurrency: input.sendCurrency, receiveCurrency: input.receiveCurrency, rate, amount: input.amount, convertedAmount: input.amount * rate };
       }),
   }),
+  // W10-C1 — AP core: vendor bills + approval policies (SPEC-wave10 C1)
+  vendorBills: vendorBillsRouter,
+  approvalPolicies: approvalPoliciesRouter,
+  // W10-C2 — AR core: invoices V2, public payment links, card funding
+  invoicesV2: invoicesV2Router,
+  paymentLinks: paymentLinksRouter,
+  cardFunding: cardFundingRouter,
+  accountingSync: accountingSyncRouter, // W10-C4
+  // W10-C5 — Vendors + Embedded Payouts (SPEC-wave10)
+  vendors: vendorsRouter,
+  embeddedPayouts: embeddedPayoutsRouter,
+  // W10-C6 bridge — Geo analytics over operational_geo_* tables (SPEC-wave10 C6)
+  geoAnalytics: geoAnalyticsRouter,
 });
 export type AppRouter = typeof appRouter;

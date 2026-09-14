@@ -53,9 +53,10 @@ jobs:
       fail-fast: false
       matrix:
         service:
+          # BROKEN-SCAFFOLD removed from matrix: go-community-feed,
+          # go-health-aggregator, go-ratelimit-sidecar (no sources; scaffolds
+          # being deleted). Re-add when real services exist.
           - go-fx-aggregator
-          - go-health-aggregator
-          - go-ratelimit-sidecar
           - go-dapr-service
           - go-kafka-service
           - go-apisix-config
@@ -64,7 +65,6 @@ jobs:
           - go-bricspay-adapter
           - go-bvn-nin-verification
           - go-cips-adapter
-          - go-community-feed
           - go-correspondent-manager
           - go-escrow-monitor
           - go-export-service
@@ -118,7 +118,7 @@ jobs:
           - rust-tigerbeetle-service
           - rust-fluvio-service
           - rust-agent-reconciliation
-          - rust-audit-service
+          # BROKEN-SCAFFOLD removed: rust-audit-service (no src/; deleted)
           - rust-bmatch-engine
           - rust-crypto-guard
           - rust-device-fingerprint
@@ -171,7 +171,7 @@ jobs:
           - python-lakehouse-service
           - python-ml-retraining
           - python-mlflow-registry
-          - python-nav-analytics
+          # BROKEN-SCAFFOLD removed: python-nav-analytics (no sources; deleted)
           - python-nlu-intent
           - python-opensearch-service
           - python-pix-adapter
@@ -255,12 +255,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - run: npm ci
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
       - name: Build frontend
-        run: npm run build
+        run: pnpm run build
       - name: Run cache busting
         run: ./ops/deploy/cache-bust.sh --purge-cdn
         env:
@@ -296,14 +298,19 @@ jobs:
           kubectl rollout status deployment/api -n remitflow --timeout=300s
       - name: Deploy Go Services
         run: |
-          for svc in go-fx-aggregator go-health-aggregator go-ratelimit-sidecar go-dapr-service; do
-            kubectl set image deployment/$svc $svc=${{ env.IMAGE_PREFIX }}/$svc:${{ github.sha }} -n remitflow || true
-            kubectl rollout status deployment/$svc -n remitflow --timeout=120s || true
+          for svc in go-fx-aggregator go-dapr-service; do
+            kubectl set image deployment/$svc $svc=${{ env.IMAGE_PREFIX }}/$svc:${{ github.sha }} -n remitflow
+            kubectl rollout status deployment/$svc -n remitflow --timeout=120s
           done
       - name: Verify Deployment Health
         run: |
-          kubectl get pods -n remitflow --field-selector=status.phase!=Running -o name | head -5
-          echo "Deployment health check complete"
+          UNHEALTHY=$(kubectl get pods -n remitflow --field-selector=status.phase!=Running -o name)
+          if [ -n "$UNHEALTHY" ]; then
+            echo "::error::Non-running pods after rollout:"
+            echo "$UNHEALTHY"
+            exit 1
+          fi
+          echo "Deployment health check passed"
 
   # ─── Deploy Production ──────────────────────────────────────────────────────
   deploy-production:
@@ -338,10 +345,12 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - run: npm install
-      - run: npx drizzle-kit migrate
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec drizzle-kit migrate
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

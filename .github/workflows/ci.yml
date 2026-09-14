@@ -16,18 +16,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-      - run: npm ci
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
       - name: TypeScript check
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
       - name: ESLint
-        run: npx eslint client/src server --ext .ts,.tsx --max-warnings 0 || true
+        run: pnpm exec eslint client/src server --ext .ts,.tsx --max-warnings 0
       - name: Secrets scanning
         run: |
-          npx secretlint "**/*" || true
+          pnpm exec secretlint "**/*"
 
   # ─── Unit Tests ───────────────────────────────────────────────────────────
   test:
@@ -53,15 +54,16 @@ jobs:
       NODE_ENV: test
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-      - run: npm ci
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
       - name: Push schema to test DB
-        run: npx drizzle-kit push
+        run: pnpm exec drizzle-kit push
       - name: Run tests
-        run: npx vitest run --reporter=verbose
+        run: pnpm exec vitest run --reporter=verbose
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@v7
@@ -76,13 +78,14 @@ jobs:
     needs: [lint-typecheck, test]
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-      - run: npm ci
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
       - name: Build frontend
-        run: npm run build
+        run: pnpm run build
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
@@ -96,20 +99,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-      - run: npm ci
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
       - name: Dependency audit
-        run: npm audit --audit-level=high || true
+        run: pnpm audit --audit-level=high
       - name: Check for secrets in code
         uses: trufflesecurity/trufflehog@main
         with:
           path: ./
           base: ${{ github.event.repository.default_branch }}
           head: HEAD
-        continue-on-error: true
 
   # ─── Docker Build ─────────────────────────────────────────────────────────
   docker:
@@ -156,18 +159,23 @@ jobs:
       PORT: 3001
     steps:
       - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-      - run: npm ci
-      - run: npx drizzle-kit push
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec drizzle-kit push
       - name: Start server in background
         run: |
-          npm run build
+          pnpm run build
           node dist/server/index.js &
           sleep 5
       - name: Run smoke tests
+        # TODO: scripts/smoke-test.mjs does not exist in this repo. Disabled
+        # honestly instead of failing on a phantom path; the server-boot check
+        # above still verifies the built artifact starts.
+        if: false
         run: node scripts/smoke-test.mjs http://localhost:3001
 
   # ─── v63: Build Go Transfer Engine ────────────────────────────────────────
@@ -200,9 +208,13 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ─── v63: Build Python Analytics ──────────────────────────────────────────
+  # DISABLED: services/analytics/ contains only a Dockerfile — no
+  # requirements.txt or application sources exist, so this job can never pass.
+  # Re-enable when the analytics service sources are restored.
   build-analytics:
     name: Build Python Analytics
     runs-on: ubuntu-latest
+    if: false
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -245,7 +257,7 @@ jobs:
         run: pip install -r requirements.txt
       - name: Lint (ruff)
         working-directory: services/pdf-receipt
-        run: pip install ruff && ruff check . || true
+        run: pip install ruff && ruff check .
       - name: Docker build (pdf-receipt)
         uses: docker/build-push-action@v7
         if: github.ref == 'refs/heads/main'
@@ -257,10 +269,14 @@ jobs:
           cache-to: type=gha,mode=max
 
   # ─── v63: Python Smoke Tests (all microservices) ──────────────────────────
+  # DISABLED: services/smoke-tests/ is a Dockerfile-only scaffold (no
+  # requirements.txt / smoke_test.py) and the analytics service it targets is
+  # disabled above (empty scaffold). Re-enable when both are restored.
   smoke-python:
     name: Python Smoke Tests
     runs-on: ubuntu-latest
     needs: [build-analytics, build-pdf-receipt, build-transfer-engine]
+    if: false
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -280,11 +296,15 @@ jobs:
         run: python smoke_test.py --mock
 
   # ─── v63: Full Docker Compose Integration Test ────────────────────────────
+  # DISABLED: docker-compose.yml has no services named db/app/analytics (the
+  # names this job starts and health-checks), the analytics scaffold is empty,
+  # and several scaffold services in the compose file cannot build. Re-enable
+  # after the compose fleet is repaired and repoint the service names.
   integration-compose:
     name: Docker Compose Integration
     runs-on: ubuntu-latest
     needs: [build, build-transfer-engine, build-analytics, build-pdf-receipt]
-    if: github.ref == 'refs/heads/main'
+    if: false
     steps:
       - uses: actions/checkout@v7
       - name: Set up Docker Buildx
@@ -310,10 +330,13 @@ jobs:
         run: docker compose down -v
 
   # v89 Pipeline Services Smoke Test
+  # DISABLED: docker-compose.pipelines.yml and airflow/dags/ do not exist in
+  # this repo — every step would fail on phantom paths.
   pipeline-smoke:
     name: Pipeline Services Smoke Test
     runs-on: ubuntu-latest
     needs: [test]
+    if: false
     steps:
       - uses: actions/checkout@v7
       - name: Validate docker-compose.pipelines.yml
