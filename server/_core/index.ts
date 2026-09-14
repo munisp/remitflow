@@ -1405,6 +1405,13 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
       startPayoutSettlementSweeper();
       logger.info("[W10/SettlementSweeper] 2-min payout settlement reconciler started");
     }).catch(err => logger.error({ errMsg: err?.message }, "[W10/SettlementSweeper] FAILED to start — executing payouts will NOT auto-settle (manual recon required):"));
+    // BDC integration: quote-expiry (hourly), EOD close 16:05 WAT (snapshot +
+    // expired-NFEM-batch sweep — the non-Temporal net for the 24h rule), and
+    // daily settlement-recon workflow kick. Guarded, non-blocking.
+    import("../services/bdcScheduler.js").then(({ startBdcSchedulers }) => {
+      startBdcSchedulers();
+      logger.info("[BDC] Schedulers registered (quote-expiry, eod-close, settlement-recon)");
+    }).catch(err => logger.error({ errMsg: err?.message }, "[BDC] Scheduler init FAILED — quote expiry/EOD sweep NOT running (manual expireStale/eodClose required):"));
     // Bootstrap OpenSearch indices + stablecoin index templates/ILM (non-blocking; loud failure logging)
     import("../middleware/opensearch").then(({ bootstrapOpenSearch }) =>
       bootstrapOpenSearch()
