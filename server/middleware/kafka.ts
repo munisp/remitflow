@@ -99,6 +99,10 @@ export const KAFKA_TOPICS = {
   KYC_REKYC_REQUIRED: "kyc.rekyc.required",
   // ── Dead Letter Queue — failed consumer messages land here after retries ──
   DLQ: "remitflow.dlq",
+  // ── BDC Operating Platform (SPEC-bdc §5 — append-only, B4) ────────────────
+  BDC_NFEM_ALERTS: "remitflow.bdc.nfem.alerts",
+  BDC_RETURNS_STATUS: "remitflow.bdc.returns.status",
+  BDC_POSITION_BREACH: "remitflow.bdc.position.breach",
 } as const;
 
 export type KafkaTopic = typeof KAFKA_TOPICS[keyof typeof KAFKA_TOPICS];
