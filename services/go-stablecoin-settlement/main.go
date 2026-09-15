@@ -50,8 +50,6 @@ var (
 	tigerBeetleAddr   = getEnv("TIGERBEETLE_ADDR", "localhost:3001")
 	mojaloopURL       = getEnv("MOJALOOP_URL", "http://localhost:4000")
 	openSearchURL     = getEnv("OPENSEARCH_URL", "http://localhost:9200")
-	coreAPIURL        = getEnv("CORE_API_URL", "http://localhost:3000")
-
 	// Provider webhook secrets (loaded from env/Vault)
 	circleWebhookSecret     = getEnv("CIRCLE_WEBHOOK_SECRET", "")
 	yellowCardWebhookSecret = getEnv("YELLOWCARD_WEBHOOK_SECRET", "")
@@ -719,6 +717,50 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, provider, secret stri
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "event_id": eventID})
 }
 
+// ── Settlement Outcome Mapping (fail-closed) ────────────────────────────────
+// Real outcome enum derived from the provider payload. FAIL CLOSED: an unknown
+// or missing provider status maps to "pending" — NEVER "completed". The previous
+// implementation labeled every settlement event "completed" regardless of the
+// actual outcome (stablecoin audit).
+var settlementOutcomeEnum = map[string]string{
+	"complete": "completed", "completed": "completed", "success": "completed",
+	"succeeded": "completed", "confirmed": "completed",
+	"failed": "failed", "failure": "failed", "cancelled": "failed", "canceled": "failed",
+	"refunded": "failed", "expired": "failed", "reversed": "failed", "declined": "failed",
+	"pending": "pending", "awaiting_payment": "pending", "waiting_payment": "pending",
+	"processing": "processing", "initiated": "processing", "in_progress": "processing",
+}
+
+func normalizeSettlementStatus(raw string) string {
+	if outcome, ok := settlementOutcomeEnum[strings.ToLower(strings.TrimSpace(raw))]; ok {
+		return outcome
+	}
+	return "pending" // fail closed — an unrecognized outcome is never treated as settled
+}
+
+// extractProviderStatus reads the real outcome field from each provider's payload.
+func extractProviderStatus(provider string, payload map[string]interface{}) string {
+	switch provider {
+	case "circle":
+		if transfer, ok := payload["transfer"].(map[string]interface{}); ok {
+			if s, ok := transfer["status"].(string); ok {
+				return s
+			}
+		}
+	case "transak":
+		if wd, ok := payload["webhookData"].(map[string]interface{}); ok {
+			if s, ok := wd["status"].(string); ok {
+				return s
+			}
+		}
+	default: // yellow_card, moonpay
+		if s, ok := payload["status"].(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
 func processWebhookEvent(event *WebhookEvent) {
 	// Extract transaction reference from webhook payload
 	payload := event.Payload
@@ -737,31 +779,46 @@ func processWebhookEvent(event *WebhookEvent) {
 		txRef, _ = payload["webhookData"].(map[string]interface{})["id"].(string)
 	}
 
-	if txRef != "" {
-		log.Printf("[Webhook] Updating settlement for tx: %s status: completed", txRef)
-		// Notify core API to update transaction status
-		go notifyCoreAPI(txRef, event.Provider, "completed")
-	}
-}
-
-func notifyCoreAPI(txRef, provider, status string) {
-	payload, _ := json.Marshal(map[string]interface{}{
-		"transactionRef": txRef,
-		"provider":       provider,
-		"status":         status,
-		"updatedAt":      time.Now().UTC().Format(time.RFC3339),
-	})
-
-	req, _ := http.NewRequest("POST", coreAPIURL+"/api/webhooks/settlement-update", strings.NewReader(string(payload)))
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[CoreAPI] Notification failed: %v", err)
+	if txRef == "" {
 		return
 	}
-	defer resp.Body.Close()
+
+	// Map the REAL provider outcome — never assume "completed".
+	rawStatus := extractProviderStatus(event.Provider, payload)
+	status := normalizeSettlementStatus(rawStatus)
+	if rawStatus == "" {
+		log.Printf("[Webhook] tx %s: provider %s payload carried no status field — treated as pending (fail closed)", txRef, event.Provider)
+	}
+
+	// Persist the real outcome onto any matching settlement record (keyed by the
+	// provider's external reference).
+	mu.Lock()
+	updated := false
+	for _, s := range settlements {
+		if s.ExternalRef == txRef {
+			s.Status = status
+			s.Timestamp = time.Now().UTC().Format(time.RFC3339)
+			updated = true
+		}
+	}
+	mu.Unlock()
+
+	// STABLECOIN AUDIT NOTE: the previous implementation POSTed every event to
+	// CORE_API_URL + "/api/webhooks/settlement-update" labeled "completed" —
+	// no such TypeScript receiver route exists in server/. Do NOT re-add an HTTP
+	// push until a real receiver is implemented. Instead, persist the event to
+	// the Kafka outbox topic this engine already uses ("stablecoin_settlement").
+	log.Printf("[Webhook] Settlement outcome: tx=%s provider=%s raw_status=%q mapped_status=%s settlement_record_updated=%v",
+		txRef, event.Provider, rawStatus, status, updated)
+	publishKafkaEvent("stablecoin_settlement", map[string]interface{}{
+		"event_id":                  event.ID,
+		"transaction_ref":           txRef,
+		"provider":                  event.Provider,
+		"status":                    status,
+		"raw_status":                rawStatus,
+		"settlement_record_updated": updated,
+		"updated_at":                time.Now().UTC().Format(time.RFC3339),
+	})
 }
 
 // ── P2P Claim Endpoint ──────────────────────────────────────────────────────

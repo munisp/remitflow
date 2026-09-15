@@ -145,19 +145,31 @@ export async function getLiveStablecoinPrice(symbol: string): Promise<{ price: n
       signal: AbortSignal.timeout(3000),
     });
     if (res.ok) {
-      const data = await res.json() as { price: number; depegged: boolean; source: string };
-      STABLECOIN_PRICE_CACHE.set(symbol, { price: data.price, expiresAt: Date.now() + 60_000 });
-      return data;
+      // Contract: /depeg/check returns { threshold_pct, results: { [symbol]: {...} }, alerts_active }
+      const payload = await res.json() as {
+        results?: Record<string, { price_usd?: number; depegged?: boolean; source?: string }>;
+      };
+      const data = payload.results?.[symbol];
+      if (data && typeof data.price_usd === "number" && Number.isFinite(data.price_usd)) {
+        STABLECOIN_PRICE_CACHE.set(symbol, { price: data.price_usd, expiresAt: Date.now() + 60_000 });
+        return { price: data.price_usd, depegged: data.depegged === true, source: data.source ?? "oracle" };
+      }
+      logger.error({ symbol }, "[StablecoinPrice] De-peg service returned malformed payload — failing CLOSED (depegged)");
+    } else {
+      logger.error({ symbol, status: res.status }, "[StablecoinPrice] De-peg service rejected request — failing CLOSED (depegged)");
     }
   } catch {
-    logger.warn({ symbol }, "[StablecoinPrice] Python de-peg service unavailable");
+    logger.error({ symbol }, "[StablecoinPrice] Python de-peg service unavailable — failing CLOSED (depegged)");
   }
 
+  // FAIL-CLOSED (stablecoin audit): on any oracle fetch/check failure, report the
+  // asset as de-pegged so callers block new onramp/offramp quotes. Never fall back
+  // to a static "healthy" price — that silently passes a failed breaker check.
   const staticPrices: Record<string, number> = {
     USDT: 1.0, USDC: 1.0, BUSD: 1.0, DAI: 1.0, PYUSD: 1.0, NGNT: 1 / 1600, cUSD: 1.0,
   };
   const price = staticPrices[symbol] ?? 1.0;
-  return { price, depegged: false, source: "static" };
+  return { price, depegged: true, source: "unavailable" };
 }
 
 // ── Pessimistic Wallet Debit (Stablecoin) ────────────────────────────────────

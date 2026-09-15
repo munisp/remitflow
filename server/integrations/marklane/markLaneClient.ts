@@ -108,6 +108,8 @@ interface MarkLaneConfig {
 
 const circuitBreaker = new CircuitBreaker("marklane-api", { failureThreshold: 5, resetTimeoutMs: 30_000 });
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
 function getConfig(): MarkLaneConfig {
   return {
     baseUrl: process.env.MARKLANE_API_URL || "https://api.marklane.io/v1",
@@ -126,8 +128,14 @@ async function markLaneRequest<T>(
 ): Promise<T> {
   const config = getConfig();
 
+  // FAIL-CLOSED: In production, a missing API key is a fatal configuration error.
+  // Mock responses (fabricated RF-ML-* references, fake KYC passports, fake nostro
+  // balances) are allowed only outside production, with a loud warning.
   if (!config.apiKey) {
-    logger.warn("Mark Lane API key not configured — using mock response");
+    if (IS_PRODUCTION) {
+      throw new Error("[MarkLane] FAIL-CLOSED: MARKLANE_API_KEY not configured in production — cannot process FX/transfer request");
+    }
+    logger.warn("[MarkLane] MARKLANE_API_KEY not configured — returning mock response (NON-PRODUCTION ONLY). Data is fabricated; do not treat as a real execution.");
     return mockResponse(path) as T;
   }
 

@@ -12,8 +12,14 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { appRouter } from "./routers";
 import type { TrpcContext } from "./_core/context";
+
+// H1 quarantine: these scenarios exercise the v312 stablecoin feature packs
+// (qrPayments/nfcPayments), which are UNMOUNTED by default
+// (STABLECOIN_FEATURE_PACKS_ENABLED, see routers.ts). Opt in for this test
+// module before the router module is evaluated.
+process.env.STABLECOIN_FEATURE_PACKS_ENABLED = "true";
+const { appRouter } = await import("./routers");
 
 // ── Setup ────────────────────────────────────────────────────────────────────
 

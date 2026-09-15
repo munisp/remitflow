@@ -62,8 +62,11 @@ export const getWorkflowStatusQuery = defineQuery<WorkflowStatus>("getStatus");
 interface WorkflowStatus {
   currentStep: string;
   completedSteps: string[];
-  status: "running" | "completed" | "compensating" | "compensated" | "cancelled";
+  // "compensation_partial" (H3 fail-closed hardening): one or more compensation
+  // steps failed — the workflow is NOT fully reversed and needs ops reconciliation.
+  status: "running" | "completed" | "compensating" | "compensated" | "compensation_partial" | "cancelled";
   error?: string;
+  failedCompensations?: Array<{ step: string; error: string }>;
 }
 
 // ── Cross-Border Transfer Workflow ───────────────────────────────────────────
@@ -214,6 +217,7 @@ export async function CrossBorderTransferWorkflow(input: CrossBorderTransferInpu
     status.status = "compensating";
     status.error = err instanceof Error ? err.message : String(err);
 
+    const failedCompensations: Array<{ step: string; error: string }> = [];
     for (let i = compensationStack.length - 1; i >= 0; i--) {
       const comp = compensationStack[i];
       status.currentStep = `compensate:${comp.step}`;
@@ -221,19 +225,36 @@ export async function CrossBorderTransferWorkflow(input: CrossBorderTransferInpu
         await comp.compensate();
       } catch (compErr) {
         // Log but continue compensating other steps
+        const compError = compErr instanceof Error ? compErr.message : String(compErr);
+        failedCompensations.push({ step: comp.step, error: compError });
         await recordAuditLog(input.operationId, "cross_border_send", "compensation_failed", {
           step: comp.step,
-          error: compErr instanceof Error ? compErr.message : String(compErr),
+          error: compError,
         });
       }
     }
 
-    // Publish compensation event
-    await publishKafkaEvent("fund_flow_compensated", { ...input, error: status.error } as unknown as Record<string, unknown>);
+    // H3: publish fail-soft so telemetry never throws into the workflow.
+    if (failedCompensations.length > 0) {
+      // Alert ops: the saga did NOT fully reverse — reconciliation required.
+      try {
+        await publishKafkaEvent("fund_flow_compensation_failed", {
+          ...input,
+          error: status.error,
+          failedCompensations,
+        } as unknown as Record<string, unknown>);
+      } catch { /* telemetry must never block the money path */ }
+      status.failedCompensations = failedCompensations;
+      status.status = "compensation_partial";
+    } else {
+      try {
+        await publishKafkaEvent("fund_flow_compensated", { ...input, error: status.error } as unknown as Record<string, unknown>);
+      } catch { /* telemetry must never block the money path */ }
+      await recordAuditLog(input.operationId, "cross_border_send", "compensated", { error: status.error });
+      status.status = "compensated";
+    }
     await reportCircuitBreakerHealth("cross_border_send", false);
-    await recordAuditLog(input.operationId, "cross_border_send", "compensated", { error: status.error });
 
-    status.status = "compensated";
     throw err;
   }
 }
@@ -310,11 +331,42 @@ export async function AgentCashOutWorkflow(input: AgentCashOutInput): Promise<{ 
   } catch (err) {
     status.status = "compensating";
     status.error = err instanceof Error ? err.message : String(err);
+    // H3: collect per-step compensation results — never swallow a failed reversal.
+    const failedCompensations: Array<{ step: string; error: string }> = [];
     for (let i = compensationStack.length - 1; i >= 0; i--) {
-      try { await compensationStack[i].compensate(); } catch {}
+      const comp = compensationStack[i];
+      status.currentStep = `compensate:${comp.step}`;
+      try {
+        await comp.compensate();
+      } catch (compErr) {
+        const compError = compErr instanceof Error ? compErr.message : String(compErr);
+        failedCompensations.push({ step: comp.step, error: compError });
+        // Log with workflow context, then continue compensating remaining steps.
+        await recordAuditLog(input.operationId, "agent_cash_out", "compensation_failed", {
+          step: comp.step,
+          error: compError,
+          workflowError: status.error,
+        });
+      }
     }
-    await publishKafkaEvent("fund_flow_compensated", { ...input, error: status.error } as unknown as Record<string, unknown>);
-    status.status = "compensated";
+    // H3: publish fail-soft so telemetry never throws into the workflow.
+    if (failedCompensations.length > 0) {
+      // Alert ops: the saga did NOT fully reverse — reconciliation required.
+      try {
+        await publishKafkaEvent("fund_flow_compensation_failed", {
+          ...input,
+          error: status.error,
+          failedCompensations,
+        } as unknown as Record<string, unknown>);
+      } catch { /* telemetry must never block the money path */ }
+      status.failedCompensations = failedCompensations;
+      status.status = "compensation_partial";
+    } else {
+      try {
+        await publishKafkaEvent("fund_flow_compensated", { ...input, error: status.error } as unknown as Record<string, unknown>);
+      } catch { /* telemetry must never block the money path */ }
+      status.status = "compensated";
+    }
     throw err;
   }
 }

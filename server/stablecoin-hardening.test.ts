@@ -376,32 +376,10 @@ describe("Python FX Oracle", () => {
 // 10. UI PARITY
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe("PWA Stablecoin UI", () => {
-  it("Stablecoin.tsx exists", () => {
-    expect(existsSync(join(ROOT, "client/src/pages/Stablecoin.tsx"))).toBe(true);
-  });
-
-  it("has 11 tabs", () => {
-    const content = readFileSync(join(ROOT, "client/src/pages/Stablecoin.tsx"), "utf-8");
-    for (const tab of ["onramp", "offramp", "swap", "send", "yield", "bridge", "dca", "card", "bill", "p2p", "history"]) {
-      expect(content).toContain(`value="${tab}"`);
-    }
-  });
-
-  it("supports all 7 stablecoins", () => {
-    const content = readFileSync(join(ROOT, "client/src/pages/Stablecoin.tsx"), "utf-8");
-    for (const coin of ["USDT", "USDC", "BUSD", "DAI", "NGNT", "cUSD", "PYUSD"]) {
-      expect(content).toContain(coin);
-    }
-  });
-
-  it("supports all 8 fiats", () => {
-    const content = readFileSync(join(ROOT, "client/src/pages/Stablecoin.tsx"), "utf-8");
-    for (const fiat of ["USD", "NGN", "GBP", "EUR", "GHS", "KES", "ZAR", "XOF"]) {
-      expect(content).toContain(fiat);
-    }
-  });
-});
+// H6: the "PWA Stablecoin UI" pinning block was removed — it pinned the dead
+// client/ tree (client/src/pages/Stablecoin.tsx, no package.json; vite root is
+// uis/pwa per vite.config.ts:198-199, publicDir uis/pwa/public). The live PWA
+// page is uis/pwa/src/pages/Stablecoin.tsx.
 
 describe("Flutter Stablecoin UI", () => {
   it("stablecoin_screen.dart exists", () => {

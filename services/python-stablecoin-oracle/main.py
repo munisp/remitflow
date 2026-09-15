@@ -474,14 +474,22 @@ async def get_stablecoin_price(symbol: str) -> StablecoinPrice:
         prices.append(("chainlink", chainlink_price))
 
     if not prices:
-        # Fallback to assumed $1.00 with low confidence
+        # FAIL-CLOSED (stablecoin audit): every oracle fetch failed (exception → None).
+        # Do NOT assume $1.00 and report healthy — that fails open and lets
+        # on-ramp/off-ramp quotes proceed on a fabricated price. Mark the asset as
+        # de-pegged (breaker tripped) with zero confidence so consumers block quotes.
+        logger.error(
+            f"All price oracles unavailable for {symbol} — failing CLOSED "
+            "(reporting depegged=True to block new quotes)"
+        )
+        oracle_metrics["errors"] += 1
         price_result = StablecoinPrice(
             symbol=symbol,
             price_usd=1.0,
-            source="fallback",
+            source="unavailable",
             deviation_from_peg=0.0,
-            depegged=False,
-            confidence=0.5,
+            depegged=True,
+            confidence=0.0,
             fetched_at=now.isoformat(),
         )
     else:
@@ -700,7 +708,10 @@ async def depeg_check(req: DepegCheckRequest):
         results[symbol] = {
             "price_usd": price.price_usd,
             "deviation_pct": price.deviation_from_peg,
-            "depegged": price.deviation_from_peg > (threshold * 100),
+            # FAIL-CLOSED: honor the oracle's depegged flag (set when all price
+            # sources are unavailable) — never recompute "healthy" from a
+            # fabricated 0.0% deviation on a fallback price.
+            "depegged": price.depegged or price.deviation_from_peg > (threshold * 100),
             "source": price.source,
             "confidence": price.confidence,
         }

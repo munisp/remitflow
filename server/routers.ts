@@ -508,6 +508,19 @@ import { vendorBillsRouter, approvalPoliciesRouter } from "./routers/vendorBills
 // after a smoke test. Undocumented env; fail-closed default.
 const LEGACY_PACKS_ENABLED = process.env.LEGACY_FEATURE_PACKS_ENABLED === "true";
 
+// H1 (fail-closed hardening audit): v312 "20 Stablecoin Features (F1–F20)" quarantine.
+// These routers were verified to fabricate executions presented as real:
+//   merchantGateway.ts:181 fabricates a deposit address (0x${randomBytes(20)});
+//   remittanceCorridors.ts:266-288 returns status "completed" with no debit/rail;
+//   platformFeatures.ts:209-216 payroll marks employees "paid" with zero payments;
+//   platformFeatures.ts:529-545 nft_mint returns a fabricated txHash;
+//   platformFeatures.ts:437-462 fabricated insurance policies;
+//   lendingBorrowing.ts / savingsVault.ts positions with no real wallet movement
+//   and swallowed ledger writes.
+// They are UNMOUNTED unless STABLECOIN_FEATURE_PACKS_ENABLED="true" is set after a
+// per-pack audit + smoke test. Undocumented env; fail-closed default.
+const STABLECOIN_FEATURE_PACKS_ENABLED = process.env.STABLECOIN_FEATURE_PACKS_ENABLED === "true";
+
 // ─── W9 Q2: Transaction-PIN KDF ──────────────────────────────────────────────
 // Stored format: `scrypt:v1:<saltHex>:<hashHex>` (scrypt N=16384,r=8,p=1,
 // 32-byte key, 16-byte random salt). Legacy rows are unsalted sha256(pin+userId);
@@ -7848,21 +7861,26 @@ Case: #${input.caseId}`,
   // v311 — Liquidity Provider: quotes, settlements, reserves, rebalancing, admin
   liquidityPool: liquidityPoolRouter,
   // v312 — 20 Stablecoin Features (F1–F20) with polyglot middleware integration
-  programmablePayments: programmablePaymentsRouter,
+  // ─── H1 QUARANTINE (fail-closed hardening audit) ──────────────────────────
+  // Verified fabrications (fabricated deposit addresses, "completed" statuses with
+  // no debit/rail, fabricated txHashes/policies, swallowed ledger writes) — see the
+  // STABLECOIN_FEATURE_PACKS_ENABLED declaration above for file:line citations.
+  // Modules retained but UNMOUNTED unless explicitly re-enabled after per-pack audit.
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { programmablePayments: programmablePaymentsRouter } : {}),
   crossCurrencySwap: crossCurrencySwapRouter,
-  merchantGateway: merchantGatewayRouter,
-  batchPayouts: batchPayoutsRouter,
-  accountAbstraction: accountAbstractionRouter,
-  lendingBorrowing: lendingBorrowingRouter,
-  invoicesAndSubscriptions: invoicesAndSubscriptionsRouter,
-  savingsVault: savingsVaultRouter,
-  remittanceCorridors: remittanceCorridorsRouter,
-  platformFeatures: platformFeaturesRouter,
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { merchantGateway: merchantGatewayRouter } : {}),
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { batchPayouts: batchPayoutsRouter } : {}),
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { accountAbstraction: accountAbstractionRouter } : {}),
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { lendingBorrowing: lendingBorrowingRouter } : {}),
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { invoicesAndSubscriptions: invoicesAndSubscriptionsRouter } : {}),
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { savingsVault: savingsVaultRouter } : {}),
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { remittanceCorridors: remittanceCorridorsRouter } : {}),
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { platformFeatures: platformFeaturesRouter } : {}),
   platformV4: platformV4Router,
   platformV5: platformV5Router,
   // QR & NFC Payment Systems
-  qrPayments: qrPaymentsRouter,
-  nfcPayments: nfcPaymentsRouter,
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { qrPayments: qrPaymentsRouter } : {}),
+  ...(STABLECOIN_FEATURE_PACKS_ENABLED ? { nfcPayments: nfcPaymentsRouter } : {}),
   // Mark Lane Integration (Canadian FX Partner)
   markLane: markLaneRouter,
   // Admin Dashboard (compliance ops, transaction investigation, KYC review)
