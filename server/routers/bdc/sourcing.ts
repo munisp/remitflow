@@ -341,6 +341,14 @@ export const bdcSourcingRouter = router({
       z.object({
         batchId: z.number().int().positive(),
         fxbtReference: z.string().max(64).optional(),
+        // wave12 G5: actual amount the bank disbursed (major units). Absent →
+        // full disbursement (unchanged path). Present and < requested →
+        // partial fill: entitlement is consumed by the ACTUAL amount, the
+        // residual is returned (postNfemReturn legs, nfem-residual key) and
+        // the batch closes as 'part_filled'. Must be ≤ the requested amount
+        // (validated against the batch row inside the transaction — a refine
+        // cannot see the persisted requested amount).
+        actualDisbursedUsd: z.number().positive().optional(),
         totpCode: z.string().optional(),
       }),
     )
@@ -378,16 +386,65 @@ export const bdcSourcingRouter = router({
             message: `Batch is '${batchRow.status}' — only 'requested' batches can be funding-confirmed`,
           });
         }
-        const selling = (await tx.execute(sql`
-          UPDATE bdc_nfem_purchase_batches
-          SET status = 'selling', updated_at = NOW()
-          WHERE id = ${input.batchId} AND tenant_id = ${tenantId} AND status = 'funded'
-          RETURNING id
-        `)) as unknown as Array<{ id: number }>;
-        if (selling.length !== 1) {
-          throw new TRPCError({ code: "CONFLICT", message: "NFEM funding flip failed — retry" });
-        }
         const batch = batchRow;
+
+        // wave12 G5 partial disbursement: actual < requested → the batch
+        // closes as 'part_filled' (11 chars — fits the varchar(12) status
+        // column) with the residual marked returned. actual == requested (or
+        // absent) keeps the full 'selling' path unchanged.
+        const requestedCents = toCents(batch.amountUsd);
+        const actualCents = input.actualDisbursedUsd !== undefined ? toCents(input.actualDisbursedUsd) : requestedCents;
+        if (actualCents > requestedCents) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `actualDisbursedUsd (${input.actualDisbursedUsd}) exceeds the requested batch amount (${batch.amountUsd})`,
+          });
+        }
+        const residualCents = requestedCents - actualCents;
+        const isPartial = residualCents > 0;
+
+        if (isPartial) {
+          const flipped = (await tx.execute(sql`
+            UPDATE bdc_nfem_purchase_batches
+            SET status = 'part_filled', actual_disbursed_usd = ${centsToMajor(actualCents)}::numeric,
+                residual_handling = 'returned', updated_at = NOW()
+            WHERE id = ${input.batchId} AND tenant_id = ${tenantId} AND status = 'funded'
+            RETURNING id
+          `)) as unknown as Array<{ id: number }>;
+          if (flipped.length !== 1) {
+            throw new TRPCError({ code: "CONFLICT", message: "NFEM funding flip failed — retry" });
+          }
+
+          // Entitlement consumption = ACTUAL amount: requestNfemPurchase
+          // consumed the requested amount via the guarded UPDATE, so release
+          // the residual here (guarded: used_usd can never go below 0).
+          if (batch.entitlementId != null) {
+            const released = (await tx.execute(sql`
+              UPDATE bdc_nfem_entitlements
+              SET used_usd = used_usd - ${centsToMajor(residualCents)}::numeric, version = version + 1, updated_at = NOW()
+              WHERE id = ${batch.entitlementId}
+                AND tenant_id = ${tenantId}
+                AND used_usd - ${centsToMajor(residualCents)}::numeric >= 0
+              RETURNING id
+            `)) as unknown as Array<{ id: number }>;
+            if (released.length !== 1) {
+              throw new TRPCError({
+                code: "CONFLICT",
+                message: "Entitlement residual release failed (used_usd guard) — retry",
+              });
+            }
+          }
+        } else {
+          const selling = (await tx.execute(sql`
+            UPDATE bdc_nfem_purchase_batches
+            SET status = 'selling', updated_at = NOW()
+            WHERE id = ${input.batchId} AND tenant_id = ${tenantId} AND status = 'funded'
+            RETURNING id
+          `)) as unknown as Array<{ id: number }>;
+          if (selling.length !== 1) {
+            throw new TRPCError({ code: "CONFLICT", message: "NFEM funding flip failed — retry" });
+          }
+        }
 
         // 2. TB posting: DR FX_INVENTORY_USD / CR BANK_NGN (posted legs).
         //    Tenant-scoped deterministic key (F2) — batch ids are identity
@@ -431,20 +488,58 @@ export const bdcSourcingRouter = router({
           bdcTransactionId: txn.id,
         });
 
+        // 5. wave12 G5: residual return legs for a partial fill. The purchase
+        //    legs above booked the full requested amount (the naira was paid
+        //    in full at request time); the bank disbursed only the actual
+        //    amount, so the residual USD leaves inventory and the residual
+        //    naira returns via postNfemReturn — deterministic key
+        //    `nfem-residual:${tenantId}:${batchId}` (replay-safe; distinct
+        //    from markBatchReturned's `nfem-return:` key). Fail-closed like
+        //    the purchase legs: a TB failure rolls this transaction back and
+        //    the whole confirmation can be retried idempotently.
+        let residualLegs: Awaited<ReturnType<typeof postNfemReturn>> = [];
+        let residualKey: string | null = null;
+        if (isPartial) {
+          residualKey = `nfem-residual:${tenantId}:${batch.id}`;
+          const rateKobo = BigInt(toCents(batch.rate));
+          const residualNairaKobo = (BigInt(residualCents) * rateKobo + 50n) / 100n;
+          residualLegs = await postNfemReturn({
+            tenantId,
+            idempotencyKey: residualKey,
+            amountUsdMinor: BigInt(residualCents),
+            nairaReturnedMinor: residualNairaKobo,
+          });
+          // PG mirror for the residual legs in the SAME transaction.
+          await mirrorLegsToPg(tx, residualLegs, {
+            reference: residualKey,
+            type: "bdc_nfem_residual_return",
+            tenantId,
+            bdcTransactionId: txn.id,
+          });
+        }
+
         // Start the 24h lifecycle workflow AFTER the money transaction commits.
         // Fail-soft: a Temporal outage never blocks funding confirmation — the
         // eodClose sweep is the safety net for expired batches (honest WARN).
+        // Partial fills do NOT enter 'selling' — no lifecycle workflow is
+        // started for them (the residual is already returned; the status is
+        // the honest terminal 'part_filled').
         const result = {
-          status: "selling" as const,
+          status: (isPartial ? "part_filled" : "selling") as "part_filled" | "selling",
           batchId: batch.id,
           deadlineAt: batch.deadlineAt,
+          actualDisbursedUsd: isPartial ? centsToMajor(actualCents) : null as string | null,
+          residualUsd: isPartial ? centsToMajor(residualCents) : null as string | null,
           tbTransferIds: legs,
+          residualTbTransferIds: residualLegs,
           temporalWorkflowId: null as string | null,
         };
         return result;
       });
 
-      try {
+      // wave12 G5: only 'selling' batches get the 24h lifecycle workflow —
+      // a 'part_filled' batch is terminal (residual returned), nothing sweeps it.
+      if (result.status === "selling") try {
         const { startBdcNfemBatchLifecycle } = await import("../../temporal/workflows-bdc.js");
         const started = await startBdcNfemBatchLifecycle(result.batchId);
         if (started) {

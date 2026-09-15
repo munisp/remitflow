@@ -16,11 +16,13 @@
  * numeric(18,2) value to integer cents for exact arithmetic.
  */
 import { TRPCError } from "@trpc/server";
-import { and, eq, ne } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import {
   bdcBranches,
   bdcFranchisees,
   bdcOperatorProfiles,
+  bdcRescreeningResults,
+  bdcTenantOffboardings,
   type BdcBranch,
   type BdcOperatorProfile,
 } from "../../../drizzle/schema";
@@ -82,6 +84,10 @@ export async function getBdcProfile(
       message: "BDC operator profile not configured",
     });
   }
+  // wave12 G7 (ORCH wiring): tenant choke point — BDC procedures resolve
+  // their profile through here, so a COMPLETED offboarding blocks operations.
+  // Documented exception: bdc/reversals.ts (unwind path — see its header).
+  await assertTenantActive(db, tenantId);
   return profile;
 }
 
@@ -227,4 +233,59 @@ export function weekStartUTC(d: Date): string {
     Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - sinceMonday),
   );
   return monday.toISOString().slice(0, 10);
+}
+
+/**
+ * wave12 G3 (B3): sale-path rescreening gate. Reads the LATEST
+ * bdc_rescreening_results row for this tenant+customer (append-only table);
+ * if that row is blocked=true the customer was matched by periodic sanctions
+ * rescreening and every money path must fail closed until an MLRO review
+ * produces a newer non-blocked row. Never screened → allowed (onboarding
+ * screening remains the gate; verdict='error' rows are never blocked).
+ * Throws PRECONDITION_FAILED when blocked.
+ */
+export async function assertCustomerNotRescreenBlocked(
+  db: any,
+  tenantId: number,
+  customerId: number,
+): Promise<void> {
+  const rows = await db
+    .select({ id: bdcRescreeningResults.id, blocked: bdcRescreeningResults.blocked })
+    .from(bdcRescreeningResults)
+    .where(and(
+      eq(bdcRescreeningResults.tenantId, tenantId),
+      eq(bdcRescreeningResults.customerId, customerId),
+    ))
+    .orderBy(desc(bdcRescreeningResults.id))
+    .limit(1);
+  const latest = rows[0] as { id: number; blocked: boolean } | undefined;
+  if (latest?.blocked) {
+    logger.warn(
+      { tenantId, customerId, rescreeningResultId: latest.id },
+      "[BDC] Sale blocked — customer blocked by sanctions rescreening (MLRO review required)",
+    );
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "customer blocked by sanctions rescreening — MLRO review required",
+    });
+  }
+}
+
+// ─── wave12 G7 (B6) — tenant offboarding choke-point helper ──────────────────
+// Throws PRECONDITION_FAILED "tenant offboarded" when a COMPLETED offboarding
+// exists for the tenant (SPEC-wave12 §4.7). Only 'completed' is terminal and
+// operation-blocking: requested/in_progress/blocked tenants may still trade
+// (their blockers are being unwound).
+export async function assertTenantActive(db: any, tenantId: number): Promise<void> {
+  const rows = await db
+    .select({ id: bdcTenantOffboardings.id })
+    .from(bdcTenantOffboardings)
+    .where(and(eq(bdcTenantOffboardings.tenantId, tenantId), eq(bdcTenantOffboardings.status, "completed")))
+    .limit(1);
+  if (rows.length > 0) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "tenant offboarded",
+    });
+  }
 }

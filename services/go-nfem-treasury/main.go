@@ -394,6 +394,12 @@ type liquidateRequest struct {
 	TenantID int64  `json:"tenantId"`
 	BatchID  int64  `json:"batchId"`
 	Mode     string `json:"mode"` // "market" | "return"
+	// DisbursedUSD (wave12 G5): the amount the bank actually disbursed, major
+	// units. Pointer so an ABSENT field (full disbursement — unchanged path)
+	// is distinguishable from an explicit non-positive value (rejected 400).
+	// Present and < batch amount → partial: batch closes 'part_filled' with
+	// actual_disbursed_usd recorded and residual_handling='returned'.
+	DisbursedUSD *float64 `json:"disbursedUsd,omitempty"`
 }
 
 // liquidationTarget maps a liquidation mode to its terminal batch status.
@@ -422,6 +428,40 @@ func buildLiquidationUpdate(mode string) string {
 	return `UPDATE bdc_nfem_purchase_batches
 	       SET status = '` + target + `', updated_at = now()
 	       WHERE id = $1 AND tenant_id = $2 AND status = 'selling'`
+}
+
+// buildPartialLiquidationUpdate returns the guarded UPDATE for a partial
+// disbursement (wave12 G5): the batch closes 'part_filled' (11 chars — MUST
+// fit the existing varchar(12) status column; the column is NOT altered) with
+// the actual disbursed amount recorded and the residual marked 'returned'.
+// Same tenant predicate ($2 — F12) and single-winner 'selling' guard.
+func buildPartialLiquidationUpdate() string {
+	return `UPDATE bdc_nfem_purchase_batches
+	       SET status = 'part_filled', actual_disbursed_usd = $3, residual_handling = 'returned',
+	           liquidated_at = now(), updated_at = now()
+	       WHERE id = $1 AND tenant_id = $2 AND status = 'selling'`
+}
+
+// classifyDisbursement validates the optional disbursedUsd against the batch
+// amount (both major units). Returns (actual, isPartial, errMsg):
+//   - nil / == amount → full disbursement (isPartial=false, no error)
+//   - 0 < d < amount  → partial fill
+//   - d <= 0 or d > amount → errMsg for a 400 response
+func classifyDisbursement(disbursed *float64, batchAmount float64) (actual float64, partial bool, errMsg string) {
+	if disbursed == nil {
+		return 0, false, ""
+	}
+	d := round2(*disbursed)
+	if d <= 0 {
+		return 0, false, "disbursedUsd must be > 0"
+	}
+	if d > round2(batchAmount) {
+		return 0, false, "disbursedUsd exceeds the batch amount"
+	}
+	if d == round2(batchAmount) {
+		return 0, false, "" // exact amount → full disbursement
+	}
+	return d, true, ""
 }
 
 func handleLiquidate(w http.ResponseWriter, r *http.Request) {
@@ -473,9 +513,22 @@ func handleLiquidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// wave12 G5: optional partial disbursement. Validated against the
+	// persisted batch amount — > amount or <= 0 is a client error (400).
+	actualUSD, isPartial, dErr := classifyDisbursement(req.DisbursedUSD, amountUSD)
+	if dErr != "" {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", dErr)
+		return
+	}
+
 	// Guarded single-winner claim (SPEC-bdc §0.5b) with the tenant predicate
 	// (F12): the UPDATE can never land on another tenant's batch.
-	res, err := db.ExecContext(r.Context(), buildLiquidationUpdate(req.Mode), req.BatchID, req.TenantID)
+	var res sql.Result
+	if isPartial {
+		res, err = db.ExecContext(r.Context(), buildPartialLiquidationUpdate(), req.BatchID, req.TenantID, actualUSD)
+	} else {
+		res, err = db.ExecContext(r.Context(), buildLiquidationUpdate(req.Mode), req.BatchID, req.TenantID)
+	}
 	if err != nil {
 		log.Printf("[nfem-treasury] liquidation update error: %v", err)
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", "liquidation update failed")
@@ -500,7 +553,8 @@ func handleLiquidate(w http.ResponseWriter, r *http.Request) {
 		note = "Return the unsold FX to the issuing bank. The naira return leg must be recorded " +
 			"by the core ledger; this service performed no bank-side execution."
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	disbursedUSD := round2(amountUSD)
+	resp := map[string]any{
 		"batchId":  req.BatchID,
 		"tenantId": tenantID,
 		"mode":     req.Mode,
@@ -515,7 +569,21 @@ func handleLiquidate(w http.ResponseWriter, r *http.Request) {
 		},
 		"externalExecution": "operator_attested",
 		"simulated":         false,
-	})
+	}
+	if isPartial {
+		// wave12 G5 partial fill: honest terminal 'part_filled' (11 chars,
+		// fits varchar(12)); the residual returns to the funding bank.
+		target = "part_filled"
+		disbursedUSD = actualUSD
+		resp["status"] = target
+		resp["actualDisbursedUsd"] = actualUSD
+		resp["residualUsd"] = round2(amountUSD - actualUSD)
+		resp["residualHandling"] = "returned"
+		resp["instruction"].(map[string]any)["note"] = note +
+			" PARTIAL FILL: the bank disbursed less than requested; only the actual amount is in scope, the residual is returned."
+	}
+	resp["disbursedUsd"] = disbursedUSD
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func nullTimePtr(t sql.NullTime) *time.Time {

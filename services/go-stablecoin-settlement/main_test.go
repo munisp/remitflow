@@ -107,3 +107,54 @@ func TestCallCirclePayout_FailClosed(t *testing.T) {
 		t.Fatal("simulated payout allowed in production")
 	}
 }
+
+// ── Wave12: refund action honesty ────────────────────────────────────────────
+
+// Refund against an unknown original operation is NOT_FOUND, never success.
+func TestExecuteRefund_UnknownOperationRejected(t *testing.T) {
+	mu.Lock()
+	settlements = make(map[string]*SettlementResult)
+	mu.Unlock()
+	_, err := executeRefund(SettlementRequest{
+		OperationID: "ref-1",
+		Provider:    "circle",
+		Action:      "refund",
+		Payload: map[string]interface{}{
+			"original_operation_id": "ghost-op",
+			"amount":                10.0,
+			"currency":              "USD",
+		},
+	}, "circle")
+	if err == nil || !strings.Contains(err.Error(), "NOT_FOUND") {
+		t.Fatalf("refund against unknown op: err=%v", err)
+	}
+}
+
+// Refund of a known operation is an honest NOT_SUPPORTED (no provider client
+// wires a refund path) — never a fabricated successful refund.
+func TestExecuteRefund_HonestNotSupported(t *testing.T) {
+	mu.Lock()
+	settlements = make(map[string]*SettlementResult)
+	settlements["op-9"] = &SettlementResult{OperationID: "op-9", Provider: "circle", Status: "submitted"}
+	mu.Unlock()
+	_, err := executeRefund(SettlementRequest{
+		OperationID: "ref-2",
+		Provider:    "circle",
+		Action:      "refund",
+		Payload:     map[string]interface{}{"original_operation_id": "op-9", "amount": 10.0, "currency": "USD"},
+	}, "circle")
+	if err == nil || !strings.Contains(err.Error(), "NOT_SUPPORTED") {
+		t.Fatalf("expected NOT_SUPPORTED, got %v", err)
+	}
+}
+
+// Missing original_operation_id is an invalid request.
+func TestExecuteRefund_RequiresOriginalOperation(t *testing.T) {
+	_, err := executeRefund(SettlementRequest{
+		OperationID: "ref-3", Provider: "circle", Action: "refund",
+		Payload: map[string]interface{}{"amount": 1.0},
+	}, "circle")
+	if err == nil || !strings.Contains(err.Error(), "INVALID_REQUEST") {
+		t.Fatalf("expected INVALID_REQUEST, got %v", err)
+	}
+}

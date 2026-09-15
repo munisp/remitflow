@@ -20,7 +20,6 @@
 
 // Re-export domain routers for incremental migration
 export { featureFlagsRouter, tenantsRouter, whiteLabelRouter } from "../routers/featureFlags";
-export { apiChangelogRouter } from "../routers/apiChangelogRouter";
 export {
   bnplRouter, travelRuleRouter, agentNetworkRouter, corridorAnalyticsRouter,
   referralEngineRouter, whiteLabelPreviewRouter, familyEnhancedRouter,

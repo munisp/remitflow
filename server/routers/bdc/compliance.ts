@@ -489,3 +489,130 @@ export const bdcComplianceRouter = router({
       return { strs, nextCursor: hasMore ? strs[strs.length - 1]?.id ?? null : null };
     }),
 });
+
+// ─── wave12 G6 structuring (B6) — rolling 7d/30d aggregation ────────────────
+
+/** SPEC-wave12 §4.6 thresholds (USD): 7-day ≥ $10,000 or 30-day ≥ $50,000. */
+export const STRUCTURING_THRESHOLD_7D_USD = 10_000;
+export const STRUCTURING_THRESHOLD_30D_USD = 50_000;
+
+// ORCH adds a KAFKA_TOPICS constant at merge; publish the literal topic here.
+const BDC_STRUCTURING_ALERTS_TOPIC = "remitflow.bdc.structuring.alerts";
+
+export interface RollingThresholdResult {
+  block: boolean;
+  reason?: string;
+  totals: { d7: number; d30: number };
+}
+
+/**
+ * checkRollingThresholds (SPEC-wave12 §4.6) — multi-day structuring guard.
+ * Exported helper; ORCH wires the call into the sale path (sales.ts buyFx /
+ * sellFx) at merge — callers block with PRECONDITION_FAILED when
+ * `{block:true, reason:'sof_required'}`.
+ *
+ * Sums fx_amount over bdc_transactions for (tenant_id, customer_id) with
+ * txn_type IN ('buy_fx','sell_fx') and status NOT IN ('failed','reversed')
+ * in rolling 7-day and 30-day windows, INCLUDING the pending trade amount
+ * (newAmountUsd). If a window total meets its threshold and there is NO
+ * approved bdc_sof_declarations row on file for the customer:
+ *   - upsert bdc_structuring_alerts (ON CONFLICT on the unique
+ *     (tenant_id, customer_id, window_days, window_start) key UPDATE
+ *     totals/txn_count — repeat detections refresh the same alert row),
+ *   - publish a Kafka alert on INSERT only (fail-soft telemetry, §0.5),
+ *   - return {block:true, reason:'sof_required', totals}.
+ * Fail-closed: a DB outage throws (requireDb) — the sale must not proceed
+ * unchecked.
+ */
+export async function checkRollingThresholds(
+  tenantId: number,
+  customerId: number,
+  newAmountUsd: number,
+): Promise<RollingThresholdResult> {
+  const db = await requireDb();
+  const { publishEvent } = await import("../../middleware/kafka");
+
+  const [sums] = (await db.execute(sql`
+    SELECT
+      COALESCE(SUM(fx_amount) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days'), 0)::text  AS "sum7",
+      COUNT(*)        FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')::int               AS "count7",
+      COALESCE(SUM(fx_amount) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days'), 0)::text AS "sum30",
+      COUNT(*)        FILTER (WHERE created_at >= NOW() - INTERVAL '30 days')::int              AS "count30",
+      (CURRENT_DATE - INTERVAL '7 days')::date::text  AS "windowStart7",
+      (CURRENT_DATE - INTERVAL '30 days')::date::text AS "windowStart30"
+    FROM bdc_transactions
+    WHERE tenant_id = ${tenantId}
+      AND customer_id = ${customerId}
+      AND txn_type IN ('buy_fx', 'sell_fx')
+      AND status NOT IN ('failed', 'reversed')
+      AND created_at >= NOW() - INTERVAL '30 days'
+  `)) as unknown as Array<{
+    sum7: string; count7: number; sum30: string; count30: number;
+    windowStart7: string; windowStart30: string;
+  }>;
+
+  const d7 = Number(sums?.sum7 ?? 0) + newAmountUsd;
+  const d30 = Number(sums?.sum30 ?? 0) + newAmountUsd;
+  const totals = { d7, d30 };
+
+  const breach7 = d7 >= STRUCTURING_THRESHOLD_7D_USD;
+  const breach30 = d30 >= STRUCTURING_THRESHOLD_30D_USD;
+  if (!breach7 && !breach30) {
+    return { block: false, totals };
+  }
+
+  // Approved source-of-funds declaration on file clears the block (alert
+  // rows are NOT written for declared funds).
+  const sof = (await db.execute(sql`
+    SELECT id FROM bdc_sof_declarations
+    WHERE tenant_id = ${tenantId} AND customer_id = ${customerId} AND status = 'approved'
+    LIMIT 1
+  `)) as unknown as Array<{ id: number }>;
+  if (sof.length > 0) {
+    return { block: false, totals };
+  }
+
+  // Upsert one alert per breached window. (xmax = 0) distinguishes a fresh
+  // INSERT from a conflict UPDATE so the Kafka alert fires only once per
+  // (tenant, customer, window) detection.
+  const windows: Array<{ days: 7 | 30; total: number; count: number; start: string }> = [];
+  if (breach7) windows.push({ days: 7, total: d7, count: (sums?.count7 ?? 0) + 1, start: sums?.windowStart7 ?? "" });
+  if (breach30) windows.push({ days: 30, total: d30, count: (sums?.count30 ?? 0) + 1, start: sums?.windowStart30 ?? "" });
+
+  for (const w of windows) {
+    const upserted = (await db.execute(sql`
+      INSERT INTO bdc_structuring_alerts
+        (tenant_id, customer_id, window_days, window_start, total_usd, txn_count, disposition)
+      VALUES
+        (${tenantId}, ${customerId}, ${w.days}, ${w.start}::date, ${w.total.toFixed(2)}, ${w.count}, 'sof_required')
+      ON CONFLICT (tenant_id, customer_id, window_days, window_start)
+      DO UPDATE SET total_usd = EXCLUDED.total_usd, txn_count = EXCLUDED.txn_count, updated_at = NOW()
+      RETURNING id, (xmax = 0) AS "inserted"
+    `)) as unknown as Array<{ id: number; inserted: boolean }>;
+
+    const row = upserted[0];
+    if (row?.inserted) {
+      await publishEvent(BDC_STRUCTURING_ALERTS_TOPIC, `bdc-structuring:${tenantId}:${customerId}:${w.days}:${w.start}`, {
+        eventType: "bdc.structuring.alert",
+        alertId: row.id,
+        tenantId,
+        customerId,
+        windowDays: w.days,
+        windowStart: w.start,
+        totalUsd: w.total.toFixed(2),
+        txnCount: w.count,
+        thresholdUsd: w.days === 7 ? STRUCTURING_THRESHOLD_7D_USD : STRUCTURING_THRESHOLD_30D_USD,
+        reason: "sof_required",
+        timestamp: new Date().toISOString(),
+      }).catch((err: unknown) =>
+        logger.warn({ err: err instanceof Error ? err.message : String(err), tenantId, customerId }, "[BDC] structuring alert publish failed (alert row persisted — non-critical)"),
+      );
+    }
+  }
+
+  logger.warn(
+    { tenantId, customerId, d7, d30, breach7, breach30 },
+    "[BDC] rolling structuring threshold breached without approved SoF — blocking sale (sof_required)",
+  );
+  return { block: true, reason: "sof_required", totals };
+}

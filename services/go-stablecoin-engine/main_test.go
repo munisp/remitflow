@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -139,5 +140,92 @@ func TestOnRampRoute_FailClosed(t *testing.T) {
 	}
 	if strings.Contains(w2.Body.String(), "tx_hash") {
 		t.Fatal("fabricated tx_hash in response")
+	}
+}
+
+// ── Wave12: quotes + fx-rates pair query ─────────────────────────────────────
+
+// On-ramp quote mirrors the execution conversion math and carries no ids.
+func TestComputeOnRampQuote(t *testing.T) {
+	q := computeOnRampQuote(OnRampQuoteRequest{
+		FiatCurrency: "NGN", FiatAmount: 160000, Stablecoin: "USDC",
+	})
+	// 160000 NGN * (1/1600 USD/NGN) = 100 USD = 100 USDC.
+	if q.StablecoinAmount != 100 {
+		t.Fatalf("stablecoinAmount = %v, want 100", q.StablecoinAmount)
+	}
+	if q.Fee != 800 { // 0.5% of 160000
+		t.Fatalf("fee = %v, want 800", q.Fee)
+	}
+	if q.FiatAmount != 160000 || q.EstimatedTime != "instant" {
+		t.Fatalf("unexpected quote: %+v", q)
+	}
+	if time.Until(q.ExpiresAt) <= 0 || time.Until(q.ExpiresAt) > quoteTTL {
+		t.Fatalf("expiresAt outside quote TTL: %v", q.ExpiresAt)
+	}
+}
+
+// Off-ramp quote nets out the 0.75% fee and uses the shared rail estimates.
+func TestComputeOffRampQuote(t *testing.T) {
+	q := computeOffRampQuote(OffRampQuoteRequest{
+		Stablecoin: "USDC", StablecoinAmount: 100, FiatCurrency: "NGN", PayoutRail: "mobile_money",
+	})
+	// 100 USDC = 100 USD * 1600 = 160000 NGN gross; fee 1200; net 158800.
+	if q.Fee != 1200 || q.FiatAmount != 158800 {
+		t.Fatalf("fee/net = %v/%v, want 1200/158800", q.Fee, q.FiatAmount)
+	}
+	if q.EstimatedTime != "instant" {
+		t.Fatalf("estimatedTime = %q, want instant", q.EstimatedTime)
+	}
+	// Unknown rail estimate is empty, never invented.
+	q2 := computeOffRampQuote(OffRampQuoteRequest{
+		Stablecoin: "USDC", StablecoinAmount: 1, FiatCurrency: "USD", PayoutRail: "carrier_pigeon",
+	})
+	if q2.EstimatedTime != "" {
+		t.Fatalf("unknown rail got fabricated estimate %q", q2.EstimatedTime)
+	}
+}
+
+// ?from=&to= returns one rate; unknown currency fails closed (400, no 1.0).
+func TestFXRatesPairQuery(t *testing.T) {
+	r := gin.New()
+	r.GET("/stablecoin/fx-rates", func(c *gin.Context) {
+		from, to := c.Query("from"), c.Query("to")
+		if from != "" && to != "" {
+			fromRate, ok1 := fallbackRates[strings.ToUpper(from)]
+			toRate, ok2 := fallbackRates[strings.ToUpper(to)]
+			if !ok1 || !ok2 {
+				c.JSON(400, gin.H{"error": "unsupported currency pair"})
+				return
+			}
+			c.JSON(200, gin.H{"from": strings.ToUpper(from), "to": strings.ToUpper(to), "rate": toRate / fromRate})
+			return
+		}
+		c.JSON(200, FXRate{Base: "USD", Rates: fallbackRates, Timestamp: time.Now()})
+	})
+
+	req := httptest.NewRequest("GET", "/stablecoin/fx-rates?from=ngn&to=usd", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("pair query got %d", w.Code)
+	}
+	var out struct {
+		From string  `json:"from"`
+		To   string  `json:"to"`
+		Rate float64 `json:"rate"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.From != "NGN" || out.To != "USD" || out.Rate != 1.0/1600.0 {
+		t.Fatalf("bad pair rate: %+v", out)
+	}
+
+	req2 := httptest.NewRequest("GET", "/stablecoin/fx-rates?from=XXX&to=USD", nil)
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != 400 {
+		t.Fatalf("unknown currency not rejected: %d", w2.Code)
 	}
 }

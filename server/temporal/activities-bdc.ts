@@ -114,6 +114,8 @@ export interface BdcActivities {
   submitReturnActivity(returnId: number): Promise<BdcReturnSubmitOutcome>;
   publishReturnAckTimeoutAlert(returnId: number): Promise<BdcAckTimeoutCheck>;
   reconcileActivity(imtoCode: string, period: string): Promise<BdcReconReport>;
+  /** wave12 G7 (B6): tenant offboarding blocker evaluation. */
+  evaluateOffboardingBlockers(tenantId: number): Promise<BdcOffboardingOutcome>;
 }
 
 // ─── NFEM batch activities ───────────────────────────────────────────────────
@@ -535,6 +537,171 @@ export async function reconcileActivity(imtoCode: string, period: string): Promi
   return report;
 }
 
+// ─── wave12 G7 tenant offboarding activity (B6) ──────────────────────────────
+
+export interface BdcOffboardingBlocker {
+  type: "non_zero_position" | "open_nfem_batches" | "unsettled_imto_payouts" | "open_regulatory_returns";
+  count: number;
+  detail: string;
+  ids?: number[];
+}
+
+export interface BdcOffboardingOutcome {
+  tenantId: number;
+  status: "completed" | "blocked" | "already_terminal" | "cancelled";
+  blockers: BdcOffboardingBlocker[];
+}
+
+/**
+ * Evaluate a tenant's offboarding blockers and settle the offboarding record
+ * (SPEC-wave12 §4.7):
+ *   1. Guarded single-winner claim requested|blocked → in_progress (a
+ *      concurrent cancelOffboarding removes the row → non-retryable).
+ *   2. Blockers (ALL honestly evaluated, all written to blockers jsonb):
+ *      - non-zero position via computePosition (the same TB-balance source
+ *        positionNow/eodClose use — never estimated). FAIL CLOSED: if the
+ *        position cannot be computed (TB/rate outage), that itself is a
+ *        blocker — a tenant is never completed blind.
+ *      - open NFEM batches (status NOT IN ('returned','liquidated','settled'))
+ *      - unsettled IMTO payouts (bdc_transactions txn_type='imto_payout'
+ *        AND status IN ('pending','posted'))
+ *      - open regulatory returns (status NOT IN ('acknowledged','accepted'))
+ *   3. Empty blockers → guarded flip in_progress → completed (+completed_at);
+ *      else → in_progress → blocked with the honest blocker list.
+ */
+export async function evaluateOffboardingBlockers(tenantId: number): Promise<BdcOffboardingOutcome> {
+  const { getDb } = await import("../db.js");
+  const { sql } = await import("drizzle-orm");
+  const { logger } = await import("../_core/logger.js");
+  const db = await getDb();
+  if (!db) throw new Error("[BDC] Database unavailable — evaluateOffboardingBlockers failing closed");
+
+  const existing = (await db.execute(sql`
+    SELECT id, status FROM bdc_tenant_offboardings WHERE tenant_id = ${tenantId} LIMIT 1
+  `)) as unknown as Array<{ id: number; status: string }>;
+  if (existing.length === 0) {
+    throw new BdcNonRetryableError(`[BDC] no offboarding record for tenant ${tenantId} — request offboarding first`);
+  }
+  if (existing[0].status === "completed") {
+    return { tenantId, status: "already_terminal", blockers: [] };
+  }
+
+  // Guarded single-winner claim → in_progress.
+  const claimed = (await db.execute(sql`
+    UPDATE bdc_tenant_offboardings
+    SET status = 'in_progress', updated_at = NOW()
+    WHERE tenant_id = ${tenantId} AND status IN ('requested', 'blocked', 'in_progress')
+    RETURNING id
+  `)) as unknown as Array<{ id: number }>;
+  if (claimed.length === 0) {
+    // Row disappeared mid-flight → cancelOffboarding won. Honest no-op.
+    return { tenantId, status: "cancelled", blockers: [] };
+  }
+
+  const blockers: BdcOffboardingBlocker[] = [];
+
+  // 1. Non-zero position (TB balances via computePosition — fail CLOSED on
+  //    outage: an unverifiable position blocks completion).
+  try {
+    const { computePosition } = await import("../routers/bdc/sourcing.js");
+    const pos = await computePosition(db, tenantId);
+    const nopMinor = BigInt(pos.nopUsdMinor);
+    const borrowingMinor = BigInt(pos.borrowingUsdMinor);
+    if (nopMinor !== 0n || borrowingMinor !== 0n) {
+      blockers.push({
+        type: "non_zero_position",
+        count: 1,
+        detail: `non-zero position: NOP $${(Number(nopMinor) / 100).toFixed(2)}, borrowing $${(Number(borrowingMinor) / 100).toFixed(2)} (unwind FX inventory / borrowing before offboarding completes)`,
+      });
+    }
+  } catch (err) {
+    blockers.push({
+      type: "non_zero_position",
+      count: 1,
+      detail: `position unverifiable (fail-closed): ${err instanceof Error ? err.message : String(err)}`.slice(0, 500),
+    });
+  }
+
+  // 2. Open NFEM purchase batches. Terminal statuses: returned/liquidated/settled
+  // plus wave12 'part_filled' (partial fill fully accounted — residual returned
+  // via postNfemReturn, entitlement corrected; sourcing.ts) and 'expired'
+  // (24h deadline sweep terminal). Without these a fully-closed batch would
+  // block offboarding forever (adversarial-verify HIGH-1).
+  const nfem = (await db.execute(sql`
+    SELECT id FROM bdc_nfem_purchase_batches
+    WHERE tenant_id = ${tenantId} AND status NOT IN ('returned', 'liquidated', 'settled', 'part_filled', 'expired')
+    ORDER BY id LIMIT 50
+  `)) as unknown as Array<{ id: number }>;
+  if (nfem.length > 0) {
+    blockers.push({
+      type: "open_nfem_batches",
+      count: nfem.length,
+      detail: `${nfem.length} NFEM batch(es) not in a terminal state (returned/liquidated/settled)`,
+      ids: nfem.map((r) => r.id),
+    });
+  }
+
+  // 3. Unsettled IMTO payouts.
+  const imto = (await db.execute(sql`
+    SELECT id FROM bdc_transactions
+    WHERE tenant_id = ${tenantId} AND txn_type = 'imto_payout' AND status IN ('pending', 'posted')
+    ORDER BY id LIMIT 50
+  `)) as unknown as Array<{ id: number }>;
+  if (imto.length > 0) {
+    blockers.push({
+      type: "unsettled_imto_payouts",
+      count: imto.length,
+      detail: `${imto.length} IMTO payout(s) still pending/posted (await switch confirmation or abort)`,
+      ids: imto.map((r) => r.id),
+    });
+  }
+
+  // 4. Open regulatory returns.
+  const returns = (await db.execute(sql`
+    SELECT id FROM bdc_regulatory_returns
+    WHERE tenant_id = ${tenantId} AND status NOT IN ('acknowledged', 'accepted')
+    ORDER BY id LIMIT 50
+  `)) as unknown as Array<{ id: number }>;
+  if (returns.length > 0) {
+    blockers.push({
+      type: "open_regulatory_returns",
+      count: returns.length,
+      detail: `${returns.length} regulatory return(s) not acknowledged/accepted by the regulator`,
+      ids: returns.map((r) => r.id),
+    });
+  }
+
+  const blockersJson = JSON.stringify(blockers);
+  if (blockers.length === 0) {
+    const completed = (await db.execute(sql`
+      UPDATE bdc_tenant_offboardings
+      SET status = 'completed', blockers = '[]'::jsonb, completed_at = NOW(), updated_at = NOW()
+      WHERE tenant_id = ${tenantId} AND status = 'in_progress'
+      RETURNING id
+    `)) as unknown as Array<{ id: number }>;
+    if (completed.length === 0) {
+      return { tenantId, status: "cancelled", blockers: [] }; // cancelled mid-flight
+    }
+    logger.info({ tenantId }, "[BDC] tenant offboarding COMPLETED — no blockers; assertTenantActive now denies BDC operations");
+    return { tenantId, status: "completed", blockers: [] };
+  }
+
+  const blocked = (await db.execute(sql`
+    UPDATE bdc_tenant_offboardings
+    SET status = 'blocked', blockers = ${blockersJson}::jsonb, updated_at = NOW()
+    WHERE tenant_id = ${tenantId} AND status = 'in_progress'
+    RETURNING id
+  `)) as unknown as Array<{ id: number }>;
+  if (blocked.length === 0) {
+    return { tenantId, status: "cancelled", blockers: [] }; // cancelled mid-flight
+  }
+  logger.warn(
+    { tenantId, blockers: blockers.map((b) => b.type) },
+    "[BDC] tenant offboarding BLOCKED — resolve blockers then re-request",
+  );
+  return { tenantId, status: "blocked", blockers };
+}
+
 // ─── Registration object (worker imports this or the named exports) ──────────
 
 export const bdcActivities: BdcActivities = {
@@ -544,4 +711,126 @@ export const bdcActivities: BdcActivities = {
   submitReturnActivity,
   publishReturnAckTimeoutAlert,
   reconcileActivity,
+  evaluateOffboardingBlockers,
+};
+
+
+// ─── wave12 G1 (B4) — settled-reversal watchdog activity ─────────────────────
+// APPEND-ONLY block. Finds bdc_reversals stuck in 'approved' for > 24h (the
+// execution after approval failed or never ran — e.g. TB outage at approval
+// time, rail-return execution error) and emits ONE Kafka alert per stuck
+// reversal. It deliberately marks NOTHING: the human ops path (re-execute or
+// reject) is the honest resolution. Registered by ORCH — spread into the
+// worker activities: {...bdcActivities, ...bdcReversalWatchdogActivities}.
+
+/** Alert threshold: reversals approved longer than this are execution-stuck. */
+export const BDC_REVERSAL_WATCHDOG_STUCK_HOURS = 24;
+
+export interface BdcStuckReversal {
+  reversalId: number;
+  tenantId: number;
+  txnId: number;
+  reversalType: string;
+  approvedBy: number | null;
+  approvedAt: string | null;
+  stuckHours: number;
+}
+
+export interface BdcReversalWatchdogReport {
+  checkedAt: string;
+  stuckThresholdHours: number;
+  stuckCount: number;
+  alertsPublished: number;
+  stuck: BdcStuckReversal[];
+}
+
+export interface BdcReversalWatchdogActivities {
+  reversalWatchdogActivity(): Promise<BdcReversalWatchdogReport>;
+}
+
+export async function reversalWatchdogActivity(): Promise<BdcReversalWatchdogReport> {
+  const { getDb } = await import("../db.js");
+  const { sql } = await import("drizzle-orm");
+  const { publishEvent } = await import("../middleware/kafka.js");
+  const { logger } = await import("../_core/logger.js");
+  const db = await getDb();
+  if (!db) throw new Error("[BDC] Database unavailable — reversalWatchdogActivity failing closed");
+
+  const stuck = (await db.execute(sql`
+    SELECT id AS "reversalId", tenant_id AS "tenantId", txn_id AS "txnId",
+           reversal_type AS "reversalType", approved_by AS "approvedBy",
+           updated_at AS "approvedAt",
+           EXTRACT(EPOCH FROM (NOW() - updated_at)) / 3600.0 AS "stuckHours"
+    FROM bdc_reversals
+    WHERE status = 'approved'
+      AND updated_at < NOW() - make_interval(hours => ${BDC_REVERSAL_WATCHDOG_STUCK_HOURS})
+    ORDER BY updated_at
+    LIMIT 500
+  `)) as unknown as Array<{
+    reversalId: number;
+    tenantId: number;
+    txnId: number;
+    reversalType: string;
+    approvedBy: number | null;
+    approvedAt: string;
+    stuckHours: number;
+  }>;
+
+  // ORCH adds constant: KAFKA_TOPICS.BDC_REVERSALS = "remitflow.bdc.reversals" (SPEC-wave12 §7).
+  const BDC_REVERSALS_TOPIC = "remitflow.bdc.reversals";
+  const report: BdcReversalWatchdogReport = {
+    checkedAt: new Date().toISOString(),
+    stuckThresholdHours: BDC_REVERSAL_WATCHDOG_STUCK_HOURS,
+    stuckCount: stuck.length,
+    alertsPublished: 0,
+    stuck: stuck.map((r) => ({
+      reversalId: r.reversalId,
+      tenantId: r.tenantId,
+      txnId: r.txnId,
+      reversalType: r.reversalType,
+      approvedBy: r.approvedBy,
+      approvedAt: r.approvedAt ? new Date(r.approvedAt).toISOString() : null,
+      stuckHours: Math.round(Number(r.stuckHours) * 100) / 100,
+    })),
+  };
+
+  for (const r of report.stuck) {
+    // Fail-soft per alert: an outage must not skip the remaining alerts, and
+    // the full report is in the workflow history regardless.
+    const published = await publishEvent(
+      BDC_REVERSALS_TOPIC,
+      `bdc-reversal:${r.tenantId}:${r.reversalId}:approved_stuck`,
+      {
+        eventType: "bdc.reversal.approved_stuck",
+        reversalId: r.reversalId,
+        tenantId: r.tenantId,
+        transactionId: r.txnId,
+        reversalType: r.reversalType,
+        approvedBy: r.approvedBy,
+        approvedAt: r.approvedAt,
+        stuckHours: r.stuckHours,
+        note: `Reversal approved > ${BDC_REVERSAL_WATCHDOG_STUCK_HOURS}h ago but never executed — ops must re-execute (executeApprovedReversal) or reject; row intentionally unchanged`,
+        timestamp: new Date().toISOString(),
+      },
+    ).catch((err: unknown) => {
+      logger.warn(
+        { err: err instanceof Error ? err.message : String(err), reversalId: r.reversalId },
+        "[BDC] reversal-watchdog alert publish failed (report still returned to workflow history)",
+      );
+      return false;
+    });
+    if (published) report.alertsPublished += 1;
+  }
+
+  if (report.stuckCount > 0) {
+    logger.warn(
+      { stuckCount: report.stuckCount, alertsPublished: report.alertsPublished },
+      "[BDC] reversal watchdog found approved-stuck reversals",
+    );
+  }
+  return report;
+}
+
+export const bdcReversalWatchdogActivities: BdcReversalWatchdogActivities = {
+  reversalWatchdogActivity,
 };

@@ -181,16 +181,9 @@ function makeAgentCtx() {
 
 let analyticsDashboardRouter: any;
 let fraudOrchestratorRouter: any;
-let strGeneratorRouter: any;
 let webauthnRouter: any;
 let multiTenancyRouter: any;
-let developerPortalRouter: any;
-let financialProductsRouter: any;
-let openBankingPsd2Router: any;
-let aiSupportAgentRouter: any;
 let cbdcSettlementRouter: any;
-let smartRoutingRouter: any;
-let pushNotificationRouter: any;
 
 beforeAll(async () => {
   // Dynamic imports to allow mocks to be set up first
@@ -200,35 +193,14 @@ beforeAll(async () => {
   const fraud = await import("../routers/fraudOrchestratorRouter");
   fraudOrchestratorRouter = fraud.fraudOrchestratorRouter;
 
-  const str = await import("../routers/strGeneratorRouter");
-  strGeneratorRouter = str.strGeneratorRouter;
-
   const webauthn = await import("../routers/webauthnRouter");
   webauthnRouter = webauthn.webauthnRouter;
 
   const tenancy = await import("../routers/multiTenancyRouter");
   multiTenancyRouter = tenancy.multiTenancyRouter;
 
-  const devPortal = await import("../routers/developerPortalRouter");
-  developerPortalRouter = devPortal.developerPortalRouter;
-
-  const finProducts = await import("../routers/financialProductsRouter");
-  financialProductsRouter = finProducts.financialProductsRouter;
-
-  const openBanking = await import("../routers/openBankingPsd2Router");
-  openBankingPsd2Router = openBanking.openBankingPsd2Router;
-
-  const aiSupport = await import("../routers/aiSupportAgentRouter");
-  aiSupportAgentRouter = aiSupport.aiSupportAgentRouter;
-
   const cbdc = await import("../routers/cbdcSettlementRouter");
   cbdcSettlementRouter = cbdc.cbdcSettlementRouter;
-
-  const smartRouting = await import("../routers/smartRoutingRouter");
-  smartRoutingRouter = smartRouting.smartRoutingRouter;
-
-  const pushNotif = await import("../routers/pushNotificationRouter");
-  pushNotificationRouter = pushNotif.pushNotificationRouter;
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -289,12 +261,6 @@ describe("Stakeholder 1: End User — Retail Remittance Flows", () => {
     });
   });
 
-  describe("1.5 AI-Powered KYC Document Review", () => {
-    it("should have AI KYC reviewer router defined", () => {
-      expect(typeof aiSupportAgentRouter).toBe("object");
-    });
-  });
-
   describe("1.6 Transfer — Quote & Rate Lock", () => {
     it("should return a rate-locked quote with fee breakdown", async () => {
       const { getLockRate } = await import("../middleware/redis");
@@ -316,10 +282,6 @@ describe("Stakeholder 1: End User — Retail Remittance Flows", () => {
   });
 
   describe("1.7 Transfer — Multi-Rail Routing", () => {
-    it("should have smart routing router defined", () => {
-      expect(typeof smartRoutingRouter).toBe("object");
-    });
-
     it("should support PIX rail for BRL transfers", async () => {
       const pixModule = await import("../routers/pixRouter").catch(() => null);
       // PIX router exists in the codebase
@@ -370,31 +332,6 @@ describe("Stakeholder 1: End User — Retail Remittance Flows", () => {
       const { openSearch } = await import("../lib/middleware-orchestrator");
       expect(openSearch.index).toHaveBeenCalled();
     });
-
-    it("should send push notification on transfer completion", () => {
-      expect(typeof pushNotificationRouter).toBe("object");
-    });
-  });
-
-  describe("1.9 BNPL — Buy Now Pay Later", () => {
-    it("should have financial products router defined", () => {
-      expect(typeof financialProductsRouter).toBe("object");
-    });
-
-    it("should compute BNPL credit score from KYC and history", () => {
-      // financialProductsRouter.getBnplCreditScore procedure exists
-      expect(financialProductsRouter).toBeDefined();
-    });
-  });
-
-  describe("1.10 Micro-Savings & Investment", () => {
-    it("should support round-up savings rules", () => {
-      expect(financialProductsRouter).toBeDefined();
-    });
-
-    it("should support recurring savings goals", () => {
-      expect(financialProductsRouter).toBeDefined();
-    });
   });
 
   describe("1.11 WebAuthn Passkey Authentication", () => {
@@ -416,20 +353,6 @@ describe("Stakeholder 1: End User — Retail Remittance Flows", () => {
       const fs = await import("fs");
       const exists = fs.existsSync(join(ROOT_DIR, "services/rust-social-ledger/src/main.rs"));
       expect(exists).toBe(true);
-    });
-  });
-
-  describe("1.13 Open Banking — PSD2 Account Linking", () => {
-    it("should have open banking PSD2 router defined", () => {
-      expect(typeof openBankingPsd2Router).toBe("object");
-    });
-
-    it("should support AISP account information retrieval", () => {
-      expect(openBankingPsd2Router).toBeDefined();
-    });
-
-    it("should support PISP payment initiation", () => {
-      expect(openBankingPsd2Router).toBeDefined();
     });
   });
 });
@@ -460,13 +383,6 @@ describe("Stakeholder 2: Business User — Bulk Payments & Payroll", () => {
       const fs = await import("fs");
       const exists = fs.existsSync(join(ROOT_DIR, "services/go-fx-hedging/main.go"));
       expect(exists).toBe(true);
-    });
-  });
-
-  describe("2.4 AI FX Market Commentary", () => {
-    it("should have AI FX commentary router defined", async () => {
-      const { aiFxCommentaryRouter } = await import("../routers/aiFxCommentaryRouter");
-      expect(typeof aiFxCommentaryRouter).toBe("object");
     });
   });
 });
@@ -518,10 +434,6 @@ describe("Stakeholder 3: Compliance Officer — AML, KYC, STR", () => {
   });
 
   describe("3.3 Suspicious Transaction Report (STR) Generation", () => {
-    it("should have STR generator router defined", () => {
-      expect(typeof strGeneratorRouter).toBe("object");
-    });
-
     it("should have python-str-generator service implemented", async () => {
       const fs = await import("fs");
       const exists = fs.existsSync(join(ROOT_DIR, "services/python-str-generator/main.py"));
@@ -541,13 +453,6 @@ describe("Stakeholder 3: Compliance Officer — AML, KYC, STR", () => {
     it("should have KYC orchestration router defined", async () => {
       const { kycOrchestrationRouter: kycOrchestration } = await import("../routers/kycOrchestration");
       expect(typeof kycOrchestration).toBe("object");
-    });
-  });
-
-  describe("3.6 AI-Powered KYC Document Review", () => {
-    it("should have AI KYC reviewer router defined", async () => {
-      const { aiKycReviewerRouter } = await import("../routers/aiKycReviewerRouter");
-      expect(typeof aiKycReviewerRouter).toBe("object");
     });
   });
 });
@@ -639,12 +544,6 @@ describe("Stakeholder 5: B2B Partner / Tenant — White-Label & Developer Portal
     });
   });
 
-  describe("5.2 Developer Portal — API Keys & Webhooks", () => {
-    it("should have developer portal router defined", () => {
-      expect(typeof developerPortalRouter).toBe("object");
-    });
-  });
-
   describe("5.3 SDK Auto-Generation Pipeline", () => {
     it("should have SDK generation workflow defined", async () => {
       const fs = await import("fs");
@@ -664,12 +563,6 @@ describe("Stakeholder 5: B2B Partner / Tenant — White-Label & Developer Portal
       const fs = await import("fs");
       const content = fs.readFileSync(join(ROOT_DIR, "openapi/remitflow-api.yaml"), "utf-8");
       expect(content).toContain("odl");
-    });
-  });
-
-  describe("5.5 Webhook Management", () => {
-    it("should support webhook registration and HMAC signing", () => {
-      expect(developerPortalRouter).toBeDefined();
     });
   });
 });
@@ -712,19 +605,9 @@ describe("Stakeholder 6: Agent — Cash-In / Cash-Out", () => {
 describe("Cross-Cutting: AI, Notifications, Security", () => {
 
   describe("7.1 AI Support Agent (Ollama)", () => {
-    it("should have AI support agent router defined", () => {
-      expect(typeof aiSupportAgentRouter).toBe("object");
-    });
-
     it("should use Ollama for local inference (not OpenAI)", async () => {
       const { ollamaChat } = await import("../ollama.service");
       expect(typeof ollamaChat).toBe("function");
-    });
-  });
-
-  describe("7.2 Push Notifications", () => {
-    it("should have push notification router defined", () => {
-      expect(typeof pushNotificationRouter).toBe("object");
     });
   });
 

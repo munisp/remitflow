@@ -103,6 +103,15 @@ export const KAFKA_TOPICS = {
   BDC_NFEM_ALERTS: "remitflow.bdc.nfem.alerts",
   BDC_RETURNS_STATUS: "remitflow.bdc.returns.status",
   BDC_POSITION_BREACH: "remitflow.bdc.position.breach",
+  // ── Wave-12 gap closures (SPEC-wave12 §7 — append-only, ORCH) ─────────────
+  BDC_REVERSALS: "remitflow.bdc.reversals",
+  BDC_RESCREENING_ALERTS: "remitflow.bdc.rescreening.alerts",
+  BDC_STRUCTURING_ALERTS: "remitflow.bdc.structuring.alerts",
+  BDC_OFFBOARDING: "remitflow.bdc.offboarding",
+  BDC_TELLER_FRAUD: "remitflow.bdc.teller.fraud",
+  // Stablecoin settlement outbox (go-stablecoin-settlement, underscore style — consumed by kafkaConsumer.ts) + recon alerts
+  STABLECOIN_SETTLEMENT: "stablecoin_settlement",
+  STABLECOIN_RECON_ALERTS: "remitflow.stablecoin.recon.alerts",
 } as const;
 
 export type KafkaTopic = typeof KAFKA_TOPICS[keyof typeof KAFKA_TOPICS];

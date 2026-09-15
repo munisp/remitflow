@@ -14,6 +14,9 @@ const WEBHOOK_SECRETS: Record<string, string | undefined> = {
   cips: process.env.WEBHOOK_SECRET_CIPS,
   mojaloop: process.env.WEBHOOK_SECRET_MOJALOOP,
   swift: process.env.WEBHOOK_SECRET_SWIFT,
+  // wave12 G8 (B4): rail-initiated return webhooks — same fail-closed rules.
+  nip: process.env.WEBHOOK_SECRET_NIP,
+  mobilemoney: process.env.WEBHOOK_SECRET_MOBILEMONEY,
 };
 
 if (isProduction) {

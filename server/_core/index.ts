@@ -359,6 +359,11 @@ async function startServer() {
   // PIX + UPI + CIPS + Mojaloop + SWIFT payment rail webhooks
   registerPaymentRailWebhooks(app);
 
+  // wave12 G8: NIP + mobile-money post-payout return/reversal webhooks
+  // (HMAC fail-closed without WEBHOOK_SECRET_NIP / WEBHOOK_SECRET_MOBILEMONEY)
+  const { registerRailReturnWebhooks } = await import("../rail-return-webhooks");
+  registerRailReturnWebhooks(app);
+
   // OpenAPI/Swagger documentation — serves the generated contract at the
   // canonical /api/docs.json endpoint and the public SDK-compatible /openapi.json alias.
   const { generateOpenApiSpec } = await import("../lib/openapi");
@@ -1412,6 +1417,20 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
       startBdcSchedulers();
       logger.info("[BDC] Schedulers registered (quote-expiry, eod-close, settlement-recon)");
     }).catch(err => logger.error({ errMsg: err?.message }, "[BDC] Scheduler init FAILED — quote expiry/EOD sweep NOT running (manual expireStale/eodClose required):"));
+    // wave12 (SPEC-wave12 §7): pickup-expiry sweep, teller-fraud nightly scan, reversal watchdog (guarded, non-blocking)
+    import("../services/wave12Schedulers.js").then(({ startWave12Schedulers }) => {
+      startWave12Schedulers();
+    }).catch(err => logger.error({ errMsg: err?.message }, "[wave12] Scheduler init FAILED — pickup expiry/teller-fraud/reversal watchdog NOT running (manual triggers available via bdc.* routers):"));
+    // wave12 G3: nightly BDC customer sanctions rescreening (guarded, non-blocking)
+    import("../services/bdcRescreening.js").then(({ startBdcRescreeningScheduler }) => {
+      startBdcRescreeningScheduler();
+      logger.info("[wave12] BDC rescreening scheduler registered (nightly 02:17)");
+    }).catch(err => logger.error({ errMsg: err?.message }, "[wave12] Rescreening scheduler init FAILED — periodic customer rescreening NOT running:"));
+    // wave12 stablecoin: hourly on/offramp recon — flags stale pending rows, never auto-completes (guarded, non-blocking)
+    import("../services/stablecoinRecon.js").then(({ startStablecoinRecon }) => {
+      startStablecoinRecon();
+      logger.info("[wave12] Stablecoin recon scheduler registered (hourly)");
+    }).catch(err => logger.error({ errMsg: err?.message }, "[wave12] Stablecoin recon init FAILED — stale pending on/offramps NOT auto-flagged:"));
     // Bootstrap OpenSearch indices + stablecoin index templates/ILM (non-blocking; loud failure logging)
     import("../middleware/opensearch").then(({ bootstrapOpenSearch }) =>
       bootstrapOpenSearch()

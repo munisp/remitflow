@@ -35,6 +35,7 @@ import {
 import {
   BDC_WORKFLOW_TASK_QUEUE,
   bdcActivities,
+  bdcReversalWatchdogActivities,
 } from "./activities-bdc";
 
 // V2-R2: modules dynamically import()ed inside the W10 activity/schedule
@@ -176,7 +177,7 @@ async function run(): Promise<void> {
     taskQueue: BDC_WORKFLOW_TASK_QUEUE,
     workflowsPath: new URL("./workflows-bdc.js", import.meta.url).pathname,
     bundlerOptions: { ignoreModules: BDC_WORKFLOW_IGNORE_MODULES },
-    activities: bdcActivities,
+    activities: { ...bdcActivities, ...bdcReversalWatchdogActivities },
     maxConcurrentActivityTaskExecutions: 5,
     maxConcurrentWorkflowTaskExecutions: 5,
     maxCachedWorkflows: 100,

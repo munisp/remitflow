@@ -17,11 +17,12 @@ import { TRPCError } from "@trpc/server";
 import { eq, and, desc, gte, lte, sql } from "drizzle-orm";
 import { router, protectedProcedure, adminProcedure } from "../trpc.js";
 import { getDb, createAuditLog } from "../db.js";
-import { wallets, transactions, auditLogs, users } from "../../drizzle/schema.js";
+import { wallets, transactions, auditLogs, users, stablecoinReserves } from "../../drizzle/schema.js";
 import { createId } from "@paralleldrive/cuid2";
 import { runComplianceCheck } from "../_core/complianceEngine.js";
 import { KAFKA_TOPICS, publishEvent } from "../middleware/kafka.js";
-import { requestStablecoinEngine, requestStablecoinOracle, submitTravelRuleReport, requireFiniteNumber, requireText } from "../services/stablecoinOperations.js";
+import { requestStablecoinEngine, requestStablecoinEngineGet, submitTravelRuleReport, requireFiniteNumber, requireText } from "../services/stablecoinOperations.js";
+import { getLiveStablecoinPrice } from "../middleware/stablecoinAtomicity.js";
 import { createStablecoinP2PClaim, reserveStablecoinP2PClaim, completeStablecoinP2PClaim, releaseStablecoinP2PClaim, deleteStablecoinP2PClaim, failStablecoinP2PClaim, cancelStablecoinP2PClaim } from "../services/stablecoinP2PClaims.js";
 import { logger } from "../_core/logger.js";
 import { assertFeatureEligible } from "../_core/featureGuard.js";
@@ -67,17 +68,24 @@ const TRAVEL_RULE_THRESHOLD_USD = 1_000;
 const DEPEG_THRESHOLD = 0.005; // 0.5% deviation from $1.00
 
 // ── Configured, fail-closed service operations ───────────────────────────────
+// SPEC-wave12 §3.1 — fx-rates is a GET route on the engine with optional
+// ?from=&to= query params returning a single {from,to,rate} when both present.
 async function getFXRate(from: string, to: string): Promise<number> {
-  const response = await requestStablecoinEngine("/stablecoin/fx-rate", { from_currency: from, to_currency: to });
+  const response = await requestStablecoinEngineGet(
+    `/stablecoin/fx-rates?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
+  );
   return requireFiniteNumber(response.rate, "rate");
 }
 
+// SPEC-wave12 §3.1 — the python oracle only serves POST /depeg/check (via
+// getLiveStablecoinPrice, which fails CLOSED). The old GET /depeg route does
+// not exist and has been removed.
 async function checkDepeg(stablecoin: string): Promise<{ depegged: boolean; price: number; deviation: number }> {
-  const response = await requestStablecoinOracle(`/depeg?asset=${encodeURIComponent(stablecoin)}`);
+  const live = await getLiveStablecoinPrice(stablecoin);
   return {
-    depegged: Boolean(response.depegged),
-    price: requireFiniteNumber(response.price, "price"),
-    deviation: requireFiniteNumber(response.deviation, "deviation"),
+    depegged: live.depegged,
+    price: live.price,
+    deviation: Math.abs(live.price - 1.0),
   };
 }
 
@@ -222,18 +230,20 @@ export const stablecoinEnhancedRouter = router({
 
       // 4. Call stablecoin engine
       const txRef = `ONRAMP-${createId()}`;
+      // SPEC-wave12 §3.1 — engine bodies are camelCase; OnRampRequest accepts
+      // optional {provider, walletAddress, txRef} (B2 extension).
       const engineResult = await callStablecoinEngine("/stablecoin/onramp", {
-        user_id: ctx.user.id,
-        fiat_currency: input.fiatCurrency,
-        fiat_amount: input.fiatAmount,
+        userId: ctx.user.id,
+        fiatCurrency: input.fiatCurrency,
+        fiatAmount: input.fiatAmount,
         stablecoin: input.stablecoin,
         chain: input.chain,
         provider: input.provider,
-        wallet_address: input.walletAddress,
-        tx_ref: txRef,
+        walletAddress: input.walletAddress,
+        txRef,
       });
 
-      const stablecoinAmount = requireFiniteNumber(engineResult.stablecoin_amount, "stablecoin_amount");
+      const stablecoinAmount = requireFiniteNumber(engineResult.stablecoinAmount, "stablecoinAmount");
       const fee = requireFiniteNumber(engineResult.fee, "fee");
 
       // 5. Credit stablecoin wallet (optimistic — confirmed on webhook)
@@ -263,7 +273,7 @@ export const stablecoinEnhancedRouter = router({
         // W9/Q9: tx_type enum has no "onramp"/"deposit" — fiat→stablecoin purchase
         // maps to "topup"; the rail semantics are preserved in description/metadata.
         type: "topup",
-        status: engineResult.status === "settled" ? "completed" : "pending",
+        status: (engineResult.status === "settled" || engineResult.status === "completed") ? "completed" : "pending",
         fromCurrency: input.fiatCurrency,
         fromAmount: input.fiatAmount.toString(),
         toCurrency: input.stablecoin,
@@ -316,7 +326,8 @@ export const stablecoinEnhancedRouter = router({
         chain: input.chain,
         fee,
         provider: input.provider,
-        estimatedTime: engineResult.estimated_time ?? "1-3 minutes",
+        estimatedTime: typeof engineResult.estimatedTime === "string" ? engineResult.estimatedTime : "1-3 minutes",
+        orderId: typeof engineResult.orderId === "string" ? engineResult.orderId : null,
         travelRuleApplied: amountUsd >= TRAVEL_RULE_THRESHOLD_USD,
       };
     }),
@@ -398,23 +409,24 @@ export const stablecoinEnhancedRouter = router({
         });
       }
 
-      // 6. Call stablecoin settlement engine
+      // 6. Call stablecoin engine — SPEC-wave12 §3.1: POST /stablecoin/offramp
+      // (NOT /settlement) with a camelCase body; OffRampRequest accepts
+      // optional {bankAccountId, mobileMoneyNumber, txRef, operationId}.
       const fxRate = await getFXRate("USD", input.fiatCurrency);
       const fiatAmount = input.stablecoinAmount * fxRate;
       const fee = fiatAmount * 0.0075;
       const netPayout = fiatAmount - fee;
 
-      const engineResult = await callStablecoinEngine("/settlement", {
-        operation_id: txRef,
-        operation_type: "initiate_offramp",
-        user_id: ctx.user.id,
+      const engineResult = await callStablecoinEngine("/stablecoin/offramp", {
+        userId: ctx.user.id,
         stablecoin: input.stablecoin,
-        stablecoin_amount: input.stablecoinAmount,
-        fiat_currency: input.fiatCurrency,
-        fiat_amount: netPayout,
-        payout_rail: input.payoutRail,
-        bank_account_id: input.bankAccountId,
-        mobile_money_number: input.mobileMoneyNumber,
+        stablecoinAmount: input.stablecoinAmount,
+        fiatCurrency: input.fiatCurrency,
+        payoutRail: input.payoutRail,
+        bankAccountId: input.bankAccountId !== undefined ? String(input.bankAccountId) : undefined,
+        mobileMoneyNumber: input.mobileMoneyNumber,
+        txRef,
+        operationId: txRef,
       });
 
       // 7. Record transaction
@@ -475,7 +487,7 @@ export const stablecoinEnhancedRouter = router({
         netPayout: parseFloat(netPayout.toFixed(2)),
         fee: parseFloat(fee.toFixed(2)),
         payoutRail: input.payoutRail,
-        estimatedTime: requireText(engineResult.estimated_time, "estimated_time"),
+        estimatedTime: requireText(engineResult.estimatedTime, "estimatedTime"),
         depegWarning: depeg.depegged ? `${input.stablecoin} price deviation: ${(depeg.deviation * 100).toFixed(2)}%` : null,
         travelRuleApplied: amountUsd >= TRAVEL_RULE_THRESHOLD_USD,
       };
@@ -511,9 +523,11 @@ export const stablecoinEnhancedRouter = router({
       provider:     z.enum(["moonpay", "transak", "yellowcard", "circle", "internal"]).default("internal"),
     }))
     .query(async ({ input }) => {
+      // SPEC-wave12 §3.1 — engine quote routes are camelCase and return
+      // {rate, fee, stablecoinAmount, fiatAmount, expiresAt, estimatedTime}.
       const quote = await callStablecoinEngine("/stablecoin/quotes/onramp", {
-        fiat_currency: input.fiatCurrency,
-        fiat_amount: input.fiatAmount,
+        fiatCurrency: input.fiatCurrency,
+        fiatAmount: input.fiatAmount,
         stablecoin: input.stablecoin,
         provider: input.provider,
       });
@@ -531,21 +545,85 @@ export const stablecoinEnhancedRouter = router({
     .query(async ({ input }) => {
       const quote = await callStablecoinEngine("/stablecoin/quotes/offramp", {
         stablecoin: input.stablecoin,
-        stablecoin_amount: input.stablecoinAmount,
-        fiat_currency: input.fiatCurrency,
-        payout_rail: input.payoutRail,
+        stablecoinAmount: input.stablecoinAmount,
+        fiatCurrency: input.fiatCurrency,
+        payoutRail: input.payoutRail,
       });
       return quote;
     }),
 
   // ── Supported Assets ───────────────────────────────────────────────────────
-  supported: protectedProcedure.query(async () => callStablecoinEngine("/stablecoin/supported", {})),
+  // SPEC-wave12 §3.1 — GET (not POST) /stablecoin/supported.
+  supported: protectedProcedure.query(async () => requestStablecoinEngineGet("/stablecoin/supported")),
 
   // ── De-Peg Status ──────────────────────────────────────────────────────────
-  depegStatus: protectedProcedure.query(async () => requestStablecoinOracle("/depeg/status")),
+  // SPEC-wave12 §3.1 — the oracle has no GET /depeg or /depeg/status route.
+  // Aggregate per-symbol results from the real POST /depeg/check route (via
+  // getLiveStablecoinPrice, which fails CLOSED on oracle errors).
+  depegStatus: protectedProcedure.query(async () => {
+    const results = await Promise.all(
+      SUPPORTED_STABLECOINS.map(async (symbol) => {
+        const live = await getLiveStablecoinPrice(symbol);
+        return {
+          symbol,
+          priceUsd: live.price,
+          deviationPct: Math.abs(live.price - 1.0) * 100,
+          depegged: live.depegged,
+          source: live.source,
+        };
+      }),
+    );
+    return {
+      thresholdPct: DEPEG_THRESHOLD * 100,
+      results,
+      alertsActive: results.some((r) => r.depegged),
+      checkedAt: new Date().toISOString(),
+    };
+  }),
 
   // ── Reserve Proof (Admin) ──────────────────────────────────────────────────
-  reserveProof: adminProcedure.query(async () => requestStablecoinOracle("/reserve/proof")),
+  // SPEC-wave12 §3.1 — DB-backed from stablecoin_reserves. Stored attestation
+  // data is reported VERBATIM with the honest stored status (e.g. 'unverified').
+  // There is no oracle /reserve/proof route — never invent one.
+  reserveProof: adminProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+    const rows = await db.select().from(stablecoinReserves).orderBy(desc(stablecoinReserves.updatedAt));
+
+    // Latest stored row per symbol (attestation data verbatim).
+    const latestBySymbol = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) {
+      if (!latestBySymbol.has(row.symbol)) latestBySymbol.set(row.symbol, row);
+    }
+
+    const reserves = await Promise.all(
+      [...latestBySymbol.values()].map(async (row) => {
+        // Latest oracle price is contextual only — it never upgrades the
+        // stored verification status.
+        const live = await getLiveStablecoinPrice(row.symbol).catch(() => null);
+        return {
+          symbol: row.symbol,
+          onChainBalance: row.onChainBalance,
+          platformBalance: row.platformBalance,
+          reserveRatio: row.reserveRatio,
+          custodian: row.custodian,
+          attestationUrl: row.attestationUrl,
+          lastVerifiedAt: row.lastVerifiedAt,
+          status: row.status, // honest stored status — e.g. 'unverified'
+          oraclePriceUsd: live?.price ?? null,
+          oracleSource: live?.source ?? null,
+        };
+      }),
+    );
+
+    return {
+      status: reserves.length === 0 ? "no_data" : "unverified",
+      note: "Reserve data is reported verbatim from stablecoin_reserves; no independent oracle attestation route exists.",
+      reserves,
+      generatedAt: new Date().toISOString(),
+    };
+  }),
 
   // ── Transaction History ────────────────────────────────────────────────────
   history: protectedProcedure

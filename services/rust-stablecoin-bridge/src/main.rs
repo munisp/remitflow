@@ -16,6 +16,12 @@
  *   - TigerBeetle: double-entry ledger for bridge movements
  *   - Redis: gas price cache, bridge status tracking
  *   - OpenSearch: bridge transaction indexing
+ *
+ * FAIL-CLOSED (SPEC-wave12 §3.4): this service has zero chain interaction.
+ * /bridge, /escrow/*, /card/authorize and /depeg return 503 "unavailable"
+ * (no chain client configured) instead of fabricating ids/tx_hashes/states.
+ * BRIDGE_EXECUTION_ENABLED=true + CHAIN_RPC_URL merely documents the future
+ * provisioning point — no RPC client is implemented here.
  */
 
 use actix_cors::Cors;
@@ -24,7 +30,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use uuid::Uuid;
 
 static BRIDGE_COUNT: AtomicU64 = AtomicU64::new(0);
 static ESCROW_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -57,22 +62,6 @@ struct BridgeRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct BridgeResult {
-    bridge_id: String,
-    status: String,
-    stablecoin: String,
-    amount: f64,
-    net_amount: f64,
-    from_chain: String,
-    to_chain: String,
-    bridge_fee: f64,
-    gas_fee: f64,
-    total_fee: f64,
-    estimated_time_minutes: u32,
-    tx_hash: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 struct EscrowRequest {
     stablecoin: String,
     amount: f64,
@@ -80,18 +69,6 @@ struct EscrowRequest {
     seller_id: u64,
     condition: String,
     expiry_hours: u32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct EscrowResult {
-    escrow_id: String,
-    status: String,
-    stablecoin: String,
-    amount: f64,
-    buyer_id: u64,
-    seller_id: u64,
-    condition: String,
-    expires_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -105,31 +82,12 @@ struct GasEstimate {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DePegStatus {
-    symbol: String,
-    price: f64,
-    target_price: f64,
-    deviation_percent: f64,
-    depegged: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 struct CardAuthRequest {
     card_id: String,
     merchant: String,
     amount_usd: f64,
     stablecoin: String,
     user_id: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CardAuthResult {
-    auth_id: String,
-    approved: bool,
-    amount_deducted: f64,
-    stablecoin: String,
-    merchant: String,
-    reason: String,
 }
 
 // ── Chain Registry ──────────────────────────────────────────────────────────
@@ -227,92 +185,67 @@ async fn metrics() -> impl Responder {
     ))
 }
 
-#[post("/bridge")]
-async fn bridge(req: web::Json<BridgeRequest>) -> impl Responder {
-    let chains = get_chains();
-    let from_chain = match chains.get(&req.from_chain) {
-        Some(c) => c,
-        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "unsupported from_chain"})),
-    };
-    let to_chain = match chains.get(&req.to_chain) {
-        Some(c) => c,
-        None => return HttpResponse::BadRequest().json(serde_json::json!({"error": "unsupported to_chain"})),
-    };
+// ── Fail-closed execution gate (SPEC-wave12 §3.4) ───────────────────────────
+//
+// This binary has ZERO chain interaction: no RPC client, no wallet, no signer.
+// The previous implementation fabricated bridge_id / tx_hash / escrow_id /
+// auth_id from Uuid::new_v4 and reported fake "processing"/"funded"/"released"
+// states. That dishonesty is removed: every execution endpoint below returns
+// 503 {error, status:"unavailable"}.
+//
+// `BRIDGE_EXECUTION_ENABLED=true` + `CHAIN_RPC_URL` set is the documented
+// PROVISIONING POINT for a future real chain client. Per SPEC §3.4 we must
+// NOT implement an RPC client here — so even when the gate is satisfied the
+// endpoints still return 503 honestly (the gate only records that an operator
+// intended to provision execution).
 
-    if req.from_chain == req.to_chain {
-        return HttpResponse::BadRequest().json(serde_json::json!({"error": "same chain bridge not allowed"}));
+/// True when the operator has signalled intent to provision chain execution.
+/// NOTE: no chain client exists in this binary, so a `true` result does NOT
+/// enable execution — see `execution_unavailable`.
+fn execution_provisioned() -> bool {
+    let enabled = std::env::var("BRIDGE_EXECUTION_ENABLED").map(|v| v == "true").unwrap_or(false);
+    let rpc_set = std::env::var("CHAIN_RPC_URL").map(|v| !v.trim().is_empty()).unwrap_or(false);
+    enabled && rpc_set
+}
+
+/// Honest 503 for every chain-execution endpoint. Evaluates the provisioning
+/// gate purely so the intent is logged; the response is 503 either way.
+fn execution_unavailable(endpoint: &str) -> HttpResponse {
+    if execution_provisioned() {
+        println!(
+            "[rust-stablecoin-bridge] {} requested with BRIDGE_EXECUTION_ENABLED=true and CHAIN_RPC_URL set, \
+             but no chain client is implemented — failing closed (503)",
+            endpoint
+        );
     }
+    HttpResponse::ServiceUnavailable().json(serde_json::json!({
+        "error": "bridge execution path not provisioned — no chain client configured",
+        "status": "unavailable",
+    }))
+}
 
-    let bridge_fee = req.amount * 0.001; // 0.1% bridge protocol fee
-    let gas_fee = from_chain.transfer_gas_usd + to_chain.transfer_gas_usd;
-    let total_fee = bridge_fee + gas_fee;
-    let net_amount = req.amount - bridge_fee;
-
-    BRIDGE_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    let bridge_id = format!("BRIDGE-{}", &Uuid::new_v4().to_string()[..8]);
-    let tx_hash = format!("0x{}", &Uuid::new_v4().to_string().replace("-", ""));
-
-    HttpResponse::Ok().json(BridgeResult {
-        bridge_id,
-        status: "processing".into(),
-        stablecoin: req.stablecoin.clone(),
-        amount: req.amount,
-        net_amount,
-        from_chain: from_chain.name.clone(),
-        to_chain: to_chain.name.clone(),
-        bridge_fee,
-        gas_fee,
-        total_fee,
-        estimated_time_minutes: 10,
-        tx_hash,
-    })
+#[post("/bridge")]
+async fn bridge(_req: web::Json<BridgeRequest>) -> impl Responder {
+    // No chain client: never fabricate a bridge_id/tx_hash. Fail closed.
+    execution_unavailable("/bridge")
 }
 
 #[post("/escrow/create")]
-async fn create_escrow(req: web::Json<EscrowRequest>) -> impl Responder {
-    if req.amount <= 0.0 {
-        return HttpResponse::BadRequest().json(serde_json::json!({"error": "amount must be positive"}));
-    }
-
-    ESCROW_COUNT.fetch_add(1, Ordering::Relaxed);
-
-    let escrow_id = format!("ESCROW-{}", &Uuid::new_v4().to_string()[..8]);
-    let expiry_hours = if req.expiry_hours == 0 { 24 } else { req.expiry_hours };
-    let expires_at = chrono::Utc::now() + chrono::Duration::hours(expiry_hours as i64);
-
-    HttpResponse::Ok().json(EscrowResult {
-        escrow_id,
-        status: "funded".into(),
-        stablecoin: req.stablecoin.clone(),
-        amount: req.amount,
-        buyer_id: req.buyer_id,
-        seller_id: req.seller_id,
-        condition: req.condition.clone(),
-        expires_at: expires_at.to_rfc3339(),
-    })
+async fn create_escrow(_req: web::Json<EscrowRequest>) -> impl Responder {
+    // No chain client: never fabricate an escrow_id or a 'funded' state. Fail closed.
+    execution_unavailable("/escrow/create")
 }
 
 #[post("/escrow/release")]
-async fn release_escrow(req: web::Json<serde_json::Value>) -> impl Responder {
-    let escrow_id = req.get("escrow_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-    HttpResponse::Ok().json(serde_json::json!({
-        "escrow_id": escrow_id,
-        "status": "released",
-        "released_at": chrono::Utc::now().to_rfc3339(),
-    }))
+async fn release_escrow(_req: web::Json<serde_json::Value>) -> impl Responder {
+    // No escrow state machine exists — there is nothing to release. Fail closed.
+    execution_unavailable("/escrow/release")
 }
 
 #[post("/escrow/dispute")]
-async fn dispute_escrow(req: web::Json<serde_json::Value>) -> impl Responder {
-    let escrow_id = req.get("escrow_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-    let reason = req.get("reason").and_then(|v| v.as_str()).unwrap_or("not specified");
-    HttpResponse::Ok().json(serde_json::json!({
-        "escrow_id": escrow_id,
-        "status": "disputed",
-        "reason": reason,
-        "disputed_at": chrono::Utc::now().to_rfc3339(),
-    }))
+async fn dispute_escrow(_req: web::Json<serde_json::Value>) -> impl Responder {
+    // No escrow state machine exists — there is nothing to dispute. Fail closed.
+    execution_unavailable("/escrow/dispute")
 }
 
 #[get("/gas")]
@@ -329,51 +262,29 @@ async fn gas_estimates() -> impl Responder {
         }
     }).collect();
 
-    HttpResponse::Ok().json(serde_json::json!({"estimates": estimates}))
+    HttpResponse::Ok().json(serde_json::json!({
+        "source": "static_config",
+        "estimates": estimates,
+    }))
 }
 
 #[get("/depeg")]
 async fn depeg_status() -> impl Responder {
-    let stablecoins = vec![
-        ("USDT", 1.0, 1.0),
-        ("USDC", 1.0, 1.0),
-        ("BUSD", 1.0, 1.0),
-        ("DAI", 1.0, 1.0),
-        ("PYUSD", 1.0, 1.0),
-        ("cUSD", 1.0, 1.0),
-    ];
-
-    let statuses: Vec<DePegStatus> = stablecoins.iter().map(|(symbol, price, target)| {
-        let deviation = ((price - target) / target).abs() * 100.0;
-        DePegStatus {
-            symbol: symbol.to_string(),
-            price: *price,
-            target_price: *target,
-            deviation_percent: deviation,
-            depegged: deviation > 0.5,
-        }
-    }).collect();
-
-    HttpResponse::Ok().json(serde_json::json!({
-        "statuses": statuses,
-        "threshold_percent": 0.5,
-        "checked_at": chrono::Utc::now().to_rfc3339(),
+    // SPEC-wave12 §3.4: /depeg should proxy the python oracle POST /depeg/check.
+    // Proxying requires an HTTP client crate (reqwest) which is NOT vendored in
+    // Cargo.toml, and SPEC §0.1 forbids new external deps — so there is no way
+    // to reach the oracle from this binary. The old static "everything is $1.00"
+    // response was dishonest; fail closed with 503 instead.
+    HttpResponse::ServiceUnavailable().json(serde_json::json!({
+        "error": "bridge execution path not provisioned — no chain client configured",
+        "status": "unavailable",
     }))
 }
 
 #[post("/card/authorize")]
-async fn card_authorize(req: web::Json<CardAuthRequest>) -> impl Responder {
-    let approved = req.amount_usd <= 50_000.0 && req.amount_usd > 0.0;
-    let auth_id = format!("AUTH-{}", &Uuid::new_v4().to_string()[..8]);
-
-    HttpResponse::Ok().json(CardAuthResult {
-        auth_id,
-        approved,
-        amount_deducted: if approved { req.amount_usd } else { 0.0 },
-        stablecoin: req.stablecoin.clone(),
-        merchant: req.merchant.clone(),
-        reason: if approved { "approved".into() } else { "exceeds limit".into() },
-    })
+async fn card_authorize(_req: web::Json<CardAuthRequest>) -> impl Responder {
+    // No card network / chain client: never fabricate an auth decision. Fail closed.
+    execution_unavailable("/card/authorize")
 }
 
 // ── Core Fund Flow Event Verification ────────────────────────────────────────
@@ -454,13 +365,16 @@ async fn verify_fund_flow(req: web::Json<FundFlowEvent>) -> impl Responder {
         transaction_id: req.transaction_id.clone(),
         verified: all_passed,
         checks,
-        verified_at: Utc::now().to_rfc3339(),
+        verified_at: chrono::Utc::now().to_rfc3339(),
     })
 }
 
 #[get("/chains")]
 async fn list_chains() -> impl Responder {
-    HttpResponse::Ok().json(get_chains())
+    HttpResponse::Ok().json(serde_json::json!({
+        "source": "static_config",
+        "chains": get_chains(),
+    }))
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────

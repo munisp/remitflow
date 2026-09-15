@@ -16,13 +16,19 @@
 package main
 
 import (
-	"context"
+	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
+	"math/big"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -39,9 +45,9 @@ func getEnv(key, fallback string) string {
 
 var (
 	temporalAddr      = getEnv("TEMPORAL_ADDR", "temporal:7233")
-	stablecoinEngine  = getEnv("STABLECOIN_ENGINE_URL", "http://go-stablecoin-engine:8108")
-	settlementSvc     = getEnv("SETTLEMENT_URL", "http://go-stablecoin-settlement:8109")
-	tigerBeetleBridge = getEnv("TIGERBEETLE_BRIDGE_URL", "http://rust-tigerbeetle-bridge:8112")
+	stablecoinEngine  = getEnv("STABLECOIN_ENGINE_URL", "http://go-stablecoin-engine:8113")
+	settlementSvc     = getEnv("SETTLEMENT_URL", "http://go-stablecoin-settlement:8215")
+	tigerBeetleBridge = getEnv("TIGERBEETLE_BRIDGE_URL", "http://rust-tigerbeetle-bridge:8200")
 	coreAPIURL        = getEnv("CORE_API_URL", "http://server:5000")
 	port              = getEnv("PORT", "8120")
 	// amlScorerURL is the real AML/sanctions scoring service (python-aml-scorer).
@@ -51,13 +57,13 @@ var (
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
 var (
-	onrampStarted    atomic.Int64
-	onrampCompleted  atomic.Int64
-	onrampFailed     atomic.Int64
-	onrampCompensated atomic.Int64
-	offrampStarted   atomic.Int64
-	offrampCompleted atomic.Int64
-	offrampFailed    atomic.Int64
+	onrampStarted      atomic.Int64
+	onrampCompleted    atomic.Int64
+	onrampFailed       atomic.Int64
+	onrampCompensated  atomic.Int64
+	offrampStarted     atomic.Int64
+	offrampCompleted   atomic.Int64
+	offrampFailed      atomic.Int64
 	offrampCompensated atomic.Int64
 )
 
@@ -72,16 +78,16 @@ type StepResult struct {
 
 // ── On-Ramp Saga Input/Output ─────────────────────────────────────────────────
 type OnRampSagaInput struct {
-	SagaID          string  `json:"saga_id"`
-	UserID          int64   `json:"user_id"`
-	FiatCurrency    string  `json:"fiat_currency"`
-	FiatAmount      float64 `json:"fiat_amount"`
-	Stablecoin      string  `json:"stablecoin"`
-	Chain           string  `json:"chain"`
-	Provider        string  `json:"provider"`
-	WalletAddress   string  `json:"wallet_address,omitempty"`
-	KYCTier         string  `json:"kyc_tier"`
-	IdempotencyKey  string  `json:"idempotency_key"`
+	SagaID         string  `json:"saga_id"`
+	UserID         int64   `json:"user_id"`
+	FiatCurrency   string  `json:"fiat_currency"`
+	FiatAmount     float64 `json:"fiat_amount"`
+	Stablecoin     string  `json:"stablecoin"`
+	Chain          string  `json:"chain"`
+	Provider       string  `json:"provider"`
+	WalletAddress  string  `json:"wallet_address,omitempty"`
+	KYCTier        string  `json:"kyc_tier"`
+	IdempotencyKey string  `json:"idempotency_key"`
 }
 
 type OnRampSagaResult struct {
@@ -94,6 +100,9 @@ type OnRampSagaResult struct {
 	CompletedAt      string       `json:"completed_at,omitempty"`
 	FailedAt         string       `json:"failed_at,omitempty"`
 	CompensatedSteps []string     `json:"compensated_steps,omitempty"`
+	// CompensationFailures lists compensations that were invoked but errored.
+	// Present iff status == "failed_compensation_partial".
+	CompensationFailures []string `json:"compensation_failures,omitempty"`
 }
 
 // ── Off-Ramp Saga Input/Output ────────────────────────────────────────────────
@@ -120,6 +129,9 @@ type OffRampSagaResult struct {
 	CompletedAt      string       `json:"completed_at,omitempty"`
 	FailedAt         string       `json:"failed_at,omitempty"`
 	CompensatedSteps []string     `json:"compensated_steps,omitempty"`
+	// CompensationFailures lists compensations that were invoked but errored.
+	// Present iff status == "failed_compensation_partial".
+	CompensationFailures []string `json:"compensation_failures,omitempty"`
 }
 
 // ── KYC Tier Limits ───────────────────────────────────────────────────────────
@@ -131,57 +143,173 @@ var kycLimits = map[string]struct{ onramp, offramp, single float64 }{
 	"tier4": {500000, 250000, 250000},
 }
 
-// ── FX Rates (fallback) ───────────────────────────────────────────────────────
-var fxRates = map[string]float64{
-	"USD": 1.0, "NGN": 1650.0, "GBP": 0.79, "EUR": 0.92,
-	"GHS": 15.8, "KES": 129.5, "ZAR": 18.6, "CAD": 1.36, "AUD": 1.52,
-}
+// ── FX Rates (live engine source — no static map) ─────────────────────────────
 
-func toUSD(amount float64, currency string) float64 {
-	rate, ok := fxRates[currency]
-	if !ok || rate == 0 {
-		return amount
+// getEngineFXRate fetches the live rate from go-stablecoin-engine
+// (GET /stablecoin/fx-rates?from=&to=). FAIL CLOSED: any transport error,
+// non-200, undecodable body, or non-positive rate is an error — the saga must
+// not fall back to a hardcoded table (the old static map disagreed with the
+// engine, e.g. NGN 1650 vs 1600).
+func getEngineFXRate(from, to string) (float64, error) {
+	u := fmt.Sprintf("%s/stablecoin/fx-rates?from=%s&to=%s",
+		strings.TrimRight(stablecoinEngine, "/"), url.QueryEscape(from), url.QueryEscape(to))
+	resp, err := sagaHTTP.Get(u)
+	if err != nil {
+		return 0, fmt.Errorf("engine fx-rates unreachable: %w", err)
 	}
-	return amount / rate
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
+		return 0, fmt.Errorf("engine fx-rates %s->%s returned HTTP %d", from, to, resp.StatusCode)
+	}
+	var out struct {
+		Rate float64 `json:"rate"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&out); err != nil {
+		return 0, fmt.Errorf("engine fx-rates undecodable: %w", err)
+	}
+	if out.Rate <= 0 {
+		return 0, fmt.Errorf("engine fx-rates returned non-positive rate %v for %s->%s", out.Rate, from, to)
+	}
+	return out.Rate, nil
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
-func postJSON(url string, body interface{}) (map[string]interface{}, error) {
-	b, _ := json.Marshal(body)
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+var sagaHTTP = &http.Client{Timeout: 8 * time.Second}
+
+// postJSON POSTs body as JSON and FAILS CLOSED on any non-2xx response — a
+// money-moving step may never treat an HTTP error as success.
+func postJSON(rawURL string, body interface{}) (map[string]interface{}, error) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, rawURL, bytes.NewReader(b))
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Body = http.NoBody
-	// Re-create with body
-	req2, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, jsonReader(b))
-	req2.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req2)
+	resp, err := sagaHTTP.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var result map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&result)
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet := strings.TrimSpace(string(data))
+		if len(snippet) > 256 {
+			snippet = snippet[:256]
+		}
+		return nil, fmt.Errorf("POST %s -> HTTP %d: %s", rawURL, resp.StatusCode, snippet)
+	}
+	result := map[string]interface{}{}
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &result); err != nil {
+			return nil, fmt.Errorf("POST %s -> undecodable response: %w", rawURL, err)
+		}
+	}
 	return result, nil
 }
 
-type jsonBodyReader struct {
-	data []byte
-	pos  int
+// ── TigerBeetle bridge contract (rust-tigerbeetle-bridge) ────────────────────
+// The bridge serves EXACTLY: POST /transfers/create {transfers:[NewTransfer]}
+// with snake_case fields and u128 ids/amounts as decimal strings, and returns
+// {errors:[{index,code,reason}]} — an empty errors array means posted.
+// There is NO /ledger/transfer and NO /ledger/reverse route.
+
+// tbTransfer mirrors the bridge's NewTransfer (snake_case contract).
+type tbTransfer struct {
+	ID              string `json:"id"`
+	DebitAccountID  string `json:"debit_account_id"`
+	CreditAccountID string `json:"credit_account_id"`
+	Amount          string `json:"amount"` // minor units, decimal string
+	Ledger          uint32 `json:"ledger"`
+	Code            uint16 `json:"code"`
 }
 
-func (r *jsonBodyReader) Read(p []byte) (n int, err error) {
-	if r.pos >= len(r.data) {
-		return 0, fmt.Errorf("EOF")
+// tbCodeSagaTransfer is the transfer code for saga-initiated stablecoin moves.
+const tbCodeSagaTransfer uint16 = 1
+
+// tbLedgers mirrors TB_LEDGERS in server/_core/tigerBeetle.ts. An unmapped
+// currency fails closed — never post to a guessed ledger.
+var tbLedgers = map[string]uint32{
+	"USD": 840, "NGN": 566, "GBP": 826, "EUR": 978, "KES": 404, "GHS": 936,
+	"ZAR": 710, "XOF": 952, "USDC": 9001, "USDT": 9002, "CNGN": 9003,
+}
+
+// deterministicU128 derives a stable u128 (decimal string, 1..=2^128-2) from
+// a seed via sha256 — the platform's deterministic-id convention.
+func deterministicU128(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	n := new(big.Int).SetBytes(sum[:16])
+	if n.Sign() == 0 {
+		n = big.NewInt(1)
 	}
-	n = copy(p, r.data[r.pos:])
-	r.pos += n
-	return n, nil
+	return n.String()
 }
 
-func jsonReader(data []byte) *jsonBodyReader {
-	return &jsonBodyReader{data: data}
+// tbAccountID maps a saga-side symbolic account name to a deterministic u128
+// account id. If no account was provisioned under this id, the bridge rejects
+// the transfer with a per-index error and the step fails closed.
+func tbAccountID(name string) string { return deterministicU128("account:" + name) }
+
+// tbMinorUnits converts a major-unit amount to the ledger's smallest unit
+// (6 decimals for USD-pegged stablecoins) as a decimal string.
+func tbMinorUnits(amount float64) string {
+	return strconv.FormatUint(uint64(math.Round(amount*1e6)), 10)
+}
+
+// postTBTransfer posts one transfer to the real bridge contract. A per-index
+// entry in the bridge's errors array is a failure, not a success.
+func postTBTransfer(t tbTransfer) error {
+	res, err := postJSON(tigerBeetleBridge+"/transfers/create",
+		map[string]interface{}{"transfers": []tbTransfer{t}})
+	if err != nil {
+		return err
+	}
+	if errs, ok := res["errors"].([]interface{}); ok {
+		for _, e := range errs {
+			m, _ := e.(map[string]interface{})
+			idx, _ := m["index"].(float64)
+			if int(idx) == 0 {
+				return fmt.Errorf("tigerbeetle transfer rejected: code=%v reason=%v", m["code"], m["reason"])
+			}
+		}
+	}
+	return nil
+}
+
+// ledgerReversal posts the inverse of an already-posted transfer: debit/credit
+// accounts swapped, deterministic id = sha256("reversal:"+originalID). An
+// error marks the compensation failed — it is never swallowed.
+func ledgerReversal(original tbTransfer) error {
+	rev := original
+	rev.ID = deterministicU128("reversal:" + original.ID)
+	rev.DebitAccountID, rev.CreditAccountID = original.CreditAccountID, original.DebitAccountID
+	return postTBTransfer(rev)
+}
+
+// ── Compensation framework ────────────────────────────────────────────────────
+
+// compensation pairs a money-moving step's name with its undo action.
+type compensation struct {
+	name string
+	fn   func() error
+}
+
+// runCompensations invokes ALL registered compensations in reverse order and
+// collects per-step results. succeeded/failed preserve execution order.
+func runCompensations(comps []compensation) (succeeded, failed []string) {
+	for i := len(comps) - 1; i >= 0; i-- {
+		if err := comps[i].fn(); err != nil {
+			slog.Error("[Saga] compensation FAILED", "step", comps[i].name, "err", err)
+			failed = append(failed, comps[i].name)
+		} else {
+			slog.Info("[Saga] compensation applied", "step", comps[i].name)
+			succeeded = append(succeeded, comps[i].name)
+		}
+	}
+	return succeeded, failed
 }
 
 // ── Saga Steps ────────────────────────────────────────────────────────────────
@@ -200,16 +328,16 @@ func stepKYCCheck(userID int64, amountUSD float64, kycTier string, txType string
 	}
 	if limit == 0 {
 		return StepResult{StepName: "kyc_check", Status: "failed",
-			Error: "KYC not completed — tier0 has no transaction limit",
+			Error:      "KYC not completed — tier0 has no transaction limit",
 			DurationMs: time.Since(start).Milliseconds()}
 	}
 	if amountUSD > limit {
 		return StepResult{StepName: "kyc_check", Status: "failed",
-			Error: fmt.Sprintf("Amount $%.2f exceeds KYC %s single-tx limit $%.2f", amountUSD, kycTier, limit),
+			Error:      fmt.Sprintf("Amount $%.2f exceeds KYC %s single-tx limit $%.2f", amountUSD, kycTier, limit),
 			DurationMs: time.Since(start).Milliseconds()}
 	}
 	return StepResult{StepName: "kyc_check", Status: "ok",
-		Data: map[string]interface{}{"kyc_tier": kycTier, "limit_usd": limit},
+		Data:       map[string]interface{}{"kyc_tier": kycTier, "limit_usd": limit},
 		DurationMs: time.Since(start).Milliseconds()}
 }
 
@@ -235,36 +363,36 @@ func stepSanctionsScreen(userID int64, amount float64, currency string) StepResu
 	if err != nil {
 		slog.Error("[Saga] sanctions screen unreachable — failing closed", "user", userID, "err", err)
 		return StepResult{StepName: "sanctions_screen", Status: "failed",
-			Error: fmt.Sprintf("SANCTIONS_SCREEN_UNAVAILABLE: %v", err),
+			Error:      fmt.Sprintf("SANCTIONS_SCREEN_UNAVAILABLE: %v", err),
 			DurationMs: time.Since(start).Milliseconds()}
 	}
 	action, _ := result["action"].(string)
 	riskScore, _ := result["risk_score"].(float64)
 	if action != "allow" {
 		return StepResult{StepName: "sanctions_screen", Status: "failed",
-			Error: fmt.Sprintf("AML scorer action=%q risk_score=%v — transaction blocked", action, riskScore),
-			Data: map[string]interface{}{"action": action, "risk_score": riskScore},
+			Error:      fmt.Sprintf("AML scorer action=%q risk_score=%v — transaction blocked", action, riskScore),
+			Data:       map[string]interface{}{"action": action, "risk_score": riskScore},
 			DurationMs: time.Since(start).Milliseconds()}
 	}
 	return StepResult{StepName: "sanctions_screen", Status: "ok",
-		Data: map[string]interface{}{"screened": true, "action": action, "risk_score": riskScore},
+		Data:       map[string]interface{}{"screened": true, "action": action, "risk_score": riskScore},
 		DurationMs: time.Since(start).Milliseconds()}
 }
 
-func stepFXQuote(fiatCurrency, stablecoin string, fiatAmount float64) (StepResult, float64, float64) {
+// stepFXQuote computes the quote from the LIVE engine rate (fetched by the
+// caller via getEngineFXRate — a saga that cannot reach the engine fails
+// before any money step). No static rate table exists here anymore.
+func stepFXQuote(fiatCurrency, stablecoin string, fiatAmount, fiatToUSDRate float64) (StepResult, float64, float64) {
 	start := time.Now()
-	usdRate, ok := fxRates[fiatCurrency]
-	if !ok {
-		usdRate = 1.0
-	}
-	usdAmount := fiatAmount / usdRate
+	usdAmount := fiatAmount * fiatToUSDRate
 	fee := fiatAmount * 0.005
-	stablecoinAmount := math.Round((usdAmount-fee/usdRate)*1e6) / 1e6
+	stablecoinAmount := math.Round((usdAmount-fee*fiatToUSDRate)*1e6) / 1e6
 	return StepResult{
 		StepName: "fx_quote",
 		Status:   "ok",
 		Data: map[string]interface{}{
-			"fx_rate":           usdRate,
+			"fx_rate":           fiatToUSDRate,
+			"rate_source":       "go-stablecoin-engine",
 			"usd_amount":        usdAmount,
 			"stablecoin_amount": stablecoinAmount,
 			"fee":               fee,
@@ -293,7 +421,7 @@ func stepProviderCharge(provider, txRef string, fiatAmount float64, fiatCurrency
 	if err != nil {
 		slog.Error("[Saga] provider charge failed — failing closed", "provider", provider, "ref", txRef, "err", err)
 		return StepResult{StepName: "provider_charge", Status: "failed",
-			Error: fmt.Sprintf("Provider %s charge failed: %v", provider, err),
+			Error:      fmt.Sprintf("Provider %s charge failed: %v", provider, err),
 			DurationMs: time.Since(start).Milliseconds()}
 	}
 	status, _ := result["status"].(string)
@@ -303,7 +431,7 @@ func stepProviderCharge(provider, txRef string, fiatAmount float64, fiatCurrency
 	}
 	if status == "failed" || status == "" {
 		return StepResult{StepName: "provider_charge", Status: "failed",
-			Error: fmt.Sprintf("Provider %s charge not accepted (status=%q)", provider, status),
+			Error:      fmt.Sprintf("Provider %s charge not accepted (status=%q)", provider, status),
 			DurationMs: time.Since(start).Milliseconds()}
 	}
 	return StepResult{StepName: "provider_charge", Status: "ok",
@@ -314,59 +442,97 @@ func stepProviderCharge(provider, txRef string, fiatAmount float64, fiatCurrency
 		DurationMs: time.Since(start).Milliseconds()}
 }
 
-func stepLedgerCredit(txRef string, userID int64, stablecoin string, amount float64) StepResult {
+// stepLedgerCredit posts the credit leg to the REAL bridge contract
+// (POST /transfers/create). FAIL CLOSED: a bridge error fails the step — the
+// old "best-effort ok" report is gone. On success it returns the posted
+// transfer so a reversal compensation can invert it exactly.
+func stepLedgerCredit(txRef string, userID int64, stablecoin string, amount float64) (StepResult, *tbTransfer) {
 	start := time.Now()
-	_, err := postJSON(tigerBeetleBridge+"/ledger/transfer", map[string]interface{}{
-		"ref":            txRef,
-		"user_id":        userID,
-		"debit_account":  fmt.Sprintf("fiat:reserve"),
-		"credit_account": fmt.Sprintf("stablecoin:%s:user:%d", stablecoin, userID),
-		"amount":         amount,
-		"currency":       stablecoin,
-	})
-	if err != nil {
-		slog.Warn("[Saga] TigerBeetle ledger credit failed (best-effort)", "ref", txRef, "err", err)
+	ledger, ok := tbLedgers[strings.ToUpper(stablecoin)]
+	if !ok {
+		return StepResult{StepName: "ledger_credit", Status: "failed",
+			Error:      fmt.Sprintf("no TigerBeetle ledger mapped for %s — failing closed", stablecoin),
+			DurationMs: time.Since(start).Milliseconds()}, nil
+	}
+	t := tbTransfer{
+		ID:              deterministicU128("transfer:" + txRef + ":ledger_credit"),
+		DebitAccountID:  tbAccountID("fiat:reserve"),
+		CreditAccountID: tbAccountID(fmt.Sprintf("stablecoin:%s:user:%d", strings.ToUpper(stablecoin), userID)),
+		Amount:          tbMinorUnits(amount),
+		Ledger:          ledger,
+		Code:            tbCodeSagaTransfer,
+	}
+	if err := postTBTransfer(t); err != nil {
+		slog.Error("[Saga] TigerBeetle ledger credit failed — failing closed", "ref", txRef, "err", err)
+		return StepResult{StepName: "ledger_credit", Status: "failed",
+			Error:      fmt.Sprintf("TigerBeetle ledger credit failed: %v", err),
+			DurationMs: time.Since(start).Milliseconds()}, nil
 	}
 	return StepResult{StepName: "ledger_credit", Status: "ok",
-		Data: map[string]interface{}{"ref": txRef, "amount": amount, "stablecoin": stablecoin},
-		DurationMs: time.Since(start).Milliseconds()}
+		Data:       map[string]interface{}{"ref": txRef, "transfer_id": t.ID, "amount": amount, "stablecoin": stablecoin},
+		DurationMs: time.Since(start).Milliseconds()}, &t
 }
 
-func stepLedgerDebit(txRef string, userID int64, stablecoin string, amount float64) StepResult {
+// stepLedgerDebit posts the debit leg to the REAL bridge contract, fail-closed,
+// returning the posted transfer for exact inversion on compensation.
+func stepLedgerDebit(txRef string, userID int64, stablecoin string, amount float64) (StepResult, *tbTransfer) {
 	start := time.Now()
-	_, err := postJSON(tigerBeetleBridge+"/ledger/transfer", map[string]interface{}{
-		"ref":            txRef,
-		"user_id":        userID,
-		"debit_account":  fmt.Sprintf("stablecoin:%s:user:%d", stablecoin, userID),
-		"credit_account": "fiat:payout",
-		"amount":         amount,
-		"currency":       stablecoin,
-	})
-	if err != nil {
-		slog.Warn("[Saga] TigerBeetle ledger debit failed (best-effort)", "ref", txRef, "err", err)
+	ledger, ok := tbLedgers[strings.ToUpper(stablecoin)]
+	if !ok {
+		return StepResult{StepName: "ledger_debit", Status: "failed",
+			Error:      fmt.Sprintf("no TigerBeetle ledger mapped for %s — failing closed", stablecoin),
+			DurationMs: time.Since(start).Milliseconds()}, nil
+	}
+	t := tbTransfer{
+		ID:              deterministicU128("transfer:" + txRef + ":ledger_debit"),
+		DebitAccountID:  tbAccountID(fmt.Sprintf("stablecoin:%s:user:%d", strings.ToUpper(stablecoin), userID)),
+		CreditAccountID: tbAccountID("fiat:payout"),
+		Amount:          tbMinorUnits(amount),
+		Ledger:          ledger,
+		Code:            tbCodeSagaTransfer,
+	}
+	if err := postTBTransfer(t); err != nil {
+		slog.Error("[Saga] TigerBeetle ledger debit failed — failing closed", "ref", txRef, "err", err)
+		return StepResult{StepName: "ledger_debit", Status: "failed",
+			Error:      fmt.Sprintf("TigerBeetle ledger debit failed: %v", err),
+			DurationMs: time.Since(start).Milliseconds()}, nil
 	}
 	return StepResult{StepName: "ledger_debit", Status: "ok",
-		Data: map[string]interface{}{"ref": txRef, "amount": amount, "stablecoin": stablecoin},
-		DurationMs: time.Since(start).Milliseconds()}
+		Data:       map[string]interface{}{"ref": txRef, "transfer_id": t.ID, "amount": amount, "stablecoin": stablecoin},
+		DurationMs: time.Since(start).Milliseconds()}, &t
 }
 
+// stepProviderPayout submits the payout to the REAL settlement contract:
+// POST /settlement/execute {operation_id, provider, action, payload}.
+// FAIL CLOSED: transport errors, non-2xx and missing/failed status fail the
+// step (the old code POSTed to a nonexistent /settlement route and reported ok).
 func stepProviderPayout(payoutRail, txRef string, fiatAmount float64, fiatCurrency string) StepResult {
 	start := time.Now()
-	// Production: call go-stablecoin-settlement /settlement endpoint
-	result, err := postJSON(settlementSvc+"/settlement", map[string]interface{}{
-		"operation_id":   txRef,
-		"operation_type": "initiate_offramp",
-		"fiat_currency":  fiatCurrency,
-		"fiat_amount":    fiatAmount,
-		"payout_rail":    payoutRail,
+	result, err := postJSON(settlementSvc+"/settlement/execute", map[string]interface{}{
+		"operation_id": txRef,
+		"action":       "initiate_payout",
+		"payload": map[string]interface{}{
+			"amount":       fiatAmount,
+			"fiatCurrency": fiatCurrency,
+			"currency":     fiatCurrency,
+			"payout_rail":  payoutRail,
+			"txRef":        txRef,
+		},
 	})
 	if err != nil {
 		return StepResult{StepName: "provider_payout", Status: "failed",
-			Error: fmt.Sprintf("Settlement service unreachable: %v", err),
+			Error:      fmt.Sprintf("Settlement service payout failed: %v", err),
+			DurationMs: time.Since(start).Milliseconds()}
+	}
+	status, _ := result["status"].(string)
+	if status == "" || status == "failed" {
+		return StepResult{StepName: "provider_payout", Status: "failed",
+			Error:      fmt.Sprintf("Settlement service payout not accepted (status=%q)", status),
+			Data:       result,
 			DurationMs: time.Since(start).Milliseconds()}
 	}
 	return StepResult{StepName: "provider_payout", Status: "ok",
-		Data: result,
+		Data:       result,
 		DurationMs: time.Since(start).Milliseconds()}
 }
 
@@ -377,7 +543,7 @@ func stepNotify(userID int64, txRef, txType, status string, amount float64, curr
 		"status": status, "amount": amount, "currency": currency,
 	})
 	return StepResult{StepName: "notify", Status: "ok",
-		Data: map[string]interface{}{"notified": true},
+		Data:       map[string]interface{}{"notified": true},
 		DurationMs: time.Since(start).Milliseconds()}
 }
 
@@ -390,64 +556,105 @@ func executeOnRampSaga(input OnRampSagaInput) OnRampSagaResult {
 		TxRef:  txRef,
 		Steps:  []StepResult{},
 	}
-	compensations := []func(){}
+	compensations := []compensation{}
 
-	amountUSD := toUSD(input.FiatAmount, input.FiatCurrency)
-
-	// Step 1: KYC Check
-	step1 := stepKYCCheck(input.UserID, amountUSD, input.KYCTier, "onramp")
-	result.Steps = append(result.Steps, step1)
-	if step1.Status != "ok" {
-		result.Status = "failed"
+	// abort finalizes a failed saga: if any money-moving step succeeded, ALL
+	// registered compensations are invoked in reverse order and the outcome is
+	// reported honestly — "failed_compensated" only when every compensation
+	// returned nil, else "failed_compensation_partial" with the failing names.
+	abort := func() OnRampSagaResult {
 		result.FailedAt = time.Now().UTC().Format(time.RFC3339)
+		if len(compensations) == 0 {
+			result.Status = "failed"
+		} else {
+			succeeded, failed := runCompensations(compensations)
+			result.CompensatedSteps = succeeded
+			if len(failed) == 0 {
+				result.Status = "failed_compensated"
+			} else {
+				result.Status = "failed_compensation_partial"
+				result.CompensationFailures = failed
+			}
+			onrampCompensated.Add(1)
+		}
 		onrampFailed.Add(1)
 		return result
 	}
 
-	// Step 2: Sanctions Screen
-	step2 := stepSanctionsScreen(input.UserID, input.FiatAmount, input.FiatCurrency)
+	// Step 1: FX rate fetch (live engine source) — fail closed before any
+	// money-moving step when the engine cannot supply a rate.
+	fiatToUSD, rateErr := getEngineFXRate(input.FiatCurrency, "USD")
+	if rateErr != nil {
+		result.Steps = append(result.Steps, StepResult{
+			StepName: "fx_quote", Status: "failed",
+			Error: fmt.Sprintf("live FX rate unavailable (fail-closed): %v", rateErr),
+		})
+		return abort()
+	}
+	amountUSD := input.FiatAmount * fiatToUSD
+
+	// Step 2: KYC Check
+	step2 := stepKYCCheck(input.UserID, amountUSD, input.KYCTier, "onramp")
 	result.Steps = append(result.Steps, step2)
 	if step2.Status != "ok" {
-		result.Status = "failed"
-		result.FailedAt = time.Now().UTC().Format(time.RFC3339)
-		onrampFailed.Add(1)
-		return result
+		return abort()
 	}
 
-	// Step 3: FX Quote
-	step3, stablecoinAmount, fee := stepFXQuote(input.FiatCurrency, input.Stablecoin, input.FiatAmount)
+	// Step 3: Sanctions Screen
+	step3 := stepSanctionsScreen(input.UserID, input.FiatAmount, input.FiatCurrency)
 	result.Steps = append(result.Steps, step3)
+	if step3.Status != "ok" {
+		return abort()
+	}
+
+	// Step 4: FX Quote (computed from the live engine rate)
+	step4, stablecoinAmount, fee := stepFXQuote(input.FiatCurrency, input.Stablecoin, input.FiatAmount, fiatToUSD)
+	result.Steps = append(result.Steps, step4)
 	result.StablecoinAmount = stablecoinAmount
 	result.Fee = fee
 
-	// Step 4: Provider Charge (with compensation: refund)
-	step4 := stepProviderCharge(input.Provider, txRef, input.FiatAmount, input.FiatCurrency)
-	result.Steps = append(result.Steps, step4)
-	if step4.Status != "ok" {
-		// Compensate: nothing to undo yet (charge failed)
-		result.Status = "failed"
-		result.FailedAt = time.Now().UTC().Format(time.RFC3339)
-		onrampFailed.Add(1)
-		return result
-	}
-	// Register compensation: refund provider charge
-	compensations = append(compensations, func() {
-		slog.Info("[Saga] Compensating: refund provider charge", "tx_ref", txRef)
-		postJSON(settlementSvc+"/settlement/refund", map[string]interface{}{"tx_ref": txRef})
-	})
-
-	// Step 5: Ledger Credit
-	step5 := stepLedgerCredit(txRef, input.UserID, input.Stablecoin, stablecoinAmount)
+	// Step 5: Provider Charge (money-moving; compensation: provider refund)
+	step5 := stepProviderCharge(input.Provider, txRef, input.FiatAmount, input.FiatCurrency)
 	result.Steps = append(result.Steps, step5)
-	// Register compensation: reverse ledger credit
-	compensations = append(compensations, func() {
-		slog.Info("[Saga] Compensating: reverse ledger credit", "tx_ref", txRef)
-		postJSON(tigerBeetleBridge+"/ledger/reverse", map[string]interface{}{"ref": txRef})
+	if step5.Status != "ok" {
+		// Charge never landed — nothing to undo.
+		return abort()
+	}
+	compensations = append(compensations, compensation{
+		name: "provider_charge",
+		fn: func() error {
+			slog.Info("[Saga] Compensating: refund provider charge", "tx_ref", txRef)
+			_, err := postJSON(settlementSvc+"/settlement/execute", map[string]interface{}{
+				"operation_id": txRef + "-refund",
+				"provider":     input.Provider,
+				"action":       "refund",
+				"payload": map[string]interface{}{
+					"original_operation_id": txRef,
+					"amount":                input.FiatAmount,
+					"currency":              input.FiatCurrency,
+				},
+			})
+			return err // an error (incl. NOT_SUPPORTED) marks this compensation failed
+		},
 	})
 
-	// Step 6: Notify
-	step6 := stepNotify(input.UserID, txRef, "onramp", "completed", stablecoinAmount, input.Stablecoin)
+	// Step 6: Ledger Credit (money-moving; compensation: ledger reversal)
+	step6, creditLeg := stepLedgerCredit(txRef, input.UserID, input.Stablecoin, stablecoinAmount)
 	result.Steps = append(result.Steps, step6)
+	if step6.Status != "ok" {
+		return abort()
+	}
+	compensations = append(compensations, compensation{
+		name: "ledger_credit",
+		fn: func() error {
+			slog.Info("[Saga] Compensating: reverse ledger credit", "tx_ref", txRef, "transfer_id", creditLeg.ID)
+			return ledgerReversal(*creditLeg)
+		},
+	})
+
+	// Step 7: Notify (telemetry only — not money-moving)
+	step7 := stepNotify(input.UserID, txRef, "onramp", "completed", stablecoinAmount, input.Stablecoin)
+	result.Steps = append(result.Steps, step7)
 
 	result.Status = "completed"
 	result.CompletedAt = time.Now().UTC().Format(time.RFC3339)
@@ -461,34 +668,60 @@ func executeOffRampSaga(input OffRampSagaInput) OffRampSagaResult {
 	offrampStarted.Add(1)
 	txRef := fmt.Sprintf("OFFRAMP-%s", uuid.New().String()[:12])
 
-	fxRate, ok := fxRates[input.FiatCurrency]
-	if !ok {
-		fxRate = 1.0
-	}
-	fiatAmount := input.StablecoinAmount * fxRate
-	fee := fiatAmount * 0.0075
-	netPayout := math.Round((fiatAmount-fee)*100) / 100
-
 	result := OffRampSagaResult{
 		SagaID:       input.SagaID,
 		TxRef:        txRef,
-		NetPayout:    netPayout,
 		FiatCurrency: input.FiatCurrency,
 		Steps:        []StepResult{},
 	}
-	compensations := []func(){}
+	compensations := []compensation{}
 
-	// Step 1: KYC Check
-	step1 := stepKYCCheck(input.UserID, input.StablecoinAmount, input.KYCTier, "offramp")
-	result.Steps = append(result.Steps, step1)
-	if step1.Status != "ok" {
-		result.Status = "failed"
+	// abort: invoke ALL registered compensations in reverse order and report
+	// honestly (see executeOnRampSaga). CompensatedSteps lists ONLY
+	// compensations that actually ran and returned nil.
+	abort := func() OffRampSagaResult {
 		result.FailedAt = time.Now().UTC().Format(time.RFC3339)
+		if len(compensations) == 0 {
+			result.Status = "failed"
+		} else {
+			succeeded, failed := runCompensations(compensations)
+			result.CompensatedSteps = succeeded
+			if len(failed) == 0 {
+				result.Status = "failed_compensated"
+			} else {
+				result.Status = "failed_compensation_partial"
+				result.CompensationFailures = failed
+			}
+			offrampCompensated.Add(1)
+		}
 		offrampFailed.Add(1)
 		return result
 	}
 
-	// Step 2: Balance Debit (via Core API — atomic pessimistic lock)
+	// Step 1: FX rate fetch (live engine source) — fail closed before any
+	// money-moving step.
+	usdToFiat, rateErr := getEngineFXRate("USD", input.FiatCurrency)
+	if rateErr != nil {
+		result.Steps = append(result.Steps, StepResult{
+			StepName: "fx_quote", Status: "failed",
+			Error: fmt.Sprintf("live FX rate unavailable (fail-closed): %v", rateErr),
+		})
+		return abort()
+	}
+	fiatAmount := input.StablecoinAmount * usdToFiat
+	fee := fiatAmount * 0.0075
+	netPayout := math.Round((fiatAmount-fee)*100) / 100
+	result.NetPayout = netPayout
+
+	// Step 2: KYC Check
+	step2 := stepKYCCheck(input.UserID, input.StablecoinAmount, input.KYCTier, "offramp")
+	result.Steps = append(result.Steps, step2)
+	if step2.Status != "ok" {
+		return abort()
+	}
+
+	// Step 3: Balance Debit (money-moving, via Core API — atomic pessimistic
+	// lock; compensation: re-credit the balance)
 	start := time.Now()
 	debitResult, err := postJSON(coreAPIURL+"/internal/stablecoin/debit", map[string]interface{}{
 		"user_id":    input.UserID,
@@ -496,67 +729,59 @@ func executeOffRampSaga(input OffRampSagaInput) OffRampSagaResult {
 		"amount":     input.StablecoinAmount,
 		"tx_ref":     txRef,
 	})
-	step2 := StepResult{StepName: "balance_debit", DurationMs: time.Since(start).Milliseconds()}
+	step3 := StepResult{StepName: "balance_debit", DurationMs: time.Since(start).Milliseconds()}
 	if err != nil || debitResult["status"] == "error" {
-		step2.Status = "failed"
-		step2.Error = fmt.Sprintf("Balance debit failed: %v", err)
-		result.Steps = append(result.Steps, step2)
-		result.Status = "failed"
-		result.FailedAt = time.Now().UTC().Format(time.RFC3339)
-		offrampFailed.Add(1)
-		return result
+		step3.Status = "failed"
+		step3.Error = fmt.Sprintf("Balance debit failed: %v", err)
+		result.Steps = append(result.Steps, step3)
+		return abort()
 	}
-	step2.Status = "ok"
-	step2.Data = debitResult
-	result.Steps = append(result.Steps, step2)
-	// Register compensation: re-credit balance
-	compensations = append(compensations, func() {
-		slog.Info("[Saga] Compensating: re-credit stablecoin balance", "tx_ref", txRef)
-		postJSON(coreAPIURL+"/internal/stablecoin/credit", map[string]interface{}{
-			"user_id": input.UserID, "stablecoin": input.Stablecoin,
-			"amount": input.StablecoinAmount, "tx_ref": txRef + "-compensation",
-		})
+	step3.Status = "ok"
+	step3.Data = debitResult
+	result.Steps = append(result.Steps, step3)
+	compensations = append(compensations, compensation{
+		name: "balance_debit",
+		fn: func() error {
+			slog.Info("[Saga] Compensating: re-credit stablecoin balance", "tx_ref", txRef)
+			_, err := postJSON(coreAPIURL+"/internal/stablecoin/credit", map[string]interface{}{
+				"user_id": input.UserID, "stablecoin": input.Stablecoin,
+				"amount": input.StablecoinAmount, "tx_ref": txRef + "-compensation",
+			})
+			return err
+		},
 	})
 
-	// Step 3: Sanctions Screen
-	step3 := stepSanctionsScreen(input.UserID, netPayout, input.FiatCurrency)
-	result.Steps = append(result.Steps, step3)
-	if step3.Status != "ok" {
-		// Compensate: re-credit balance
-		for i := len(compensations) - 1; i >= 0; i-- {
-			compensations[i]()
-			result.CompensatedSteps = append(result.CompensatedSteps, "balance_debit")
-		}
-		result.Status = "failed_compensated"
-		result.FailedAt = time.Now().UTC().Format(time.RFC3339)
-		offrampFailed.Add(1)
-		offrampCompensated.Add(1)
-		return result
+	// Step 4: Sanctions Screen
+	step4 := stepSanctionsScreen(input.UserID, netPayout, input.FiatCurrency)
+	result.Steps = append(result.Steps, step4)
+	if step4.Status != "ok" {
+		return abort()
 	}
 
-	// Step 4: Ledger Debit
-	step4 := stepLedgerDebit(txRef, input.UserID, input.Stablecoin, input.StablecoinAmount)
-	result.Steps = append(result.Steps, step4)
-
-	// Step 5: Provider Payout
-	step5 := stepProviderPayout(input.PayoutRail, txRef, netPayout, input.FiatCurrency)
+	// Step 5: Ledger Debit (money-moving; compensation: ledger reversal)
+	step5, debitLeg := stepLedgerDebit(txRef, input.UserID, input.Stablecoin, input.StablecoinAmount)
 	result.Steps = append(result.Steps, step5)
 	if step5.Status != "ok" {
-		// Compensate: reverse ledger debit + re-credit balance
-		for i := len(compensations) - 1; i >= 0; i-- {
-			compensations[i]()
-		}
-		result.CompensatedSteps = append(result.CompensatedSteps, "balance_debit", "ledger_debit")
-		result.Status = "failed_compensated"
-		result.FailedAt = time.Now().UTC().Format(time.RFC3339)
-		offrampFailed.Add(1)
-		offrampCompensated.Add(1)
-		return result
+		return abort()
+	}
+	compensations = append(compensations, compensation{
+		name: "ledger_debit",
+		fn: func() error {
+			slog.Info("[Saga] Compensating: reverse ledger debit", "tx_ref", txRef, "transfer_id", debitLeg.ID)
+			return ledgerReversal(*debitLeg)
+		},
+	})
+
+	// Step 6: Provider Payout
+	step6 := stepProviderPayout(input.PayoutRail, txRef, netPayout, input.FiatCurrency)
+	result.Steps = append(result.Steps, step6)
+	if step6.Status != "ok" {
+		return abort()
 	}
 
-	// Step 6: Notify
-	step6 := stepNotify(input.UserID, txRef, "offramp", "completed", netPayout, input.FiatCurrency)
-	result.Steps = append(result.Steps, step6)
+	// Step 7: Notify (telemetry only — not money-moving)
+	step7 := stepNotify(input.UserID, txRef, "offramp", "completed", netPayout, input.FiatCurrency)
+	result.Steps = append(result.Steps, step7)
 
 	result.Status = "completed"
 	result.CompletedAt = time.Now().UTC().Format(time.RFC3339)
@@ -581,7 +806,7 @@ func onrampHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	result := executeOnRampSaga(input)
 	w.Header().Set("Content-Type", "application/json")
-	if result.Status == "failed" || result.Status == "failed_compensated" {
+	if result.Status == "failed" || result.Status == "failed_compensated" || result.Status == "failed_compensation_partial" {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 	}
 	json.NewEncoder(w).Encode(result)
@@ -602,7 +827,7 @@ func offrampHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	result := executeOffRampSaga(input)
 	w.Header().Set("Content-Type", "application/json")
-	if result.Status == "failed" || result.Status == "failed_compensated" {
+	if result.Status == "failed" || result.Status == "failed_compensated" || result.Status == "failed_compensation_partial" {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 	}
 	json.NewEncoder(w).Encode(result)
@@ -611,15 +836,15 @@ func offrampHandler(w http.ResponseWriter, r *http.Request) {
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":         "healthy",
-		"service":        "go-stablecoin-saga",
-		"temporal_addr":  temporalAddr,
-		"onramp_started": onrampStarted.Load(),
-		"onramp_ok":      onrampCompleted.Load(),
-		"onramp_failed":  onrampFailed.Load(),
+		"status":          "healthy",
+		"service":         "go-stablecoin-saga",
+		"temporal_addr":   temporalAddr,
+		"onramp_started":  onrampStarted.Load(),
+		"onramp_ok":       onrampCompleted.Load(),
+		"onramp_failed":   onrampFailed.Load(),
 		"offramp_started": offrampStarted.Load(),
-		"offramp_ok":     offrampCompleted.Load(),
-		"offramp_failed": offrampFailed.Load(),
+		"offramp_ok":      offrampCompleted.Load(),
+		"offramp_failed":  offrampFailed.Load(),
 	})
 }
 
@@ -634,6 +859,9 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# HELP remitflow_onramp_failed_total Total on-ramp sagas failed\n")
 	fmt.Fprintf(w, "# TYPE remitflow_onramp_failed_total counter\n")
 	fmt.Fprintf(w, "remitflow_onramp_failed_total %d\n", onrampFailed.Load())
+	fmt.Fprintf(w, "# HELP remitflow_onramp_compensated_total Total on-ramp sagas compensated\n")
+	fmt.Fprintf(w, "# TYPE remitflow_onramp_compensated_total counter\n")
+	fmt.Fprintf(w, "remitflow_onramp_compensated_total %d\n", onrampCompensated.Load())
 	fmt.Fprintf(w, "# HELP remitflow_offramp_started_total Total off-ramp sagas started\n")
 	fmt.Fprintf(w, "# TYPE remitflow_offramp_started_total counter\n")
 	fmt.Fprintf(w, "remitflow_offramp_started_total %d\n", offrampStarted.Load())
@@ -651,12 +879,12 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	slog.Info("[StablecoinSaga] Starting", "port", port, "temporal", temporalAddr)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/health",          healthHandler)
-	mux.HandleFunc("/livez",           func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/readyz",          func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("/metrics",         metricsHandler)
-	mux.HandleFunc("/saga/onramp",     onrampHandler)
-	mux.HandleFunc("/saga/offramp",    offrampHandler)
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/livez", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	mux.HandleFunc("/metrics", metricsHandler)
+	mux.HandleFunc("/saga/onramp", onrampHandler)
+	mux.HandleFunc("/saga/offramp", offrampHandler)
 
 	srv := &http.Server{
 		Addr:         ":" + port,

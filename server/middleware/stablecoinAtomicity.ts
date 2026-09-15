@@ -227,13 +227,17 @@ export async function creditStablecoinWallet(
     return { newBalance: updated.balance, walletId: updated.id };
   }
 
+  // SPEC-wave12 §3.1 — NEVER fabricate a wallet address. The wallet is created
+  // with wallet_address NULL and status 'unprovisioned'; on-chain operations
+  // for it must fail PRECONDITION_FAILED until a real Circle wallet/address is
+  // provisioned via circleClient.createWallet / createDepositAddress.
   const [created] = await db.insert(stablecoinWallets).values({
     userId,
     symbol,
     balance: amount.toFixed(8),
-    walletAddress: `0x${randomBytes(20).toString("hex")}`,
+    walletAddress: null,
     network: chain,
-    status: "active",
+    status: "unprovisioned",
   }).returning({ balance: stablecoinWallets.balance, id: stablecoinWallets.id });
 
   return { newBalance: created.balance, walletId: created.id };
@@ -322,6 +326,20 @@ export async function executeOnChainTransaction(params: {
 }): Promise<{ txHash: string; confirmed: boolean; blockNumber?: number }> {
   const symbol = params.symbol ?? params.stablecoin ?? "USDC";
   const chain = params.chain ?? params.fromChain ?? "ethereum";
+
+  // SPEC-wave12 §3.1 — on-chain operations require a REAL provisioned address
+  // (Circle wallet/deposit address). Wallets created before provisioning have
+  // wallet_address NULL + status 'unprovisioned'; executing on-chain without a
+  // real source address is a precondition failure, never a fabricated
+  // "platform" address.
+  if (!params.fromAddress) {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "On-chain execution blocked: no provisioned wallet address. Provision a real Circle wallet/address first (wallet status 'unprovisioned').",
+    });
+  }
+
+  let failureDetail = "unknown";
   try {
     const res = await fetch(`${RUST_ONCHAIN_URL}/transaction/execute`, {
       method: "POST",
@@ -331,8 +349,8 @@ export async function executeOnChainTransaction(params: {
         tx_type: params.type ?? "transfer",
         symbol,
         amount: params.amount,
-        from_address: params.fromAddress ?? "platform",
-        to_address: params.toAddress ?? (params.toChain ?? "platform"),
+        from_address: params.fromAddress,
+        to_address: params.toAddress,
         chain,
         to_chain: params.toChain,
         user_id: params.userId,
@@ -341,20 +359,34 @@ export async function executeOnChainTransaction(params: {
       signal: AbortSignal.timeout(15000),
     });
     if (res.ok) {
-      return await res.json() as { txHash: string; confirmed: boolean; blockNumber?: number };
+      const data: unknown = await res.json().catch(() => null);
+      if (
+        data && typeof data === "object" && !Array.isArray(data) &&
+        typeof (data as Record<string, unknown>).txHash === "string" &&
+        typeof (data as Record<string, unknown>).confirmed === "boolean"
+      ) {
+        return data as { txHash: string; confirmed: boolean; blockNumber?: number };
+      }
+      failureDetail = "malformed response contract";
+      logger.error({ chain, symbol }, "[OnChain] Rust guard returned a malformed payload — failing CLOSED");
+    } else {
+      const errText = await res.text().catch(() => "");
+      failureDetail = `HTTP ${res.status}: ${errText.slice(0, 200)}`;
+      logger.warn({ status: res.status, err: errText }, "[OnChain] Transaction execution failed");
     }
-    const errText = await res.text();
-    logger.warn({ status: res.status, err: errText }, "[OnChain] Transaction execution failed");
   } catch (err) {
-    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[OnChain] Rust guard unavailable");
+    failureDetail = err instanceof Error ? err.message : String(err);
+    logger.warn({ err: failureDetail }, "[OnChain] Rust guard unavailable");
   }
 
-  // Dev fallback: generate mock tx hash
-  return {
-    txHash: `0x${randomBytes(32).toString("hex")}`,
-    confirmed: true,
-    blockNumber: Math.floor(Date.now() / 1000),
-  };
+  // SPEC-wave12 §3.1 — rust-onchain-guard has no real /transaction/execute
+  // path. The old dev fallback fabricated `txHash: 0x${randomBytes(32)}` +
+  // confirmed:true — REMOVED. Throw UNAVAILABLE on ANY failure, in ALL
+  // environments; callers must surface honest pending/blocked states.
+  throw new TRPCError({
+    code: "SERVICE_UNAVAILABLE",
+    message: `On-chain execution path not provisioned — transaction was NOT executed (${failureDetail}).`,
+  });
 }
 
 // ── Webhook Registration for External Providers ──────────────────────────────
@@ -365,23 +397,32 @@ export async function notifySettlementService(params: {
   action: "initiate_payout" | "initiate_onramp" | "confirm_bridge" | "pay_biller";
   payload: Record<string, unknown>;
 }): Promise<{ externalRef?: string; status: string }> {
+  // SPEC-wave12 §3.1 — go-stablecoin-settlement serves ONLY
+  // POST /settlement/execute with {operation_id, provider, action, payload}
+  // (there is no /settlement/{action} route).
   try {
-    const res = await fetch(`${GO_STABLECOIN_URL}/settlement/${params.action}`, {
+    const res = await fetch(`${GO_STABLECOIN_URL}/settlement/execute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         operation_id: params.operationId,
         provider: params.provider,
-        ...params.payload,
+        action: params.action,
+        payload: params.payload,
       }),
       signal: AbortSignal.timeout(10000),
     });
     if (res.ok) {
       return await res.json() as { externalRef?: string; status: string };
     }
+    logger.warn({ status: res.status, action: params.action, operationId: params.operationId }, "[Settlement] Go service rejected execute request");
   } catch (err) {
     logger.warn({ err: err instanceof Error ? err.message : String(err), action: params.action }, "[Settlement] Go service unavailable");
   }
+  // Honest telemetry-only swallow: the settlement event was NOT confirmed by
+  // the settlement service. 'queued' means "handed to the local outbox path,
+  // awaiting settlement confirmation" — callers whose money decision depends
+  // on settlement MUST propagate the error instead of trusting this status.
   return { status: "queued" };
 }
 

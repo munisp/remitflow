@@ -19,7 +19,7 @@
 //   - OpenSearch: Settlement transaction indexing
 //   - APISix: Rate limiting on webhook endpoints
 //
-// Port: 8200
+// Port: 8215 (was 8200 — that collided with rust-tigerbeetle-bridge)
 package main
 
 import (
@@ -43,13 +43,15 @@ import (
 // ── Configuration ───────────────────────────────────────────────────────────
 
 var (
-	port              = getEnv("PORT", "8200")
-	kafkaBrokers      = getEnv("KAFKA_BROKERS", "localhost:9092")
-	redisURL          = getEnv("REDIS_URL", "localhost:6379")
-	daprURL           = getEnv("DAPR_HTTP_PORT", "3500")
-	tigerBeetleAddr   = getEnv("TIGERBEETLE_ADDR", "localhost:3001")
-	mojaloopURL       = getEnv("MOJALOOP_URL", "http://localhost:4000")
-	openSearchURL     = getEnv("OPENSEARCH_URL", "http://localhost:9200")
+	// Default port is 8215: 8200 belongs to rust-tigerbeetle-bridge and the
+	// collision made both services race for the same listener. PORT overrides.
+	port            = getEnv("PORT", "8215")
+	kafkaBrokers    = getEnv("KAFKA_BROKERS", "localhost:9092")
+	redisURL        = getEnv("REDIS_URL", "localhost:6379")
+	daprURL         = getEnv("DAPR_HTTP_PORT", "3500")
+	tigerBeetleAddr = getEnv("TIGERBEETLE_ADDR", "localhost:3001")
+	mojaloopURL     = getEnv("MOJALOOP_URL", "http://localhost:4000")
+	openSearchURL   = getEnv("OPENSEARCH_URL", "http://localhost:9200")
 	// Provider webhook secrets (loaded from env/Vault)
 	circleWebhookSecret     = getEnv("CIRCLE_WEBHOOK_SECRET", "")
 	yellowCardWebhookSecret = getEnv("YELLOWCARD_WEBHOOK_SECRET", "")
@@ -71,10 +73,10 @@ func getEnv(key, fallback string) string {
 // ── Types ───────────────────────────────────────────────────────────────────
 
 type SettlementRequest struct {
-	OperationID  string                 `json:"operation_id"`
-	Provider     string                 `json:"provider"`
-	Action       string                 `json:"action"` // initiate_payout, initiate_onramp, confirm_bridge, pay_biller
-	Payload      map[string]interface{} `json:"payload"`
+	OperationID string                 `json:"operation_id"`
+	Provider    string                 `json:"provider"`
+	Action      string                 `json:"action"` // initiate_payout, initiate_onramp, confirm_bridge, pay_biller, refund
+	Payload     map[string]interface{} `json:"payload"`
 }
 
 type SettlementResult struct {
@@ -86,12 +88,12 @@ type SettlementResult struct {
 }
 
 type WebhookEvent struct {
-	ID          string                 `json:"id"`
-	Type        string                 `json:"type"`
-	Provider    string                 `json:"provider"`
-	Payload     map[string]interface{} `json:"payload"`
-	ReceivedAt  string                 `json:"received_at"`
-	Verified    bool                   `json:"verified"`
+	ID         string                 `json:"id"`
+	Type       string                 `json:"type"`
+	Provider   string                 `json:"provider"`
+	Payload    map[string]interface{} `json:"payload"`
+	ReceivedAt string                 `json:"received_at"`
+	Verified   bool                   `json:"verified"`
 }
 
 type LedgerEntry struct {
@@ -106,15 +108,15 @@ type LedgerEntry struct {
 }
 
 type P2PClaim struct {
-	ClaimID       string  `json:"claim_id"`
-	SenderID      int     `json:"sender_id"`
-	Stablecoin    string  `json:"stablecoin"`
-	Amount        float64 `json:"amount"`
-	Chain         string  `json:"chain"`
-	ExpiresAt     string  `json:"expires_at"`
-	Status        string  `json:"status"` // pending, claimed, expired
-	ClaimedByID   int     `json:"claimed_by_id,omitempty"`
-	ClaimedAt     string  `json:"claimed_at,omitempty"`
+	ClaimID     string  `json:"claim_id"`
+	SenderID    int     `json:"sender_id"`
+	Stablecoin  string  `json:"stablecoin"`
+	Amount      float64 `json:"amount"`
+	Chain       string  `json:"chain"`
+	ExpiresAt   string  `json:"expires_at"`
+	Status      string  `json:"status"` // pending, claimed, expired
+	ClaimedByID int     `json:"claimed_by_id,omitempty"`
+	ClaimedAt   string  `json:"claimed_at,omitempty"`
 }
 
 type CircuitBreaker struct {
@@ -129,18 +131,18 @@ type CircuitBreaker struct {
 // ── Stores ──────────────────────────────────────────────────────────────────
 
 var (
-	settlements    = make(map[string]*SettlementResult)
-	webhookEvents  = make(map[string]*WebhookEvent)
-	webhookDedup   = make(map[string]bool) // 24h dedup
-	ledgerEntries  = make(map[string]*LedgerEntry)
-	p2pClaims      = make(map[string]*P2PClaim)
-	mu             sync.RWMutex
+	settlements   = make(map[string]*SettlementResult)
+	webhookEvents = make(map[string]*WebhookEvent)
+	webhookDedup  = make(map[string]bool) // 24h dedup
+	ledgerEntries = make(map[string]*LedgerEntry)
+	p2pClaims     = make(map[string]*P2PClaim)
+	mu            sync.RWMutex
 
-	settlementCount  uint64
-	webhookCount     uint64
-	ledgerCount      uint64
-	claimCount       uint64
-	errorCount       uint64
+	settlementCount uint64
+	webhookCount    uint64
+	ledgerCount     uint64
+	claimCount      uint64
+	errorCount      uint64
 
 	circuitBreakers = map[string]*CircuitBreaker{
 		"circle":      {maxFailures: 3, resetTimeout: 30 * time.Second, state: "closed"},
@@ -300,6 +302,8 @@ func executeSettlement(req SettlementRequest) (*SettlementResult, error) {
 		result, err = executeBridgeSettlement(req, provider)
 	case "pay_biller":
 		result, err = executeBillerPayment(req, provider)
+	case "refund":
+		result, err = executeRefund(req, provider)
 	default:
 		return nil, fmt.Errorf("unknown action: %s", req.Action)
 	}
@@ -442,6 +446,30 @@ func executeBillerPayment(req SettlementRequest, provider string) (*SettlementRe
 		Status:      "submitted",
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}, nil
+}
+
+// executeRefund handles action "refund". FAIL CLOSED / NO FAKE SUCCESS:
+//   - The original operation must exist in the settlement record store,
+//     otherwise there is nothing real to refund (NOT_FOUND).
+//   - A provider refund is only reported when the provider client genuinely
+//     supports one. None of the wired provider clients (circle, yellow_card,
+//     mojaloop) implements a refund path, so this returns an honest
+//     NOT_SUPPORTED error — the saga records it as a failed compensation and
+//     NEVER as a completed refund.
+func executeRefund(req SettlementRequest, provider string) (*SettlementResult, error) {
+	originalOp, _ := req.Payload["original_operation_id"].(string)
+	if originalOp == "" {
+		return nil, fmt.Errorf("INVALID_REQUEST: refund requires payload.original_operation_id")
+	}
+	mu.RLock()
+	_, known := settlements[originalOp]
+	mu.RUnlock()
+	if !known {
+		return nil, fmt.Errorf("NOT_FOUND: original operation %q has no settlement record; refusing to report a refund against nothing", originalOp)
+	}
+	log.Printf("[Settlement] Refund requested via %s: operation=%s original=%s amount=%v currency=%v — no provider refund path is wired; reporting NOT_SUPPORTED",
+		provider, req.OperationID, originalOp, req.Payload["amount"], req.Payload["currency"])
+	return nil, fmt.Errorf("NOT_SUPPORTED: provider %s has no refund capability in this settlement client; original operation %s requires manual/provider-console refund", provider, originalOp)
 }
 
 // ── Provider API Calls ──────────────────────────────────────────────────────
@@ -587,16 +615,16 @@ func callMojaloopTransfer(req SettlementRequest, ref string) (*SettlementResult,
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":       "ok",
-		"service":      "stablecoin-settlement",
-		"port":         port,
-		"version":      "1.0.0",
-		"uptime_secs":  int(time.Since(startTime).Seconds()),
-		"settlements":  atomic.LoadUint64(&settlementCount),
-		"webhooks":     atomic.LoadUint64(&webhookCount),
+		"status":        "ok",
+		"service":       "stablecoin-settlement",
+		"port":          port,
+		"version":       "1.0.0",
+		"uptime_secs":   int(time.Since(startTime).Seconds()),
+		"settlements":   atomic.LoadUint64(&settlementCount),
+		"webhooks":      atomic.LoadUint64(&webhookCount),
 		"ledger_writes": atomic.LoadUint64(&ledgerCount),
-		"claims":       atomic.LoadUint64(&claimCount),
-		"errors":       atomic.LoadUint64(&errorCount),
+		"claims":        atomic.LoadUint64(&claimCount),
+		"errors":        atomic.LoadUint64(&errorCount),
 	})
 }
 
@@ -703,10 +731,10 @@ func handleWebhook(w http.ResponseWriter, r *http.Request, provider, secret stri
 
 	// Publish Kafka event
 	publishKafkaEvent("stablecoin_webhook", map[string]interface{}{
-		"event_id": eventID,
-		"provider": provider,
-		"type":     event.Type,
-		"verified": verified,
+		"event_id":    eventID,
+		"provider":    provider,
+		"type":        event.Type,
+		"verified":    verified,
 		"received_at": event.ReceivedAt,
 	})
 
@@ -865,9 +893,9 @@ func createClaimHandler(w http.ResponseWriter, r *http.Request) {
 	})
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":  true,
-		"claim_id": req.ClaimID,
-		"claim_url": fmt.Sprintf("/claim/%s", req.ClaimID),
+		"success":    true,
+		"claim_id":   req.ClaimID,
+		"claim_url":  fmt.Sprintf("/claim/%s", req.ClaimID),
 		"expires_at": claim.ExpiresAt,
 	})
 }
@@ -998,13 +1026,13 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"settlements":     atomic.LoadUint64(&settlementCount),
-		"webhooks":        atomic.LoadUint64(&webhookCount),
-		"ledger_writes":   atomic.LoadUint64(&ledgerCount),
-		"claims":          atomic.LoadUint64(&claimCount),
-		"errors":          atomic.LoadUint64(&errorCount),
+		"settlements":      atomic.LoadUint64(&settlementCount),
+		"webhooks":         atomic.LoadUint64(&webhookCount),
+		"ledger_writes":    atomic.LoadUint64(&ledgerCount),
+		"claims":           atomic.LoadUint64(&claimCount),
+		"errors":           atomic.LoadUint64(&errorCount),
 		"circuit_breakers": cbStates,
-		"uptime_secs":     int(time.Since(startTime).Seconds()),
+		"uptime_secs":      int(time.Since(startTime).Seconds()),
 	})
 }
 

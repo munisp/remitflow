@@ -25,7 +25,9 @@
 import { KAFKA_TOPICS, sendToDLQ, publishEvent } from "./kafka";
 import { getDb, createAuditLog } from "../db";
 import { logger } from "../_core/logger";
-import { sql } from "drizzle-orm";
+import { sql, eq, and, inArray } from "drizzle-orm";
+import { stablecoinSettlementEvents, onrampTransactions, offrampTransactions } from "../../drizzle/schema";
+import { pessimisticStablecoinDebit, creditStablecoinWallet } from "./stablecoinAtomicity";
 import type { Consumer, KafkaMessage } from "kafkajs";
 
 const CONSUMER_GROUP = process.env.KAFKA_CONSUMER_GROUP || "remitflow-main-consumer";
@@ -264,6 +266,139 @@ const handlers: ConsumerHandler[] = [
         description: (msg.sessionId as string) || "unknown",
         metadata: { passed: msg.passed, score: msg.score, method: msg.method },
       }).catch(() => {});
+    },
+  },
+  {
+    // SPEC-wave12 §3.3 — ORCH adds KAFKA_TOPICS.STABLECOIN_SETTLEMENT at merge
+    topic: "stablecoin_settlement",
+    description: "Stablecoin settlement outbox — idempotent event log, honest on/off-ramp status transitions, failure compensation",
+    handler: async (msg) => {
+      const db = await getDb();
+      if (!db) throw new Error("[StablecoinSettlement] database unavailable");
+
+      // Go settlement publishes: {event_id, transaction_ref, provider, status,
+      // raw_status, settlement_record_updated, updated_at} (normalized status:
+      // pending|processing|completed|failed).
+      const eventId = typeof msg.event_id === "string" && msg.event_id.length > 0 ? msg.event_id : null;
+      const txRef = typeof msg.transaction_ref === "string" && msg.transaction_ref.length > 0 ? msg.transaction_ref : null;
+      const provider = typeof msg.provider === "string" && msg.provider.length > 0 ? msg.provider : "unknown";
+      const status = typeof msg.status === "string" ? msg.status : "pending";
+      const rawStatus = typeof msg.raw_status === "string" ? msg.raw_status : null;
+
+      if (!eventId || !txRef) {
+        logger.warn({ msg }, "[StablecoinSettlement] malformed settlement event (missing event_id/transaction_ref) — skipped");
+        return;
+      }
+
+      // 1. Idempotent event insert — ON CONFLICT (event_id) DO NOTHING.
+      const inserted = await db
+        .insert(stablecoinSettlementEvents)
+        .values({ eventId, txRef, provider, status, rawStatus, payload: msg })
+        .onConflictDoNothing({ target: stablecoinSettlementEvents.eventId })
+        .returning({ id: stablecoinSettlementEvents.id });
+      if (inserted.length === 0) return; // duplicate delivery — already handled
+
+      const markApplied = async (applied: boolean) => {
+        await db
+          .update(stablecoinSettlementEvents)
+          .set({ applied, appliedAt: new Date() })
+          .where(eq(stablecoinSettlementEvents.eventId, eventId));
+      };
+
+      try {
+        // 2. Resolve tx_ref → onramp_transactions or offramp_transactions.
+        const [onramp] = await db.select().from(onrampTransactions).where(eq(onrampTransactions.txRef, txRef)).limit(1);
+        const [offramp] = onramp
+          ? [undefined]
+          : await db.select().from(offrampTransactions).where(eq(offrampTransactions.txRef, txRef)).limit(1);
+
+        if (!onramp && !offramp) {
+          // Unknown tx_ref — never fabricate a transition.
+          logger.warn({ eventId, txRef, provider, status }, "[StablecoinSettlement] unknown tx_ref — event recorded, not applied");
+          await markApplied(false);
+          return;
+        }
+
+        if (status === "completed") {
+          // 3a. Honest guarded flip: pending|processing → completed.
+          if (onramp) {
+            await db.update(onrampTransactions)
+              .set({ status: "completed", completedAt: new Date(), updatedAt: new Date() })
+              .where(and(eq(onrampTransactions.txRef, txRef), inArray(onrampTransactions.status, ["pending", "processing"])));
+          } else if (offramp) {
+            await db.update(offrampTransactions)
+              .set({ status: "completed", completedAt: new Date(), updatedAt: new Date() })
+              .where(and(eq(offrampTransactions.txRef, txRef), inArray(offrampTransactions.status, ["pending", "processing"])));
+          }
+          await markApplied(true);
+          return;
+        }
+
+        if (status === "failed") {
+          // 3b. Guarded flip → failed, then compensate the money movement.
+          if (onramp) {
+            const flipped = await db.update(onrampTransactions)
+              .set({ status: "failed", updatedAt: new Date() })
+              .where(and(eq(onrampTransactions.txRef, txRef), inArray(onrampTransactions.status, ["pending", "processing"])))
+              .returning({ id: onrampTransactions.id });
+
+            if (flipped.length === 1) {
+              // The on-ramp wallet credit was optimistic — claw it back.
+              const amount = Number(onramp.stablecoinAmount);
+              try {
+                await pessimisticStablecoinDebit(onramp.userId, onramp.stablecoin, amount);
+              } catch (compErr) {
+                // Insufficient balance (funds already moved) — mark for manual
+                // review; NEVER fabricate a successful clawback.
+                const errMsg = compErr instanceof Error ? compErr.message : String(compErr);
+                logger.error({ eventId, txRef, userId: onramp.userId, amount, err: errMsg }, "[StablecoinSettlement] CRITICAL: onramp compensation failed — insufficient_balance_manual_review");
+                await db.update(onrampTransactions)
+                  .set({ depegWarning: true, updatedAt: new Date() })
+                  .where(eq(onrampTransactions.txRef, txRef));
+                await createAuditLog({
+                  userId: onramp.userId,
+                  action: "stablecoin.settlement.compensation_failed",
+                  targetType: "onramp_transaction",
+                  description: txRef,
+                  metadata: { eventId, amount, stablecoin: onramp.stablecoin, compensation: "insufficient_balance_manual_review", error: errMsg },
+                }).catch(() => {});
+              }
+            }
+          } else if (offramp) {
+            const flipped = await db.update(offrampTransactions)
+              .set({ status: "failed", updatedAt: new Date() })
+              .where(and(eq(offrampTransactions.txRef, txRef), inArray(offrampTransactions.status, ["pending", "processing"])))
+              .returning({ id: offrampTransactions.id });
+
+            if (flipped.length === 1) {
+              // The off-ramp stablecoin debit already happened — re-credit it.
+              const amount = Number(offramp.stablecoinAmount);
+              try {
+                await creditStablecoinWallet(offramp.userId, offramp.stablecoin, amount);
+              } catch (compErr) {
+                const errMsg = compErr instanceof Error ? compErr.message : String(compErr);
+                logger.error({ eventId, txRef, userId: offramp.userId, amount, err: errMsg }, "[StablecoinSettlement] CRITICAL: offramp re-credit failed — manual reconciliation required");
+                await createAuditLog({
+                  userId: offramp.userId,
+                  action: "stablecoin.settlement.compensation_failed",
+                  targetType: "offramp_transaction",
+                  description: txRef,
+                  metadata: { eventId, amount, stablecoin: offramp.stablecoin, compensation: "recredit_failed_manual_review", error: errMsg },
+                }).catch(() => {});
+              }
+            }
+          }
+          await markApplied(true);
+          return;
+        }
+
+        // pending/processing — recorded, no terminal transition to apply.
+        await markApplied(true);
+      } catch (err) {
+        // Event row is durably stored; leave applied=false for recon and do
+        // not rethrow (a retry would no-op on the event_id conflict anyway).
+        logger.error({ eventId, txRef, err: err instanceof Error ? err.message : String(err) }, "[StablecoinSettlement] failed to apply settlement event — left unapplied for recon");
+      }
     },
   },
 ];

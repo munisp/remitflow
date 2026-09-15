@@ -12,6 +12,12 @@ import { bdcVaultRouter } from "./vault";
 import { bdcComplianceRouter } from "./compliance";
 import { bdcReportingRouter } from "./reporting";
 import { bdcImtoRouter } from "./imto";
+// wave12 gap closures (SPEC-wave12 §4) — orchestrator registration
+import { bdcReversalsRouter } from "./reversals";
+import { bdcRescreeningRouter } from "./rescreening";
+import { bdcOffboardingRouter } from "./offboarding";
+import { bdcPickupRouter } from "./pickup";
+import { bdcAnalyticsRouter } from "./analytics";
 
 export const bdcRouter = router({
   operator: operatorRouter,
@@ -22,4 +28,9 @@ export const bdcRouter = router({
   compliance: bdcComplianceRouter,
   reporting: bdcReportingRouter,
   imto: bdcImtoRouter,
+  reversals: bdcReversalsRouter,
+  rescreening: bdcRescreeningRouter,
+  offboarding: bdcOffboardingRouter,
+  pickup: bdcPickupRouter,
+  analytics: bdcAnalyticsRouter,
 });

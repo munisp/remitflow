@@ -47,6 +47,7 @@ import type {
   BdcActivities,
   BdcBatchDeadlineInfo,
   BdcForceLiquidationOutcome,
+  BdcOffboardingOutcome,
   BdcReconReport,
   BdcReturnSubmitOutcome,
 } from "./activities-bdc";
@@ -157,6 +158,21 @@ export async function bdcSettlementReconWorkflow(imtoCode: string, period: strin
   return acts.reconcileActivity(imtoCode, period);
 }
 
+// ─── wave12 G7 — tenant offboarding (B6) ─────────────────────────────────────
+
+/**
+ * One-shot tenant offboarding evaluation (SPEC-wave12 §4.7): the activity
+ * claims the offboarding record (requested|blocked → in_progress), honestly
+ * evaluates every blocker (non-zero position, open NFEM batches, unsettled
+ * IMTO payouts, open regulatory returns — fail-closed on an unverifiable
+ * position), writes the blockers jsonb, and flips to 'completed'
+ * (+completed_at) or 'blocked'. Re-running the workflow (re-request) simply
+ * re-evaluates current state — idempotent by design.
+ */
+export async function bdcTenantOffboardingWorkflow(tenantId: number): Promise<BdcOffboardingOutcome> {
+  return acts.evaluateOffboardingBlockers(tenantId);
+}
+
 // ─── Starter helpers (worker-process side — NOT part of the workflow sandbox) ─
 // Called from routers (e.g. B2 sourcing.confirmNfemFunding, B3
 // reporting.submitReturn) and the cron registrar. Fail-soft like
@@ -224,6 +240,85 @@ export async function startBdcSettlementRecon(imtoCode: string, period: string):
     logger.warn(
       { imtoCode, period, err: err instanceof Error ? err.message : String(err) },
       "[BDC] Temporal unavailable — settlement recon workflow not started",
+    );
+    return false;
+  }
+}
+
+// ─── wave12 G1 (B4) — settled-reversal watchdog (daily cron) ─────────────────
+// APPEND-ONLY block. Type-only import + dedicated activity proxy, so nothing
+// above is touched. ORCH registers reversalWatchdogActivity on the same
+// BDC_WORKFLOW_TASK_QUEUE worker and schedules startBdcReversalWatchdog()
+// daily (cron registrar). The workflow is a thin deterministic shell: all
+// I/O is in the activity; the activity marks nothing — it emits Kafka alerts
+// for the human ops path (honest, SPEC-wave12 §4.1).
+import type { BdcReversalWatchdogActivities, BdcReversalWatchdogReport } from "./activities-bdc";
+
+const watchdogActs = proxyActivities<BdcReversalWatchdogActivities>({
+  startToCloseTimeout: "5 minutes",
+  retry: {
+    maximumAttempts: 3,
+    initialInterval: "5 seconds",
+    backoffCoefficient: 2,
+    maximumInterval: "1 minute",
+    nonRetryableErrorTypes: ["BdcNonRetryableError"],
+  },
+});
+
+/**
+ * Daily watchdog: find bdc_reversals stuck 'approved' > 24h (execution after
+ * approval failed) and emit per-reversal Kafka alerts. Returns the full
+ * report (persisted in workflow history).
+ */
+export async function bdcReversalWatchdogWorkflow(): Promise<BdcReversalWatchdogReport> {
+  return watchdogActs.reversalWatchdogActivity();
+}
+
+/** Start a one-shot reversal watchdog sweep. Idempotent per UTC day (ORCH cron calls daily). */
+export async function startBdcReversalWatchdog(): Promise<boolean> {
+  const { getTemporalClient } = await import("./temporalClient.js");
+  const { BDC_WORKFLOW_TASK_QUEUE } = await import("./activities-bdc.js");
+  const { logger } = await import("../_core/logger.js");
+  try {
+    const client = await getTemporalClient();
+    const day = new Date().toISOString().slice(0, 10); // worker-side clock — not sandboxed
+    await client.start("bdcReversalWatchdogWorkflow", {
+      taskQueue: BDC_WORKFLOW_TASK_QUEUE,
+      workflowId: `bdc-reversal-watchdog-${day}`,
+      args: [],
+    });
+    return true;
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      "[BDC] Temporal unavailable — reversal watchdog workflow not started",
+    );
+    return false;
+  }
+}
+
+/**
+ * wave12 G7 (B6): start the tenant offboarding evaluation workflow. Idempotent
+ * workflowId `bdc-offboard-${tenantId}`; fail-soft like the other starters —
+ * Temporal unavailable (or a prior run still open) → warn + false; the
+ * offboarding row stays 'requested' honestly and a re-request re-drives it.
+ */
+export async function startBdcTenantOffboarding(tenantId: number): Promise<boolean> {
+  const { getTemporalClient } = await import("./temporalClient.js");
+  const { BDC_WORKFLOW_TASK_QUEUE } = await import("./activities-bdc.js");
+  const { logger } = await import("../_core/logger.js");
+  try {
+    const client = await getTemporalClient();
+    await client.start("bdcTenantOffboardingWorkflow", {
+      taskQueue: BDC_WORKFLOW_TASK_QUEUE,
+      workflowId: `bdc-offboard-${tenantId}`,
+      args: [tenantId],
+    });
+    return true;
+  } catch (err) {
+    logger.warn(
+      { tenantId, err: err instanceof Error ? err.message : String(err) },
+      "[BDC] Temporal unavailable — tenant offboarding workflow not started",
     );
     return false;
   }

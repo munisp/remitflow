@@ -39,6 +39,7 @@ import {
   toCents,
   getBdcProfile,
   assertBranchActive,
+  assertCustomerNotRescreenBlocked,
 } from "./_shared";
 import {
   postBuyFx,
@@ -48,6 +49,7 @@ import {
   mirrorLegsToPg,
   type TbLegRecord,
 } from "./_ledger";
+import { computePosition } from "./sourcing";
 
 // ─── Local helpers ────────────────────────────────────────────────────────────
 
@@ -227,6 +229,12 @@ async function requireVerifiedCustomer(
 
 const SOF_THRESHOLD_CENTS = 1_000_000; // $10,000.00
 const CASH_METHOD_CAP_CENTS = 50_000; // $500.00
+/**
+ * Intraday NOP cap, percent of shareholders' funds (SPEC-wave12 §4.2).
+ * bdc_operator_profiles.nop_limit_pct is the tenant override (default 30);
+ * this constant is the fallback when a profile row carries no value.
+ */
+const NOP_CAP_PERCENT = 30;
 
 // ─── Router ───────────────────────────────────────────────────────────────────
 
@@ -262,6 +270,25 @@ export const bdcSalesRouter = router({
       await getBdcProfile(db, tenantId);
       await assertBranchActive(db, tenantId, input.branchId);
       const customer = await requireVerifiedCustomer(db, tenantId, input.customerId);
+
+      // wave12 G3 rescreen-block (B3): refuse customers whose latest periodic
+      // sanctions rescreening row is blocked (MLRO review required).
+      await assertCustomerNotRescreenBlocked(db, tenantId, input.customerId);
+
+      // wave12 G6 structuring guard (ORCH wiring): rolling 7d/30d accumulation
+      // vs the >$10k SoF rule. fxAmount is foreign-major-units; used as the
+      // USD-equivalent approximation (documented — same convention as the G2
+      // NOP projection). An approved SoF declaration clears the block.
+      {
+        const { checkRollingThresholds } = await import("./compliance.js");
+        const rolling = await checkRollingThresholds(tenantId, input.customerId, Number(input.fxAmount));
+        if (rolling.block) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `Rolling ${rolling.totals.d7.toFixed(2)} USD (7d) / ${rolling.totals.d30.toFixed(2)} USD (30d) accumulation exceeds structuring thresholds — approved Source-of-Funds declaration required`,
+          });
+        }
+      }
 
       const fxCents = toCents(input.fxAmount);
       if (fxCents <= 0) throw new TRPCError({ code: "BAD_REQUEST", message: "fxAmount must be positive" });
@@ -330,6 +357,41 @@ export const bdcSalesRouter = router({
       const rateKobo = BigInt(toCents(rate));
       // naira kobo = fxCents * rateKobo / 100 (round-half-up, integer math).
       const nairaKobo = (BigInt(fxCents) * rateKobo + 50n) / 100n;
+
+      // wave12 G2 intraday NOP (B5)
+      // Pre-trade prudential gate (SPEC-wave12 §4.2): project this purchase
+      // onto the live net-open-position (buy_fx: +fxAmount USD long) and block
+      // when the projected NOP% would exceed the cap. Computed FRESH per trade
+      // (no cache — money decision); a position that cannot be computed fails
+      // CLOSED (the trade is blocked, no money moves, no idempotency claim is
+      // burned).
+      {
+        let pos: Awaited<ReturnType<typeof computePosition>>;
+        try {
+          pos = await computePosition(db, tenantId);
+        } catch (nopErr) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `NOP position unavailable — trade blocked fail-closed (${nopErr instanceof Error ? nopErr.message : String(nopErr)})`,
+          });
+        }
+        const capPct = pos.profile.nopLimitPct ?? NOP_CAP_PERCENT;
+        const fundsCents = BigInt(toCents(pos.profile.shareholdersFunds ?? "0"));
+        const projectedNopMinor = pos.nopUsdMinor + BigInt(fxCents);
+        const projectedNopPct =
+          fundsCents > 0n
+            ? Number((projectedNopMinor * 10_000n) / fundsCents) / 100
+            : projectedNopMinor > 0n
+              ? 100
+              : 0;
+        if (projectedNopPct > capPct) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `NOP_CAP_EXCEEDED: projected NOP ${projectedNopPct}% of shareholders' funds exceeds the ${capPct}% cap (current ${pos.nopPct}%) — trade blocked`,
+            cause: { currentNopPct: pos.nopPct, projectedNopPct, capPct },
+          });
+        }
+      }
 
       // Tenant-scoped claim: idempotencyKey is client-supplied — without the
       // tenant prefix two tenants presenting the same key would collide.
@@ -448,6 +510,23 @@ export const bdcSalesRouter = router({
       await assertBranchActive(db, tenantId, input.branchId);
       const customer = await requireVerifiedCustomer(db, tenantId, input.customerId);
 
+      // wave12 G3 rescreen-block (B3): refuse customers whose latest periodic
+      // sanctions rescreening row is blocked (MLRO review required).
+      await assertCustomerNotRescreenBlocked(db, tenantId, input.customerId);
+
+      // wave12 G6 structuring guard (ORCH wiring): rolling 7d/30d accumulation
+      // vs the >$10k SoF rule (see buyFx for the USD-equivalent convention).
+      {
+        const { checkRollingThresholds } = await import("./compliance.js");
+        const rolling = await checkRollingThresholds(tenantId, input.customerId, Number(input.fxAmount));
+        if (rolling.block) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `Rolling ${rolling.totals.d7.toFixed(2)} USD (7d) / ${rolling.totals.d30.toFixed(2)} USD (30d) accumulation exceeds structuring thresholds — approved Source-of-Funds declaration required`,
+          });
+        }
+      }
+
       // Eligibility engine: only individuals (a customerType must exist).
       if (!customer.customerType) {
         throw new TRPCError({
@@ -504,6 +583,40 @@ export const bdcSalesRouter = router({
       const rate = await currentPublishedRate(db, tenantId, input.currency, "sell");
       const rateKobo = BigInt(toCents(rate));
       const nairaKobo = (BigInt(fxCents) * rateKobo + 50n) / 100n;
+
+      // wave12 G2 intraday NOP (B5)
+      // Pre-trade prudential gate (SPEC-wave12 §4.2): project this sale onto
+      // the live net-open-position (sell_fx: −fxAmount) and block when the
+      // projected NOP% would exceed the cap (a sale deepens a short position).
+      // Computed FRESH per trade (no cache — money decision); a position that
+      // cannot be computed fails CLOSED (trade blocked, no claim burned).
+      {
+        let pos: Awaited<ReturnType<typeof computePosition>>;
+        try {
+          pos = await computePosition(db, tenantId);
+        } catch (nopErr) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `NOP position unavailable — trade blocked fail-closed (${nopErr instanceof Error ? nopErr.message : String(nopErr)})`,
+          });
+        }
+        const capPct = pos.profile.nopLimitPct ?? NOP_CAP_PERCENT;
+        const fundsCents = BigInt(toCents(pos.profile.shareholdersFunds ?? "0"));
+        const projectedNopMinor = pos.nopUsdMinor - BigInt(fxCents);
+        const projectedNopPct =
+          fundsCents > 0n
+            ? Number((projectedNopMinor * 10_000n) / fundsCents) / 100
+            : projectedNopMinor > 0n
+              ? 100
+              : 0;
+        if (projectedNopPct > capPct) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `NOP_CAP_EXCEEDED: projected NOP ${projectedNopPct}% of shareholders' funds exceeds the ${capPct}% cap (current ${pos.nopPct}%) — trade blocked`,
+            cause: { currentNopPct: pos.nopPct, projectedNopPct, capPct },
+          });
+        }
+      }
 
       const claimKey = `BDC-SELL-${tenantId}-${input.idempotencyKey}`;
       const claim = await claimIdempotency(claimKey);
@@ -721,11 +834,32 @@ export const bdcSalesRouter = router({
           message: "Maker-checker violation: the maker cannot reverse their own transaction",
         });
       }
+      // wave12 G1 settled-reversal (B4): settled transactions are reversed
+      // only through an approved bdc_reversals row (maker-checker orchestrator
+      // path). If one exists, delegate to the shared execution helper;
+      // otherwise fail honestly and point at bdc.reversals.requestReversal.
       if (txn.status === "settled") {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "settled transactions require orchestrator approval (follow-up)",
-        });
+        const { bdcReversals } = await import("../../../drizzle/schema");
+        const { executeApprovedReversal } = await import("./reversals");
+        const [approved] = await db
+          .select()
+          .from(bdcReversals)
+          .where(
+            and(
+              eq(bdcReversals.tenantId, tenantId),
+              eq(bdcReversals.txnId, txn.id),
+              eq(bdcReversals.status, "approved"),
+            ),
+          )
+          .limit(1);
+        if (!approved) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message:
+              "settled transactions require an approved reversal — request one via bdc.reversals.requestReversal (maker-checker orchestrator path)",
+          });
+        }
+        return executeApprovedReversal(approved.id, ctx.user.id);
       }
       if (txn.status !== "pending" && txn.status !== "posted") {
         throw new TRPCError({

@@ -45,14 +45,46 @@ async function requestJson<T extends Record<string, unknown>>(
   return data as T;
 }
 
+// SPEC-wave12 §3.1 — the go-stablecoin-engine is canonical and requires
+// `X-API-Key: ${INTERNAL_SERVICE_KEY}` on all POST /stablecoin/* routes.
+// Fail closed in production when the key is not configured.
+function stablecoinEngineApiKey(): string {
+  const key = process.env.INTERNAL_SERVICE_KEY?.trim() ?? "";
+  if (!key && process.env.NODE_ENV === "production") {
+    throw new TRPCError({
+      code: "PRECONDITION_FAILED",
+      message: "INTERNAL_SERVICE_KEY must be configured before stablecoin engine operations can be used.",
+    });
+  }
+  return key;
+}
+
+function stablecoinEngineHeaders(withBody: boolean): Record<string, string> {
+  return {
+    ...(withBody ? { "Content-Type": "application/json" } : {}),
+    "X-API-Key": stablecoinEngineApiKey(),
+  };
+}
+
 export async function requestStablecoinEngine(
   path: string,
   body: Record<string, unknown>,
 ): Promise<StablecoinEngineResponse> {
   return requestJson<StablecoinEngineResponse>("STABLECOIN_ENGINE_URL", path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: stablecoinEngineHeaders(true),
     body: JSON.stringify(body),
+  });
+}
+
+// SPEC-wave12 §3.1 — GET routes on the engine (fx-rates, supported, depeg,
+// yield, gas). `path` may include a query string.
+export async function requestStablecoinEngineGet(
+  path: string,
+): Promise<StablecoinEngineResponse> {
+  return requestJson<StablecoinEngineResponse>("STABLECOIN_ENGINE_URL", path, {
+    method: "GET",
+    headers: stablecoinEngineHeaders(false),
   });
 }
 

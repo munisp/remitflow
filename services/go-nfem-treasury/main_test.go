@@ -145,6 +145,62 @@ func TestBuildLiquidationUpdate(t *testing.T) {
 	})
 }
 
+func TestBuildPartialLiquidationUpdate(t *testing.T) {
+	q := buildPartialLiquidationUpdate()
+	for _, want := range []string{
+		"UPDATE bdc_nfem_purchase_batches",
+		"status = 'part_filled'",
+		"actual_disbursed_usd = $3",
+		"residual_handling = 'returned'",
+		"WHERE id = $1 AND tenant_id = $2 AND status = 'selling'", // tenant predicate (F12) + single-winner guard
+	} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query missing %q:\n%s", want, q)
+		}
+	}
+	// 'part_filled' MUST fit the existing varchar(12) status column (11 chars).
+	if got := len("part_filled"); got > 12 {
+		t.Errorf("status 'part_filled' is %d chars — exceeds varchar(12)", got)
+	}
+}
+
+func TestClassifyDisbursement(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	cases := []struct {
+		name        string
+		disbursed   *float64
+		batchAmount float64
+		wantActual  float64
+		wantPartial bool
+		wantErr     bool
+	}{
+		{"absent → full", nil, 1000, 0, false, false},
+		{"exact amount → full", f(1000), 1000, 0, false, false},
+		{"partial", f(600), 1000, 600, true, false},
+		{"partial with cents", f(432.10), 1000, 432.10, true, false},
+		{"zero → 400", f(0), 1000, 0, false, true},
+		{"negative → 400", f(-5), 1000, 0, false, true},
+		{"exceeds batch → 400", f(1000.01), 1000, 0, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			actual, partial, errMsg := classifyDisbursement(tc.disbursed, tc.batchAmount)
+			if tc.wantErr && errMsg == "" {
+				t.Errorf("expected error, got none")
+			}
+			if !tc.wantErr && errMsg != "" {
+				t.Errorf("unexpected error %q", errMsg)
+			}
+			if partial != tc.wantPartial {
+				t.Errorf("partial = %v, want %v", partial, tc.wantPartial)
+			}
+			if actual != tc.wantActual {
+				t.Errorf("actual = %v, want %v", actual, tc.wantActual)
+			}
+		})
+	}
+}
+
 func TestFXBTValidate(t *testing.T) {
 	base := fxbtRequest{TenantID: 1, BankCode: "GTB", AmountUSD: 1000, Rate: 1530.5}
 	cases := []struct {

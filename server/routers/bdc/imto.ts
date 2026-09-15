@@ -76,6 +76,7 @@ import {
   bdcRateQuotes,
   bdcDenominationInventory,
   bdcTellerDrawers,
+  bdcCustomers,
 } from "../../../drizzle/schema";
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import {
@@ -87,6 +88,9 @@ import { claimIdempotency, storeIdempotency, releaseIdempotencyClaim } from "../
 import { requireTotpStepUp, requireKycTierForAmount } from "../../_core/totpStepUp";
 import { ENV } from "../../_core/env";
 import { logger } from "../../_core/logger";
+// wave12 G4 settle-screen (B6): fail-closed sanctions re-screen at settle time.
+import { screenSanctions } from "../../_core/polyglotClient";
+import { KAFKA_TOPICS, publishEvent } from "../../middleware/kafka";
 import { getBdcProfile, assertBranchActive, toCents } from "./_shared";
 import {
   ensureBdcAccounts,
@@ -558,6 +562,27 @@ export const bdcImtoRouter = router({
       // account provisioning is not money movement).
       await ensureBdcAccounts(tenantId);
 
+      // ── wave12 G4 settle-screen (B6) ─────────────────────────────────────
+      // SPEC-wave12 §4.5: re-screen the beneficiary IMMEDIATELY BEFORE the TB
+      // payout legs (the first money movement in the db.transaction below).
+      // FAIL CLOSED — a screening provider outage blocks the payout just like
+      // a match does. At this point NO legs exist (and no txn/settlement row
+      // yet), so the abort is the abortImtoSettlement-style honest terminal
+      // state minus the leg reversal: record the denied attempt as a failed
+      // imto_payout row (audit trail; distinct idempotency key so an honest
+      // retry is not blocked by the unique index), emit a Kafka/audit alert
+      // (fail-soft telemetry per §0.5), then throw —
+      //   provider error/outage/malformed → UNAVAILABLE (fail closed)
+      //   sanctions match / non-allow      → FORBIDDEN
+      await settleTimeRescreen(db, {
+        tenantId,
+        quote,
+        customerId: input.customerId ?? null,
+        branchId: input.branchId,
+        makerId: ctx.user.id,
+        idempotencyKey,
+      });
+
       const { txnId, settlementId, tbTransferIds } = await db.transaction(async (tx) => {
         // Cash leg: version-guarded drawer denomination decrements (each
         // guarded UPDATE must affect exactly 1 row or the whole tx rolls back).
@@ -895,6 +920,135 @@ export const bdcImtoRouter = router({
       };
     }),
 });
+
+// ─── wave12 G4 settle-screen (B6) ────────────────────────────────────────────
+
+/**
+ * Settle-time sanctions re-screen (SPEC-wave12 §4.5). Called from
+ * executePayout immediately before the TB payout legs; any failure path
+ * THROWS so no legs are ever posted for an unscreened/matched beneficiary.
+ *
+ * Screening subject (honest — no fabricated identity material): the payee
+ * name from the payment leg/quote context. When a BDC customer is bound to
+ * the payout (the cash recipient), their on-file full name is screened;
+ * otherwise the recipient reference (MSISDN) from the HMAC-signed quote
+ * payload is the only identity material available and is screened as-is.
+ *
+ * `screenSanctions` is fail-closed (throws on outage / non-OK / malformed);
+ * a throw here → UNAVAILABLE (provider error blocks payout). A match or any
+ * non-"allow" action → FORBIDDEN. Both paths record the denied attempt as a
+ * failed imto_payout row (best-effort; the primary error must never be
+ * masked) and publish a COMPLIANCE_ALERT (fail-soft).
+ */
+async function settleTimeRescreen(
+  db: Db,
+  ctx0: {
+    tenantId: number;
+    quote: ImtoQuotePayload;
+    customerId: number | null;
+    branchId: number;
+    makerId: number;
+    idempotencyKey: string;
+  },
+): Promise<void> {
+  const { tenantId, quote, customerId, branchId, makerId, idempotencyKey } = ctx0;
+
+  let payeeName = quote.reference; // recipient MSISDN from the signed quote payload
+  if (customerId != null) {
+    const [customer] = await db
+      .select({ fullName: bdcCustomers.fullName })
+      .from(bdcCustomers)
+      .where(and(eq(bdcCustomers.id, customerId), eq(bdcCustomers.tenantId, tenantId)))
+      .limit(1);
+    if (customer?.fullName) payeeName = customer.fullName;
+  }
+
+  let outcome: { matched: boolean; reason: string };
+  try {
+    const result = await screenSanctions({ name: payeeName, entityType: "individual" });
+    if (result.isSanctioned || result.action !== "allow") {
+      outcome = {
+        matched: true,
+        reason:
+          `settle-time sanctions re-screen ${result.isSanctioned ? "MATCH" : `action=${result.action}`}` +
+          ` (risk=${result.riskLevel}${result.matchType ? `, matchType=${result.matchType}` : ""}) — payout denied (fail-closed)`,
+      };
+    } else {
+      return; // explicit well-formed negative — the only pass.
+    }
+  } catch (err) {
+    outcome = {
+      matched: false,
+      reason: `settle-time sanctions re-screen provider error — payout denied (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  // Honest terminal record (abortImtoSettlement-style, but no legs exist to
+  // reverse): a failed imto_payout row + alert. Best-effort — the throw below
+  // is the authoritative denial and must not be masked by audit-write issues.
+  const reason = outcome.reason.slice(0, 1000);
+  try {
+    await db.insert(bdcTransactions).values({
+      tenantId,
+      branchId,
+      txnType: "imto_payout",
+      currency: quote.currency,
+      fxAmount: quote.fxAmount,
+      nairaAmount: quote.nairaAmount,
+      rate: quote.rate,
+      purposeCode: null,
+      customerId,
+      paymentLeg: {
+        method: null,
+        reference: null,
+        imtoCode: quote.imtoCode,
+        quoteId: quote.quoteId,
+        mojaloopTransferId: null as string | null,
+        settleScreenDenial: true,
+      },
+      cashPortion: "0.00",
+      // Distinct key (':screenfail' suffix, ≤96 chars) so the unique index
+      // never blocks an honest retry of the original claim key.
+      idempotencyKey: `${idempotencyKey}:screenfail`.slice(0, 96),
+      tbTransferIds: [],
+      status: "failed",
+      makerId,
+      failureReason: reason,
+    });
+  } catch (auditErr) {
+    logger.error(
+      { err: auditErr instanceof Error ? auditErr.message : String(auditErr), tenantId, reference: quote.reference },
+      "[BDC IMTO] failed to persist settle-screen denial record — denial still enforced",
+    );
+  }
+  await publishEvent(KAFKA_TOPICS.COMPLIANCE_ALERT, `bdc-imto-settlescreen:${tenantId}:${quote.quoteId}`, {
+    eventType: "bdc.imto.settle_screen_denied",
+    tenantId,
+    imtoCode: quote.imtoCode,
+    reference: quote.reference,
+    customerId,
+    matched: outcome.matched,
+    reason,
+    timestamp: new Date().toISOString(),
+  }).catch((err: unknown) =>
+    logger.warn({ err: err instanceof Error ? err.message : String(err), tenantId }, "[BDC IMTO] settle-screen denial alert publish failed (non-critical)"),
+  );
+  logger.warn(
+    { tenantId, imtoCode: quote.imtoCode, reference: quote.reference, customerId, matched: outcome.matched, reason },
+    "[BDC IMTO] settle-time sanctions re-screen denied the payout — no TB legs posted",
+  );
+
+  if (outcome.matched) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: `Beneficiary failed settle-time sanctions re-screening — IMTO payout denied: ${reason}`,
+    });
+  }
+  throw new TRPCError({
+    code: "UNAVAILABLE",
+    message: `Sanctions screening unavailable at settle time — IMTO payout denied (fail-closed): ${reason}`,
+  });
+}
 
 /** Record the Mojaloop transfer id on the settlement + txn (guarded: only
  *  while the txn is still pending — a later duplicate call cannot clobber a

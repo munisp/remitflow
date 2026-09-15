@@ -71,12 +71,12 @@ type Config struct {
 
 func loadConfig() Config {
 	return Config{
-		Port:            getEnv("STABLECOIN_ENGINE_PORT", "8113"),
-		DatabaseURL:     getEnv("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow"),
-		KafkaBrokers:    getEnv("KAFKA_BROKERS", "localhost:9092"),
-		RedisURL:        getEnv("REDIS_URL", "localhost:6379"),
-		TigerBeetleAddr: getEnv("TIGERBEETLE_ADDR", "localhost:3000"),
-		MojaloopHubURL:  getEnv("MOJALOOP_HUB_URL", "http://localhost:4001"),
+		Port:                getEnv("STABLECOIN_ENGINE_PORT", "8113"),
+		DatabaseURL:         getEnv("DATABASE_URL", "postgresql://remitflow:remitflow123@localhost:5432/remitflow"),
+		KafkaBrokers:        getEnv("KAFKA_BROKERS", "localhost:9092"),
+		RedisURL:            getEnv("REDIS_URL", "localhost:6379"),
+		TigerBeetleAddr:     getEnv("TIGERBEETLE_ADDR", "localhost:3000"),
+		MojaloopHubURL:      getEnv("MOJALOOP_HUB_URL", "http://localhost:4001"),
 		SanctionsServiceURL: os.Getenv("SANCTIONS_SERVICE_URL"),
 		ChainSettlementURL:  os.Getenv("CHAIN_SETTLEMENT_URL"),
 	}
@@ -103,6 +103,11 @@ type OnRampRequest struct {
 	FiatAmount   float64 `json:"fiatAmount" binding:"required,gt=0"`
 	Stablecoin   string  `json:"stablecoin" binding:"required"`
 	Chain        string  `json:"chain"`
+	// Optional contract fields: provider routing, destination wallet and the
+	// caller-supplied transaction reference.
+	Provider      string `json:"provider,omitempty"`
+	WalletAddress string `json:"walletAddress,omitempty"`
+	TxRef         string `json:"txRef,omitempty"`
 }
 
 type OffRampRequest struct {
@@ -113,6 +118,12 @@ type OffRampRequest struct {
 	PayoutRail       string  `json:"payoutRail"`
 	BankAccount      string  `json:"bankAccount"`
 	BankName         string  `json:"bankName"`
+	// Optional contract fields: tokenized payout destination and the
+	// caller-supplied transaction/operation references.
+	BankAccountId     string `json:"bankAccountId,omitempty"`
+	MobileMoneyNumber string `json:"mobileMoneyNumber,omitempty"`
+	TxRef             string `json:"txRef,omitempty"`
+	OperationId       string `json:"operationId,omitempty"`
 }
 
 type SettlementResult struct {
@@ -125,6 +136,97 @@ type SettlementResult struct {
 	PayoutRail       string  `json:"payoutRail,omitempty"`
 	EstimatedTime    string  `json:"estimatedTime"`
 	TxHash           string  `json:"txHash,omitempty"`
+}
+
+// ── Quotes (computation only — no execution, no ids) ─────────────────────────
+
+// Fee schedule — the single source of truth shared by execution and quotes.
+const (
+	onRampFeeRate  = 0.005  // 0.5% on-ramp fee
+	offRampFeeRate = 0.0075 // 0.75% off-ramp fee
+)
+
+// quoteTTL is how long a computed quote stays valid.
+const quoteTTL = 5 * time.Minute
+
+// payoutEstimatedTimes is the shared per-rail settlement-time estimate used by
+// both off-ramp execution and off-ramp quotes.
+var payoutEstimatedTimes = map[string]string{
+	"ach": "1-3 business days", "sepa": "1 business day",
+	"swift": "2-5 business days", "mobile_money": "instant",
+	"mojaloop": "< 30 seconds",
+}
+
+type OnRampQuoteRequest struct {
+	FiatCurrency string  `json:"fiatCurrency" binding:"required"`
+	FiatAmount   float64 `json:"fiatAmount" binding:"required,gt=0"`
+	Stablecoin   string  `json:"stablecoin" binding:"required"`
+	Chain        string  `json:"chain,omitempty"`
+}
+
+type OffRampQuoteRequest struct {
+	Stablecoin       string  `json:"stablecoin" binding:"required"`
+	StablecoinAmount float64 `json:"stablecoinAmount" binding:"required,gt=0"`
+	FiatCurrency     string  `json:"fiatCurrency" binding:"required"`
+	PayoutRail       string  `json:"payoutRail,omitempty"`
+}
+
+// QuoteResponse is a pure computation result: no order id, no execution, no
+// fabricated identifiers of any kind.
+type QuoteResponse struct {
+	Rate             float64   `json:"rate"`
+	Fee              float64   `json:"fee"`
+	StablecoinAmount float64   `json:"stablecoinAmount"`
+	FiatAmount       float64   `json:"fiatAmount"`
+	ExpiresAt        time.Time `json:"expiresAt"`
+	EstimatedTime    string    `json:"estimatedTime"`
+}
+
+// stableRateOrDefault mirrors the execution path's stablecoin peg lookup.
+func stableRateOrDefault(symbol string) float64 {
+	if r := stablecoinRates[symbol]; r != 0 {
+		return r
+	}
+	return 1.0
+}
+
+// computeOnRampQuote mirrors processOnRamp's conversion math exactly.
+func computeOnRampQuote(req OnRampQuoteRequest) QuoteResponse {
+	fxRate := getFXRate(req.FiatCurrency, "USD")
+	stableRate := stableRateOrDefault(req.Stablecoin)
+	usdAmount := req.FiatAmount * fxRate
+	stablecoinAmount := usdAmount / stableRate
+	fee := req.FiatAmount * onRampFeeRate
+	return QuoteResponse{
+		Rate:             math.Round(fxRate/stableRate*1e8) / 1e8,
+		Fee:              math.Round(fee*100) / 100,
+		StablecoinAmount: math.Round(stablecoinAmount*1e6) / 1e6,
+		FiatAmount:       req.FiatAmount,
+		ExpiresAt:        time.Now().Add(quoteTTL),
+		EstimatedTime:    "instant",
+	}
+}
+
+// computeOffRampQuote mirrors processOffRamp's conversion math exactly.
+func computeOffRampQuote(req OffRampQuoteRequest) QuoteResponse {
+	stableRate := stableRateOrDefault(req.Stablecoin)
+	usdAmount := req.StablecoinAmount * stableRate
+	fxRate := getFXRate("USD", req.FiatCurrency)
+	fiatAmount := usdAmount * fxRate
+	fee := fiatAmount * offRampFeeRate
+	netPayout := fiatAmount - fee
+	rail := req.PayoutRail
+	if rail == "" {
+		rail = "ach"
+	}
+	return QuoteResponse{
+		Rate:             math.Round(stableRate*fxRate*1e8) / 1e8,
+		Fee:              math.Round(fee*100) / 100,
+		StablecoinAmount: req.StablecoinAmount,
+		FiatAmount:       math.Round(netPayout*100) / 100,
+		ExpiresAt:        time.Now().Add(quoteTTL),
+		EstimatedTime:    payoutEstimatedTimes[rail],
+	}
 }
 
 type DePegAlert struct {
@@ -145,9 +247,9 @@ type YieldPool struct {
 }
 
 type GasEstimate struct {
-	Chain    string  `json:"chain"`
-	GasUsd   float64 `json:"gasUsd"`
-	GasGwei  int     `json:"gasGwei"`
+	Chain     string  `json:"chain"`
+	GasUsd    float64 `json:"gasUsd"`
+	GasGwei   int     `json:"gasGwei"`
 	BlockTime float64 `json:"blockTime"`
 }
 
@@ -179,10 +281,10 @@ func getFXRate(from, to string) float64 {
 // ── Sanctions Screening ─────────────────────────────────────────────────────
 
 type SanctionsResult struct {
-	Name        string `json:"name"`
-	Sanctioned  bool   `json:"isSanctioned"`
-	RiskLevel   string `json:"riskLevel"`
-	Action      string `json:"action"`
+	Name       string `json:"name"`
+	Sanctioned bool   `json:"isSanctioned"`
+	RiskLevel  string `json:"riskLevel"`
+	Action     string `json:"action"`
 }
 
 // errScreeningUnavailable marks a fail-closed sanctions-screening outage.
@@ -257,7 +359,7 @@ func processOnRamp(req OnRampRequest) (*SettlementResult, error) {
 
 	usdAmount := req.FiatAmount * fxRate
 	stablecoinAmount := usdAmount / stableRate
-	fee := req.FiatAmount * 0.005 // 0.5% on-ramp fee
+	fee := req.FiatAmount * onRampFeeRate
 
 	orderID := fmt.Sprintf("ONRAMP-%s", uuid.New().String()[:8])
 	atomic.AddInt64(&settlementCounter, 1)
@@ -269,11 +371,11 @@ func processOnRamp(req OnRampRequest) (*SettlementResult, error) {
 		return nil, fmt.Errorf("NOT_CONFIGURED: CHAIN_SETTLEMENT_URL is not set; on-ramp order %s was NOT settled", orderID)
 	}
 	settleBody, err := json.Marshal(map[string]interface{}{
-		"order_id":         orderID,
-		"user_id":          req.UserID,
-		"stablecoin":       req.Stablecoin,
+		"order_id":          orderID,
+		"user_id":           req.UserID,
+		"stablecoin":        req.Stablecoin,
 		"stablecoin_amount": math.Round(stablecoinAmount*1e6) / 1e6,
-		"chain":            req.Chain,
+		"chain":             req.Chain,
 	})
 	if err != nil {
 		return nil, err
@@ -352,18 +454,12 @@ func processOffRamp(req OffRampRequest) (*SettlementResult, error) {
 	usdAmount := req.StablecoinAmount * stableRate
 	fxRate := getFXRate("USD", req.FiatCurrency)
 	fiatAmount := usdAmount * fxRate
-	fee := fiatAmount * 0.0075 // 0.75% off-ramp fee
+	fee := fiatAmount * offRampFeeRate
 	netPayout := fiatAmount - fee
 
 	rail := req.PayoutRail
 	if rail == "" {
 		rail = "ach"
-	}
-
-	estimatedTimes := map[string]string{
-		"ach": "1-3 business days", "sepa": "1 business day",
-		"swift": "2-5 business days", "mobile_money": "instant",
-		"mojaloop": "< 30 seconds",
 	}
 
 	orderID := fmt.Sprintf("OFFRAMP-%s", uuid.New().String()[:8])
@@ -386,7 +482,7 @@ func processOffRamp(req OffRampRequest) (*SettlementResult, error) {
 		Fee:              math.Round(fee*100) / 100,
 		FXRate:           math.Round(stableRate*fxRate*1e8) / 1e8,
 		PayoutRail:       rail,
-		EstimatedTime:    estimatedTimes[rail],
+		EstimatedTime:    payoutEstimatedTimes[rail],
 	}, nil
 }
 
@@ -575,8 +671,43 @@ func main() {
 		c.JSON(200, result)
 	})
 
+	// ── Quotes (computation only — no execution, no fabricated ids) ─────
+	guarded.POST("/quotes/onramp", func(c *gin.Context) {
+		var req OnRampQuoteRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(200, computeOnRampQuote(req))
+	})
+	guarded.POST("/quotes/offramp", func(c *gin.Context) {
+		var req OffRampQuoteRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(200, computeOffRampQuote(req))
+	})
+
 	// ── FX Rates ────────────────────────────────────────────────────────
 	r.GET("/stablecoin/fx-rates", func(c *gin.Context) {
+		// Optional pair query: ?from=&to= returns a single {from,to,rate}.
+		// FAIL CLOSED: an unknown currency is an error, never a silent 1.0.
+		from, to := c.Query("from"), c.Query("to")
+		if from != "" && to != "" {
+			fromRate, ok1 := fallbackRates[strings.ToUpper(from)]
+			toRate, ok2 := fallbackRates[strings.ToUpper(to)]
+			if !ok1 || !ok2 {
+				c.JSON(400, gin.H{"error": "unsupported currency pair", "from": from, "to": to})
+				return
+			}
+			c.JSON(200, gin.H{
+				"from": strings.ToUpper(from),
+				"to":   strings.ToUpper(to),
+				"rate": toRate / fromRate,
+			})
+			return
+		}
 		base := c.DefaultQuery("base", "USD")
 		c.JSON(200, FXRate{
 			Base:      base,
@@ -630,8 +761,8 @@ func main() {
 		chains := []string{"ethereum", "polygon", "bsc", "solana", "tron", "arbitrum", "optimism", "base", "avalanche"}
 		stablecoins := []string{"USDT", "USDC", "BUSD", "DAI", "NGNT", "cUSD", "PYUSD"}
 		c.JSON(200, gin.H{
-			"stablecoins": stablecoins,
-			"chains":      chains,
+			"stablecoins":    stablecoins,
+			"chains":         chains,
 			"fiatCurrencies": []string{"USD", "NGN", "GBP", "EUR", "GHS", "KES", "ZAR", "XOF"},
 		})
 	})
