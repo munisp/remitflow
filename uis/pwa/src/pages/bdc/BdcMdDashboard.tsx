@@ -82,7 +82,15 @@ const BdcMdDashboard: React.FC = () => {
     setPosErr(null);
     setRetErr(null);
     try {
-      const res = await bdc.sales.listTransactions.query({ from, to, limit: 500 });
+      // Server schema: dateFrom/dateTo (z.coerce.date, dateTo is exclusive)
+      // and limit is capped at 100 — not from/to and not 500.
+      const toInclusive = new Date(`${to}T00:00:00.000Z`);
+      toInclusive.setUTCDate(toInclusive.getUTCDate() + 1);
+      const res = await bdc.sales.listTransactions.query({
+        dateFrom: from,
+        dateTo: toInclusive,
+        limit: 100,
+      });
       setTxns(asList(res as BdcTransaction[] | { items: BdcTransaction[] }));
     } catch (e) {
       setTxErr(errMsg(e));
@@ -120,13 +128,13 @@ const BdcMdDashboard: React.FC = () => {
     // not a real P&L — show gross volumes and the spread proxy per USD traded.
     return {
       count: settled.length,
-      buyFxUsd: sum(buys, (t) => t.fxAmountMinor),
-      sellFxUsd: sum(sells, (t) => t.fxAmountMinor),
-      buyNaira: sum(buys, (t) => t.nairaAmountMinor),
-      sellNaira: sum(sells, (t) => t.nairaAmountMinor),
-      payoutNaira: sum(payouts, (t) => t.nairaAmountMinor),
+      buyFxUsd: sum(buys, (t) => t.fxAmount),
+      sellFxUsd: sum(sells, (t) => t.fxAmount),
+      buyNaira: sum(buys, (t) => t.nairaAmount),
+      sellNaira: sum(sells, (t) => t.nairaAmount),
+      payoutNaira: sum(payouts, (t) => t.nairaAmount),
       payoutCount: payouts.length,
-      nfemUsd: sum(nfem, (t) => t.fxAmountMinor),
+      nfemUsd: sum(nfem, (t) => t.fxAmount),
       pendingCount: txns.filter((t) => t.status === "pending").length,
     };
   }, [txns]);
@@ -136,7 +144,7 @@ const BdcMdDashboard: React.FC = () => {
     for (const t of txns) {
       if (t.status === "reversed" || t.status === "failed") continue;
       const row = byBranch.get(t.branchId) ?? { naira: 0, count: 0 };
-      row.naira += moneyNum(t.nairaAmountMinor);
+      row.naira += moneyNum(t.nairaAmount);
       row.count += 1;
       byBranch.set(t.branchId, row);
     }
@@ -203,13 +211,13 @@ const BdcMdDashboard: React.FC = () => {
         <Tile
           label={`NOP vs ${NOP_CAP_PCT}% cap`}
           value={position ? `${nopPct.toFixed(2)}%` : "—"}
-          sub={position ? fmtMoney(position.nopUsdMinor, "USD") : posErr ? "position unavailable" : undefined}
+          sub={position ? fmtMoney(position.nopUsd, "USD") : posErr ? "position unavailable" : undefined}
           tone={!position ? "default" : nopPct > NOP_CAP_PCT ? "bad" : nopPct > NOP_CAP_PCT * 0.8 ? "warn" : "ok"}
         />
         <Tile
           label={`Borrowing vs ${BORROWING_CAP_PCT}% cap`}
           value={position ? `${borPct.toFixed(2)}%` : "—"}
-          sub={position ? fmtMoney(position.borrowingMinor, "NGN") : posErr ? "position unavailable" : undefined}
+          sub={position ? fmtMoney(position.borrowingUsd, "NGN") : posErr ? "position unavailable" : undefined}
           tone={!position ? "default" : borPct > BORROWING_CAP_PCT ? "bad" : borPct > BORROWING_CAP_PCT * 0.8 ? "warn" : "ok"}
         />
         <Tile

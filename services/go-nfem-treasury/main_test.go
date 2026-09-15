@@ -121,7 +121,7 @@ func TestBuildLiquidationUpdate(t *testing.T) {
 			"UPDATE bdc_nfem_purchase_batches",
 			"status = 'liquidated'",
 			"liquidated_at = now()",
-			"WHERE id = $1 AND status = 'selling'", // single-winner guard
+			"WHERE id = $1 AND tenant_id = $2 AND status = 'selling'", // tenant predicate (F12) + single-winner guard
 		} {
 			if !strings.Contains(q, want) {
 				t.Errorf("query missing %q:\n%s", want, q)
@@ -133,7 +133,7 @@ func TestBuildLiquidationUpdate(t *testing.T) {
 		q := buildLiquidationUpdate("return")
 		for _, want := range []string{
 			"status = 'returned'",
-			"WHERE id = $1 AND status = 'selling'",
+			"WHERE id = $1 AND tenant_id = $2 AND status = 'selling'",
 		} {
 			if !strings.Contains(q, want) {
 				t.Errorf("query missing %q:\n%s", want, q)

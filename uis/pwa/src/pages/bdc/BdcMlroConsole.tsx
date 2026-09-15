@@ -42,12 +42,15 @@ const BdcMlroConsole: React.FC = () => {
 
   // ── CTR check ──
   const [ctrAmount, setCtrAmount] = useState("");
-  const [ctrResult, setCtrResult] = useState<{ requiresCtr: boolean; threshold: string } | null>(null);
+  const [ctrResult, setCtrResult] = useState<{ requiresCtr: boolean; threshold: string | number } | null>(null);
   const [ctrErr, setCtrErr] = useState<string | null>(null);
 
   // ── STR filing ──
   const [strTxId, setStrTxId] = useState("");
   const [strReason, setStrReason] = useState("");
+  const [strRisk, setStrRisk] = useState<"low" | "medium" | "high" | "critical">("medium");
+  const [strNarrative, setStrNarrative] = useState("");
+  const [strOfficer, setStrOfficer] = useState("");
   const [strTotp, setStrTotp] = useState("");
   const [strResult, setStrResult] = useState<unknown>(null);
   const [strErr, setStrErr] = useState<string | null>(null);
@@ -72,7 +75,8 @@ const BdcMlroConsole: React.FC = () => {
       const res = await bdc.compliance.reviewSofDeclaration.mutate({
         declarationId: Number(sofId),
         decision,
-        reason: sofReason || undefined,
+        // Server schema: reason is REQUIRED (min 5 chars) for both decisions.
+        reason: sofReason,
         totpCode: sofTotp,
       });
       setSofMsg(`Declaration #${res.id} ${decision}.`);
@@ -103,7 +107,9 @@ const BdcMlroConsole: React.FC = () => {
     setCtrResult(null);
     setCtrErr(null);
     try {
-      const res = await bdc.compliance.ctrCheck.query({ amountUsdMinor: ctrAmount });
+      // Server schema: { amount (major-unit string), currency } — currency is
+      // required; this card is USD-threshold specific.
+      const res = await bdc.compliance.ctrCheck.query({ amount: ctrAmount, currency: "USD" });
       setCtrResult(res);
     } catch (e) {
       setCtrErr(errMsg(e));
@@ -116,7 +122,10 @@ const BdcMlroConsole: React.FC = () => {
     try {
       const res = await bdc.compliance.fileStr.mutate({
         transactionId: Number(strTxId),
-        reason: strReason,
+        suspicionReason: strReason,
+        riskLevel: strRisk,
+        narrative: strNarrative,
+        filingOfficer: strOfficer,
         totpCode: strTotp,
       });
       setStrResult(res);
@@ -132,7 +141,9 @@ const BdcMlroConsole: React.FC = () => {
     setReturnsErr(null);
     try {
       const res = await bdc.reporting.listReturns.query(
-        returnsFilter ? { status: returnsFilter } : {},
+        returnsFilter
+          ? { status: returnsFilter as "draft" | "staged" | "submitted" | "acknowledged" | "quarantined" | "failed" }
+          : {},
       );
       setReturns(asList(res as RegulatoryReturn[] | { items: RegulatoryReturn[] }));
     } catch (e) {
@@ -204,7 +215,7 @@ const BdcMlroConsole: React.FC = () => {
               <Field label="Declaration ID">
                 <input className={inputCls} inputMode="numeric" value={sofId} onChange={(e) => setSofId(e.target.value.replace(/\D/g, ""))} />
               </Field>
-              <Field label="Reason (required for reject)">
+              <Field label="Reason (required, min 5 chars)">
                 <input className={inputCls} value={sofReason} onChange={(e) => setSofReason(e.target.value)} />
               </Field>
             </div>
@@ -212,14 +223,14 @@ const BdcMlroConsole: React.FC = () => {
               <TotpField value={sofTotp} onChange={setSofTotp} label="MLRO TOTP" />
               <button
                 className={btnPrimaryCls}
-                disabled={!sofId || sofTotp.length !== 6}
+                disabled={!sofId || sofReason.trim().length < 5 || sofTotp.length !== 6}
                 onClick={() => reviewSof("approved")}
               >
                 Approve
               </button>
               <button
                 className={btnSecondaryCls}
-                disabled={!sofId || !sofReason || sofTotp.length !== 6}
+                disabled={!sofId || sofReason.trim().length < 5 || sofTotp.length !== 6}
                 onClick={() => reviewSof("rejected")}
               >
                 Reject
@@ -285,15 +296,40 @@ const BdcMlroConsole: React.FC = () => {
               <Field label="Transaction ID">
                 <input className={inputCls} inputMode="numeric" value={strTxId} onChange={(e) => setStrTxId(e.target.value.replace(/\D/g, ""))} />
               </Field>
-              <Field label="Suspicion reason">
+              <Field label="Suspicion reason (min 10 chars)">
                 <input className={inputCls} value={strReason} onChange={(e) => setStrReason(e.target.value)} />
               </Field>
+              <Field label="Risk level">
+                <select className={inputCls} value={strRisk} onChange={(e) => setStrRisk(e.target.value as typeof strRisk)}>
+                  {(["low", "medium", "high", "critical"] as const).map((r) => (
+                    <option key={r} value={r}>{r}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Filing officer">
+                <input className={inputCls} value={strOfficer} onChange={(e) => setStrOfficer(e.target.value)} placeholder="Officer full name" />
+              </Field>
             </div>
+            <Field label="Narrative (min 50 chars)">
+              <textarea
+                className={inputCls}
+                rows={3}
+                value={strNarrative}
+                onChange={(e) => setStrNarrative(e.target.value)}
+                placeholder="Full goaml narrative: parties, amounts, dates, grounds for suspicion"
+              />
+            </Field>
             <div className="flex items-end gap-3">
               <TotpField value={strTotp} onChange={setStrTotp} label="MLRO TOTP" />
               <button
                 className={btnPrimaryCls}
-                disabled={!strTxId || !strReason || strTotp.length !== 6}
+                disabled={
+                  !strTxId ||
+                  strReason.trim().length < 10 ||
+                  strNarrative.trim().length < 50 ||
+                  strOfficer.trim().length < 2 ||
+                  strTotp.length !== 6
+                }
                 onClick={fileStr}
               >
                 Draft & file STR

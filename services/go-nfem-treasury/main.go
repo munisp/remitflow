@@ -254,6 +254,14 @@ func buildEntitlementQuery(tenantID int64, bankCode string) (string, []any) {
 
 // buildBatchQuery returns the read-only purchase-batch query and args. When
 // bankCode is set, batches are filtered via their entitlement row.
+//
+// KNOWN LIMITATION (M24): this read model (and the used_usd / remainingUsd
+// headroom derived from the entitlement row) trusts the latest PG batch /
+// entitlement rows as the exposure picture. It does NOT verify that a settled
+// TigerBeetle leg exists for a batch before counting it — a row whose TB
+// posting failed or is still pending is reported exactly like a settled one.
+// Closing that gap requires a TB-backed reconciliation read; documented here
+// only, not redesigned in this service.
 func buildBatchQuery(tenantID int64, bankCode string) (string, []any) {
 	args := []any{tenantID}
 	if bankCode != "" {
@@ -380,8 +388,12 @@ func handleEntitlement(w http.ResponseWriter, r *http.Request) {
 // ─── Liquidation intent (guarded single-winner claim) ────────────────────────
 
 type liquidateRequest struct {
-	BatchID int64  `json:"batchId"`
-	Mode    string `json:"mode"` // "market" | "return"
+	// TenantID scopes the confirmation UPDATE (F12): without it, any caller
+	// holding the internal key could confirm/liquidate another tenant's batch
+	// given a known batch id. Required — requests without it are rejected.
+	TenantID int64  `json:"tenantId"`
+	BatchID  int64  `json:"batchId"`
+	Mode     string `json:"mode"` // "market" | "return"
 }
 
 // liquidationTarget maps a liquidation mode to its terminal batch status.
@@ -396,25 +408,30 @@ func liquidationTarget(mode string) (string, bool) {
 }
 
 // buildLiquidationUpdate returns the guarded UPDATE for the given mode. The
-// WHERE clause enforces the single-winner claim: only a batch still in
-// 'selling' can transition, so concurrent losers get 0 rows affected.
+// WHERE clause enforces the tenant predicate ($2 — F12 cross-tenant guard)
+// plus the single-winner claim: only a batch still in 'selling' can
+// transition, so concurrent losers get 0 rows affected.
 func buildLiquidationUpdate(mode string) string {
 	target, _ := liquidationTarget(mode)
 	if mode == "market" {
 		return `UPDATE bdc_nfem_purchase_batches
 		       SET status = '` + target + `', liquidated_at = now(), updated_at = now()
-		       WHERE id = $1 AND status = 'selling'`
+		       WHERE id = $1 AND tenant_id = $2 AND status = 'selling'`
 	}
 	// 'return' mode: no liquidated_at — the FX goes back to the issuing bank.
 	return `UPDATE bdc_nfem_purchase_batches
 	       SET status = '` + target + `', updated_at = now()
-	       WHERE id = $1 AND status = 'selling'`
+	       WHERE id = $1 AND tenant_id = $2 AND status = 'selling'`
 }
 
 func handleLiquidate(w http.ResponseWriter, r *http.Request) {
 	var req liquidateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "invalid JSON body")
+		return
+	}
+	if req.TenantID <= 0 {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", "tenantId must be a positive integer")
 		return
 	}
 	if req.BatchID <= 0 {
@@ -426,7 +443,8 @@ func handleLiquidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate batch exists and inspect its state.
+	// Validate batch exists and inspect its state — tenant-scoped (F12): a
+	// batch id belonging to another tenant is indistinguishable from missing.
 	var (
 		tenantID    int64
 		status      string
@@ -438,7 +456,7 @@ func handleLiquidate(w http.ResponseWriter, r *http.Request) {
 	)
 	err := db.QueryRowContext(r.Context(),
 		`SELECT tenant_id, status, amount_usd, rate, fxbt_reference, deadline_at, purchased_at
-		 FROM bdc_nfem_purchase_batches WHERE id = $1`, req.BatchID).
+		 FROM bdc_nfem_purchase_batches WHERE id = $1 AND tenant_id = $2`, req.BatchID, req.TenantID).
 		Scan(&tenantID, &status, &amountUSD, &rate, &fxbtRef, &deadlineAt, &purchasedAt)
 	if err == sql.ErrNoRows {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "batch not found")
@@ -455,8 +473,9 @@ func handleLiquidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Guarded single-winner claim (SPEC-bdc §0.5b).
-	res, err := db.ExecContext(r.Context(), buildLiquidationUpdate(req.Mode), req.BatchID)
+	// Guarded single-winner claim (SPEC-bdc §0.5b) with the tenant predicate
+	// (F12): the UPDATE can never land on another tenant's batch.
+	res, err := db.ExecContext(r.Context(), buildLiquidationUpdate(req.Mode), req.BatchID, req.TenantID)
 	if err != nil {
 		log.Printf("[nfem-treasury] liquidation update error: %v", err)
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", "liquidation update failed")

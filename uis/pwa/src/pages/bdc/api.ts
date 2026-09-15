@@ -1,14 +1,26 @@
 /**
  * BDC console — typed client wrapper over the PWA tRPC client.
  *
- * The server exposes the `bdc.*` namespace (server/routers/bdc/*, per
- * SPEC-bdc.md §3). The PWA-local AppRouter contract (types/appRouter.ts) does
- * not mirror `bdc` yet (that file is outside F1's editable scope), so this
- * module casts the shared client to a local structural type — the same
- * "pages cast to their own interfaces" convention used by OperationsMap.
+ * The server exposes the `bdc.*` namespace (server/routers.ts →
+ * server/routers/bdc/index.ts: operator, rates, sales, sourcing, vault,
+ * compliance, reporting, imto). The PWA-local AppRouter contract
+ * (types/appRouter.ts) does not mirror `bdc` yet, so this module casts the
+ * shared client to a local structural type — the same "pages cast to their
+ * own interfaces" convention used by OperationsMap.
  *
- * Money values are decimal strings (numeric(18,2)) — display with 2dp via
- * fmtMoney. Dates are ISO strings. Field names mirror the SPEC §3 contracts.
+ * CONTRACT SOURCE OF TRUTH: the zod `.input(...)` schemas in
+ * server/routers/bdc/*.ts. Every request-body interface below mirrors its
+ * router schema exactly — field names, required vs optional, enums.
+ *
+ * Money values are numeric(18,2) MAJOR units. On the wire they are decimal
+ * strings (e.g. "12500.00"); several schemas (sales.buyFx/sellFx,
+ * sourcing.requestNfemPurchase) also accept positive numbers. There are NO
+ * *Minor fields anywhere in the BDC contract. Display with 2dp via fmtMoney.
+ * Dates are ISO strings; reporting period fields are "YYYY-MM-DD".
+ *
+ * Idempotency: schemas that require `idempotencyKey` (sales.buyFx,
+ * sales.sellFx, sourcing.requestNfemPurchase) must be given a fresh
+ * `crypto.randomUUID()` per user action (see newIdempotencyKey()).
  */
 import { trpcClient } from "../../services/trpc";
 
@@ -38,9 +50,19 @@ export const NFEM_LIQUIDATION_HOURS = 24;
 export const NOP_CAP_PCT = 30;
 export const BORROWING_CAP_PCT = 50;
 
+/**
+ * Fresh idempotency key for money-moving mutations whose schema requires one
+ * (sales.buyFx / sales.sellFx / sourcing.requestNfemPurchase). UUIDv4 is
+ * 36 chars — inside the server's min(8)/max(64) bounds. Generate ONCE per
+ * user action so a retried submit replays idempotently.
+ */
+export function newIdempotencyKey(): string {
+  return crypto.randomUUID();
+}
+
 // ── Display helpers ──────────────────────────────────────────────────────────
 
-/** Format a decimal-string money value with 2dp. */
+/** Format a major-unit money value (decimal string or number) with 2dp. */
 export function fmtMoney(
   value: string | number | null | undefined,
   currency?: string,
@@ -56,7 +78,7 @@ export function fmtMoney(
   return currency ? `${currency} ${body}` : body;
 }
 
-/** Parse a decimal-string money value to a Number for threshold checks. */
+/** Parse a major-unit money value to a Number for threshold checks. */
 export function moneyNum(value: string | number | null | undefined): number {
   const n = typeof value === "number" ? value : Number(value);
   return Number.isFinite(n) ? n : 0;
@@ -91,18 +113,45 @@ export function errMsg(e: unknown): string {
   return String(e);
 }
 
-// ── Procedure shapes (SPEC §3) ───────────────────────────────────────────────
+// ── Procedure shapes ─────────────────────────────────────────────────────────
 
 type Query<I, O> = { query: (input: I) => Promise<O> };
 type Mutation<I, O> = { mutate: (input: I) => Promise<O> };
 
 type Json = Record<string, unknown> | unknown[] | unknown;
 
+// ── Shared input atoms (mirror server/routers/bdc/* zod atoms) ──────────────
+
+/** numeric(18,2) major-unit amount — decimal string ("12500.00"). */
+type MoneyString = string;
+/** Schemas declared as z.union([z.number().positive(), z.string()]) accept either. */
+type MoneyInput = number | string;
+/** "YYYY-MM-DD" (reporting dateSchema). */
+type DateString = string;
+/** "YYYY-MM" (imto settlement period). */
+type PeriodString = string;
+
+type VaultLocationType = "vault" | "drawer" | "cit";
+
+/** vault.ts locationRefSchema. */
+export interface LocationRef {
+  locationType: VaultLocationType;
+  locationId: number;
+}
+
+/**
+ * Denomination breakdown row. `currency` is present only where the server
+ * schema carries it (vault itemSchema); sales/imto denomination schemas are
+ * { denomination, noteCount } only. `denomination` is a MAJOR-unit face value
+ * per note (e.g. "100.00") — there is no denominationMinor.
+ */
 export interface DenominationItem {
   currency?: string;
-  denominationMinor: string;
+  denomination: MoneyInput;
   noteCount: number;
 }
+
+// ── Response row types (drizzle numeric columns deserialize as strings) ─────
 
 export interface BdcBranch {
   id: number;
@@ -120,8 +169,9 @@ export interface BdcQuote {
   branchId?: number | null;
   currency: string;
   side: "buy" | "sell";
-  rateMinor: string;
-  referenceRateMinor?: string;
+  /** naira per 1 unit of `currency`, numeric(18,2) major units. */
+  rate: MoneyString;
+  referenceRate?: MoneyString | null;
   status: string;
   makerId: number;
   checkerId?: number | null;
@@ -129,12 +179,11 @@ export interface BdcQuote {
   expiresAt?: string | null;
 }
 
+/** rates.currentBoard row: { currency, buy, sell } (rates.ts). */
 export interface BoardRow {
   currency: string;
   buy?: BdcQuote | null;
   sell?: BdcQuote | null;
-  publishedAt?: string | null;
-  expiresAt?: string | null;
 }
 
 export interface BdcTransaction {
@@ -142,14 +191,18 @@ export interface BdcTransaction {
   branchId: number;
   txnType: string;
   currency: string;
-  fxAmountMinor: string;
-  nairaAmountMinor: string;
-  rateMinor: string;
+  /** FX amount, numeric(18,2) major units. */
+  fxAmount: MoneyString;
+  /** Naira countervalue, numeric(18,2) major units. */
+  nairaAmount: MoneyString;
+  /** Dealt rate (naira per 1 FX unit), numeric(18,2). */
+  rate: MoneyString;
   purposeCode?: string | null;
   evidenceRefs?: string[];
   customerId?: number | null;
-  paymentLeg?: { method: string; reference: string | null };
-  cashPortionMinor?: string;
+  paymentLeg?: { method: string; reference: string | null } & Record<string, unknown>;
+  /** Cash portion of the deal, numeric(18,2) major units. */
+  cashPortion?: MoneyString;
   idempotencyKey?: string;
   status: string;
   makerId?: number;
@@ -158,21 +211,29 @@ export interface BdcTransaction {
   createdAt?: string;
 }
 
+/** sourcing.entitlementStatus row (bdc_nfem_entitlements + remainingUsd). */
 export interface EntitlementRow {
   id: number;
-  bankCode: string;
+  bankCode: string | null;
   weekStart: string;
-  capUsdMinor: string;
-  usedUsdMinor: string;
-  remainingUsdMinor?: string;
+  capUsd: MoneyString;
+  usedUsd: MoneyString;
+  remainingUsd: MoneyString;
 }
 
+/** sourcing.entitlementStatus response envelope. */
+export interface EntitlementStatus {
+  weekStart: string;
+  rows: EntitlementRow[];
+}
+
+/** bdc_nfem_purchase_batches row. */
 export interface NfemBatch {
   id: number;
-  entitlementId?: number;
-  amountUsdMinor: string;
-  rateMinor: string;
-  nairaPaidMinor?: string;
+  entitlementId?: number | null;
+  amountUsd: MoneyString;
+  rate: MoneyString;
+  nairaPaid?: MoneyString;
   fxbtReference?: string | null;
   status: string;
   purchasedAt?: string | null;
@@ -180,24 +241,35 @@ export interface NfemBatch {
   liquidatedAt?: string | null;
 }
 
+/** sourcing.positionNow response (major units; server converts internally). */
 export interface PositionNow {
-  nopUsdMinor: string;
+  nopUsd: MoneyString;
   nopPct: string | number;
-  borrowingMinor: string;
+  borrowingUsd: MoneyString;
   borrowingPct: string | number;
   breaches: string[];
-  asOf?: string;
+  perCurrency?: Json;
+  stalenessLabel?: string;
+  rateStale?: boolean;
 }
 
+/** vault.getStock inventory row. */
 export interface StockRow {
   id?: number;
   locationType: string;
   locationId: number;
   currency: string;
-  denominationMinor: string;
+  /** Face value per note, numeric(18,2) major units. */
+  denomination: MoneyString;
   noteCount: number;
   version?: number;
   updatedAt?: string;
+}
+
+/** vault.getStock response envelope. */
+export interface StockResponse {
+  rows: StockRow[];
+  totals: Array<{ currency: string; noteCount: number; totalCents: number }>;
 }
 
 export interface CitManifest {
@@ -216,7 +288,7 @@ export interface SofDeclaration {
   id: number;
   customerId: number;
   transactionId?: number | null;
-  amountUsdMinor: string;
+  amountUsd: MoneyString;
   sourceDescription?: string | null;
   documentRefs?: string[];
   status: string;
@@ -237,100 +309,350 @@ export interface RegulatoryReturn {
   errorDetail?: string | null;
 }
 
+/** compliance.ctrCheck response. */
+export interface CtrCheckResult {
+  requiresCtr: boolean;
+  reason?: "amount_threshold" | "structuring_pattern" | null;
+  threshold: string | number;
+}
+
+/** imto.payoutQuote response — includes the HMAC-signed quote envelope that
+ *  executePayout consumes verbatim. */
 export interface PayoutQuoteResult {
-  nairaAmountMinor: string;
-  commissionMinor: string;
   quoteId: string;
   expiresAt: string;
+  /** Gross naira value of the FX amount, major units. */
+  nairaAmount: MoneyString;
+  /** Naira commission deducted from the payout, major units. */
+  commission: MoneyString;
+  /** Cash to recipient (nairaAmount − commission), major units. */
+  payoutAmount: MoneyString;
+  rate: MoneyString;
+  payeeFspId: string;
+  /** Signed quote — pass back to executePayout untouched. */
+  quote: { payload: unknown; signature: string };
 }
+
+/** sales.buyFx / sellFx / confirmNairaLeg / reverseTransaction result. */
+export interface TxnActionResult {
+  status: string;
+  transactionId?: number;
+  declarationId?: number;
+  message?: string;
+  tbTransferIds?: Json;
+}
+
+// ── Client contract (one entry per server procedure) ────────────────────────
 
 export interface BdcClient {
   operator: {
+    /** No input. */
     getProfile: Query<Record<string, never>, Json>;
-    upsertProfile: Mutation<Json, Json>;
-    registerBranch: Mutation<Json, Json>;
-    updateBranchStatus: Mutation<{ branchId: number; status: string; totpCode: string }, Json>;
-    listBranches: Query<{ status?: string; stateCode?: string }, BdcBranch[]>;
-    registerFranchisee: Mutation<Json, Json>;
-    listFranchisees: Query<Record<string, never>, Json[]>;
+    upsertProfile: Mutation<
+      {
+        tier?: "tier_1" | "tier_2";
+        licenseNo?: string;
+        stateCode?: string;
+        shareholdersFunds?: MoneyString;
+        nopLimitPct?: number;
+        borrowingLimitPct?: number;
+        weeklyNfemEntitlementUsd?: MoneyString;
+        licenseStatus?: "pending" | "aip" | "provisional" | "active" | "suspended";
+        paDeadlineAt?: string | Date;
+        totpCode?: string;
+      },
+      Json
+    >;
+    registerBranch: Mutation<
+      {
+        code: string;
+        name: string;
+        address?: string;
+        stateCode: string;
+        lat: number;
+        lng: number;
+        isHeadOffice?: boolean;
+      },
+      Json
+    >;
+    updateBranchStatus: Mutation<
+      { branchId: number; status: "active" | "suspended" | "closed"; totpCode?: string },
+      Json
+    >;
+    listBranches: Query<
+      { status?: "pending" | "active" | "suspended" | "closed"; stateCode?: string },
+      BdcBranch[]
+    >;
+    registerFranchisee: Mutation<
+      {
+        name: string;
+        licenseRef?: string;
+        stateCode: string;
+        lat: number;
+        lng: number;
+        royaltyBps?: number;
+        airportExempt?: boolean;
+      },
+      Json
+    >;
+    listFranchisees: Query<
+      { status?: "pending" | "active" | "suspended" | "closed"; stateCode?: string },
+      Json[]
+    >;
   };
   rates: {
-    setBand: Mutation<{ currency: string; bandBps: number; totpCode: string }, Json>;
+    setBand: Mutation<{ currency: string; bandBps: number; totpCode?: string }, Json>;
     createQuote: Mutation<
-      { branchId?: number; currency: string; side: "buy" | "sell"; rateMinor: string },
+      { branchId?: number; currency: string; side: "buy" | "sell"; rate: MoneyString },
       BdcQuote
     >;
-    publishQuote: Mutation<{ quoteId: number; totpCode: string }, BdcQuote>;
+    publishQuote: Mutation<{ quoteId: number; totpCode?: string }, BdcQuote>;
+    /** No input. */
     expireStale: Mutation<Record<string, never>, Json>;
-    currentBoard: Query<{ branchId?: number }, BoardRow[] | { rows: BoardRow[] }>;
+    currentBoard: Query<{ branchId?: number }, BoardRow[]>;
     crossQuote: Query<{ fromCcy: string; toCcy: string }, Json>;
+    listBands: Query<{ includeInactive?: boolean }, Json>;
+    listQuotes: Query<
+      {
+        status?: "draft" | "published" | "expired" | "suspended";
+        currency?: string;
+        cursor?: number;
+        limit?: number;
+      },
+      { items: BdcQuote[]; nextCursor: number | null } | Json
+    >;
   };
   sales: {
-    buyFx: Mutation<Json, Json>;
-    sellFx: Mutation<Json, Json>;
-    confirmNairaLeg: Mutation<{ transactionId: number; totpCode: string }, Json>;
-    reverseTransaction: Mutation<{ transactionId: number; totpCode: string }, Json>;
-    getTransaction: Query<{ id: number }, BdcTransaction>;
+    buyFx: Mutation<
+      {
+        branchId: number;
+        customerId: number;
+        currency: string;
+        fxAmount: MoneyInput;
+        denominations: Array<{ denomination: MoneyInput; noteCount: number }>;
+        paymentMethod: "cash" | "nip_transfer" | "prepaid_card";
+        paymentReference?: string | null;
+        idempotencyKey: string;
+        totpCode?: string;
+        sofSourceDescription?: string;
+        sofDocumentRefs?: string[];
+      },
+      TxnActionResult
+    >;
+    sellFx: Mutation<
+      {
+        branchId: number;
+        customerId: number;
+        currency: string;
+        fxAmount: MoneyInput;
+        purposeCode: string;
+        evidenceRefs: string[];
+        nipReference: string;
+        cashPortion?: MoneyInput;
+        disbursementMethod: "prepaid_card" | "domiciliary";
+        disbursementReference?: string | null;
+        denominations?: Array<{ denomination: MoneyInput; noteCount: number }>;
+        idempotencyKey: string;
+        totpCode?: string;
+      },
+      TxnActionResult
+    >;
+    confirmNairaLeg: Mutation<
+      { transactionId: number; confirmationReference?: string; totpCode?: string },
+      TxnActionResult
+    >;
+    reverseTransaction: Mutation<
+      { transactionId: number; reason: string; totpCode?: string },
+      TxnActionResult
+    >;
+    getTransaction: Query<{ transactionId: number }, BdcTransaction>;
     listTransactions: Query<
       {
         branchId?: number;
-        txnType?: string;
-        status?: string;
-        from?: string;
-        to?: string;
-        cursor?: string;
+        txnType?: "buy_fx" | "sell_fx" | "imto_payout" | "nfem_purchase" | "nfem_return";
+        status?: "pending" | "posted" | "settled" | "failed" | "reversed";
+        dateFrom?: string | Date;
+        dateTo?: string | Date;
+        cursor?: number;
         limit?: number;
       },
-      BdcTransaction[] | { items: BdcTransaction[]; nextCursor?: string | null }
+      { items: BdcTransaction[]; nextCursor: number | null }
     >;
   };
   sourcing: {
     requestNfemPurchase: Mutation<
-      { bankCode: string; amountUsdMinor: string; rateMinor: string; totpCode: string },
+      {
+        bankCode: string;
+        amountUsd: MoneyInput;
+        rate: MoneyInput;
+        idempotencyKey: string;
+        totpCode?: string;
+      },
       NfemBatch
     >;
-    confirmNfemFunding: Mutation<{ batchId: number; totpCode: string }, NfemBatch>;
-    markBatchLiquidated: Mutation<{ batchId: number; totpCode: string }, NfemBatch>;
-    markBatchReturned: Mutation<{ batchId: number; totpCode: string }, NfemBatch>;
-    entitlementStatus: Query<{ bankCode?: string }, EntitlementRow[] | { rows: EntitlementRow[] }>;
+    confirmNfemFunding: Mutation<
+      { batchId: number; fxbtReference?: string; totpCode?: string },
+      NfemBatch
+    >;
+    markBatchLiquidated: Mutation<{ batchId: number; totpCode?: string }, NfemBatch>;
+    markBatchReturned: Mutation<
+      { batchId: number; nairaReturnReference: string; totpCode?: string },
+      NfemBatch
+    >;
+    entitlementStatus: Query<{ bankCode?: string }, EntitlementStatus>;
     positionNow: Query<Record<string, never>, PositionNow>;
-    eodClose: Mutation<{ totpCode: string }, { breaches?: string[] } & Json>;
+    eodClose: Mutation<{ totpCode?: string }, { breaches?: string[] } & Json>;
+    listBatches: Query<
+      {
+        status?: "requested" | "funded" | "selling" | "liquidated" | "returned" | "expired";
+        cursor?: number;
+        limit?: number;
+      },
+      { items: NfemBatch[]; nextCursor: number | null } | Json
+    >;
   };
   vault: {
-    getStock: Query<{ locationType: string; locationId: number }, StockRow[] | { rows: StockRow[]; totals?: Json }>;
-    adjustStock: Mutation<Json, Json>;
+    getStock: Query<
+      { locationType: VaultLocationType; locationId: number },
+      StockResponse
+    >;
+    adjustStock: Mutation<
+      {
+        location: LocationRef;
+        currency: string;
+        denomination: MoneyString;
+        noteCount: number;
+        expectedVersion?: number;
+        reason: string;
+        totpCode?: string;
+      },
+      Json
+    >;
     transferStock: Mutation<
-      { from: Json; to: Json; items: DenominationItem[] },
+      {
+        from: LocationRef;
+        to: LocationRef;
+        items: Array<{ currency: string; denomination: MoneyString; noteCount: number }>;
+        custodianBId: number;
+        note?: string;
+      },
       CitManifest
     >;
-    confirmDelivery: Mutation<{ manifestId: number; totpCode: string }, CitManifest>;
-    reportCounterfeit: Mutation<Json, Json>;
+    confirmDelivery: Mutation<
+      { manifestId: number; recount: DenominationItem[]; totpCode?: string },
+      CitManifest
+    >;
+    reportCounterfeit: Mutation<
+      {
+        branchId: number;
+        location: LocationRef;
+        currency: string;
+        denomination: MoneyString;
+        noteSerial?: string;
+        noteCount?: number;
+        notes?: string;
+      },
+      Json
+    >;
+    /** Input optional ({}) — call with {}. */
     insuranceValue: Query<Record<string, never>, Json>;
   };
   compliance: {
-    submitSofDeclaration: Mutation<Json, SofDeclaration>;
+    submitSofDeclaration: Mutation<
+      {
+        customerId: number;
+        transactionId?: number;
+        amountUsd: MoneyString;
+        sourceDescription: string;
+        documentRefs?: string[];
+      },
+      SofDeclaration
+    >;
     reviewSofDeclaration: Mutation<
-      { declarationId: number; decision: "approved" | "rejected"; reason?: string; totpCode: string },
+      {
+        declarationId: number;
+        decision: "approved" | "rejected";
+        reason: string;
+        totpCode?: string;
+      },
       SofDeclaration
     >;
     screenCustomer: Mutation<{ customerId: number }, Json>;
-    fileStr: Mutation<{ transactionId: number; reason: string; totpCode: string }, Json>;
-    ctrCheck: Query<{ amountUsdMinor: string; currency?: string }, { requiresCtr: boolean; threshold: string }>;
+    fileStr: Mutation<
+      {
+        transactionId: number;
+        suspicionReason: string;
+        riskLevel: "low" | "medium" | "high" | "critical";
+        narrative: string;
+        filingOfficer: string;
+        totpCode?: string;
+      },
+      Json
+    >;
+    ctrCheck: Query<
+      { customerId?: number; amount: MoneyString; currency: string },
+      CtrCheckResult
+    >;
+    listSofDeclarations: Query<
+      {
+        status?: "submitted" | "approved" | "rejected";
+        customerId?: number;
+        cursor?: number;
+        limit?: number;
+      },
+      { items: SofDeclaration[]; nextCursor: number | null } | Json
+    >;
+    listStrs: Query<
+      { cursor?: number; limit?: number },
+      Json
+    >;
   };
   reporting: {
-    buildReturn: Mutation<{ returnType: string; periodStart: string; periodEnd: string }, RegulatoryReturn>;
-    submitReturn: Mutation<{ returnId: number; totpCode: string }, RegulatoryReturn>;
-    ackReturn: Mutation<{ returnId: number; ackRef: string }, RegulatoryReturn>;
-    listReturns: Query<{ status?: string; returnType?: string }, RegulatoryReturn[] | { items: RegulatoryReturn[] }>;
-    getReturn: Query<{ id: number }, RegulatoryReturn>;
+    buildReturn: Mutation<
+      {
+        returnType: "fifx" | "fina" | "carp" | "trms" | "extranet";
+        periodStart: DateString;
+        periodEnd: DateString;
+      },
+      RegulatoryReturn
+    >;
+    submitReturn: Mutation<{ returnId: number; totpCode?: string }, RegulatoryReturn>;
+    ackReturn: Mutation<{ returnId: number; ackRef?: string; error?: string }, RegulatoryReturn>;
+    listReturns: Query<
+      {
+        returnType?: "fifx" | "fina" | "carp" | "trms" | "extranet";
+        status?: "draft" | "staged" | "submitted" | "acknowledged" | "quarantined" | "failed";
+        limit?: number;
+        cursor?: number;
+      },
+      { items: RegulatoryReturn[]; nextCursor: number | null }
+    >;
+    getReturn: Query<{ returnId: number }, RegulatoryReturn>;
     retryQuarantined: Mutation<{ returnId: number }, RegulatoryReturn>;
-    evidencePack: Query<{ customerId?: number; periodStart?: string; periodEnd?: string }, Json>;
+    /** Mutation (not a query) — builds the pack on demand. */
+    evidencePack: Mutation<{ returnId: number }, Json>;
   };
   imto: {
-    payoutQuote: Mutation<{ imtoCode: string; reference: string }, PayoutQuoteResult>;
-    executePayout: Mutation<{ quoteId: string; totpCode: string }, Json>;
-    settlementStatement: Mutation<{ imtoCode: string; periodStart: string; periodEnd: string }, Json>;
-    reconcileSettlements: Query<{ imtoCode: string; periodStart?: string; periodEnd?: string }, Json>;
+    payoutQuote: Mutation<
+      { imtoCode: string; reference: string; fxAmount: MoneyString; currency?: string },
+      PayoutQuoteResult
+    >;
+    executePayout: Mutation<
+      {
+        quote: { payload: unknown; signature: string };
+        totpCode?: string;
+        branchId: number;
+        customerId?: number;
+        paymentLeg: {
+          method: "cash" | "nip_transfer" | "prepaid_card" | "domiciliary";
+          reference: string | null;
+        };
+        denominations?: Array<{ denomination: MoneyString; noteCount: number }>;
+      },
+      Json
+    >;
+    settlementStatement: Mutation<{ imtoCode: string; period: PeriodString }, Json>;
+    reconcileSettlements: Query<{ imtoCode: string; period: PeriodString }, Json>;
   };
 }
 

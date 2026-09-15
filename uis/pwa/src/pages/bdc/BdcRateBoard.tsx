@@ -152,15 +152,15 @@ const BdcRateBoard: React.FC = () => {
                       {row.currency}
                     </td>
                     <td className="py-3 pr-4 tabular-nums text-slate-700">
-                      {row.buy ? fmtMoney(row.buy.rateMinor, "NGN") : "—"}
+                      {row.buy ? fmtMoney(row.buy.rate, "NGN") : "—"}
                     </td>
                     <td className="py-3 pr-4 tabular-nums text-slate-700">
-                      {row.sell ? fmtMoney(row.sell.rateMinor, "NGN") : "—"}
+                      {row.sell ? fmtMoney(row.sell.rate, "NGN") : "—"}
                     </td>
                     <td className="py-3">
                       <StalenessBadge
-                        publishedAt={row.publishedAt ?? row.sell?.publishedAt ?? row.buy?.publishedAt}
-                        expiresAt={row.expiresAt ?? row.sell?.expiresAt ?? row.buy?.expiresAt}
+                        publishedAt={row.sell?.publishedAt ?? row.buy?.publishedAt}
+                        expiresAt={row.sell?.expiresAt ?? row.buy?.expiresAt}
                       />
                     </td>
                   </tr>

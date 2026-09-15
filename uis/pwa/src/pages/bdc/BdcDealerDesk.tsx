@@ -9,6 +9,7 @@ import {
   fmtMoney,
   moneyNum,
   msUntil,
+  newIdempotencyKey,
   NOP_CAP_PCT,
   type BdcQuote,
   type EntitlementRow,
@@ -93,6 +94,7 @@ const BdcDealerDesk: React.FC = () => {
   const [nfErr, setNfErr] = useState<string | null>(null);
   const [batches, setBatches] = useState<NfemBatch[]>([]);
   const [batchTotp, setBatchTotp] = useState<Record<number, string>>({});
+  const [batchReturnRef, setBatchReturnRef] = useState<Record<number, string>>({});
   const [batchMsg, setBatchMsg] = useState<Record<number, string>>({});
   const [manualBatchId, setManualBatchId] = useState("");
   const [, setTick] = useState(0);
@@ -159,7 +161,7 @@ const BdcDealerDesk: React.FC = () => {
         branchId: qBranch ? Number(qBranch) : undefined,
         currency: qCcy,
         side: qSide,
-        rateMinor: qRate,
+        rate: qRate,
       });
       setDrafts((d) => [q, ...d]);
     } catch (e) {
@@ -190,8 +192,9 @@ const BdcDealerDesk: React.FC = () => {
     try {
       const batch = await bdc.sourcing.requestNfemPurchase.mutate({
         bankCode: nfBank,
-        amountUsdMinor: nfAmount,
-        rateMinor: nfRate,
+        amountUsd: nfAmount,
+        rate: nfRate,
+        idempotencyKey: newIdempotencyKey(),
         totpCode: nfTotp,
       });
       setBatches((b) => [batch, ...b]);
@@ -209,7 +212,11 @@ const BdcDealerDesk: React.FC = () => {
       const updated =
         kind === "liquidated"
           ? await bdc.sourcing.markBatchLiquidated.mutate({ batchId, totpCode: code })
-          : await bdc.sourcing.markBatchReturned.mutate({ batchId, totpCode: code });
+          : await bdc.sourcing.markBatchReturned.mutate({
+              batchId,
+              nairaReturnReference: batchReturnRef[batchId] ?? manualReturnRef,
+              totpCode: code,
+            });
       setBatches((b) => b.map((x) => (x.id === batchId ? { ...x, ...updated } : x)));
       setBatchMsg((m) => ({ ...m, [batchId]: `Batch #${batchId} marked ${kind}.` }));
     } catch (e) {
@@ -220,6 +227,7 @@ const BdcDealerDesk: React.FC = () => {
   // For batches not tracked in this session the operator types the ID; the
   // TOTP entered in the batch row (or the shared manual field) is used.
   const [manualActionTotp, setManualActionTotp] = useState("");
+  const [manualReturnRef, setManualReturnRef] = useState("");
   const manualBatchTotpFor = (_batchId: number) => manualActionTotp;
 
   return (
@@ -263,19 +271,19 @@ const BdcDealerDesk: React.FC = () => {
                 label="Net Open Position (NOP)"
                 pct={moneyNum(position.nopPct)}
                 capPct={NOP_CAP_PCT}
-                valueText={fmtMoney(position.nopUsdMinor, "USD")}
+                valueText={fmtMoney(position.nopUsd, "USD")}
               />
               <Gauge
                 label="Borrowing"
                 pct={moneyNum(position.borrowingPct)}
                 capPct={BORROWING_CAP_PCT}
-                valueText={fmtMoney(position.borrowingMinor, "NGN")}
+                valueText={fmtMoney(position.borrowingUsd, "NGN")}
               />
               {position.breaches?.length > 0 && (
                 <ErrorNote error={`Breaches: ${position.breaches.join(", ")}`} />
               )}
               <p className="text-xs text-slate-400">
-                Computed from TigerBeetle balances (≤1s staleness) {position.asOf ? `· as of ${fmtDateTime(position.asOf)}` : ""}
+                Computed from TigerBeetle balances {position.stalenessLabel ? `· ${position.stalenessLabel}` : ""}
               </p>
             </div>
           ) : (
@@ -321,7 +329,7 @@ const BdcDealerDesk: React.FC = () => {
                 <div key={q.id} className="py-3 flex flex-wrap items-end gap-3">
                   <div className="flex-1 min-w-48">
                     <p className="text-sm font-semibold text-slate-900">
-                      #{q.id} · {q.side.toUpperCase()} {q.currency} @ {fmtMoney(q.rateMinor, "NGN")}
+                      #{q.id} · {q.side.toUpperCase()} {q.currency} @ {fmtMoney(q.rate, "NGN")}
                     </p>
                     <p className="text-xs text-slate-400">
                       maker #{q.makerId} · <Badge tone={statusTone(q.status)}>{q.status}</Badge>
@@ -384,8 +392,8 @@ const BdcDealerDesk: React.FC = () => {
           ) : (
             <div className="space-y-4">
               {entitlements.map((row) => {
-                const cap = moneyNum(row.capUsdMinor);
-                const used = moneyNum(row.usedUsdMinor);
+                const cap = moneyNum(row.capUsd);
+                const used = moneyNum(row.usedUsd);
                 const pct = cap > 0 ? (used / cap) * 100 : 0;
                 return (
                   <div key={`${row.bankCode}-${row.weekStart}`}>
@@ -394,7 +402,7 @@ const BdcDealerDesk: React.FC = () => {
                         {row.bankCode} · week of {row.weekStart}
                       </p>
                       <p className="text-xs text-slate-500 tabular-nums">
-                        {fmtMoney(row.usedUsdMinor, "USD")} / {fmtMoney(row.capUsdMinor, "USD")} ({pct.toFixed(1)}%)
+                        {fmtMoney(row.usedUsd, "USD")} / {fmtMoney(row.capUsd, "USD")} ({pct.toFixed(1)}%)
                       </p>
                     </div>
                     <div className="h-3 bg-slate-100 rounded-full overflow-hidden">
@@ -459,7 +467,7 @@ const BdcDealerDesk: React.FC = () => {
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <p className="text-sm font-semibold text-slate-900">
-                        Batch #{b.id} · {fmtMoney(b.amountUsdMinor, "USD")} @ {fmtMoney(b.rateMinor, "NGN")}
+                        Batch #{b.id} · {fmtMoney(b.amountUsd, "USD")} @ {fmtMoney(b.rate, "NGN")}
                       </p>
                       <p className="text-xs text-slate-400">
                         {b.fxbtReference ? `FXBT ref ${b.fxbtReference} · ` : ""}
@@ -488,9 +496,15 @@ const BdcDealerDesk: React.FC = () => {
                     >
                       Mark liquidated
                     </button>
+                    <input
+                      className={`${inputCls} w-44`}
+                      value={batchReturnRef[b.id] ?? ""}
+                      onChange={(e) => setBatchReturnRef((s) => ({ ...s, [b.id]: e.target.value }))}
+                      placeholder="Naira return reference"
+                    />
                     <button
                       className={btnSecondaryCls}
-                      disabled={(batchTotp[b.id] ?? "").length !== 6}
+                      disabled={(batchTotp[b.id] ?? "").length !== 6 || (batchReturnRef[b.id] ?? "").trim().length < 4}
                       onClick={() => batchAction(b.id, "returned")}
                     >
                       Mark returned
@@ -520,9 +534,15 @@ const BdcDealerDesk: React.FC = () => {
             >
               Liquidate
             </button>
+            <input
+              className={`${inputCls} w-44`}
+              value={manualReturnRef}
+              onChange={(e) => setManualReturnRef(e.target.value)}
+              placeholder="Naira return reference"
+            />
             <button
               className={btnSecondaryCls}
-              disabled={!manualBatchId || manualActionTotp.length !== 6}
+              disabled={!manualBatchId || manualActionTotp.length !== 6 || manualReturnRef.trim().length < 4}
               onClick={() => batchAction(Number(manualBatchId), "returned")}
             >
               Return

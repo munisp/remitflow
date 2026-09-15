@@ -7,7 +7,6 @@ import {
   fmtMoney,
   type BdcBranch,
   type CitManifest,
-  type DenominationItem,
   type StockRow,
 } from "./api";
 import {
@@ -58,6 +57,7 @@ const BdcBranchManager: React.FC = () => {
   const [trCcy, setTrCcy] = useState("USD");
   const [trDenom, setTrDenom] = useState("");
   const [trNotes, setTrNotes] = useState("");
+  const [trCustodianB, setTrCustodianB] = useState("");
   const [manifest, setManifest] = useState<CitManifest | null>(null);
   const [trErr, setTrErr] = useState<string | null>(null);
   const [confirmManifestId, setConfirmManifestId] = useState("");
@@ -66,6 +66,8 @@ const BdcBranchManager: React.FC = () => {
 
   // ── counterfeit ──
   const [cfBranch, setCfBranch] = useState("");
+  const [cfLocType, setCfLocType] = useState<"vault" | "drawer" | "cit">("drawer");
+  const [cfLocId, setCfLocId] = useState("");
   const [cfCcy, setCfCcy] = useState("USD");
   const [cfDenom, setCfDenom] = useState("");
   const [cfSerial, setCfSerial] = useState("");
@@ -83,7 +85,9 @@ const BdcBranchManager: React.FC = () => {
     setBranchesErr(null);
     try {
       const res = await bdc.operator.listBranches.query(
-        statusFilter ? { status: statusFilter } : {},
+        statusFilter
+          ? { status: statusFilter as "pending" | "active" | "suspended" | "closed" }
+          : {},
       );
       setBranches(asList(res));
     } catch (e) {
@@ -105,10 +109,10 @@ const BdcBranchManager: React.FC = () => {
       await bdc.operator.registerBranch.mutate({
         code: nbCode,
         name: nbName,
-        address: nbAddress,
+        address: nbAddress || undefined,
         stateCode: nbState,
-        lat: nbLat || undefined,
-        lng: nbLng || undefined,
+        lat: Number(nbLat),
+        lng: Number(nbLng),
       });
       setNbMsg(`Branch ${nbCode} registered (status pending — activate with TOTP). Geofence 1km + tier rules enforced server-side.`);
       setNbCode("");
@@ -120,7 +124,7 @@ const BdcBranchManager: React.FC = () => {
     }
   };
 
-  const changeStatus = async (branchId: number, status: string) => {
+  const changeStatus = async (branchId: number, status: "active" | "suspended" | "closed") => {
     const code = statusTotp[branchId] ?? "";
     setStatusMsg((m) => ({ ...m, [branchId]: "" }));
     try {
@@ -151,13 +155,13 @@ const BdcBranchManager: React.FC = () => {
     setTrErr(null);
     setManifest(null);
     try {
-      const items: DenominationItem[] = [
-        { currency: trCcy, denominationMinor: trDenom, noteCount: Number(trNotes) },
-      ];
       const m = await bdc.vault.transferStock.mutate({
-        from: { locationType: trFromType, locationId: Number(trFromId) },
-        to: { locationType: trToType, locationId: Number(trToId) },
-        items,
+        from: { locationType: trFromType as "vault" | "drawer" | "cit", locationId: Number(trFromId) },
+        to: { locationType: trToType as "vault" | "drawer" | "cit", locationId: Number(trToId) },
+        items: [
+          { currency: trCcy, denomination: trDenom, noteCount: Number(trNotes) },
+        ],
+        custodianBId: Number(trCustodianB),
       });
       setManifest(m);
       setConfirmManifestId(String(m.id));
@@ -171,6 +175,8 @@ const BdcBranchManager: React.FC = () => {
     try {
       const m = await bdc.vault.confirmDelivery.mutate({
         manifestId: Number(confirmManifestId),
+        // Empty recount = delivery confirmed against the manifest as dispatched.
+        recount: [],
         totpCode: confirmTotp,
       });
       setConfirmMsg(`Manifest #${m.id} → ${m.status}.`);
@@ -187,9 +193,10 @@ const BdcBranchManager: React.FC = () => {
     try {
       await bdc.vault.reportCounterfeit.mutate({
         branchId: Number(cfBranch),
+        location: { locationType: cfLocType, locationId: Number(cfLocId) },
         currency: cfCcy,
-        denominationMinor: cfDenom,
-        noteSerial: cfSerial,
+        denomination: cfDenom,
+        noteSerial: cfSerial || undefined,
         notes: cfNotes || undefined,
       });
       setCfMsg("Counterfeit registered and inventory decremented (quarantined).");
@@ -213,7 +220,7 @@ const BdcBranchManager: React.FC = () => {
   };
 
   const stockTotals = stock.reduce<Record<string, number>>((acc, row) => {
-    const v = Number(row.denominationMinor) * row.noteCount;
+    const v = Number(row.denomination) * row.noteCount;
     acc[row.currency] = (acc[row.currency] ?? 0) + (Number.isFinite(v) ? v : 0);
     return acc;
   }, {});
@@ -268,7 +275,7 @@ const BdcBranchManager: React.FC = () => {
                       onChange={(c) => setStatusTotp((m) => ({ ...m, [b.id]: c }))}
                       label="Admin TOTP"
                     />
-                    {["active", "suspended", "closed"].map((s) => (
+                    {(["active", "suspended", "closed"] as const).map((s) => (
                       <button
                         key={s}
                         className={s === "closed" ? btnSecondaryCls : btnSecondaryCls}
@@ -308,7 +315,7 @@ const BdcBranchManager: React.FC = () => {
               </Field>
             </div>
             <div className="mt-3">
-              <button className={btnPrimaryCls} disabled={!nbCode || !nbName || !nbState} onClick={registerBranch}>
+              <button className={btnPrimaryCls} disabled={!nbCode || !nbName || !nbState || !nbLat || !nbLng} onClick={registerBranch}>
                 Register branch
               </button>
             </div>
@@ -364,10 +371,10 @@ const BdcBranchManager: React.FC = () => {
                     {stock.map((row, i) => (
                       <tr key={row.id ?? i}>
                         <td className="py-2 pr-4 font-semibold text-slate-900">{row.currency}</td>
-                        <td className="py-2 pr-4 tabular-nums">{fmtMoney(row.denominationMinor)}</td>
+                        <td className="py-2 pr-4 tabular-nums">{fmtMoney(row.denomination)}</td>
                         <td className="py-2 pr-4 tabular-nums">{row.noteCount}</td>
                         <td className="py-2 pr-4 tabular-nums">
-                          {fmtMoney(Number(row.denominationMinor) * row.noteCount, row.currency)}
+                          {fmtMoney(Number(row.denomination) * row.noteCount, row.currency)}
                         </td>
                         <td className="py-2 text-xs text-slate-400">{fmtDateTime(row.updatedAt)}</td>
                       </tr>
@@ -413,10 +420,13 @@ const BdcBranchManager: React.FC = () => {
               <Field label="Note count">
                 <input className={inputCls} inputMode="numeric" value={trNotes} onChange={(e) => setTrNotes(e.target.value.replace(/\D/g, ""))} />
               </Field>
+              <Field label="Custodian B user ID">
+                <input className={inputCls} inputMode="numeric" value={trCustodianB} onChange={(e) => setTrCustodianB(e.target.value.replace(/\D/g, ""))} placeholder="second custodian" />
+              </Field>
             </div>
             <button
               className={btnPrimaryCls}
-              disabled={!trFromId || !trToId || !trDenom || !trNotes}
+              disabled={!trFromId || !trToId || !trDenom || !trNotes || !trCustodianB}
               onClick={startTransfer}
             >
               Dispatch (create manifest)
@@ -467,6 +477,16 @@ const BdcBranchManager: React.FC = () => {
               <Field label="Branch ID">
                 <input className={inputCls} inputMode="numeric" value={cfBranch} onChange={(e) => setCfBranch(e.target.value.replace(/\D/g, ""))} />
               </Field>
+              <Field label="Found in (location type)">
+                <select className={inputCls} value={cfLocType} onChange={(e) => setCfLocType(e.target.value as "vault" | "drawer" | "cit")}>
+                  <option value="drawer">drawer</option>
+                  <option value="vault">vault</option>
+                  <option value="cit">cit</option>
+                </select>
+              </Field>
+              <Field label="Location ID">
+                <input className={inputCls} inputMode="numeric" value={cfLocId} onChange={(e) => setCfLocId(e.target.value.replace(/\D/g, ""))} />
+              </Field>
               <Field label="Currency">
                 <input className={inputCls} maxLength={3} value={cfCcy} onChange={(e) => setCfCcy(e.target.value.toUpperCase())} />
               </Field>
@@ -482,7 +502,7 @@ const BdcBranchManager: React.FC = () => {
             </Field>
             <button
               className={btnPrimaryCls}
-              disabled={!cfBranch || !cfDenom || !cfSerial}
+              disabled={!cfBranch || !cfLocId || !cfDenom}
               onClick={reportCounterfeit}
             >
               Register counterfeit

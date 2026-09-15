@@ -8,6 +8,7 @@ import {
   fmtDateTime,
   fmtMoney,
   moneyNum,
+  newIdempotencyKey,
   PURPOSE_CODES,
   SOF_THRESHOLD_USD,
   type BdcTransaction,
@@ -38,7 +39,7 @@ type Tab = "buy" | "sell" | "payout" | "queue";
 function routePaymentMethod(
   amountUsd: number,
   customerType: "resident" | "non_resident",
-): { method: string; note: string } {
+): { method: "cash" | "nip_transfer" | "prepaid_card"; note: string } {
   if (customerType === "non_resident") {
     return amountUsd <= CASH_CAP_USD
       ? { method: "cash", note: "Cash allowed (≤ $500); prepaid card also available for non-residents." }
@@ -68,7 +69,7 @@ let denomKey = 0;
 const newDenomRow = (currency: string): DenomRow => ({
   key: ++denomKey,
   currency,
-  denominationMinor: "",
+  denomination: "",
   noteCount: 0,
 });
 
@@ -110,12 +111,12 @@ const DenominationPicker: React.FC<{
         />
         <input
           className={`${inputCls} flex-1`}
-          value={row.denominationMinor}
+          value={row.denomination}
           inputMode="decimal"
           onChange={(e) =>
             onChange(
               rows.map((r) =>
-                r.key === row.key ? { ...r, denominationMinor: e.target.value } : r,
+                r.key === row.key ? { ...r, denomination: e.target.value } : r,
               ),
             )
           }
@@ -164,6 +165,7 @@ const BdcTeller: React.FC = () => {
   const [evidenceRefs, setEvidenceRefs] = useState("");
   const [cashPortion, setCashPortion] = useState("");
   const [disburseMethod, setDisburseMethod] = useState<"prepaid_card" | "domiciliary">("prepaid_card");
+  const [nipRef, setNipRef] = useState("");
 
   // ── results ──
   const [submitting, setSubmitting] = useState(false);
@@ -173,6 +175,9 @@ const BdcTeller: React.FC = () => {
   // ── IMTO payout ──
   const [imtoCode, setImtoCode] = useState("");
   const [imtoRef, setImtoRef] = useState("");
+  const [payoutFx, setPayoutFx] = useState("");
+  const [payoutMethod, setPayoutMethod] = useState<"cash" | "nip_transfer" | "prepaid_card" | "domiciliary">("cash");
+  const [payoutRef, setPayoutRef] = useState("");
   const [quote, setQuote] = useState<PayoutQuoteResult | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [payoutTotp, setPayoutTotp] = useState("");
@@ -184,6 +189,7 @@ const BdcTeller: React.FC = () => {
   const [queueLoading, setQueueLoading] = useState(false);
   const [queueError, setQueueError] = useState<string | null>(null);
   const [actionTotp, setActionTotp] = useState<Record<number, string>>({});
+  const [actionReason, setActionReason] = useState<Record<number, string>>({});
   const [actionMsg, setActionMsg] = useState<Record<number, string>>({});
   const [receiptId, setReceiptId] = useState("");
   const [receipt, setReceipt] = useState<BdcTransaction | null>(null);
@@ -200,12 +206,13 @@ const BdcTeller: React.FC = () => {
     return (moneyNum(cashPortion) / fx) * 100;
   }, [amountUsd, cashPortion]);
 
+  // sales.buyFx/sellFx denomination schema: { denomination, noteCount }
+  // (major units — no currency key, no *Minor fields).
   const denomPayload = () =>
     denoms
-      .filter((d) => d.denominationMinor && d.noteCount > 0)
-      .map(({ currency: c, denominationMinor, noteCount }) => ({
-        currency: c ?? currency,
-        denominationMinor,
+      .filter((d) => d.denomination && d.noteCount > 0)
+      .map(({ denomination, noteCount }) => ({
+        denomination: String(denomination),
         noteCount,
       }));
 
@@ -218,10 +225,10 @@ const BdcTeller: React.FC = () => {
         branchId: Number(branchId),
         customerId: Number(customerId),
         currency,
-        fxAmountMinor: amount,
-        rateMinor: rate || undefined,
+        fxAmount: amount,
         denominations: denomPayload(),
         paymentMethod: routed.method,
+        idempotencyKey: newIdempotencyKey(),
       });
       setSubmitResult(res);
     } catch (e) {
@@ -240,17 +247,21 @@ const BdcTeller: React.FC = () => {
         .split(/[\n,]+/)
         .map((s) => s.trim())
         .filter(Boolean);
+      const cash = moneyNum(cashPortion);
       const res = await bdc.sales.sellFx.mutate({
         branchId: Number(branchId),
         customerId: Number(customerId),
         currency,
-        fxAmountMinor: amount,
-        rateMinor: rate || undefined,
+        fxAmount: amount,
         purposeCode,
         evidenceRefs: refs,
-        cashPortionMinor: cashPortion || "0",
+        nipReference: nipRef,
+        cashPortion: cash > 0 ? cashPortion : undefined,
         disbursementMethod: disburseMethod,
-        denominations: denomPayload(),
+        // Server: denominations required (and summed to cashPortion) only when
+        // a cash portion is disbursed; rejected when cashPortion is zero.
+        denominations: cash > 0 ? denomPayload() : undefined,
+        idempotencyKey: newIdempotencyKey(),
       });
       setSubmitResult(res);
     } catch (e) {
@@ -266,7 +277,11 @@ const BdcTeller: React.FC = () => {
     setQuote(null);
     setPayoutResult(null);
     try {
-      const q = await bdc.imto.payoutQuote.mutate({ imtoCode, reference: imtoRef });
+      const q = await bdc.imto.payoutQuote.mutate({
+        imtoCode,
+        reference: imtoRef,
+        fxAmount: payoutFx,
+      });
       setQuote(q);
     } catch (e) {
       setPayoutError(errMsg(e));
@@ -281,8 +296,15 @@ const BdcTeller: React.FC = () => {
     setPayoutResult(null);
     try {
       const res = await bdc.imto.executePayout.mutate({
-        quoteId: quote.quoteId,
+        quote: quote.quote,
         totpCode: payoutTotp,
+        branchId: Number(branchId),
+        paymentLeg: {
+          method: payoutMethod,
+          reference: payoutRef || null,
+        },
+        // Required (and summed to the payout) for cash payouts.
+        denominations: payoutMethod === "cash" ? denomPayload() : undefined,
       });
       setPayoutResult(res);
     } catch (e) {
@@ -315,7 +337,11 @@ const BdcTeller: React.FC = () => {
       if (kind === "confirm") {
         await bdc.sales.confirmNairaLeg.mutate({ transactionId: tx.id, totpCode: code });
       } else {
-        await bdc.sales.reverseTransaction.mutate({ transactionId: tx.id, totpCode: code });
+        await bdc.sales.reverseTransaction.mutate({
+          transactionId: tx.id,
+          reason: actionReason[tx.id] ?? "",
+          totpCode: code,
+        });
       }
       setActionMsg((m) => ({ ...m, [tx.id]: kind === "confirm" ? "Naira leg confirmed." : "Transaction reversed." }));
       await loadQueue();
@@ -328,7 +354,7 @@ const BdcTeller: React.FC = () => {
     setReceipt(null);
     setReceiptError(null);
     try {
-      const tx = await bdc.sales.getTransaction.query({ id: Number(receiptId) });
+      const tx = await bdc.sales.getTransaction.query({ transactionId: Number(receiptId) });
       setReceipt(tx);
     } catch (e) {
       setReceiptError(errMsg(e));
@@ -445,6 +471,9 @@ const BdcTeller: React.FC = () => {
                 placeholder="e.g. PTA-2024-001, ticket-ref-123"
               />
             </Field>
+            <Field label="NIP transfer reference (naira in-leg — mandatory)">
+              <input className={inputCls} value={nipRef} onChange={(e) => setNipRef(e.target.value)} placeholder="NIP session / transaction reference" />
+            </Field>
             <Field label="Balance disbursement method">
               <select className={inputCls} value={disburseMethod} onChange={(e) => setDisburseMethod(e.target.value as "prepaid_card" | "domiciliary")}>
                 <option value="prepaid_card">Prepaid card</option>
@@ -462,7 +491,7 @@ const BdcTeller: React.FC = () => {
             )}
             <button
               className={btnPrimaryCls}
-              disabled={submitting || !branchId || !customerId || !amount || !evidenceRefs.trim()}
+              disabled={submitting || !branchId || !customerId || !amount || !evidenceRefs.trim() || nipRef.trim().length < 4}
               onClick={submitSell}
             >
               {submitting ? "Submitting..." : "Submit sell ticket"}
@@ -481,19 +510,22 @@ const BdcTeller: React.FC = () => {
               <Field label="Payout reference">
                 <input className={inputCls} value={imtoRef} onChange={(e) => setImtoRef(e.target.value)} placeholder="Mojaloop party reference" />
               </Field>
-              <div className="flex items-end">
-                <button className={btnSecondaryCls} disabled={quoteLoading || !imtoCode || !imtoRef} onClick={getQuote}>
-                  {quoteLoading ? "Quoting..." : "Get payout quote"}
-                </button>
-              </div>
+              <Field label="FX amount (USD, 2dp)">
+                <input className={inputCls} inputMode="decimal" value={payoutFx} onChange={(e) => setPayoutFx(e.target.value)} placeholder="e.g. 500.00" />
+              </Field>
+            </div>
+            <div className="flex items-end">
+              <button className={btnSecondaryCls} disabled={quoteLoading || !imtoCode || !imtoRef || !payoutFx} onClick={getQuote}>
+                {quoteLoading ? "Quoting..." : "Get payout quote"}
+              </button>
             </div>
             {quote && (
               <div className="p-4 bg-slate-50 rounded-xl space-y-1 text-sm">
                 <p className="text-slate-700">
-                  Naira payable: <span className="font-semibold tabular-nums">{fmtMoney(quote.nairaAmountMinor, "NGN")}</span>
+                  Naira payable: <span className="font-semibold tabular-nums">{fmtMoney(quote.payoutAmount, "NGN")}</span>
                 </p>
                 <p className="text-slate-700">
-                  Commission: <span className="font-semibold tabular-nums">{fmtMoney(quote.commissionMinor, "NGN")}</span>
+                  Commission: <span className="font-semibold tabular-nums">{fmtMoney(quote.commission, "NGN")}</span>
                 </p>
                 <p className="text-xs text-slate-400">
                   Quote <span className="font-mono">{quote.quoteId}</span> — expires {fmtDateTime(quote.expiresAt)}
@@ -501,9 +533,30 @@ const BdcTeller: React.FC = () => {
               </div>
             )}
             {quote && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <Field label="Branch ID (payout location)">
+                  <input className={inputCls} inputMode="numeric" value={branchId} onChange={(e) => setBranchId(e.target.value.replace(/\D/g, ""))} placeholder="e.g. 1" />
+                </Field>
+                <Field label="Payout method">
+                  <select className={inputCls} value={payoutMethod} onChange={(e) => setPayoutMethod(e.target.value as typeof payoutMethod)}>
+                    <option value="cash">Cash</option>
+                    <option value="nip_transfer">NIP transfer</option>
+                    <option value="prepaid_card">Prepaid card</option>
+                    <option value="domiciliary">Domiciliary account</option>
+                  </select>
+                </Field>
+                <Field label="Payment reference (optional)">
+                  <input className={inputCls} value={payoutRef} onChange={(e) => setPayoutRef(e.target.value)} placeholder="transfer / card reference" />
+                </Field>
+              </div>
+            )}
+            {quote && payoutMethod === "cash" && (
+              <DenominationPicker currency="NGN" rows={denoms} onChange={setDenoms} />
+            )}
+            {quote && (
               <div className="flex items-end gap-3">
                 <TotpField value={payoutTotp} onChange={setPayoutTotp} />
-                <button className={btnPrimaryCls} disabled={payoutTotp.length !== 6} onClick={executePayout}>
+                <button className={btnPrimaryCls} disabled={payoutTotp.length !== 6 || !branchId} onClick={executePayout}>
                   Execute payout
                 </button>
               </div>
@@ -534,7 +587,7 @@ const BdcTeller: React.FC = () => {
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <p className="text-sm font-semibold text-slate-900">
-                          #{tx.id} · {tx.txnType} · {fmtMoney(tx.fxAmountMinor, tx.currency)} @ {fmtMoney(tx.rateMinor, "NGN")}
+                          #{tx.id} · {tx.txnType} · {fmtMoney(tx.fxAmount, tx.currency)} @ {fmtMoney(tx.rate, "NGN")}
                         </p>
                         <p className="text-xs text-slate-400">
                           {fmtDateTime(tx.createdAt)} · branch {tx.branchId}
@@ -556,9 +609,15 @@ const BdcTeller: React.FC = () => {
                       >
                         Confirm naira leg
                       </button>
+                      <input
+                        className={`${inputCls} w-48`}
+                        value={actionReason[tx.id] ?? ""}
+                        onChange={(e) => setActionReason((m) => ({ ...m, [tx.id]: e.target.value }))}
+                        placeholder="Reversal reason (min 4 chars)"
+                      />
                       <button
                         className={btnDangerCls}
-                        disabled={(actionTotp[tx.id] ?? "").length !== 6}
+                        disabled={(actionTotp[tx.id] ?? "").length !== 6 || (actionReason[tx.id] ?? "").trim().length < 4}
                         onClick={() => queueAction(tx, "reverse")}
                       >
                         Reverse
