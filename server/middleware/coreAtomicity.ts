@@ -330,6 +330,28 @@ export async function claimIdempotency(
   );
 }
 
+/**
+ * Release a claim taken via claimIdempotency() after the operation FAILED
+ * (threw) before storeIdempotency() ran — otherwise the failed attempt would
+ * burn the key for its full TTL and every honest client retry would be
+ * denied as "in flight". Only a still-pending claim is released: once a
+ * result is stored the key must survive for replay serving. Fail-soft by
+ * design (the original error is what matters); failures are WARN-logged.
+ */
+export async function releaseIdempotencyClaim(key: string): Promise<void> {
+  inMemoryIdempotency.delete(key);
+  _deleteFromDb("core_idempotency_cache", key).catch(() => {});
+  const redis = getRedisClient();
+  if (!redis) return;
+  try {
+    // Atomic compare-and-delete: only remove a pending marker, never a result.
+    const script = `local v = redis.call("get", KEYS[1]); if v and string.sub(v, 1, 8) == "pending:" then return redis.call("del", KEYS[1]) else return 0 end`;
+    await redis.eval(script, 1, `${IDEMP_CLAIM_PREFIX}${key}`);
+  } catch (err) {
+    logger.warn({ err, key }, "[Atomicity] Failed to release idempotency claim after operation failure (claim will expire via TTL)");
+  }
+}
+
 /** Retryable 409-style denial for in-flight duplicate operations. */
 export class IdempotencyConflictError extends Error {
   readonly retryable = true;
@@ -520,7 +542,10 @@ export async function recordCoreDoubleEntry(params: {
   ledger?: number;
 }): Promise<boolean> {
   try {
-    const transferBigId = BigInt(Date.now()) * BigInt(1000) + BigInt(Math.floor(Math.random() * 1000));
+    // H4: Date.now()*1000 + random(1000) collides under concurrency (same ms + same
+    // random suffix → TigerBeetle rejects/duplicates the transfer id). Use a
+    // randomUUID-derived 128-bit id instead — deterministic uniqueness, valid u128.
+    const transferBigId = BigInt("0x" + randomUUID().replace(/-/g, ""));
     const debitAccountId = BigInt(params.userId);
     const creditAccountId = BigInt(params.userId + 1_000_000);
     const amountCents = BigInt(Math.round(params.amount * 100));

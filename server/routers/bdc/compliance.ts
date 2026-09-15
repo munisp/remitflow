@@ -33,6 +33,7 @@ import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { router, auditedProcedure, auditedAdminProcedure } from "../../_core/trpc";
 import { getDb } from "../../db";
 import {
+  auditLogs,
   bdcCustomers,
   bdcSofDeclarations,
   bdcTransactions,

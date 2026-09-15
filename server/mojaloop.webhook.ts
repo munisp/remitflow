@@ -310,6 +310,22 @@ export function registerMojaloopWebhooks(app: Express) {
       } catch (advErr) {
         logger.warn({ err: advErr, transferId }, "[Mojaloop] Failed to advance transfer state");
       }
+    } else if (payload.transferState === "ABORTED") {
+      // ABORTED delivered on the main transfer callback (rather than the
+      // /error subresource) — same BDC compensation as the error path.
+      try {
+        const db3 = await getDb();
+        if (db3) {
+          const { abortImtoSettlement } = await import("./routers/bdc/imto.js");
+          await abortImtoSettlement(
+            db3,
+            transferId,
+            payload.errorInformation?.errorDescription ?? "Transfer aborted by switch",
+          );
+        }
+      } catch (bdcErr) {
+        logger.error({ err: bdcErr, transferId }, "[Mojaloop] BDC IMTO abort compensation failed (non-blocking; recon net remains)");
+      }
     }
 
     res.status(200).json({ received: true });
@@ -345,6 +361,25 @@ export function registerMojaloopWebhooks(app: Express) {
       }
     } catch (err) {
       logger.warn({ data: err }, '[Mojaloop] DB update failed for aborted transfer ${transferId}:');
+    }
+
+    // BDC integration: compensate any IMTO payout leg awaiting this transfer.
+    // abortImtoSettlement marks the txn honestly 'failed' + settlement
+    // 'disputed' and reverses the initiation TB legs (void pending payout,
+    // reverse posted commission) — guarded flips, idempotent on replay;
+    // telemetry-style: failure must not break the webhook ack.
+    try {
+      const db3 = await getDb();
+      if (db3) {
+        const { abortImtoSettlement } = await import("./routers/bdc/imto.js");
+        await abortImtoSettlement(
+          db3,
+          transferId,
+          payload.errorInformation?.errorDescription ?? "Transfer aborted by switch",
+        );
+      }
+    } catch (bdcErr) {
+      logger.error({ err: bdcErr, transferId }, "[Mojaloop] BDC IMTO abort compensation failed (non-blocking; recon net remains)");
     }
 
     await resolveCallback(correlationId, {

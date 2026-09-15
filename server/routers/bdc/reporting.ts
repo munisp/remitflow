@@ -24,7 +24,7 @@
  * HTTP client to python-lakehouse) — unavailable → explicit UNAVAILABLE,
  * never a fabricated pack.
  *
- * TOTP (requireTotpStepUp): submitReturn.
+ * TOTP (requireTotpStepUp): submitReturn, ackReturn.
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
@@ -266,6 +266,12 @@ export const bdcReportingRouter = router({
         )
         .returning();
       if (claimed.length === 0) {
+        // Idempotent replay (F7): a return already past the guarded flip
+        // replays its existing snapshot — NEVER a second adapter submission,
+        // a second Temporal workflow start, or another attempt increment.
+        if (row.status === "submitted" || row.status === "acknowledged") {
+          return { return: row, ackRef: row.ackRef ?? null, simulated: false, replay: true as const };
+        }
         throw new TRPCError({
           code: "CONFLICT",
           message: `Return ${row.id} is not staged (current status '${row.status}') — already claimed or invalid state`,
@@ -316,7 +322,8 @@ export const bdcReportingRouter = router({
       try {
         const { startBdcReturnSubmission } = await import("../../temporal/workflows-bdc.js");
         const started = await startBdcReturnSubmission(row.id);
-        if (started) temporalWorkflowId = `bdc-return-${row.id}`;
+        // M22: must match the starter's workflowId format (workflows-bdc.ts).
+        if (started) temporalWorkflowId = `bdc-return-submit-${row.id}`;
       } catch (wfErr) {
         logger.warn({ err: wfErr, returnId: row.id }, "[BDC] Temporal unavailable — ack-tracking workflow not started; manual ackReturn remains available");
       }
@@ -352,10 +359,14 @@ export const bdcReportingRouter = router({
       returnId: z.number().int().positive(),
       ackRef: z.string().max(96).optional(),
       error: z.string().max(1000).optional(),
+      totpCode: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await requireDb();
       const tenantId = await requireTenantId(ctx.user.id);
+      // Regulatory mutation — canonical step-up (F8/F15), same pattern as
+      // submitReturn and the other money-moving mutations.
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "regulatory return acknowledgement");
       const row = await loadReturn(db, tenantId, input.returnId);
 
       const quarantine = async (detail: string) => {

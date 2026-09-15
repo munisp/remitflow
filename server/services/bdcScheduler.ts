@@ -129,7 +129,10 @@ async function runSettlementRecon(): Promise<number> {
   let started = 0;
   try {
     const { startBdcSettlementRecon } = await import("../temporal/workflows-bdc.js");
-    const period = new Date().toISOString().slice(0, 10);
+    // reconcileActivity (server/temporal/activities-bdc.ts) requires YYYY-MM
+    // (/^\d{4}-\d{2}$/) — a YYYY-MM-DD period would fail the workflow input
+    // validation on every daily tick (F5).
+    const period = new Date().toISOString().slice(0, 7);
     for (const { imto_code } of codes) {
       if (await startBdcSettlementRecon(imto_code, period)) started++;
     }

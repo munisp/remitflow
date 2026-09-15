@@ -25,14 +25,14 @@ import {
   bdcTransactions,
 } from "../../../drizzle/schema";
 import { and, desc, eq, sql } from "drizzle-orm";
-import { claimIdempotency, storeIdempotency } from "../../middleware/coreAtomicity";
+import { claimIdempotency, storeIdempotency, releaseIdempotencyClaim } from "../../middleware/coreAtomicity";
 import { requireTotpStepUp } from "../../_core/totpStepUp";
 import { resolveTenantContext } from "../../tenantMiddleware";
 import { callService } from "../../_core/serviceProxy";
 import { getRate } from "../../_core/liveFxRates";
 import { logger } from "../../_core/logger";
 import { toCents, getBdcProfile, weekStartUTC } from "./_shared";
-import { postNfemPurchase, mirrorLegsToPg, getBdcPositionBalances } from "./_ledger";
+import { postNfemPurchase, postNfemReturn, mirrorLegsToPg, getBdcPositionBalances } from "./_ledger";
 
 // ─── Local helpers ────────────────────────────────────────────────────────────
 
@@ -74,12 +74,17 @@ interface FxbtResponse {
  *   - service unreachable / 503 (production, no creds) → { available:false }
  *   - sandbox response passes through with its simulated marker.
  * The caller decides what to persist; a batch is NEVER marked funded here.
+ *
+ * Wire contract (services/go-nfem-treasury/main.go fxbtRequest): MAJOR units
+ * — amountUsd float64 (dollars), rate float64 (naira per 1 USD). Sending
+ * minor-unit strings makes Go decode both as 0 → "amountUsd must be > 0"
+ * 400 → the adapter would NEVER execute (F6).
  */
 async function requestFxbtPurchase(params: {
   tenantId: number;
   bankCode: string;
-  amountUsdMinor: string;
-  rateMinor: string;
+  amountUsd: number; // MAJOR units (dollars)
+  rate: number; // MAJOR units (naira per 1 USD)
 }): Promise<{ available: boolean; simulated: boolean; fxbtReference: string | null }> {
   try {
     const res = await callService<FxbtResponse>(`${NFEM_TREASURY_URL}/nfem/fxbt/request`, {
@@ -95,7 +100,7 @@ async function requestFxbtPurchase(params: {
     };
   } catch (err) {
     logger.warn(
-      { err: err instanceof Error ? err.message : String(err), bankCode: params.bankCode },
+      { err: err instanceof Error ? err.message : String(err), bankCode: params.bankCode, amountUsd: params.amountUsd },
       "[BDC sourcing] FXBT adapter UNAVAILABLE — batch stays 'requested' (no money moved)",
     );
     return { available: false, simulated: false, fxbtReference: null };
@@ -153,9 +158,17 @@ export async function computePosition(db: Awaited<ReturnType<typeof requireDb>>,
   }
 
   const fundsCents = BigInt(toCents(profile.shareholdersFunds ?? "0"));
-  // Capped at 999999 (not Infinity) so numeric(6,2) inserts and JSON stay valid.
+  // Percent of shareholders' funds (M18): the snapshot columns are
+  // numeric(6,2) (max 9999.99) and a ratio can exceed 100% — store the
+  // PERCENT (v/funds × 100), clamped to 0..100.00. Breach detail above the
+  // clamp is still reported exactly via the breaches payload (valueUsd).
+  const clampPct = (pct: number): number => Math.min(100, Math.max(0, Math.round(pct * 100) / 100));
   const pctOf = (v: bigint): number =>
-    fundsCents > 0n ? Number((v * 10_000n) / fundsCents) / 100 : v > 0n ? 999_999 : 0;
+    fundsCents > 0n
+      ? clampPct(Number((v * 10_000n) / fundsCents) / 100)
+      : v > 0n
+        ? 100
+        : 0;
   const nopPct = pctOf(nopUsdMinor);
   const borrowingPct = pctOf(borrowingUsdMinor);
 
@@ -221,10 +234,12 @@ export const bdcSourcingRouter = router({
       const capMajor = profile.weeklyNfemEntitlementUsd;
       const amtMajor = centsToMajor(usdCents);
 
-      const claimKey = `BDC-NFEM-${input.idempotencyKey}`;
+      // Tenant-scoped claim: idempotencyKey is client-supplied (F2).
+      const claimKey = `BDC-NFEM-${tenantId}-${input.idempotencyKey}`;
       const claim = await claimIdempotency(claimKey);
       if (claim.cached) return claim.result;
 
+      try {
       const batch = await db.transaction(async (tx) => {
         // 1. Ensure the week row exists (race-safe upsert).
         await tx.execute(sql`
@@ -292,8 +307,8 @@ export const bdcSourcingRouter = router({
       const fxbt = await requestFxbtPurchase({
         tenantId,
         bankCode: input.bankCode,
-        amountUsdMinor: String(usdCents),
-        rateMinor: String(rateKobo),
+        amountUsd: usdCents / 100, // major units (F6 — Go fxbtRequest float64)
+        rate: rateKobo / 100, // major units, naira per 1 USD
       });
       if (fxbt.fxbtReference) {
         await db
@@ -310,6 +325,10 @@ export const bdcSourcingRouter = router({
       };
       storeIdempotency(claimKey, result);
       return result;
+      } catch (err) {
+        await releaseIdempotencyClaim(claimKey);
+        throw err;
+      }
     }),
 
   /**
@@ -331,10 +350,11 @@ export const bdcSourcingRouter = router({
       const tenantId = await requireTenantId(ctx.user.id);
       await getBdcProfile(db, tenantId);
 
-      const claimKey = `BDC-NFEM-FUND-${input.batchId}`;
+      const claimKey = `BDC-NFEM-FUND-${tenantId}-${input.batchId}`;
       const claim = await claimIdempotency(claimKey);
       if (claim.cached) return claim.result;
 
+      try {
       const result = await db.transaction(async (tx) => {
         // 1. Single-winner flips requested → funded → selling (each guarded;
         //    both must hit exactly one row).
@@ -370,7 +390,9 @@ export const bdcSourcingRouter = router({
         const batch = batchRow;
 
         // 2. TB posting: DR FX_INVENTORY_USD / CR BANK_NGN (posted legs).
-        const tbKey = `NFEM-BATCH-${batch.id}`;
+        //    Tenant-scoped deterministic key (F2) — batch ids are identity
+        //    PKs, but the key also namespaces the derived TB transfer ids.
+        const tbKey = `NFEM-BATCH-${tenantId}-${batch.id}`;
         const legs = await postNfemPurchase({
           tenantId,
           idempotencyKey: tbKey,
@@ -439,6 +461,10 @@ export const bdcSourcingRouter = router({
 
       storeIdempotency(claimKey, result);
       return result;
+      } catch (err) {
+        await releaseIdempotencyClaim(claimKey);
+        throw err;
+      }
     }),
 
   /** markBatchLiquidated (dealer) — guarded flip selling → liquidated. */
@@ -488,22 +514,59 @@ export const bdcSourcingRouter = router({
           WHERE id = ${input.batchId} AND tenant_id = ${tenantId} AND status = 'selling'
           RETURNING id
         `)) as unknown as Array<{ id: number }>;
-        if (flipped.length !== 1) {
-          throw new TRPCError({
-            code: "CONFLICT",
-            message: "Batch is not in 'selling' status — cannot mark returned",
-          });
-        }
         // Re-read via drizzle for camelCase mapping (raw RETURNING is snake_case).
         const [batch] = await tx
           .select()
           .from(bdcNfemPurchaseBatches)
           .where(and(eq(bdcNfemPurchaseBatches.id, input.batchId), eq(bdcNfemPurchaseBatches.tenantId, tenantId)))
           .limit(1);
+        if (flipped.length !== 1) {
+          if (!batch) throw new TRPCError({ code: "NOT_FOUND", message: "NFEM batch not found" });
+          // M28: idempotent replay — a batch already 'returned' returns the
+          // batch row instead of an undefined/empty result.
+          if (batch.status === "returned") {
+            return {
+              status: "returned" as const,
+              batchId: batch.id,
+              nairaReturnReference: null as string | null,
+              replay: true,
+              batch,
+            };
+          }
+          throw new TRPCError({
+            code: "CONFLICT",
+            message: "Batch is not in 'selling' status — cannot mark returned",
+          });
+        }
         if (!batch) throw new TRPCError({ code: "NOT_FOUND", message: "NFEM batch not found" });
 
+        // F11: TB return legs for the unsold NFEM funds — inverse of the
+        // purchase posting (DR CUSTOMER_PAYABLE_usd CR FX_INVENTORY_USD /
+        // DR BANK_NGN CR CUSTOMER_PAYABLE_ngn), deterministic key
+        // `nfem-return:{tenantId}:{batchId}` (replay-safe). Fail-soft per the
+        // returns-file style: the bank-side return already happened, so a TB
+        // outage must not block the honest status flip — it is logged loudly
+        // and annotated on the return transaction for recon.
+        let returnLegs: Awaited<ReturnType<typeof postNfemReturn>> = [];
+        let tbNote: string | null = null;
+        const returnKey = `nfem-return:${tenantId}:${batch.id}`;
+        try {
+          returnLegs = await postNfemReturn({
+            tenantId,
+            idempotencyKey: returnKey,
+            amountUsdMinor: BigInt(toCents(batch.amountUsd)),
+            nairaReturnedMinor: BigInt(toCents(batch.nairaPaid)),
+          });
+        } catch (tbErr) {
+          tbNote = `TB return legs NOT booked (${tbErr instanceof Error ? tbErr.message : String(tbErr)}) — recon must replay postNfemReturn(${returnKey})`;
+          logger.error(
+            { err: tbErr instanceof Error ? tbErr.message : String(tbErr), batchId: batch.id, tenantId, returnKey },
+            "[BDC sourcing] NFEM return TB legs failed — batch still marked 'returned' (fail-soft, recon required)",
+          );
+        }
+
         // Record the naira return leg (payload) on an nfem_return transaction.
-        await tx.insert(bdcTransactions).values({
+        const [returnTxn] = await tx.insert(bdcTransactions).values({
           tenantId,
           branchId: null,
           txnType: "nfem_return",
@@ -516,12 +579,22 @@ export const bdcSourcingRouter = router({
           customerId: null,
           paymentLeg: { method: "nip_transfer", reference: input.nairaReturnReference },
           cashPortion: "0.00",
-          idempotencyKey: `BDC-NFEM-RETURN-${batch.id}`,
-          tbTransferIds: [],
+          idempotencyKey: `BDC-NFEM-RETURN-${tenantId}-${batch.id}`,
+          tbTransferIds: returnLegs as unknown as Record<string, unknown>[],
           status: "settled",
           makerId: ctx.user.id,
-        });
-        return { status: "returned" as const, batchId: batch.id, nairaReturnReference: input.nairaReturnReference };
+          failureReason: tbNote,
+        }).returning({ id: bdcTransactions.id });
+
+        if (returnLegs.length > 0) {
+          await mirrorLegsToPg(tx, returnLegs, {
+            reference: returnKey,
+            type: "bdc_nfem_return",
+            tenantId,
+            bdcTransactionId: returnTxn.id,
+          });
+        }
+        return { status: "returned" as const, batchId: batch.id, nairaReturnReference: input.nairaReturnReference, replay: false, batch };
       });
       return result;
     }),

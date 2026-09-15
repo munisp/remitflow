@@ -206,10 +206,13 @@ export const operatorRouter = router({
         lat: z.number().min(-90).max(90),
         lng: z.number().min(-180).max(180),
         isHeadOffice: z.boolean().default(false),
+        totpCode: totpCodeSchema,
       }),
     )
     .mutation(async ({ ctx, input }) => {
       const tenantId = await requireTenantId(ctx.user.id);
+      // Registry mutation — canonical step-up (F15), same pattern as updateBranchStatus.
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC branch registration");
       const db = await requireDb();
       const profile = await getBdcProfile(db, tenantId);
 
@@ -337,10 +340,13 @@ export const operatorRouter = router({
         royaltyBps: z.number().int().min(0).max(10000).default(0),
         /** CBN airport-location exemption from the 1km rule (reason logged). */
         airportExempt: z.boolean().default(false),
+        totpCode: totpCodeSchema,
       }),
     )
     .mutation(async ({ ctx, input }) => {
       const tenantId = await requireTenantId(ctx.user.id);
+      // Registry mutation — canonical step-up (F15).
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC franchisee registration");
       const db = await requireDb();
       const profile = await getBdcProfile(db, tenantId);
 

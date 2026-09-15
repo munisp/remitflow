@@ -12,7 +12,8 @@
  *                           persisted; bdc_transactions stays reserved for
  *                           real executions).
  *   - executePayout        (teller+TOTP) KYC tier gate → claimIdempotency
- *                           (`BDC-IMTO-{reference}`) BEFORE money movement →
+ *                           (`BDC-IMTO-{tenantId}-{reference}`, tenant-scoped)
+ *                           BEFORE money movement →
  *                           one db.transaction (bdc_transactions 'imto_payout'
  *                           status 'pending' + bdc_imto_settlements 'accrued'
  *                           + version-guarded drawer denomination decrement
@@ -52,15 +53,15 @@
  * (timing-safe) before any money movement. Tampering or cross-tenant replay
  * → BAD_REQUEST.
  *
- * ── Assumed _shared/_ledger signatures (contracts guaranteed by B1/B2) ──────
+ * ── _shared/_ledger signatures (verified against ./\_ledger) ────────────────
  *   getBdcProfile(db, tenantId) → active profile row (throws PRECONDITION_FAILED)
  *   assertBranchActive(db, tenantId, branchId) → void (throws on inactive/missing)
  *   toCents(value: string | number) → integer minor units (cents)
  *   ensureBdcAccounts(tenantId) → void (idempotent TB chart provisioning)
- *   postImtoPayout({ tenantId, txnId, idempotencyKey, currency, fxAmount,
- *     nairaAmount, commission, cashPortion }) → { tbTransferIds: string[] }
- *   (amounts as numeric(18,2) major-unit strings; TB failure throws → tx rolls
- *    back, per SPEC §0.3 fail-closed)
+ *   postImtoPayout({ tenantId, idempotencyKey, nairaMinor: bigint,
+ *     commissionMinor: bigint }) → TbLegRecord[]  (TB BigInt minor units;
+ *     payout leg PENDING until confirmImtoSettlement posts it via confirmLeg;
+ *     TB failure throws → tx rolls back, per SPEC §0.3 fail-closed)
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
@@ -82,12 +83,19 @@ import {
   initiateTransfer,
   buildIlpPacket,
 } from "../../mojaloop.service";
-import { claimIdempotency, storeIdempotency } from "../../middleware/coreAtomicity";
+import { claimIdempotency, storeIdempotency, releaseIdempotencyClaim } from "../../middleware/coreAtomicity";
 import { requireTotpStepUp, requireKycTierForAmount } from "../../_core/totpStepUp";
 import { ENV } from "../../_core/env";
 import { logger } from "../../_core/logger";
 import { getBdcProfile, assertBranchActive, toCents } from "./_shared";
-import { ensureBdcAccounts, postImtoPayout } from "./_ledger";
+import {
+  ensureBdcAccounts,
+  postImtoPayout,
+  confirmLeg,
+  reversePost,
+  mirrorLegsToPg,
+  type TbLegRecord,
+} from "./_ledger";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -207,6 +215,13 @@ function periodWindow(period: string): { start: string; end: string } {
  * transfer COMMITTED. Guarded single-winner flips only — safe to call
  * repeatedly (duplicate/out-of-order webhooks are no-ops).
  *
+ * Two-phase commit (F1/F10): the PENDING payout TB leg posted at initiation
+ * (`imto:{txnId}:payout`) is POSTED here via confirmLeg, inside the same
+ * db.transaction as the PG flips + PG mirror (M27). A TB failure throws →
+ * the whole transaction rolls back → the webhook logs and a later replay
+ * (duplicate webhook / manual re-drive) retries; the settlement is never
+ * marked 'settled' while its naira leg is unposted (fail-closed).
+ *
  * Returns the outcome for the caller's logging; never throws on
  * already-settled rows.
  */
@@ -214,35 +229,142 @@ export async function confirmImtoSettlement(
   db: Db,
   mojaloopTransferId: string,
 ): Promise<{ settlementUpdated: boolean; txnUpdated: boolean; reason?: string }> {
-  const settled = (await db.execute(sql`
+  return db.transaction(async (tx) => {
+    const settled = (await tx.execute(sql`
+      UPDATE bdc_imto_settlements
+      SET status = 'settled', settled_at = COALESCE(settled_at, NOW()), updated_at = NOW()
+      WHERE mojaloop_transfer_id = ${mojaloopTransferId} AND status = 'accrued'
+      RETURNING id, tenant_id AS "tenantId"
+    `)) as unknown as Array<{ id: number; tenantId: number }>;
+
+    if (settled.length === 0) {
+      const existing = (await tx.execute(sql`
+        SELECT status FROM bdc_imto_settlements WHERE mojaloop_transfer_id = ${mojaloopTransferId} LIMIT 1
+      `)) as unknown as Array<{ status: string }>;
+      if (existing.length === 0) return { settlementUpdated: false, txnUpdated: false, reason: "no_settlement_row" };
+      // Settlement already terminal — still try to settle the txn (crash-safe).
+    }
+
+    const tenantId = settled[0]?.tenantId;
+    const txns = (await tx.execute(sql`
+      UPDATE bdc_transactions
+      SET status = 'settled', updated_at = NOW()
+      WHERE payment_leg->>'mojaloopTransferId' = ${mojaloopTransferId}
+        AND status IN ('pending', 'posted')
+        ${tenantId ? sql`AND tenant_id = ${tenantId}` : sql``}
+      RETURNING id, tenant_id AS "tenantId", tb_transfer_ids AS "tbTransferIds"
+    `)) as unknown as Array<{ id: number; tenantId: number; tbTransferIds: unknown }>;
+
+    // Two-phase commit of every pending TB leg (payout leg posted on the
+    // switch's COMMITTED). Posting key must match initiation: `imto:{id}:payout`.
+    for (const t of txns) {
+      const legs = (t.tbTransferIds ?? []) as TbLegRecord[];
+      if (legs.length === 0) continue;
+      const payoutKey = `imto:${t.id}:payout`;
+      const postedLegs: TbLegRecord[] = [];
+      for (const leg of legs) {
+        postedLegs.push(await confirmLeg(payoutKey, leg));
+      }
+      await tx.execute(sql`
+        UPDATE bdc_transactions
+        SET tb_transfer_ids = ${JSON.stringify(postedLegs)}::jsonb, updated_at = NOW()
+        WHERE id = ${t.id}
+      `);
+      const postMirrorLegs: TbLegRecord[] = postedLegs
+        .filter((l) => l.postTransferId)
+        .map((l) => ({ ...l, leg: `${l.leg}-post`, transferId: l.postTransferId! }));
+      if (postMirrorLegs.length > 0) {
+        await mirrorLegsToPg(tx, postMirrorLegs, {
+          reference: payoutKey,
+          type: "bdc_imto_payout_settle",
+          tenantId: t.tenantId,
+          bdcTransactionId: t.id,
+        });
+      }
+    }
+
+    return {
+      settlementUpdated: settled.length === 1,
+      txnUpdated: txns.length >= 1,
+      reason: settled.length === 0 ? "already_terminal" : undefined,
+    };
+  });
+}
+
+/**
+ * Compensate an IMTO payout whose Mojaloop leg ABORTED (webhook error
+ * callback path). Honest terminal states (F10): settlement 'accrued' →
+ * 'disputed', linked txn 'pending'/'posted' → 'failed' with the switch's
+ * reason, and the initiation TB legs are reversed (void PENDING payout leg,
+ * reverse POSTED commission leg) so IMTO_SETTLEMENT / COMMISSION_INCOME do
+ * not stay inflated. The TB reversal is fail-soft: the money never moved at
+ * the switch, the PG rows are the honest record, and a TB outage is logged
+ * loudly for recon instead of blocking the webhook ack.
+ *
+ * Guarded single-winner flips only — safe to call repeatedly.
+ */
+export async function abortImtoSettlement(
+  db: Db,
+  mojaloopTransferId: string,
+  reason: string,
+): Promise<{ settlementUpdated: boolean; txnUpdated: boolean; reason?: string }> {
+  const disputed = (await db.execute(sql`
     UPDATE bdc_imto_settlements
-    SET status = 'settled', settled_at = COALESCE(settled_at, NOW()), updated_at = NOW()
+    SET status = 'disputed', updated_at = NOW()
     WHERE mojaloop_transfer_id = ${mojaloopTransferId} AND status = 'accrued'
     RETURNING id, tenant_id AS "tenantId"
   `)) as unknown as Array<{ id: number; tenantId: number }>;
 
-  if (settled.length === 0) {
+  if (disputed.length === 0) {
     const existing = (await db.execute(sql`
       SELECT status FROM bdc_imto_settlements WHERE mojaloop_transfer_id = ${mojaloopTransferId} LIMIT 1
     `)) as unknown as Array<{ status: string }>;
     if (existing.length === 0) return { settlementUpdated: false, txnUpdated: false, reason: "no_settlement_row" };
-    // Settlement already terminal — still try to settle the txn (crash-safe).
+    // Already terminal — still try to fail the txn (crash-safe).
   }
 
-  const tenantId = settled[0]?.tenantId;
+  const tenantId = disputed[0]?.tenantId;
+  const detail = `Mojaloop transfer aborted by switch: ${reason}`.slice(0, 1000);
   const txns = (await db.execute(sql`
     UPDATE bdc_transactions
-    SET status = 'settled', updated_at = NOW()
+    SET status = 'failed', failure_reason = ${detail}, updated_at = NOW()
     WHERE payment_leg->>'mojaloopTransferId' = ${mojaloopTransferId}
       AND status IN ('pending', 'posted')
       ${tenantId ? sql`AND tenant_id = ${tenantId}` : sql``}
-    RETURNING id
-  `)) as unknown as Array<{ id: number }>;
+    RETURNING id, tenant_id AS "tenantId", tb_transfer_ids AS "tbTransferIds"
+  `)) as unknown as Array<{ id: number; tenantId: number; tbTransferIds: unknown }>;
+
+  for (const t of txns) {
+    const legs = (t.tbTransferIds ?? []) as TbLegRecord[];
+    if (legs.length === 0) continue;
+    try {
+      const reversed = await reversePost(`imto:${t.id}:payout`, legs);
+      await db.execute(sql`
+        UPDATE bdc_transactions
+        SET tb_transfer_ids = ${JSON.stringify(reversed)}::jsonb, updated_at = NOW()
+        WHERE id = ${t.id}
+      `);
+      const reversalEntries = reversed.filter((l) => l.phase === "reversal");
+      if (reversalEntries.length > 0) {
+        await mirrorLegsToPg(db as unknown as Parameters<typeof mirrorLegsToPg>[0], reversalEntries, {
+          reference: `imto:${t.id}:payout`,
+          type: "bdc_imto_payout_reversal",
+          tenantId: t.tenantId,
+          bdcTransactionId: t.id,
+        });
+      }
+    } catch (err) {
+      logger.error(
+        { err: err instanceof Error ? err.message : String(err), bdcTxnId: t.id, mojaloopTransferId },
+        "[BDC IMTO] TB reversal of aborted payout FAILED — legs uncompensated; reconcile via reversePost replay",
+      );
+    }
+  }
 
   return {
-    settlementUpdated: settled.length === 1,
+    settlementUpdated: disputed.length === 1,
     txnUpdated: txns.length >= 1,
-    reason: settled.length === 0 ? "already_terminal" : undefined,
+    reason: disputed.length === 0 ? "already_terminal" : undefined,
   };
 }
 
@@ -404,10 +526,14 @@ export const bdcImtoRouter = router({
       await requireTotpStepUp(ctx.user.id, input.totpCode, "IMTO payout execution");
       await requireKycTierForAmount(ctx.user.id, Number(quote.nairaAmount), "IMTO payout");
 
-      const idempotencyKey = `BDC-IMTO-${quote.reference}`;
+      // Tenant-scoped claim: a recipient reference (MSISDN) is NOT unique
+      // across tenants — without the prefix one tenant's payout would burn /
+      // replay another tenant's idempotency record.
+      const idempotencyKey = `BDC-IMTO-${tenantId}-${quote.reference}`;
       const claim = await claimIdempotency(idempotencyKey);
       if (claim.cached) return claim.result as Record<string, unknown>;
 
+      try {
       await getBdcProfile(db, tenantId);
       await assertBranchActive(db, tenantId, input.branchId);
 
@@ -512,24 +638,32 @@ export const bdcImtoRouter = router({
           status: "accrued",
         }).returning({ id: bdcImtoSettlements.id });
 
-        // TB posting: DR IMTO_SETTLEMENT / CR NGN_CASH + CR COMMISSION_INCOME.
-        // TB outage throws UNAVAILABLE inside _ledger → tx rolls back (§0.3).
-        const posting = await postImtoPayout({
+        // TB posting: DR IMTO_SETTLEMENT / CR NGN_CASH (PENDING until the
+        // switch confirms) + DR IMTO_SETTLEMENT / CR COMMISSION_INCOME
+        // (posted). Real _ledger signature: BigInt minor units; deterministic
+        // posting key `imto:{txnId}:payout` (F1) — replay-safe. TB outage
+        // throws UNAVAILABLE inside _ledger → tx rolls back (§0.3).
+        const payoutKey = `imto:${txn.id}:payout`;
+        const legs = await postImtoPayout({
           tenantId,
-          txnId: txn.id,
-          idempotencyKey,
-          currency: quote.currency,
-          fxAmount: quote.fxAmount,
-          nairaAmount: quote.nairaAmount,
-          commission: quote.commission,
-          cashPortion,
+          idempotencyKey: payoutKey,
+          nairaMinor: BigInt(toCents(quote.nairaAmount)),
+          commissionMinor: BigInt(toCents(quote.commission)),
         });
 
         await tx.update(bdcTransactions)
-          .set({ tbTransferIds: posting.tbTransferIds, updatedAt: new Date() })
+          .set({ tbTransferIds: legs as unknown as Record<string, unknown>[], updatedAt: new Date() })
           .where(eq(bdcTransactions.id, txn.id));
 
-        return { txnId: txn.id, settlementId: settlement.id, tbTransferIds: posting.tbTransferIds };
+        // PG mirror (ledger_entries) in the SAME transaction.
+        await mirrorLegsToPg(tx, legs, {
+          reference: payoutKey,
+          type: "bdc_imto_payout",
+          tenantId,
+          bdcTransactionId: txn.id,
+        });
+
+        return { txnId: txn.id, settlementId: settlement.id, tbTransferIds: legs };
       });
 
       // ── Mojaloop settlement leg (post-commit; honest state machine) ──────
@@ -557,13 +691,16 @@ export const bdcImtoRouter = router({
         const confirmed = await confirmImtoSettlement(db, transfer.transferId);
         finalStatus = confirmed.settlementUpdated || confirmed.txnUpdated ? "settled" : "pending";
       } else if (transfer.transferState === "ABORTED") {
-        // Definitive switch-provided abort — mark honestly. TB two-phase
-        // reversal (void of the pending posting) is wired via _ledger
-        // reversePost by B2/orchestrator — NOT in B4's import contract.
+        // Definitive switch-provided abort — mark honestly AND compensate the
+        // initiation TB legs (void the PENDING payout leg, reverse the POSTED
+        // commission leg) so IMTO_SETTLEMENT does not stay inflated. The txn
+        // is already committed, so reversal is fail-soft: a TB outage is
+        // logged loudly and surfaces in recon, never masked.
         await recordMojaloopTransferId(db, tenantId, txnId, settlementId, transfer.transferId);
+        const abortReason = `Mojaloop transfer aborted by switch: ${transfer.errorInformation?.errorDescription ?? "no detail"}`;
         await db.execute(sql`
           UPDATE bdc_transactions
-          SET status = 'failed', failure_reason = ${`Mojaloop transfer aborted by switch: ${transfer.errorInformation?.errorDescription ?? "no detail"}`}, updated_at = NOW()
+          SET status = 'failed', failure_reason = ${abortReason}, updated_at = NOW()
           WHERE id = ${txnId} AND tenant_id = ${tenantId} AND status = 'pending'
         `);
         await db.execute(sql`
@@ -571,6 +708,26 @@ export const bdcImtoRouter = router({
           SET status = 'disputed', updated_at = NOW()
           WHERE id = ${settlementId} AND tenant_id = ${tenantId} AND status = 'accrued'
         `);
+        try {
+          const [abortTxn] = await db
+            .select()
+            .from(bdcTransactions)
+            .where(and(eq(bdcTransactions.id, txnId), eq(bdcTransactions.tenantId, tenantId)))
+            .limit(1);
+          const legs = (abortTxn?.tbTransferIds ?? []) as unknown as TbLegRecord[];
+          if (abortTxn && legs.length > 0) {
+            const reversed = await reversePost(`imto:${txnId}:payout`, legs);
+            await db
+              .update(bdcTransactions)
+              .set({ tbTransferIds: reversed as unknown as Record<string, unknown>[], updatedAt: new Date() })
+              .where(eq(bdcTransactions.id, txnId));
+          }
+        } catch (revErr) {
+          logger.error(
+            { err: revErr instanceof Error ? revErr.message : String(revErr), txnId, tenantId },
+            "[BDC IMTO] TB reversal of aborted payout FAILED — legs uncompensated; reconcile via reversePost replay",
+          );
+        }
         finalStatus = "failed";
       } else {
         // RESERVED / RECEIVED / UNCERTAIN → stay 'pending'; webhook (or a
@@ -601,6 +758,12 @@ export const bdcImtoRouter = router({
       };
       storeIdempotency(idempotencyKey, result);
       return result;
+      } catch (err) {
+        // Failed attempt must not burn the idempotency claim for its TTL —
+        // release the pending marker so an honest retry can re-execute.
+        await releaseIdempotencyClaim(idempotencyKey);
+        throw err;
+      }
     }),
 
   /**

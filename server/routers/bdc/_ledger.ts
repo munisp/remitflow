@@ -379,6 +379,46 @@ export async function postNfemPurchase(params: {
 }
 
 /**
+ * NFEM return (unsold funds returned to the funding bank) — exact inverse of
+ * postNfemPurchase:
+ *   usd leg (USD ledger, POSTED): DR CUSTOMER_PAYABLE_usd CR FX_INVENTORY_USD
+ *   ngn leg (NGN ledger, POSTED): DR BANK_NGN CR CUSTOMER_PAYABLE_ngn
+ * The USD leaves the operator's FX inventory back through the clearing
+ * account; the naira refund arrives at the bank account. Bank-confirmed →
+ * immediate POST.
+ */
+export async function postNfemReturn(params: {
+  tenantId: number;
+  idempotencyKey: string;
+  amountUsdMinor: bigint;
+  nairaReturnedMinor: bigint;
+}): Promise<TbLegRecord[]> {
+  const { tenantId, idempotencyKey } = params;
+  await ensureBdcAccounts(tenantId, ["USD"]);
+
+  const usdReq: CreateTransferRequest = {
+    id: bdcTransferId(idempotencyKey, "usd"),
+    debitAccountId: BDC_ACCOUNTS.customerPayable(tenantId, "USD"),
+    creditAccountId: BDC_ACCOUNTS.fxInventory(tenantId, "USD"),
+    amount: params.amountUsdMinor,
+    ledger: ledgerOf("USD"),
+    code: bdcAccountCode(tenantId, BDC_ACCOUNT_OFFSETS.FX_INVENTORY_BASE + ccyIndex("USD")),
+    flags: 0,
+  };
+  const ngnReq: CreateTransferRequest = {
+    id: bdcTransferId(idempotencyKey, "ngn"),
+    debitAccountId: BDC_ACCOUNTS.bankNgn(tenantId),
+    creditAccountId: BDC_ACCOUNTS.customerPayable(tenantId, "NGN"),
+    amount: params.nairaReturnedMinor,
+    ledger: ledgerOf("NGN"),
+    code: bdcAccountCode(tenantId, BDC_ACCOUNT_OFFSETS.BANK_NGN),
+    flags: 0,
+  };
+  await createTransfersIdempotent("postNfemReturn", [usdReq, ngnReq]);
+  return [legRecord("usd", usdReq, "USD", "posted"), legRecord("ngn", ngnReq, "NGN", "posted")];
+}
+
+/**
  * IMTO payout (SPEC §3.10):
  *   payout leg    (NGN ledger, PENDING): DR IMTO_SETTLEMENT CR NGN_CASH
  *   commission leg(NGN ledger, POSTED):  DR IMTO_SETTLEMENT CR COMMISSION_INCOME

@@ -30,7 +30,7 @@ import {
   bdcTransactions,
 } from "../../../drizzle/schema";
 import { and, desc, eq, gt, gte, lt, isNull, or, sql } from "drizzle-orm";
-import { claimIdempotency, storeIdempotency } from "../../middleware/coreAtomicity";
+import { claimIdempotency, storeIdempotency, releaseIdempotencyClaim } from "../../middleware/coreAtomicity";
 import { requireTotpStepUp } from "../../_core/totpStepUp";
 import { resolveTenantContext } from "../../tenantMiddleware";
 import { logger } from "../../_core/logger";
@@ -234,7 +234,7 @@ export const bdcSalesRouter = router({
   /**
    * buyFx — BDC BUYS foreign currency from a walk-in customer (pays naira).
    * Flow: TOTP → profile/branch/customer gates → SoF gate (≥$10k) →
-   * claimIdempotency(`BDC-BUY-${key}`) → db.transaction { guarded drawer
+   * claimIdempotency(`BDC-BUY-${tenantId}-${key}`) → db.transaction { guarded drawer
    * inventory credits, bdc_transactions 'pending', TB pending legs
    * DR FX_INVENTORY / CR CUSTOMER_PAYABLE + PG mirror } → confirmNairaLeg
    * settles (posts the pending legs).
@@ -331,10 +331,13 @@ export const bdcSalesRouter = router({
       // naira kobo = fxCents * rateKobo / 100 (round-half-up, integer math).
       const nairaKobo = (BigInt(fxCents) * rateKobo + 50n) / 100n;
 
-      const claimKey = `BDC-BUY-${input.idempotencyKey}`;
+      // Tenant-scoped claim: idempotencyKey is client-supplied — without the
+      // tenant prefix two tenants presenting the same key would collide.
+      const claimKey = `BDC-BUY-${tenantId}-${input.idempotencyKey}`;
       const claim = await claimIdempotency(claimKey);
       if (claim.cached) return claim.result;
 
+      try {
       const drawerId = await requireTellerDrawer(db, tenantId, input.branchId, ctx.user.id);
 
       const result = await db.transaction(async (tx) => {
@@ -362,7 +365,13 @@ export const bdcSalesRouter = router({
             purposeCode: null,
             evidenceRefs: [],
             customerId: input.customerId,
-            paymentLeg: { method: input.paymentMethod, reference: input.paymentReference ?? null },
+            paymentLeg: {
+              method: input.paymentMethod,
+              reference: input.paymentReference ?? null,
+              // Inventory footprint for a later reversal (F9): the notes
+              // credited into this drawer must be debited back out.
+              inventory: { drawerId, items: input.denominations, direction: "credit" as const },
+            },
             cashPortion: input.paymentMethod === "cash" ? centsToMajor(nairaKobo) : "0.00",
             idempotencyKey: claimKey,
             tbTransferIds: [],
@@ -398,6 +407,11 @@ export const bdcSalesRouter = router({
 
       storeIdempotency(claimKey, result);
       return result;
+      } catch (err) {
+        // Failed execution must not permanently burn the client's key.
+        await releaseIdempotencyClaim(claimKey);
+        throw err;
+      }
     }),
 
   /**
@@ -491,10 +505,11 @@ export const bdcSalesRouter = router({
       const rateKobo = BigInt(toCents(rate));
       const nairaKobo = (BigInt(fxCents) * rateKobo + 50n) / 100n;
 
-      const claimKey = `BDC-SELL-${input.idempotencyKey}`;
+      const claimKey = `BDC-SELL-${tenantId}-${input.idempotencyKey}`;
       const claim = await claimIdempotency(claimKey);
       if (claim.cached) return claim.result;
 
+      try {
       const drawerId = await requireTellerDrawer(db, tenantId, input.branchId, ctx.user.id);
 
       const trmsFields = {
@@ -539,6 +554,11 @@ export const bdcSalesRouter = router({
                 reference: input.disbursementReference ?? null,
               },
               trmsFields,
+              // Inventory footprint for a later reversal (F9): notes paid out
+              // of this drawer must be credited back.
+              ...(denominations.length > 0
+                ? { inventory: { drawerId, items: denominations, direction: "debit" as const } }
+                : {}),
             },
             cashPortion: centsToMajor(cashCents),
             idempotencyKey: claimKey,
@@ -575,6 +595,10 @@ export const bdcSalesRouter = router({
 
       storeIdempotency(claimKey, result);
       return result;
+      } catch (err) {
+        await releaseIdempotencyClaim(claimKey);
+        throw err;
+      }
     }),
 
   /**
@@ -596,10 +620,11 @@ export const bdcSalesRouter = router({
       const db = await requireDb();
       const tenantId = await requireTenantId(ctx.user.id);
 
-      const claimKey = `BDC-CONFIRM-NAIRA-${input.transactionId}`;
+      const claimKey = `BDC-CONFIRM-NAIRA-${tenantId}-${input.transactionId}`;
       const claim = await claimIdempotency(claimKey);
       if (claim.cached) return claim.result;
 
+      try {
       const result = await db.transaction(async (tx) => {
         // 1. Guarded single-winner flip pending → settled.
         const flipped = (await tx.execute(sql`
@@ -657,6 +682,10 @@ export const bdcSalesRouter = router({
 
       storeIdempotency(claimKey, result);
       return result;
+      } catch (err) {
+        await releaseIdempotencyClaim(claimKey);
+        throw err;
+      }
     }),
 
   /**
@@ -705,10 +734,11 @@ export const bdcSalesRouter = router({
         });
       }
 
-      const claimKey = `BDC-REVERSE-${input.transactionId}`;
+      const claimKey = `BDC-REVERSE-${tenantId}-${input.transactionId}`;
       const claim = await claimIdempotency(claimKey);
       if (claim.cached) return claim.result;
 
+      try {
       const result = await db.transaction(async (tx) => {
         // 1. Guarded single-winner flip → 'reversed'.
         const flipped = (await tx.execute(sql`
@@ -740,6 +770,35 @@ export const bdcSalesRouter = router({
           });
         }
 
+        // 4. Compensating drawer-inventory restore (F9): the original sale
+        //    recorded its inventory footprint on paymentLeg.inventory —
+        //    direction 'debit' (cash sale: notes paid out) → credit the notes
+        //    back; direction 'credit' (purchase: notes taken in) → debit them
+        //    back out (guarded: if the notes are no longer in the drawer the
+        //    reversal fails honestly instead of fabricating stock). There is
+        //    no bdc_stock_movements table in the additive schema — the
+        //    version-guarded bdc_denomination_inventory mutation inside this
+        //    same transaction IS the compensating stock movement (direction
+        //    IN, reason SALE_REVERSAL, referencing this reversal via the
+        //    audit metadata below).
+        const invFootprint = (txn.paymentLeg as Record<string, unknown> | null)?.inventory as
+          | { drawerId?: number; items?: Array<{ denomination: number | string; noteCount: number }>; direction?: "credit" | "debit" }
+          | undefined;
+        if (invFootprint?.drawerId && Array.isArray(invFootprint.items) && invFootprint.items.length > 0 && invFootprint.direction) {
+          await mutateInventory(tx, {
+            tenantId,
+            locationType: "drawer",
+            locationId: invFootprint.drawerId,
+            currency: txn.currency ?? "USD",
+            items: invFootprint.items,
+            direction: invFootprint.direction === "debit" ? "credit" : "debit",
+          });
+          logger.info(
+            { transactionId: txn.id, drawerId: invFootprint.drawerId, restored: invFootprint.items },
+            "[BDC sales] SALE_REVERSAL inventory compensation applied (direction IN/OUT mirrored)",
+          );
+        }
+
         logger.info(
           { transactionId: txn.id, reversedBy: ctx.user.id, makerId: txn.makerId, reason: input.reason },
           "[BDC sales] Transaction reversed",
@@ -749,6 +808,10 @@ export const bdcSalesRouter = router({
 
       storeIdempotency(claimKey, result);
       return result;
+      } catch (err) {
+        await releaseIdempotencyClaim(claimKey);
+        throw err;
+      }
     }),
 
   /** getTransaction — tenant-scoped single fetch. */

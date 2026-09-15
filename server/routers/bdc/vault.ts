@@ -8,8 +8,8 @@
  *  - auditedProcedure / auditedAdminProcedure chains (server/_core/trpc.ts);
  *    privileged "manager" ops map to the platform admin role until a dedicated
  *    BDC staff-role model lands (SPEC §3: admin ops use the admin chain).
- *  - TOTP step-up via requireTotpStepUp on adjustStock + confirmDelivery
- *    (input `totpCode?: string`).
+ *  - TOTP step-up via requireTotpStepUp on adjustStock + transferStock +
+ *    confirmDelivery + reportCounterfeit (input `totpCode?: string`).
  *  - Money: numeric(18,2) MAJOR units (orchestrator amendment to SPEC §2) —
  *    sums are computed in integer cents via toCents() from ./_shared.
  *  - Inventory mutations are version-guarded optimistic-concurrency updates
@@ -325,11 +325,14 @@ export const bdcVaultRouter = router({
       items: z.array(itemSchema).min(1).max(200),
       custodianBId: z.number().int().positive(),
       note: z.string().max(500).optional(),
+      totpCode: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await requireDb();
       const tenantId = await requireTenantId(ctx.user.id);
       await getBdcProfile(db, tenantId);
+      // Money-moving mutation — canonical step-up (F15), same pattern as confirmDelivery.
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "CIT stock transfer dispatch");
 
       if (input.custodianBId === ctx.user.id) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Receiving custodian must differ from the maker (dual custody)" });
@@ -501,12 +504,15 @@ export const bdcVaultRouter = router({
       noteSerial: z.string().max(64).optional(),
       noteCount: z.number().int().positive().default(1),
       notes: z.string().max(1000).optional(),
+      totpCode: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await requireDb();
       const tenantId = await requireTenantId(ctx.user.id);
       await getBdcProfile(db, tenantId);
       await assertBranchActive(db, tenantId, input.branchId);
+      // Removes notes from sellable stock — canonical step-up (F15).
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "counterfeit report");
 
       const registerRow = await db.transaction(async (tx: any) => {
         // Version-guarded decrement — the notes leave sellable stock.
