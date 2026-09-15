@@ -8,7 +8,9 @@ export default function BDCPartnerPortalScreen() {
   const [search, setSearch] = useState('');
   const [refreshing, setRefreshing] = useState(false);
 
-  const { data, isLoading, error, refetch } = trpc.bdc.listPartners.useQuery(undefined, {
+  // wave12: bdc.listPartners never existed on the server; the BDC partner
+  // list is served by bdc.operator.listFranchisees (operator.ts).
+  const { data, isLoading, error, refetch } = trpc.bdc.operator.listFranchisees.useQuery({}, {
     retry: 2,
     staleTime: 30_000,
   });

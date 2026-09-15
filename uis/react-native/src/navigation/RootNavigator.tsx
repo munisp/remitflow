@@ -93,6 +93,11 @@ import SendToMaliScreen from '../screens/SendToMaliScreen';
 import SendToChinaScreen from '../screens/SendToChinaScreen';
 import SendToBrazilScreen from '../screens/SendToBrazilScreen';
 import SendToIndiaScreen from '../screens/SendToIndiaScreen';
+// wave12 BDC screens — orphan registration + new screens (SPEC-wave12 §6.2)
+import BDCPartnerPortalScreen from '../screens/BDCPartnerPortalScreen';
+import BdcOnboardingEmailPreviewScreen from '../screens/BdcOnboardingEmailPreviewScreen';
+import BdcPickupAuthorizationScreen from '../screens/BdcPickupAuthorizationScreen';
+import BdcReversalStatusScreen from '../screens/BdcReversalStatusScreen';
 
 export type RootStackParamList = {
   Auth: undefined;
@@ -167,6 +172,11 @@ export type RootStackParamList = {
   SendToChina: undefined;
   SendToBrazil: undefined;
   SendToIndia: undefined;
+  // wave12 BDC screens
+  BDCPartnerPortal: undefined;
+  BdcOnboardingEmailPreview: undefined;
+  BdcPickupAuthorization: undefined;
+  BdcReversalStatus: undefined;
 };
 
 export type TabParamList = {
@@ -289,6 +299,11 @@ export default function RootNavigator() {
           <Stack.Screen name="SendToChina" component={SendToChinaScreen} />
           <Stack.Screen name="SendToBrazil" component={SendToBrazilScreen} />
           <Stack.Screen name="SendToIndia" component={SendToIndiaScreen} />
+          {/* wave12 BDC screens */}
+          <Stack.Screen name="BDCPartnerPortal" component={BDCPartnerPortalScreen} />
+          <Stack.Screen name="BdcOnboardingEmailPreview" component={BdcOnboardingEmailPreviewScreen} />
+          <Stack.Screen name="BdcPickupAuthorization" component={BdcPickupAuthorizationScreen} />
+          <Stack.Screen name="BdcReversalStatus" component={BdcReversalStatusScreen} />
         </>
       )}
     </Stack.Navigator>

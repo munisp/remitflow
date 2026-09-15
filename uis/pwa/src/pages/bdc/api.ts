@@ -654,6 +654,107 @@ export interface BdcClient {
     settlementStatement: Mutation<{ imtoCode: string; period: PeriodString }, Json>;
     reconcileSettlements: Query<{ imtoCode: string; period: PeriodString }, Json>;
   };
+  // ── Wave-12 sub-routers (SPEC-wave12 §4) ──
+  reversals: {
+    requestReversal: Mutation<
+      { transactionId: number; reason: string; totpCode?: string },
+      ReversalRequestResult
+    >;
+    approveReversal: Mutation<
+      { reversalId: number; totpCode?: string },
+      ReversalExecutionResult
+    >;
+    listReversals: Query<
+      { status?: ReversalStatus; cursor?: number; limit?: number },
+      { items: BdcReversal[]; nextCursor: number | null }
+    >;
+    getReversal: Query<{ reversalId: number }, BdcReversal>;
+  };
+  rescreening: {
+    runRescreening: Mutation<
+      { tenantId?: number; totpCode?: string },
+      RescreeningRunStarted
+    >;
+    listRescreeningResults: Query<
+      {
+        customerId?: number;
+        verdict?: "clear" | "match" | "error";
+        blockedOnly?: boolean;
+        cursor?: number;
+        limit?: number;
+      },
+      { results: RescreeningResultRow[]; nextCursor: number | null }
+    >;
+    getCustomerScreeningStatus: Query<{ customerId: number }, CustomerScreeningStatus>;
+  };
+  offboarding: {
+    requestOffboarding: Mutation<
+      { tenantId: number; totpCode?: string },
+      { offboardingId: number; tenantId: number; status: "requested"; workflowStarted: boolean }
+    >;
+    getOffboardingStatus: Query<
+      { tenantId: number },
+      { tenantId: number; offboarding: BdcOffboardingRecord | null; offboarded: boolean }
+    >;
+    cancelOffboarding: Mutation<
+      { tenantId: number; totpCode?: string },
+      { tenantId: number; cancelled: true; previousStatus: string }
+    >;
+  };
+  pickup: {
+    authorizePickup: Mutation<
+      {
+        customerId: number;
+        agentFullName: string;
+        agentIdType: PickupAgentIdType;
+        agentIdNumber: string;
+        relationship: string;
+        /** Major-unit decimal string ("500.00") — server regex ^\d+(\.\d{1,2})?$. */
+        maxAmount?: string;
+        expiresInHours?: number;
+        idempotencyKey: string;
+        totpCode?: string;
+      },
+      PickupAuthorizeResult
+    >;
+    listAuthorizations: Query<
+      { customerId?: number; status?: PickupStatus; limit?: number; cursor?: number },
+      { rows: PickupAuthorizationRow[]; nextCursor: number | null }
+    >;
+    revokeAuthorization: Mutation<
+      { authorizationId: number; totpCode?: string },
+      { authorizationId: number; status: "revoked" }
+    >;
+    executeAgentPickup: Mutation<
+      {
+        authorizationId: number;
+        transactionId: number;
+        agentIdNumber: string;
+        totpCode?: string;
+      },
+      ExecutePickupResult
+    >;
+  };
+  analytics: {
+    runTellerFraudScan: Mutation<
+      { tenantId?: number; windowDays?: number; totpCode?: string },
+      TellerFraudScanResult
+    >;
+    listTellerFraudSignals: Query<
+      {
+        tellerUserId?: number;
+        signalType?: TellerFraudSignalType;
+        status?: TellerFraudSignalStatus;
+        limit?: number;
+        cursor?: number;
+      },
+      { rows: TellerFraudSignalRow[]; nextCursor: number | null }
+    >;
+    updateSignalStatus: Mutation<
+      { signalId: number; status: "reviewing" | "escalated" | "cleared"; totpCode?: string },
+      { signalId: number; status: string; unchanged: boolean }
+    >;
+  };
 }
 
 /**
@@ -668,4 +769,185 @@ export function asList<T>(res: T[] | { items?: T[]; rows?: T[] } | null | undefi
   if (!res) return [];
   if (Array.isArray(res)) return res;
   return res.items ?? res.rows ?? [];
+}
+
+// ── Wave-12 sub-routers (SPEC-wave12 §4, §6.1) ──────────────────────────────
+// Contracts verified against server/routers/bdc/{reversals,rescreening,
+// offboarding,pickup,analytics}.ts on branch bdc-integration. Structuring
+// alerts (bdc_structuring_alerts) are API-only this wave — no router
+// procedure exposes them, so no client interface is declared for them.
+
+export type ReversalStatus = "requested" | "approved" | "posted" | "failed" | "rejected";
+
+/** bdc_reversals row (reversals.listReversals / getReversal). */
+export interface BdcReversal {
+  id: number;
+  tenantId: number;
+  txnId: number;
+  /** 'manual'|'rail_return'|'recall' */
+  reversalType: string;
+  status: ReversalStatus | string;
+  reason: string;
+  railReference?: string | null;
+  requestedBy: number;
+  approvedBy?: number | null;
+  tbReversalIds?: Json;
+  failureReason?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+/** reversals.requestReversal result. */
+export interface ReversalRequestResult {
+  status: "requested";
+  reversalId: number;
+  transactionId: number;
+}
+
+/** reversals.approveReversal result (executeApprovedReversal outcome). */
+export interface ReversalExecutionResult {
+  status: "reversed" | "failed" | "already_posted";
+  transactionId: number;
+  reversalId: number;
+  tbTransferIds?: Json;
+  failureReason?: string;
+}
+
+/** bdc_rescreening_results row. `score` is numeric(5,4) → decimal string. */
+export interface RescreeningResultRow {
+  id: number;
+  tenantId: number;
+  customerId: number;
+  runId: string;
+  verdict: "clear" | "match" | "error" | string;
+  score?: string | null;
+  matchedLists?: Json;
+  blocked: boolean;
+  report?: Json;
+  createdAt?: string;
+}
+
+/** rescreening.runRescreening honest started-state. */
+export interface RescreeningRunStarted {
+  runId: string;
+  status: "started";
+  tenantId: number | null;
+}
+
+/** rescreening.getCustomerScreeningStatus response. */
+export interface CustomerScreeningStatus {
+  customerId: number;
+  latest: RescreeningResultRow | null;
+  blocked: boolean;
+}
+
+/** Offboarding blocker entry (blockers jsonb — server/temporal/activities-bdc.ts). */
+export interface OffboardingBlocker {
+  type: "non_zero_position" | "open_nfem_batches" | "unsettled_imto_payouts" | "open_regulatory_returns" | string;
+  count: number;
+  detail: string;
+  ids?: number[];
+}
+
+/** bdc_tenant_offboardings row. Status: requested|in_progress|blocked|completed. */
+export interface BdcOffboardingRecord {
+  id: number;
+  tenantId: number;
+  status: "requested" | "in_progress" | "blocked" | "completed" | string;
+  blockers: OffboardingBlocker[];
+  initiatedBy: number;
+  completedAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type PickupAgentIdType = "nin" | "bvn" | "passport" | "drivers_license" | "voters_card";
+export type PickupStatus = "pending" | "used" | "expired" | "revoked";
+
+export const PICKUP_AGENT_ID_TYPES: readonly PickupAgentIdType[] = [
+  "nin",
+  "bvn",
+  "passport",
+  "drivers_license",
+  "voters_card",
+];
+
+/** pickup.authorizePickup result (encrypted agent ID is never returned). */
+export interface PickupAuthorizeResult {
+  authorizationId: number;
+  status: string;
+  expiresAt: string;
+  customerId: number;
+  agentFullName: string;
+  agentIdType: string;
+  relationship: string;
+  maxAmount: MoneyString | null;
+}
+
+/**
+ * pickup.listAuthorizations row — the server's select deliberately omits
+ * agentIdNumberEnc, so it is not part of this interface.
+ */
+export interface PickupAuthorizationRow {
+  id: number;
+  customerId: number;
+  txnId?: number | null;
+  agentFullName: string;
+  agentIdType: string;
+  relationship: string;
+  status: PickupStatus | string;
+  maxAmount?: MoneyString | null;
+  expiresAt: string;
+  usedAt?: string | null;
+  usedBy?: number | null;
+  createdBy: number;
+  createdAt?: string;
+}
+
+/** pickup.executeAgentPickup result. */
+export interface ExecutePickupResult {
+  authorizationId: number;
+  transactionId: number;
+  status: "used";
+  usedAt: string;
+  usedBy: number;
+  pickupAgent: { name: string; idType: string; relationship: string };
+}
+
+export type TellerFraudSignalType =
+  | "variance_pattern"
+  | "out_of_hours"
+  | "reversal_concentration"
+  | "counterfeit_concentration";
+export type TellerFraudSignalStatus = "open" | "reviewing" | "escalated" | "cleared";
+
+export const TELLER_FRAUD_SIGNAL_TYPES: readonly TellerFraudSignalType[] = [
+  "variance_pattern",
+  "out_of_hours",
+  "reversal_concentration",
+  "counterfeit_concentration",
+];
+
+/** teller_fraud_signals row. `score` is numeric(6,3) → decimal string. */
+export interface TellerFraudSignalRow {
+  id: number;
+  tenantId: number;
+  tellerUserId: number;
+  /** "YYYY-MM-DD" window bounds. */
+  windowStart: string;
+  windowEnd: string;
+  signalType: TellerFraudSignalType | string;
+  score: string;
+  evidence: Json;
+  status: TellerFraudSignalStatus | string;
+  createdAt?: string;
+}
+
+/** analytics.runTellerFraudScan honest service summary. */
+export interface TellerFraudScanResult {
+  tenantId: number | null;
+  signals_written: number;
+  window_start: string;
+  window_end: string;
+  skipped: string[];
 }

@@ -145,11 +145,17 @@ routes:
           successes: 3
 
   # ─── WEBHOOK RECEIVER ──────────────────────────────────────────────────────
+  # wave12 (SPEC-wave12 §3.5): provider webhooks are served by
+  # go-stablecoin-settlement (`POST /webhook/{provider}`, HMAC-verified,
+  # port 8215) — the remitflow-backend TS receiver routes never existed and
+  # 404'd. Rewritten + repointed accordingly.
   - id: stablecoin-webhook-circle
     uri: /api/webhooks/stablecoin/circle
     methods: [POST]
-    upstream_id: remitflow-backend
+    upstream_id: go-stablecoin-settlement
     plugins:
+      proxy-rewrite:
+        uri: /webhook/circle
       limit-req:
         rate: 100
         burst: 200
@@ -161,8 +167,10 @@ routes:
   - id: stablecoin-webhook-yellowcard
     uri: /api/webhooks/stablecoin/yellowcard
     methods: [POST]
-    upstream_id: remitflow-backend
+    upstream_id: go-stablecoin-settlement
     plugins:
+      proxy-rewrite:
+        uri: /webhook/yellowcard
       limit-req:
         rate: 100
         burst: 200
@@ -179,6 +187,20 @@ upstreams:
     health_check:
       active:
         http_path: /api/health
+        interval: 5
+        timeout: 3
+        healthy:
+          http_statuses: [200]
+  # wave12: go-stablecoin-settlement (SPEC-wave12 §3.5 — provider webhook receiver)
+  - id: go-stablecoin-settlement
+    type: roundrobin
+    nodes:
+      - host: go-stablecoin-settlement
+        port: 8215
+        weight: 1
+    health_check:
+      active:
+        http_path: /health
         interval: 5
         timeout: 3
         healthy:

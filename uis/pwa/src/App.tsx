@@ -55,6 +55,12 @@ const BdcDealerDesk = lazy(() => import("./pages/bdc/BdcDealerDesk"));
 const BdcBranchManager = lazy(() => import("./pages/bdc/BdcBranchManager"));
 const BdcMlroConsole = lazy(() => import("./pages/bdc/BdcMlroConsole"));
 const BdcMdDashboard = lazy(() => import("./pages/bdc/BdcMdDashboard"));
+// ── BDC console (wave12) — ops consoles gated AdminRoute, pickup teller-facing ──
+const BdcReversals = lazy(() => import("./pages/bdc/BdcReversals"));
+const BdcRescreening = lazy(() => import("./pages/bdc/BdcRescreening"));
+const BdcOffboarding = lazy(() => import("./pages/bdc/BdcOffboarding"));
+const BdcPickup = lazy(() => import("./pages/bdc/BdcPickup"));
+const BdcTellerFraud = lazy(() => import("./pages/bdc/BdcTellerFraud"));
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -243,6 +249,15 @@ const App: React.FC = () => {
             <Route path="bdc/branch" element={<AdminRoute><BdcBranchManager /></AdminRoute>} />
             <Route path="bdc/mlro" element={<AdminRoute><BdcMlroConsole /></AdminRoute>} />
             <Route path="bdc/dashboard" element={<AdminRoute><BdcMdDashboard /></AdminRoute>} />
+            {/* BDC console (wave12). /bdc/pickup is teller-facing like
+                /bdc/teller (any authenticated tenant user; server-side bdc.*
+                guards are authoritative — revoke is an admin procedure and
+                fails closed for tellers); the rest are ops consoles. */}
+            <Route path="bdc/reversals" element={<AdminRoute><BdcReversals /></AdminRoute>} />
+            <Route path="bdc/rescreening" element={<AdminRoute><BdcRescreening /></AdminRoute>} />
+            <Route path="bdc/offboarding" element={<AdminRoute><BdcOffboarding /></AdminRoute>} />
+            <Route path="bdc/pickup" element={<BdcPickup />} />
+            <Route path="bdc/teller-fraud" element={<AdminRoute><BdcTellerFraud /></AdminRoute>} />
           </Route>
 
           <Route path="*" element={<Navigate to="/" replace />} />

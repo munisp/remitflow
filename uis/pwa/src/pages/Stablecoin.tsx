@@ -28,14 +28,20 @@ interface Transaction {
 }
 
 interface Quote {
-  quote_id: string;
   from_currency: string;
   to_currency: string;
   from_amount: string;
   to_amount: string;
   rate: string;
+  /** Empty when the service does not quote a fee — rendered only when set. */
   fee: string;
-  is_ml_optimized: boolean;
+}
+
+interface RateRow {
+  coin: string;
+  usdRate: number;
+  ngnRate: number;
+  change24h: number;
 }
 
 // Chain configurations
@@ -152,7 +158,9 @@ export default function Stablecoin() {
   const [toStablecoin, setToStablecoin] = useState('usdc');
   const [convertAmount, setConvertAmount] = useState('');
   const [quote, setQuote] = useState<Quote | null>(null);
+  const [quoteError, setQuoteError] = useState<string | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
+  const [rates, setRates] = useState<RateRow[]>([]);
   
   // Ramp form state
   const [rampType, setRampType] = useState<'on' | 'off'>('on');
@@ -184,9 +192,10 @@ export default function Stablecoin() {
   const loadWalletData = async () => {
     setLoading(true);
     try {
-      const [balancesData, historyData] = await Promise.all([
+      const [balancesData, historyData, ratesData] = await Promise.all([
         stablecoinService.getBalances().catch(() => null),
         stablecoinService.getHistory().catch(() => null),
+        stablecoinService.getRates().catch(() => null),
       ]);
 
       if (balancesData) {
@@ -199,6 +208,11 @@ export default function Stablecoin() {
       if (historyData) {
         const hData = historyData as unknown as { transactions?: Transaction[] };
         setTransactions(hData.transactions || []);
+      }
+
+      if (ratesData) {
+        const rData = ratesData as unknown as RateRow[] | { rates?: RateRow[] };
+        setRates(Array.isArray(rData) ? rData : rData.rates || []);
       }
     } catch (error) {
       console.error('Failed to load wallet data:', error);
@@ -232,16 +246,27 @@ export default function Stablecoin() {
         amount: parseFloat(sendAmount),
         address: sendAddress,
       }).catch(() => null);
-      
+
       if (result) {
         const data = result as unknown as { status?: string; tx_hash?: string };
-        alert(data.status === 'queued_offline' 
-          ? 'Transaction queued for when you\'re back online' 
-          : `Transaction sent! TX: ${data.tx_hash || 'pending'}`
-        );
+        const status = data.status || 'pending';
+        if (status === 'queued_offline') {
+          alert('Transaction queued for when you\'re back online');
+        } else if (status === 'failed') {
+          alert('Transfer failed — no funds moved. Check your history for details.');
+        } else {
+          // Honest status-driven message: pending/processing mean the transfer
+          // is NOT settled yet; the on-chain hash only exists once broadcast.
+          alert(
+            `Transfer status: ${status}` +
+            (data.tx_hash ? ` — TX: ${data.tx_hash}` : ' — on-chain hash not yet available')
+          );
+        }
         setSendAmount('');
         setSendAddress('');
         await loadWalletData();
+      } else {
+        alert('Send failed — the server returned no confirmation. Check your history before retrying.');
       }
     } catch (error) {
       console.error('Failed to send:', error);
@@ -253,25 +278,39 @@ export default function Stablecoin() {
 
   const getQuote = async () => {
     if (!convertAmount) return;
-    
+
     setQuoteLoading(true);
+    setQuoteError(null);
+    setQuote(null);
     try {
       const ratesData = await stablecoinService.getRates().catch(() => null);
-      if (ratesData) {
-        const mockQuote: Quote = {
-          quote_id: `q-${Date.now()}`,
+      const rows: RateRow[] | null = ratesData
+        ? (() => {
+            const rData = ratesData as unknown as RateRow[] | { rates?: RateRow[] };
+            return Array.isArray(rData) ? rData : rData.rates || [];
+          })()
+        : null;
+      const fromRate = rows?.find((r) => r.coin === fromStablecoin)?.usdRate;
+      const toRate = rows?.find((r) => r.coin === toStablecoin)?.usdRate;
+      if (!rows || !fromRate || !toRate || !Number.isFinite(fromRate) || !Number.isFinite(toRate) || toRate <= 0) {
+        // Honest unavailable state — no fabricated rate/fee.
+        setQuoteError('Live quote unavailable — the rates service did not return a rate for this pair. Try again later.');
+      } else {
+        // Indicative quote computed from the service's current USD rates; the
+        // executed rate/fee is determined server-side at conversion time.
+        const rate = fromRate / toRate;
+        setQuote({
           from_currency: fromStablecoin,
           to_currency: toStablecoin,
           from_amount: convertAmount,
-          to_amount: (parseFloat(convertAmount) * 0.998).toFixed(2),
-          rate: '0.998',
-          fee: (parseFloat(convertAmount) * 0.002).toFixed(4),
-          is_ml_optimized: true,
-        };
-        setQuote(mockQuote);
+          to_amount: (parseFloat(convertAmount) * rate).toFixed(2),
+          rate: rate.toFixed(6),
+          fee: '',
+        });
       }
     } catch (error) {
       console.error('Failed to get quote:', error);
+      setQuoteError('Live quote unavailable — please try again later.');
     } finally {
       setQuoteLoading(false);
     }
@@ -286,12 +325,20 @@ export default function Stablecoin() {
         toCoin: toStablecoin,
         amount: parseFloat(convertAmount),
       }).catch(() => null);
-      
+
       if (result) {
-        alert('Conversion successful!');
+        const data = result as unknown as { status?: string };
+        const status = data.status || 'pending';
+        alert(
+          status === 'failed'
+            ? 'Conversion failed — no funds moved. Check your history for details.'
+            : `Conversion status: ${status}`
+        );
         setConvertAmount('');
         setQuote(null);
         await loadWalletData();
+      } else {
+        alert('Conversion failed — the server returned no confirmation. Check your history before retrying.');
       }
     } catch (error) {
       console.error('Failed to convert:', error);
@@ -316,9 +363,17 @@ export default function Stablecoin() {
           }).catch(() => null);
       
       if (result) {
-        const data = result as unknown as { order_id?: string };
-        alert(`Order created! Order ID: ${data.order_id || 'pending'}`);
+        const data = result as unknown as { order_id?: string; status?: string };
+        const status = data.status || 'pending';
+        alert(
+          status === 'failed'
+            ? 'Order failed — no funds moved. Check your history for details.'
+            : `Order status: ${status}` + (data.order_id ? ` — Order ID: ${data.order_id}` : '')
+        );
         setRampAmount('');
+        await loadWalletData();
+      } else {
+        alert('Order failed — the server returned no confirmation. Check your history before retrying.');
       }
     } catch (error) {
       console.error('Failed to create ramp order:', error);
@@ -338,7 +393,8 @@ export default function Stablecoin() {
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'completed': return 'text-emerald-600 bg-green-100';
-      case 'confirming': return 'text-amber-600 bg-amber-100';
+      case 'confirming':
+      case 'processing': return 'text-amber-600 bg-amber-100';
       case 'pending': return 'text-indigo-600 bg-indigo-100';
       case 'failed': return 'text-red-600 bg-red-100';
       case 'queued_offline': return 'text-slate-600 bg-slate-100';
@@ -377,10 +433,6 @@ export default function Stablecoin() {
         <div className="text-center py-4">
           <p className="text-sm opacity-80">Total Balance</p>
           <p className="text-4xl font-bold">${totalBalance}</p>
-          <p className="text-sm opacity-80 mt-1 flex items-center justify-center">
-            <TrendingUpIcon className="w-4 h-4 mr-1" />
-            ML-optimized rates active
-          </p>
         </div>
         
         {/* Quick Actions */}
@@ -797,26 +849,32 @@ export default function Stablecoin() {
                 </button>
               )}
               
+              {quoteError && (
+                <div className="p-3 bg-amber-50 rounded-xl mb-4 text-sm text-amber-700">
+                  {quoteError}
+                </div>
+              )}
+
               {quote && (
                 <div className="p-4 bg-emerald-50 rounded-xl mb-4">
                   <div className="flex justify-between mb-2">
-                    <span className="text-slate-600">You will receive</span>
+                    <span className="text-slate-600">You will receive (indicative)</span>
                     <span className="font-bold text-lg">${quote.to_amount}</span>
                   </div>
                   <div className="flex justify-between text-sm">
-                    <span className="text-slate-500">Rate</span>
+                    <span className="text-slate-500">Indicative rate</span>
                     <span>1 {STABLECOINS[fromStablecoin as keyof typeof STABLECOINS]?.symbol} = {quote.rate} {STABLECOINS[toStablecoin as keyof typeof STABLECOINS]?.symbol}</span>
                   </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-slate-500">Fee</span>
-                    <span>${quote.fee}</span>
-                  </div>
-                  {quote.is_ml_optimized && (
-                    <div className="flex items-center gap-1 text-emerald-600 text-sm mt-2">
-                      <TrendingUpIcon className="w-4 h-4" />
-                      <span>ML-optimized rate applied</span>
+                  {quote.fee && (
+                    <div className="flex justify-between text-sm">
+                      <span className="text-slate-500">Fee</span>
+                      <span>${quote.fee}</span>
                     </div>
                   )}
+                  <p className="text-xs text-slate-500 mt-2">
+                    Computed from current rates — the executed rate and any fee are
+                    confirmed by the server at conversion time.
+                  </p>
                 </div>
               )}
               
@@ -931,17 +989,20 @@ export default function Stablecoin() {
               
               <div className="p-3 bg-slate-50 rounded-xl mb-4">
                 <div className="flex justify-between text-sm">
-                  <span className="text-slate-500">Current Rate</span>
+                  <span className="text-slate-500">Current Rate ({rampStablecoin.toUpperCase()})</span>
                   <span>
-                    {rampFiat === 'NGN' ? '1 USDT = ₦1,650' : 
-                     rampFiat === 'EUR' ? '1 USDT = €0.92' :
-                     rampFiat === 'GBP' ? '1 USDT = £0.79' : '1 USDT = $1.00'}
+                    {(() => {
+                      const row = rates.find((r) => r.coin === rampStablecoin);
+                      if (!row) return 'Live rate unavailable';
+                      if (rampFiat === 'NGN') return `1 ${rampStablecoin.toUpperCase()} = ₦${row.ngnRate.toLocaleString()}`;
+                      if (rampFiat === 'USD') return `1 ${rampStablecoin.toUpperCase()} = $${row.usdRate}`;
+                      return 'Live rate unavailable for this fiat currency';
+                    })()}
                   </span>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-slate-500">Fee</span>
-                  <span>1%</span>
-                </div>
+                <p className="text-xs text-slate-400 mt-1">
+                  Fees and the final executed rate are confirmed by the server when the order is created.
+                </p>
               </div>
               
               <button
