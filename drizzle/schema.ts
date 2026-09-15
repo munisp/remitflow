@@ -6719,7 +6719,9 @@ export const bdcNfemPurchaseBatches = pgTable("bdc_nfem_purchase_batches", {
   rate: numeric("rate", { precision: 18, scale: 2 }).notNull(),
   nairaPaid: numeric("naira_paid", { precision: 18, scale: 2 }).notNull(),
   fxbtReference: varchar("fxbt_reference", { length: 64 }),
-  status: varchar("status", { length: 12 }).default("requested"), // 'requested'|'funded'|'selling'|'liquidated'|'returned'|'expired'
+  status: varchar("status", { length: 12 }).default("requested"), // 'requested'|'funded'|'selling'|'liquidated'|'returned'|'expired'|'part_filled' (wave12: partial fill, fits varchar(12))
+  actualDisbursedUsd: numeric("actual_disbursed_usd", { precision: 18, scale: 2 }), // wave12 additive (0091)
+  residualHandling: varchar("residual_handling", { length: 16 }), // wave12 additive: 'returned'|'expired'|null
   purchasedAt: timestamp("purchased_at"),
   deadlineAt: timestamp("deadline_at"),
   liquidatedAt: timestamp("liquidated_at"),
@@ -6837,3 +6839,139 @@ export const bdcCommissionSchedules = pgTable("bdc_commission_schedules", {
 });
 export type BdcCommissionSchedule = typeof bdcCommissionSchedules.$inferSelect;
 export type InsertBdcCommissionSchedule = typeof bdcCommissionSchedules.$inferInsert;
+
+// ─── Wave-12 additive tables (drizzle/0091_wave12.sql) — APPEND-ONLY block ───
+
+// 20. BDC reversals (manual recall / rail return of settled transactions).
+export const bdcReversals = pgTable("bdc_reversals", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  txnId: bigint("txn_id", { mode: "number" }).notNull().references(() => bdcTransactions.id),
+  reversalType: varchar("reversal_type", { length: 16 }).notNull(), // 'manual'|'rail_return'|'recall'
+  status: varchar("status", { length: 16 }).notNull().default("requested"), // 'requested'|'approved'|'posted'|'failed'|'rejected'
+  reason: text("reason").notNull(),
+  railReference: varchar("rail_reference", { length: 128 }),
+  requestedBy: integer("requested_by").notNull(),
+  approvedBy: integer("approved_by"),
+  tbReversalIds: jsonb("tb_reversal_ids").notNull().default([]),
+  failureReason: text("failure_reason"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  index("bdc_reversals_tenant_txn_idx").on(t.tenantId, t.txnId),
+]);
+export type BdcReversal = typeof bdcReversals.$inferSelect;
+export type InsertBdcReversal = typeof bdcReversals.$inferInsert;
+
+// 21. Third-party cash pickup authorizations (agent ID secretBox-encrypted).
+export const bdcPickupAuthorizations = pgTable("bdc_pickup_authorizations", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  customerId: bigint("customer_id", { mode: "number" }).notNull().references(() => bdcCustomers.id),
+  txnId: bigint("txn_id", { mode: "number" }).references(() => bdcTransactions.id),
+  agentFullName: varchar("agent_full_name", { length: 255 }).notNull(),
+  agentIdType: varchar("agent_id_type", { length: 32 }).notNull(), // 'nin'|'bvn'|'passport'|'drivers_license'|'voters_card'
+  agentIdNumberEnc: text("agent_id_number_enc").notNull(),
+  relationship: varchar("relationship", { length: 64 }).notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("pending"), // 'pending'|'used'|'expired'|'revoked'
+  maxAmount: numeric("max_amount", { precision: 18, scale: 2 }),
+  expiresAt: timestamp("expires_at").notNull(),
+  usedAt: timestamp("used_at"),
+  usedBy: integer("used_by"),
+  createdBy: integer("created_by").notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 96 }).notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("bdc_pickup_auth_tenant_idem_uidx").on(t.tenantId, t.idempotencyKey),
+  index("bdc_pickup_auth_customer_idx").on(t.tenantId, t.customerId, t.status),
+]);
+export type BdcPickupAuthorization = typeof bdcPickupAuthorizations.$inferSelect;
+export type InsertBdcPickupAuthorization = typeof bdcPickupAuthorizations.$inferInsert;
+
+// 22. Periodic sanctions rescreening results for bdc_customers.
+export const bdcRescreeningResults = pgTable("bdc_rescreening_results", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  customerId: bigint("customer_id", { mode: "number" }).notNull().references(() => bdcCustomers.id),
+  runId: varchar("run_id", { length: 64 }).notNull(),
+  verdict: varchar("verdict", { length: 16 }).notNull(), // 'clear'|'match'|'error'
+  score: numeric("score", { precision: 5, scale: 4 }),
+  matchedLists: jsonb("matched_lists").notNull().default([]),
+  blocked: boolean("blocked").notNull().default(false),
+  report: jsonb("report"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  index("bdc_rescreen_latest_idx").on(t.tenantId, t.customerId, t.createdAt),
+]);
+export type BdcRescreeningResult = typeof bdcRescreeningResults.$inferSelect;
+export type InsertBdcRescreeningResult = typeof bdcRescreeningResults.$inferInsert;
+
+// 23. Rolling-window structuring alerts (7d/30d aggregation per customer).
+export const bdcStructuringAlerts = pgTable("bdc_structuring_alerts", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  customerId: bigint("customer_id", { mode: "number" }).notNull().references(() => bdcCustomers.id),
+  windowDays: integer("window_days").notNull(), // 7 | 30
+  windowStart: date("window_start").notNull(),
+  totalUsd: numeric("total_usd", { precision: 18, scale: 2 }).notNull(),
+  txnCount: integer("txn_count").notNull(),
+  disposition: varchar("disposition", { length: 16 }).notNull().default("open"), // 'open'|'sof_required'|'str_filed'|'dismissed'
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("bdc_structuring_unique").on(t.tenantId, t.customerId, t.windowDays, t.windowStart),
+]);
+export type BdcStructuringAlert = typeof bdcStructuringAlerts.$inferSelect;
+export type InsertBdcStructuringAlert = typeof bdcStructuringAlerts.$inferInsert;
+
+// 24. Tenant offboarding lifecycle (one record per tenant).
+export const bdcTenantOffboardings = pgTable("bdc_tenant_offboardings", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  status: varchar("status", { length: 16 }).notNull().default("requested"), // 'requested'|'in_progress'|'blocked'|'completed'
+  blockers: jsonb("blockers").notNull().default([]),
+  initiatedBy: integer("initiated_by").notNull(),
+  completedAt: timestamp("completed_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+export type BdcTenantOffboarding = typeof bdcTenantOffboardings.$inferSelect;
+export type InsertBdcTenantOffboarding = typeof bdcTenantOffboardings.$inferInsert;
+
+// 25. Teller-fraud analytics signals (written by python-teller-analytics).
+export const tellerFraudSignals = pgTable("teller_fraud_signals", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  tellerUserId: integer("teller_user_id").notNull(),
+  windowStart: date("window_start").notNull(),
+  windowEnd: date("window_end").notNull(),
+  signalType: varchar("signal_type", { length: 32 }).notNull(), // 'variance_pattern'|'out_of_hours'|'reversal_concentration'|'counterfeit_concentration'
+  score: numeric("score", { precision: 6, scale: 3 }).notNull(),
+  evidence: jsonb("evidence").notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("open"), // 'open'|'reviewing'|'escalated'|'cleared'
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("teller_fraud_unique").on(t.tenantId, t.tellerUserId, t.signalType, t.windowStart),
+]);
+export type TellerFraudSignal = typeof tellerFraudSignals.$inferSelect;
+export type InsertTellerFraudSignal = typeof tellerFraudSignals.$inferInsert;
+
+// 26. Stablecoin settlement outbox events (consumed from Kafka topic stablecoin_settlement).
+export const stablecoinSettlementEvents = pgTable("stablecoin_settlement_events", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  eventId: varchar("event_id", { length: 128 }).notNull(),
+  txRef: varchar("tx_ref", { length: 128 }).notNull(),
+  provider: varchar("provider", { length: 32 }).notNull(),
+  status: varchar("status", { length: 16 }).notNull(), // 'pending'|'processing'|'completed'|'failed'
+  rawStatus: varchar("raw_status", { length: 64 }),
+  applied: boolean("applied").notNull().default(false),
+  payload: jsonb("payload").notNull(),
+  receivedAt: timestamp("received_at").notNull().defaultNow(),
+  appliedAt: timestamp("applied_at"),
+}, (t) => [
+  uniqueIndex("stablecoin_settlement_events_event_id_key").on(t.eventId),
+  index("stablecoin_settle_events_txref_idx").on(t.txRef),
+]);
+export type StablecoinSettlementEvent = typeof stablecoinSettlementEvents.$inferSelect;
+export type InsertStablecoinSettlementEvent = typeof stablecoinSettlementEvents.$inferInsert;
