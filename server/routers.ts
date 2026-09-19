@@ -39,10 +39,10 @@ import { publishPaymentInitiated, publishTransactionEvent, publishKYCEvent, publ
 import { auditCoreOperation, CORE_TOPICS, generateOpRef, generateIdempotencyKey, checkIdempotency, claimIdempotency, storeIdempotency } from "./middleware/coreAtomicity";
 import { checkInsiderThreat, requiresMakerChecker } from "./middleware/insiderThreat";
 import { bnplRouter, travelRuleRouter, agentNetworkRouter, corridorAnalyticsRouter, referralEngineRouter, whiteLabelPreviewRouter, apiChangelogRouter, familyEnhancedRouter, tenantAnalyticsRouter } from "./routers/productionFeatures";
-import { partnerOnboardingRouter, adminInviteCodesRouter, travelRuleDbRouter } from "./routers/partnerOnboarding";
+import { partnerOnboardingRouter, adminInviteCodesRouter } from "./routers/partnerOnboarding";
 import { partnerPayoutsRouter, webhooksRouter, apiKeysRouter, complianceWatchlistRouter, paymentGatewayLogsRouter, systemConfigRouter, notificationPrefsRouter, fxRateHistoryRouter } from "./routers/productionV2";
 import { ngxStockRouter, realEstateRouter, startupRouter, portfolioRouter, paypalTopupRouter, flutterwaveTopupRouter } from "./routers/investment";
-import { billsRouter, airtimeRouter, cardsRouter, bnplFullRouter, agentNetworkFullRouter, supportRouter, referralFullRouter, distributionsRouter, notificationLogRouter, investmentKycGateRouter } from "./routers/v75Features.js";
+import { billsRouter, airtimeRouter, cardsRouter, bnplFullRouter, supportRouter, referralFullRouter, distributionsRouter, notificationLogRouter, investmentKycGateRouter } from "./routers/v75Features.js";
 import {
   ngxLivePricesRouter,
   corridorPricingRouter,
@@ -105,12 +105,11 @@ import {
   partnerApplicationsRouter,
   partnerApiKeysRouter,
   partnerWebhooksRouter,
-  userOnboardingRouter,
-  complianceEmailRouter,
 } from "./routers/partnerApplications";
 // W10-C5 — Vendors + Embedded Payouts (SPEC-wave10)
 import { vendorsRouter } from "./routers/vendors";
 import { embeddedPayoutsRouter } from "./routers/embeddedPayouts";
+import { merchantOnboardingRouter } from "./routers/merchantOnboarding"; // W13-MERCHANT
 // W10-C6 bridge — Geo analytics (orchestrator-wired; SPEC-wave10 C6)
 import { geoAnalyticsRouter } from "./routers/geoAnalytics";
 import {
@@ -136,7 +135,6 @@ import { v100Router } from "./routers/v100Features.js";
 import { v101Router } from "./routers/v101Features.js";
 import { loadTestRouter } from "./routers/loadTestRouter.js";
 import { revenueShareRouter } from "./routers/revenueShare.js";
-import { digitalAgreementsRouter } from "./routers/digitalAgreements.js";
 import { securityAuditRouter } from "./routers/securityAudit.js";
 import { tenantFlagProcedure, invalidateFlagCache } from "./routers/tenantEnforcement.js";
 import { 
@@ -180,7 +178,6 @@ import {
   dbtRunHistoryRouter,
   airflowDagRunsRouter,
   partnerApplicationCommentsRouter,
-  complianceEmailConfigRouter,
 } from "./routers/orphanedTables.js";
 import { splitBillRouter } from "./routers/splitBill.js";
 import { rateLockRouter } from "./routers/rateLock.js";
@@ -198,7 +195,6 @@ import {
   bnplRouter as bnplMissingRouter,
   stablecoinRouter,
   mojaloopRouter,
-  kybRouter,
   fxAlertHistoryRouter,
   chargebackRouter as chargebackMissingRouter,
   tenantConfigsRouter,
@@ -298,25 +294,7 @@ import {
   smeBulkRouter,
   swiftTxRouter,
 } from "./routers/orphanFeatures";
-import {
-  accountOpeningGateRouter,
-  enhancedKybRouter,
-  kycVerificationScoringRouter,
-  bvnNinRouter,
-  sanctionsBatchRouter,
-  goamlRouter,
-  kycEventConsumerRouter,
-  cbnTierLimitsRouter,
-} from "./routers/kycProductionGate";
-import {
-  pepScreeningRouter,
-  adverseMediaRouter,
-  continuousMonitoringRouter,
-  reKYCSchedulerRouter,
-  kycSelfServiceRouter,
-  kycDataQualityRouter,
-  kycAnalyticsRouter,
-} from "./routers/kycEnhanced";
+import { bvnNinRouter } from "./routers/kycProductionGate";
 import { logger } from './_core/logger';
 import { doubleEntryRouter } from "./routers/doubleEntry";
 import { accountingSyncRouter } from "./routers/accountingSync"; // W10-C4
@@ -2416,7 +2394,11 @@ export const appRouter = router({
         { id: "tier3", name: "Full KYC", limit: 10000000, requirements: ["Source of Funds", "Enhanced Due Diligence"], status: "available" },
       ];
       const currentTier = dbUser?.kycTier ?? "tier0";
-      return { currentTier, tiers, documents: docs, pendingCount: docs.filter((d: any) => d.status === "pending").length, approvedCount: docs.filter((d: any) => d.status === "approved").length };
+      // W13-C1: expose the canonical per-tier limits (business-rules) so
+      // clients (KYC.tsx, RN KYCScreen) render real limits instead of
+      // hardcoded copies. Unknown/legacy tier values fail closed to tier0.
+      const tierKey = (currentTier in KYC_TIER_LIMITS ? currentTier : "tier0") as keyof typeof KYC_TIER_LIMITS;
+      return { currentTier, limits: KYC_TIER_LIMITS[tierKey], tiers, documents: docs, pendingCount: docs.filter((d: any) => d.status === "pending").length, approvedCount: docs.filter((d: any) => d.status === "approved").length };
     }),
     uploadDocument: strictRateLimitedProcedure.input(z.object({ type: z.string().min(1).max(50), fileBase64: z.string().max(10_000_000), fileName: z.string().min(1).max(255).trim(), mimeType: z.string().min(1).max(100) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -4434,14 +4416,8 @@ export const appRouter = router({
     terminals: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       const rows = await db.select().from(posTerminals).where(eq(posTerminals.userId, ctx.user.id)).orderBy(desc(posTerminals.createdAt)).limit(50);
-      if (rows.length > 0) return rows.map((r: any) => ({ ...r, merchant: r.merchantName, dailyVolume: Number(r.totalVolume ?? 0), transactionCount: r.totalTransactions ?? 0, lastTransaction: r.lastSeen ?? r.updatedAt }));
-      const defaults = [
-        { userId: ctx.user.id, terminalId: "POS001", merchantName: "RemitFlow Agent Lagos", serialNumber: "POS-001-NG", location: "Lagos Main Branch", status: "active" },
-        { userId: ctx.user.id, terminalId: "POS002", merchantName: "RemitFlow Agent Abuja", serialNumber: "POS-002-NG", location: "Abuja Office", status: "active" },
-        { userId: ctx.user.id, terminalId: "POS003", merchantName: "RemitFlow Agent PH", serialNumber: "POS-003-NG", location: "Port Harcourt Agent", status: "offline" },
-      ];
-      await db.insert(posTerminals).values(defaults).onConflictDoNothing().catch((err: unknown) => { logger.error({ err: err instanceof Error ? err.message : String(err) }, "Operation failed silently"); });
-      return defaults.map((d, i) => ({ ...d, id: i + 1, merchant: d.merchantName, dailyVolume: 0, transactionCount: 0, lastTransaction: new Date(), totalTransactions: 0, totalVolume: "0", dailyLimit: "500000.00", model: null, lastSeen: null, createdAt: new Date(), updatedAt: new Date() }));
+      // W13-C6: honest empty list — no fabricated seed terminals are inserted or returned.
+      return rows.map((r: any) => ({ ...r, merchant: r.merchantName, dailyVolume: Number(r.totalVolume ?? 0), transactionCount: r.totalTransactions ?? 0, lastTransaction: r.lastSeen ?? r.updatedAt }));
     }),
     transactions: protectedProcedure.input(z.object({ terminalId: z.number().optional(), limit: z.number().default(20) })).query(async ({ ctx }) => {
       const txns = await getTransactionsByUserId(ctx.user.id, { limit: 20 });
@@ -7354,7 +7330,10 @@ Case: #${input.caseId}`,
     }),
     register: protectedProcedure.input(z.object({ businessName: z.string().min(2), country: z.string(), city: z.string(), phone: z.string(), commissionRate: z.number().min(0).max(0.1).default(0.02) })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      try { await db.execute(sql`INSERT INTO agent_network (user_id, business_name, country, city, phone, commission_rate, status) VALUES (${ctx.user.id}, ${input.businessName}, ${input.country}, ${input.city}, ${input.phone}, ${input.commissionRate}, 'pending')`); } catch { /* table may not exist yet */ }
+      // W13 (SPEC §5.3): removed the fake-success swallow — insert errors now
+      // propagate as an honest UNAVAILABLE instead of a fabricated receipt.
+      try { await db.execute(sql`INSERT INTO agent_network (user_id, business_name, country, city, phone, commission_rate, status) VALUES (${ctx.user.id}, ${input.businessName}, ${input.country}, ${input.city}, ${input.phone}, ${input.commissionRate}, 'pending')`); }
+      catch (err: any) { throw new TRPCError({ code: "UNAVAILABLE", message: `Agent network registration unavailable: ${err?.message ?? "unknown error"}` }); }
       return { success: true, status: "pending" };
     }),
     stats: protectedProcedure.query(async ({ ctx }) => {
@@ -7363,12 +7342,20 @@ Case: #${input.caseId}`,
         const rows = await db.execute(sql`SELECT COUNT(*) as total, SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) as active FROM agent_network WHERE user_id = ${ctx.user.id}`) as any[];
         const row = rows[0] ?? {};
         return { totalAgents: Number(row.total ?? 0), activeAgents: Number(row.active ?? 0), totalVolume: 0, totalCommissions: 0 };
-      } catch { return { totalAgents: 0, activeAgents: 0, totalVolume: 0, totalCommissions: 0 }; }
+      } catch (err) {
+        // W13 honesty: never fail-open to fabricated zeros on a read path.
+        throw new TRPCError({ code: "UNAVAILABLE", message: `Agent stats unavailable: ${err instanceof Error ? err.message : String(err)}` });
+      }
     }),
     cashIn: protectedProcedure.input(z.object({ customerId: z.string(), amountNgn: z.number().positive().max(10_000_000), channel: z.enum(["cash", "pos", "mobile_money"]).default("cash"), reference: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const ref = input.reference ?? `CASHIN-${Date.now()}-${randomBytes(3).toString("hex").toUpperCase()}`;
-      try { await db.execute(sql`INSERT INTO agent_cash_transactions (agent_user_id, customer_id, amount_ngn, channel, reference, type, status, created_at) VALUES (${ctx.user.id}, ${input.customerId}, ${input.amountNgn}, ${input.channel}, ${ref}, 'cash_in', 'completed', NOW()) ON CONFLICT DO NOTHING`); } catch { /* table may not exist */ }
+      try {
+        await db.execute(sql`INSERT INTO agent_cash_transactions (agent_user_id, customer_id, amount_ngn, channel, reference, type, status, created_at) VALUES (${ctx.user.id}, ${input.customerId}, ${input.amountNgn}, ${input.channel}, ${ref}, 'cash_in', 'completed', NOW()) ON CONFLICT DO NOTHING`);
+      } catch (err) {
+        // W13 honesty: record failure must surface — never claim success for an unrecorded cash movement.
+        throw new TRPCError({ code: "UNAVAILABLE", message: `Cash-in recording failed: ${err instanceof Error ? err.message : String(err)}` });
+      }
       return { success: true, reference: ref, amountNgn: input.amountNgn, channel: input.channel };
     }),
   }),
@@ -7477,7 +7464,6 @@ Case: #${input.caseId}`,
   whiteLabel: whiteLabelRouter,
   partnerOnboarding: partnerOnboardingRouter,
   adminInviteCodes: adminInviteCodesRouter,
-  travelRuleDb: travelRuleDbRouter,
   partnerPayouts: partnerPayoutsRouter,
   webhooks: webhooksRouter,
   apiKeys: apiKeysRouter,
@@ -7496,7 +7482,6 @@ Case: #${input.caseId}`,
   airtimeV2: airtimeRouter,
   cardsV2: cardsRouter,
   bnplFull: bnplFullRouter,
-  agentNetworkFull: agentNetworkFullRouter,
   supportV2: supportRouter,
   referralFull: referralFullRouter,
   distributions: distributionsRouter,
@@ -7582,8 +7567,6 @@ Case: #${input.caseId}`,
   partnerApplications: partnerApplicationsRouter,
   partnerApiKeys: partnerApiKeysRouter,
   partnerWebhooks: partnerWebhooksRouter,
-  userOnboarding: userOnboardingRouter,
-  complianceEmail: complianceEmailRouter,
   // v92 Production Feature Completions
   ...(LEGACY_PACKS_ENABLED ? { feeEngineV92: feeEngineV92Router } : {}),
   ...(LEGACY_PACKS_ENABLED ? { transferLimits: transferLimitsRouter } : {}),
@@ -7619,7 +7602,6 @@ Case: #${input.caseId}`,
   loadTest: loadTestRouter,
   // v108 Revenue Share
   revenueShare: revenueShareRouter,
-  digitalAgreements: digitalAgreementsRouter,
   securityAudit: securityAuditRouter,
   pbac: pbacRouter,
   cronJobs: cronJobsRouter,
@@ -7655,7 +7637,6 @@ Case: #${input.caseId}`,
   ...(LEGACY_PACKS_ENABLED ? { bnplPlans: bnplMissingRouter } : {}),
   ...(LEGACY_PACKS_ENABLED ? { stablecoinV125: stablecoinRouter } : {}),
   ...(LEGACY_PACKS_ENABLED ? { mojaloopV125: mojaloopRouter } : {}),
-  ...(LEGACY_PACKS_ENABLED ? { kyb: kybRouter } : {}),
   ...(LEGACY_PACKS_ENABLED ? { fxAlertHistory: fxAlertHistoryRouter } : {}),
   ...(LEGACY_PACKS_ENABLED ? { chargeback: chargebackMissingRouter } : {}),
   ...(LEGACY_PACKS_ENABLED ? { tenantConfigs: tenantConfigsRouter } : {}),
@@ -7674,7 +7655,6 @@ Case: #${input.caseId}`,
   dbtRunHistory: dbtRunHistoryRouter,
   airflowDagRuns: airflowDagRunsRouter,
   partnerAppComments: partnerApplicationCommentsRouter,
-  complianceEmailConfig: complianceEmailConfigRouter,
   // v127 — All remaining microservices wired
   ...(LEGACY_PACKS_ENABLED ? { amlEngineV127: amlEngineV127Router } : {}),
   ...(LEGACY_PACKS_ENABLED ? { fraudMlV127: fraudMlV127Router } : {}),
@@ -7806,22 +7786,8 @@ Case: #${input.caseId}`,
   swiftTx: swiftTxRouter,
   // v16 — Compliance Analytics
   complianceAnalytics: complianceAnalyticsRouter,
-  // v230 — KYC/KYB Production Gate (fail-closed account opening, enhanced KYB, BVN/NIN, goAML)
-  accountOpeningGate: accountOpeningGateRouter,
-  enhancedKyb: enhancedKybRouter,
-  kycVerificationScoring: kycVerificationScoringRouter,
+  // v230 — KYC/KYB Production Gate (BVN/NIN only; other sub-routers deleted in wave-13 C6 — zero callers)
   bvnNin: bvnNinRouter,
-  sanctionsBatch: sanctionsBatchRouter,
-  goaml: goamlRouter,
-  kycEventConsumer: kycEventConsumerRouter,
-  cbnTierLimits: cbnTierLimitsRouter,
-  pepScreening: pepScreeningRouter,
-  adverseMedia: adverseMediaRouter,
-  continuousMonitoring: continuousMonitoringRouter,
-  reKYCScheduler: reKYCSchedulerRouter,
-  kycSelfService: kycSelfServiceRouter,
-  kycDataQuality: kycDataQualityRouter,
-  kycAnalytics: kycAnalyticsRouter,
   doubleEntry: doubleEntryRouter,
   receiptGeneration: receiptGenerationRouter,
   loyaltyPoints: loyaltyPointsRouter,
@@ -7928,6 +7894,7 @@ Case: #${input.caseId}`,
   // W10-C5 — Vendors + Embedded Payouts (SPEC-wave10)
   vendors: vendorsRouter,
   embeddedPayouts: embeddedPayoutsRouter,
+  merchantOnboarding: merchantOnboardingRouter, // W13-MERCHANT
   // W10-C6 bridge — Geo analytics over operational_geo_* tables (SPEC-wave10 C6)
   geoAnalytics: geoAnalyticsRouter,
 });

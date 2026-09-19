@@ -16,6 +16,7 @@ import { getDb } from "../db";
 import { createAuditLog } from "../db";
 import { executeTransfer, calculateFee, getIndicativeFxRate, validateCompliance } from "../lib/transferEngine";
 import { executeTransferPipeline, settleTransferHold, compensateFailedTransfer } from "../_core/transferPipeline";
+import { requireKYCTier, KYC_TIERS } from "../middleware/kycGate";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
 import { broadcastUserEvent } from "../sse.service";
 import { logger } from "../_core/logger";
@@ -97,6 +98,12 @@ export const transferCoreRouter = router({
           }
         }
       }
+      // W13-C1: KYC tier gate (F-T6) — outbound money movement requires at
+      // least Tier 1. Fails closed: throws FORBIDDEN for tier0/rejected/
+      // frozen accounts and INTERNAL_SERVER_ERROR when the KYC lookup itself
+      // is unavailable. Tier-0 attempts fire a non-blocking
+      // first_transfer_attempt trigger for compliance follow-up.
+      await requireKYCTier(KYC_TIERS.TIER_1)(ctx.user.id);
       // Pipeline: sanctions, fraud ML, velocity, TigerBeetle, Kafka, notifications
       const transferRef = `CORE-${Date.now()}-${ctx.user.id}`;
       const pipelineResult = await executeTransferPipeline({

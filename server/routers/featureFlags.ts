@@ -12,6 +12,10 @@ import {
   tenants, tenantUsers, whiteLabelConfigs,
 } from "../../drizzle/schema.js";
 import { eq, and, desc, asc, ilike, or, sql, inArray } from "drizzle-orm";
+import { billingTenants } from "../../drizzle/schema.js";
+import { requireTotpStepUp } from "../_core/totpStepUp";
+import { createAuditLog } from "../audit.service";
+import { invalidateTenantCache } from "../tenantMiddleware";
 
 // ─── Canonical list of all platform feature flags ────────────────────────────
 const PLATFORM_FLAGS = [
@@ -588,7 +592,7 @@ export const tenantsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const [row] = await db.insert(tenants).values({ ...input, status: "trial" }).returning({ id: tenants.id }).returning();
+      const [row] = await db.insert(tenants).values({ ...input, status: "trial" }).returning({ id: tenants.id });
       return { id: row.id };
     }),
 
@@ -623,28 +627,62 @@ export const tenantsRouter = router({
       return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
-  suspend: adminProcedure
-    .input(z.object({ id: z.number(), reason: z.string().max(2000).optional() }))
+  suspend: auditedAdminProcedure
+    .input(z.object({ id: z.number(), reason: z.string().max(2000).optional(), totpCode: z.string().regex(/^\d{6}$/).optional() }))
     .mutation(async ({ ctx, input }) => {
+      // W13 (F-24): TOTP step-up + guarded transition + audit on tenant lifecycle mutations.
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "tenant suspension");
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const [_row] = await db.update(tenants).set({ status: "suspended", updatedAt: new Date() }).where(eq(tenants.id, input.id)).returning();
+      // Guarded single-winner: only trial|active tenants can be suspended.
+      const [_row] = await db.update(tenants).set({ status: "suspended", updatedAt: new Date() })
+        .where(and(eq(tenants.id, input.id), inArray(tenants.status, ["trial", "active"]))).returning();
 
-      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      if (!_row) {
+        const [existing] = await db.select({ status: tenants.status }).from(tenants).where(eq(tenants.id, input.id)).limit(1);
+        if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+        throw new TRPCError({ code: "CONFLICT", message: `Tenant cannot be suspended from status '${existing.status}'` });
+      }
 
-      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "TENANT_SUSPENDED",
+        targetType: "tenants",
+        targetId: input.id,
+        severity: "warning",
+        description: `Tenant ${input.id} suspended${input.reason ? `: ${input.reason}` : ""}`,
+        metadata: { tenantId: input.id, reason: input.reason ?? null },
+      });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString() };
     }),
 
-  activate: adminProcedure
-    .input(z.object({ id: z.number() }))
+  activate: auditedAdminProcedure
+    .input(z.object({ id: z.number(), totpCode: z.string().regex(/^\d{6}$/).optional() }))
     .mutation(async ({ ctx, input }) => {
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "tenant activation");
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const [_row] = await db.update(tenants).set({ status: "active", updatedAt: new Date() }).where(eq(tenants.id, input.id)).returning();
+      // Guarded single-winner: only trial|suspended tenants can be activated.
+      const [_row] = await db.update(tenants).set({ status: "active", updatedAt: new Date() })
+        .where(and(eq(tenants.id, input.id), inArray(tenants.status, ["trial", "suspended"]))).returning();
 
-      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
+      if (!_row) {
+        const [existing] = await db.select({ status: tenants.status }).from(tenants).where(eq(tenants.id, input.id)).limit(1);
+        if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+        throw new TRPCError({ code: "CONFLICT", message: `Tenant cannot be activated from status '${existing.status}'` });
+      }
 
-      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "TENANT_ACTIVATED",
+        targetType: "tenants",
+        targetId: input.id,
+        description: `Tenant ${input.id} activated`,
+        metadata: { tenantId: input.id },
+      });
+
+      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString() };
     }),
 
   delete: adminProcedure
@@ -657,24 +695,60 @@ export const tenantsRouter = router({
       return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
     }),
 
-  addMember: adminProcedure
-    .input(z.object({ tenantId: z.number(), userId: z.number(), role: z.enum(["member", "admin", "owner"]).default("member") }))
+  addMember: auditedAdminProcedure
+    .input(z.object({ tenantId: z.number(), userId: z.number(), role: z.enum(["member", "admin", "owner"]).default("member"), totpCode: z.string().regex(/^\d{6}$/).optional() }))
     .mutation(async ({ ctx, input }) => {
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "tenant member addition");
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.insert(tenantUsers).values(input).onConflictDoNothing().returning();
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      const { totpCode: _totp, ...membership } = input;
+      await db.insert(tenantUsers).values(membership).onConflictDoNothing().returning();
+      // W13: membership/role cache invalidation (resolveTenantContext caches per user).
+      invalidateTenantCache(input.userId);
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "TENANT_MEMBER_ADDED",
+        targetType: "tenant_users",
+        targetId: input.tenantId,
+        description: `User ${input.userId} added to tenant ${input.tenantId} as ${input.role}`,
+        metadata: { tenantId: input.tenantId, memberUserId: input.userId, role: input.role },
+      });
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
-  removeMember: adminProcedure
-    .input(z.object({ tenantId: z.number(), userId: z.number() }))
+  removeMember: auditedAdminProcedure
+    .input(z.object({ tenantId: z.number(), userId: z.number(), totpCode: z.string().regex(/^\d{6}$/).optional() }))
     .mutation(async ({ ctx, input }) => {
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "tenant member removal");
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const _deleted = await db.delete(tenantUsers)
         .where(and(eq(tenantUsers.tenantId, input.tenantId), eq(tenantUsers.userId, input.userId))).returning();
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      // W13: membership/role cache invalidation.
+      invalidateTenantCache(input.userId);
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "TENANT_MEMBER_REMOVED",
+        targetType: "tenant_users",
+        targetId: input.tenantId,
+        severity: "warning",
+        description: `User ${input.userId} removed from tenant ${input.tenantId}`,
+        metadata: { tenantId: input.tenantId, memberUserId: input.userId },
+      });
+      return { success: true, updatedAt: new Date().toISOString() };
+    }),
+
+  // W13 (F-25): reader for billing_tenants — the table previously had no reader.
+  billingSummary: adminProcedure
+    .input(z.object({ tenantId: z.string().min(1).max(100) }))
+    .query(async ({ input }) => {
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const [row] = await db.select().from(billingTenants)
+        .where(eq(billingTenants.tenantId, input.tenantId)).limit(1);
+      if (!row) throw new TRPCError({ code: "NOT_FOUND", message: `No billing record for tenant '${input.tenantId}'` });
+      return row;
     }),
 
   // Stats for admin dashboard

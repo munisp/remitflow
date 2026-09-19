@@ -7,9 +7,9 @@
  * Reused clients (no new deps):
  *  - Screening: server/lib/enhancedScreening.ts → runEnhancedScreening
  *    (fail-closed in production; we also fail closed on ANY outage here).
- *  - STR: same client path as server/routers/kycProductionGate.ts goamlRouter —
- *    POST ${GOAML_SERVICE_URL}/v1/str/create (default http://localhost:8123,
- *    services/go-goaml-integration).
+ *  - STR: POST ${GOAML_SERVICE_URL}/v1/str/create (direct service client;
+ *    the old tRPC wrapper was deleted in wave-13 C6).
+ *    Default http://localhost:8123, services/go-goaml-integration.
  *  - CTR: threshold logic ported from server/routers/v98Features.ts
  *    (ctr.checkAndFlag: $10k daily threshold + 24h structuring pattern,
  *    same USD conversion table) — that router does not export its helpers,
@@ -68,7 +68,6 @@ function toUsd(amount: number, currency: string): number {
   return amount * rate;
 }
 
-// Same client path as server/routers/kycProductionGate.ts goamlRouter.
 const GOAML_URL = process.env.GOAML_SERVICE_URL || "http://localhost:8123";
 
 async function requireDb() {
@@ -281,7 +280,7 @@ export const bdcComplianceRouter = router({
 
   /**
    * MLRO + TOTP: file an STR for a BDC transaction via the existing goAML
-   * client path (kycProductionGate.ts goamlRouter convention). Service down →
+   * client path (direct goAML service call). Service down →
    * UNAVAILABLE; the draft is retained in the audit trail (payload).
    */
   fileStr: auditedAdminProcedure

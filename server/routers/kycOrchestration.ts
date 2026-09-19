@@ -12,8 +12,9 @@
 import { z } from "zod";
 import { createTRPCRouter, protectedProcedure, publicProcedure } from "../trpc";
 import { TRPCError } from "@trpc/server";
-import { db } from "../db-shim";
-import { eq, desc } from "drizzle-orm";
+import { getDb } from "../db";
+import { kycLifecycle, kycLifecycleHistory } from "../../drizzle/schema";
+import { and, eq } from "drizzle-orm";
 
 const KYC_ORCHESTRATOR_URL = process.env.KYC_ORCHESTRATOR_URL ?? "http://go-kyc-orchestrator:8150";
 const KYC_PIPELINE_URL     = process.env.KYC_PIPELINE_URL     ?? "http://python-kyc-pipeline:8148";
@@ -82,12 +83,130 @@ async function callService(url: string, body: unknown): Promise<unknown> {
   return resp.json();
 }
 
+// ── Orchestrator response contract (services/go-kyc-orchestrator/main.go) ────
+interface OrchestrationResult {
+  orchestration_id?: string;
+  final_status?: string; // "approved" | "rejected" | "manual_review"
+  rejection_reasons?: string[];
+  fraud_signals?: string[];
+  stages?: Record<string, unknown>;
+  processing_ms?: number;
+  timestamp?: string;
+  [key: string]: unknown;
+}
+
+// Map the orchestrator verdict onto the kyc_lifecycle stage enum.
+// IMPORTANT (W13): an orchestrator "approved" verdict marks the LIFECYCLE
+// stage approved but NEVER advances users.kycTier — the admin approveKyc
+// path (routers.ts admin router) remains the only tier-advance mechanism.
+const VERDICT_TO_STAGE = {
+  approved: "approved",
+  rejected: "rejected",
+  manual_review: "under_review",
+} as const;
+
+type LifecycleStage = (typeof VERDICT_TO_STAGE)[keyof typeof VERDICT_TO_STAGE];
+
+/**
+ * Persist the orchestration verdict to kyc_lifecycle (+ history) in a single
+ * transaction with a guarded single-winner stage transition.
+ * Returns true when persisted; false when the DB is unavailable (callers
+ * surface this honestly via the `persisted` response field).
+ */
+async function persistOrchestrationResult(
+  userId: number,
+  result: OrchestrationResult,
+): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+
+  const toStage: LifecycleStage =
+    VERDICT_TO_STAGE[result.final_status as keyof typeof VERDICT_TO_STAGE] ??
+    "under_review";
+  const rejectionReason =
+    result.rejection_reasons && result.rejection_reasons.length > 0
+      ? result.rejection_reasons.join("; ")
+      : null;
+  const now = new Date();
+
+  await db.transaction(async (tx) => {
+    const [existing] = await tx
+      .select({ id: kycLifecycle.id, stage: kycLifecycle.stage })
+      .from(kycLifecycle)
+      .where(eq(kycLifecycle.userId, userId))
+      .limit(1);
+
+    if (!existing) {
+      const [inserted] = await tx
+        .insert(kycLifecycle)
+        .values({
+          userId,
+          stage: toStage,
+          submittedAt: now,
+          ...(toStage === "under_review" ? { reviewStartedAt: now } : {}),
+          ...(toStage === "rejected" ? { rejectedAt: now, rejectionReason } : {}),
+          notes: `orchestration_id=${result.orchestration_id ?? "n/a"} final_status=${result.final_status ?? "unknown"}`,
+          updatedAt: now,
+        })
+        .returning({ id: kycLifecycle.id });
+      await tx.insert(kycLifecycleHistory).values({
+        lifecycleId: inserted.id,
+        userId,
+        fromStage: "not_started",
+        toStage,
+        reason: rejectionReason ?? `Orchestrator verdict: ${result.final_status ?? "unknown"}`,
+        metadata: { orchestrationId: result.orchestration_id ?? null, fraudSignals: result.fraud_signals ?? [] },
+      });
+      return;
+    }
+
+    if (existing.stage === toStage) {
+      // Idempotent re-submission with the same verdict — nothing to do.
+      return;
+    }
+
+    // Guarded single-winner transition: only one concurrent writer moves
+    // the stage from its observed previous value.
+    const updated = await tx
+      .update(kycLifecycle)
+      .set({
+        stage: toStage,
+        ...(toStage === "under_review" ? { reviewStartedAt: now } : {}),
+        ...(toStage === "rejected" ? { rejectedAt: now, rejectionReason } : {}),
+        ...(toStage === "approved" ? { approvedAt: now } : {}),
+        notes: `orchestration_id=${result.orchestration_id ?? "n/a"} final_status=${result.final_status ?? "unknown"}`,
+        updatedAt: now,
+      })
+      .where(and(eq(kycLifecycle.id, existing.id), eq(kycLifecycle.stage, existing.stage)))
+      .returning({ id: kycLifecycle.id });
+
+    if (updated.length !== 1) {
+      throw new TRPCError({
+        code: "CONFLICT",
+        message: "KYC lifecycle state changed concurrently — please retry.",
+      });
+    }
+
+    await tx.insert(kycLifecycleHistory).values({
+      lifecycleId: existing.id,
+      userId,
+      fromStage: existing.stage,
+      toStage,
+      reason: rejectionReason ?? `Orchestrator verdict: ${result.final_status ?? "unknown"}`,
+      metadata: { orchestrationId: result.orchestration_id ?? null, fraudSignals: result.fraud_signals ?? [] },
+    });
+  });
+
+  return true;
+}
+
 // ── Router ────────────────────────────────────────────────────────────────────
 export const kycOrchestrationRouter = createTRPCRouter({
 
   /**
    * Submit a full KYC application.
    * Orchestrates document processing, liveness, biometrics, AML, and Travel Rule.
+   * W13: the verdict is persisted to kyc_lifecycle; tier is NEVER advanced here.
    */
   submit: protectedProcedure
     .input(KYCSubmitInput)
@@ -114,8 +233,24 @@ export const kycOrchestrationRouter = createTRPCRouter({
         transfer_amount:  input.transferAmount,
       };
 
-      const result = await callService(`${KYC_ORCHESTRATOR_URL}/kyc/orchestrate`, payload);
-      return result;
+      const result = (await callService(
+        `${KYC_ORCHESTRATOR_URL}/kyc/orchestrate`,
+        payload,
+      )) as OrchestrationResult;
+
+      // Persist the verdict. If the DB is unavailable we do NOT pretend the
+      // result was recorded — the honest `persisted: false` marker tells the
+      // caller the verdict exists only in this response.
+      const persisted = await persistOrchestrationResult(Number(userId), result);
+
+      return {
+        ...result,
+        persisted,
+        // Honest contract: submitting KYC never advances the tier by itself.
+        tierAdvanced: false,
+        tierAdvanceNote:
+          "Tier upgrades require admin approval of your submitted documents.",
+      };
     }),
 
   /**

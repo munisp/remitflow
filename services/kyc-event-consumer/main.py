@@ -131,6 +131,7 @@ class ConsumerStats(BaseModel):
     events_triggered: int
     events_skipped_cooldown: int
     events_errored: int
+    kyb_reviews_marked_under_review: int = 0
     last_event_at: Optional[str]
     uptime_seconds: float
 
@@ -201,6 +202,7 @@ _stats = {
     "events_triggered": 0,
     "events_skipped_cooldown": 0,
     "events_errored": 0,
+    "kyb_reviews_marked_under_review": 0,
     "last_event_at": None,
     "start_time": time.time(),
 }
@@ -251,46 +253,77 @@ async def start_kyc_workflow(
         return None
 
 
-async def start_kyb_workflow(
+async def mark_kyb_review_under_review(
     company_id: str,
     trigger_type: str,
     metadata: Dict[str, Any],
 ) -> Optional[str]:
-    """Start a KYB verification workflow via Temporal."""
-    workflow_id = f"kyb-{company_id}-{trigger_type}-{int(time.time())}"
+    """Honest handling for kyb.verification.required events.
+
+    The previous implementation started a Temporal `KYBVerificationWorkflow`
+    that has NO implementation anywhere in the system (phantom workflow).
+    Instead we:
+      1. Log the request (structured).
+      2. Guarded UPDATE of the merchant_kyb_reviews row inserted by the KYB
+         submit path: status 'pending' → 'under_review' (single-winner
+         transition; rowcount==1 only when we won the guard).
+      3. Increment a metric counter / structured log.
+
+    TODO(wave-13): real KYB decisioning (registry lookups, sanctions screening,
+    admin approve/reject) is handled by merchantOnboarding.adminReview via
+    Kafka review events — no automated decision is made here.
+    """
+    marker_id = f"kyb-review-{company_id}-{int(time.time())}"
+    logger.info(
+        "KYB verification required",
+        extra={"company_id": company_id, "trigger_type": trigger_type, "marker_id": marker_id},
+    )
+
+    if not DATABASE_URL:
+        logger.error("DATABASE_URL unset — cannot mark KYB review under_review")
+        return None
+
+    def _update() -> int:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                if company_id.isdigit():
+                    cur.execute(
+                        """
+                        UPDATE merchant_kyb_reviews
+                        SET status = 'under_review', updated_at = NOW()
+                        WHERE user_id = %s AND status IN ('pending')
+                        """,
+                        (int(company_id),),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE merchant_kyb_reviews
+                        SET status = 'under_review', updated_at = NOW()
+                        WHERE registration_number = %s AND status IN ('pending')
+                        """,
+                        (company_id,),
+                    )
+                return cur.rowcount
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{TEMPORAL_URL}/api/v1/namespaces/{TEMPORAL_NAMESPACE}/workflows/{workflow_id}",
-                json={
-                    "workflowType": {"name": "KYBVerificationWorkflow"},
-                    "taskQueue": {"name": TEMPORAL_TASK_QUEUE},
-                    "input": {
-                        "payloads": [
-                            {
-                                "metadata": {"encoding": "json/plain"},
-                                "data": json.dumps({
-                                    "companyId": company_id,
-                                    "triggerType": trigger_type,
-                                    "triggerMetadata": metadata,
-                                }).encode().hex(),
-                            }
-                        ]
-                    },
-                    "workflowExecutionTimeout": "172800s",
-                    "workflowRunTimeout": "7200s",
-                },
-            )
-            if resp.status_code in (200, 201, 409):
-                logger.info(f"Started KYB workflow {workflow_id} for company {company_id}")
-                return workflow_id
-            else:
-                logger.error(f"Temporal returned {resp.status_code}: {resp.text[:200]}")
-                return None
+        rowcount = await asyncio.to_thread(_update)
     except Exception as e:
-        logger.error(f"Failed to start KYB workflow: {e}")
+        logger.error(f"KYB review status update failed for company {company_id}: {e}")
         return None
+
+    if rowcount == 1:
+        _stats["kyb_reviews_marked_under_review"] += 1
+        logger.info(
+            f"KYB review marked under_review for company {company_id} (marker={marker_id})"
+        )
+        return marker_id
+
+    logger.warning(
+        f"KYB review guard matched {rowcount} rows for company {company_id} "
+        "(no pending review found or already transitioned)"
+    )
+    return None
 
 
 # ─── Audit Logging ─────────────────────────────────────────────────────────────
@@ -395,10 +428,11 @@ async def process_event(raw_event: Dict[str, Any]):
     # ── Determine KYC level ───────────────────────────────────────────────
     kyc_level = determine_kyc_level(event, rule)
 
-    # ── Start workflow ────────────────────────────────────────────────────
+    # ── Start workflow / mark review ──────────────────────────────────────
     workflow_id = None
     if kyc_level == "kyb":
-        workflow_id = await start_kyb_workflow(target_id, event_type, event.metadata)
+        # Honest handling: no phantom Temporal workflow — mark review queue row.
+        workflow_id = await mark_kyb_review_under_review(target_id, event_type, event.metadata)
     else:
         workflow_id = await start_kyc_workflow(target_id, kyc_level, event_type, event.metadata)
 
@@ -495,6 +529,7 @@ async def stats():
         events_triggered=_stats["events_triggered"],
         events_skipped_cooldown=_stats["events_skipped_cooldown"],
         events_errored=_stats["events_errored"],
+        kyb_reviews_marked_under_review=_stats["kyb_reviews_marked_under_review"],
         last_event_at=_stats["last_event_at"],
         uptime_seconds=time.time() - _stats["start_time"],
     )

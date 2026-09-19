@@ -119,6 +119,61 @@ export const bdcOffboardingRouter = router({
       };
     }),
 
+  /**
+   * startOffboarding (admin + TOTP) — W13 (F-11): explicit INSERT writer for
+   * bdc_tenant_offboardings. The wave-12 blocker-evaluation activity only
+   * UPDATEs the row; this procedure guarantees a row exists by upserting with
+   * status 'in_progress' and the (possibly empty) blocker list in blockers
+   * jsonb. ON CONFLICT (tenant_id) — the 0091 DDL UNIQUE index — moves a
+   * non-terminal row forward; a COMPLETED offboarding is terminal and the
+   * guarded WHERE rejects it (0 rows → PRECONDITION_FAILED).
+   */
+  startOffboarding: auditedAdminProcedure
+    .input(z.object({
+      tenantId: z.number().int().positive(),
+      blockers: z.array(z.string().max(200)).max(50).default([]),
+      totpCode: z.string().length(6).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const db = await requireDb();
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC tenant offboarding start");
+
+      const upserted = (await db.execute(sql`
+        INSERT INTO bdc_tenant_offboardings (tenant_id, status, blockers, initiated_by)
+        VALUES (${input.tenantId}, 'in_progress', ${JSON.stringify(input.blockers)}::jsonb, ${ctx.user.id})
+        ON CONFLICT (tenant_id) DO UPDATE
+          SET status = 'in_progress', blockers = EXCLUDED.blockers,
+              initiated_by = EXCLUDED.initiated_by,
+              completed_at = NULL, updated_at = NOW()
+          WHERE bdc_tenant_offboardings.status <> 'completed'
+        RETURNING id, status
+      `)) as unknown as Array<{ id: number; status: string }>;
+
+      if (upserted.length === 0) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: `tenant ${input.tenantId} is already offboarded (terminal 'completed') — offboarding cannot be restarted`,
+        });
+      }
+
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "BDC_OFFBOARDING_STARTED",
+        targetType: "bdc_tenant_offboardings",
+        targetId: upserted[0].id,
+        severity: "warning",
+        description: `Tenant ${input.tenantId} offboarding started (in_progress) with ${input.blockers.length} blocker(s)`,
+        metadata: { tenantId: input.tenantId, blockers: input.blockers },
+      });
+
+      return {
+        offboardingId: upserted[0].id,
+        tenantId: input.tenantId,
+        status: "in_progress" as const,
+        blockers: input.blockers,
+      };
+    }),
+
   /** getOffboardingStatus — the tenant's offboarding record (null when none). */
   getOffboardingStatus: auditedAdminProcedure
     .input(z.object({ tenantId: z.number().int().positive() }))

@@ -92,6 +92,7 @@ type KYCOrchestrationResult struct {
 	FinalStatus      string                 `json:"final_status"`
 	RejectionReasons []string               `json:"rejection_reasons"`
 	FraudSignals     []string               `json:"fraud_signals"`
+	StageErrors      []string               `json:"stage_errors,omitempty"`
 	Stages           map[string]interface{} `json:"stages"`
 	ProcessingMs     int64                  `json:"processing_ms"`
 	Timestamp        string                 `json:"timestamp"`
@@ -142,6 +143,9 @@ func orchestrateKYC(ctx context.Context, req KYCOrchestrationRequest) KYCOrchest
 	stages := make(map[string]interface{})
 	var rejectionReasons []string
 	var fraudSignals []string
+	// stageErrors records infrastructure/stage failures; any stage error fails
+	// CLOSED (finalStatus="manual_review") — "approved" only when all stages clean.
+	var stageErrors []string
 	var mu sync.Mutex
 
 	// ── Stage 1: Document Processing + Liveness (Python KYC Pipeline) ────────
@@ -205,6 +209,10 @@ func orchestrateKYC(ctx context.Context, req KYCOrchestrationRequest) KYCOrchest
 			serviceErrors.WithLabelValues("rust-biometric").Inc()
 			log.Printf("[KYC Orchestrator] Biometric dedup error: %v", err)
 			stages["biometric_dedup"] = map[string]interface{}{"error": err.Error()}
+			// FAIL CLOSED: cannot prove identity is not a duplicate → manual review.
+			mu.Lock()
+			stageErrors = append(stageErrors, fmt.Sprintf("biometric_dedup_error: %v", err))
+			mu.Unlock()
 		} else {
 			stages["biometric_dedup"] = dedupResult
 			if isDup, ok := dedupResult["is_duplicate"].(bool); ok && isDup {
@@ -257,6 +265,10 @@ func orchestrateKYC(ctx context.Context, req KYCOrchestrationRequest) KYCOrchest
 			serviceErrors.WithLabelValues("python-aml-scorer").Inc()
 			log.Printf("[KYC Orchestrator] AML scorer error: %v", err)
 			stages["aml_scoring"] = map[string]interface{}{"error": err.Error()}
+			// FAIL CLOSED: sanctions/PEP screening could not run → manual review.
+			mu.Lock()
+			stageErrors = append(stageErrors, fmt.Sprintf("aml_scorer_error: %v", err))
+			mu.Unlock()
 		} else {
 			stages["aml_scoring"] = amlResult
 			if riskLevel, ok := amlResult["risk_level"].(string); ok {
@@ -302,7 +314,8 @@ func orchestrateKYC(ctx context.Context, req KYCOrchestrationRequest) KYCOrchest
 	if len(rejectionReasons) > 0 {
 		finalStatus = "rejected"
 		kycCompleted.WithLabelValues("rejected").Inc()
-	} else if len(fraudSignals) > 0 {
+	} else if len(fraudSignals) > 0 || len(stageErrors) > 0 {
+		// Fail closed: fraud signals OR any stage error → manual review, never auto-approve.
 		finalStatus = "manual_review"
 		kycCompleted.WithLabelValues("manual_review").Inc()
 	} else {
@@ -323,6 +336,7 @@ func orchestrateKYC(ctx context.Context, req KYCOrchestrationRequest) KYCOrchest
 		FinalStatus:      finalStatus,
 		RejectionReasons: rejectionReasons,
 		FraudSignals:     fraudSignals,
+		StageErrors:      stageErrors,
 		Stages:           stages,
 		ProcessingMs:     processingMs,
 		Timestamp:        time.Now().UTC().Format(time.RFC3339),

@@ -289,3 +289,25 @@ export async function assertTenantActive(db: any, tenantId: number): Promise<voi
     });
   }
 }
+
+// ─── W13 (C4) — operator licence gate ────────────────────────────────────────
+/**
+ * Throws FORBIDDEN unless the tenant's BDC operator profile has
+ * licenseStatus='active'. Money-dealing procedures (sales buyFx/sellFx) call
+ * this at the top — a pending/aip/provisional/suspended licence BLOCKS trading
+ * (fail closed). getBdcProfile deliberately accepts non-active licences for
+ * configuration paths; this helper is the dealing gate.
+ */
+export async function assertOperatorLicensed(db: any, tenantId: number): Promise<void> {
+  const profile = await getBdcProfile(db, tenantId);
+  if (profile.licenseStatus !== "active") {
+    logger.warn(
+      { tenantId, licenseStatus: profile.licenseStatus },
+      "[BDC] Dealing blocked — operator licence is not active",
+    );
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: `BDC operator licence is not active (status: ${profile.licenseStatus ?? "unknown"}) — dealing is blocked until the CBN licence is active`,
+    });
+  }
+}

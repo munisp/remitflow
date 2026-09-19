@@ -37,9 +37,9 @@ import { logger } from "../../_core/logger";
 import {
   BDC_PURPOSE_CODES,
   toCents,
-  getBdcProfile,
   assertBranchActive,
   assertCustomerNotRescreenBlocked,
+  assertOperatorLicensed,
 } from "./_shared";
 import {
   postBuyFx,
@@ -267,7 +267,8 @@ export const bdcSalesRouter = router({
       await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC FX purchase");
       const db = await requireDb();
       const tenantId = await requireTenantId(ctx.user.id);
-      await getBdcProfile(db, tenantId);
+      // W13: licence gate — a pending/suspended CBN licence blocks dealing (fail closed).
+      await assertOperatorLicensed(db, tenantId);
       await assertBranchActive(db, tenantId, input.branchId);
       const customer = await requireVerifiedCustomer(db, tenantId, input.customerId);
 
@@ -506,7 +507,8 @@ export const bdcSalesRouter = router({
       await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC FX sale");
       const db = await requireDb();
       const tenantId = await requireTenantId(ctx.user.id);
-      await getBdcProfile(db, tenantId);
+      // W13: licence gate — a pending/suspended CBN licence blocks dealing (fail closed).
+      await assertOperatorLicensed(db, tenantId);
       await assertBranchActive(db, tenantId, input.branchId);
       const customer = await requireVerifiedCustomer(db, tenantId, input.customerId);
 

@@ -1,14 +1,43 @@
 import React, { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { onboardingService } from "../services/onboardingService";
+import { trpcClient } from "../services/trpc";
+
+// W13-C1: the PWA-local AppRouter contract (types/appRouter.ts) does not
+// declare the bvnNin router yet; access it via a typed structural accessor
+// (same pattern as pages/bdc/api.ts). Response mirrors the Go BVN/NIN
+// service payload returned by bvnNin.verifyBVN (kycProductionGate.ts).
+interface BvnVerifyResponse {
+  verified: boolean;
+  match_score: number;
+  verification_id: string;
+  error?: string;
+}
+const bvnNinApi = (
+  trpcClient as unknown as {
+    bvnNin: {
+      verifyBVN: {
+        mutate: (input: {
+          bvn: string;
+          firstName: string;
+          lastName: string;
+          dateOfBirth: string;
+          phoneNumber?: string;
+        }) => Promise<BvnVerifyResponse>;
+      };
+    };
+  }
+).bvnNin;
+
+type VerifyState =
+  | { kind: "verified"; message: string }
+  | { kind: "rejected"; message: string }
+  | { kind: "unavailable"; message: string };
 
 const OnboardingBvn: React.FC = () => {
   const [bvn, setBvn] = useState("");
   const [isVerifying, setIsVerifying] = useState(false);
-  const [result, setResult] = useState<{
-    valid: boolean;
-    message: string;
-  } | null>(null);
+  const [result, setResult] = useState<VerifyState | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -21,20 +50,68 @@ const OnboardingBvn: React.FC = () => {
       setResult(null);
       return;
     }
+
+    // Client-side format check first — this alone is NOT verification.
+    const format = onboardingService.checkBvnFormat(value);
+    if (!format.valid) {
+      setResult({ kind: "rejected", message: format.message });
+      return;
+    }
+
+    // Real verification via the bvnNin tRPC router (proxies to the Go
+    // BVN/NIN service, fail-closed). The onboarding flow runs pre-login, so
+    // an UNAUTHORIZED response lands in the honest "unavailable" state:
+    // the user may continue, but the account stays at Tier 0 until BVN is
+    // verified post-login from the KYC page.
+    const profile = onboardingService.getOnboardingData();
     setIsVerifying(true);
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    setResult(onboardingService.verifyBvnLocally(value));
-    setIsVerifying(false);
+    setResult(null);
+    try {
+      const res = await bvnNinApi.verifyBVN.mutate({
+        bvn: value,
+        firstName: profile?.firstName ?? "",
+        lastName: profile?.lastName ?? "",
+        // Date of birth is not collected during registration; the Go service
+        // treats an empty value per its own matching policy (fail-closed).
+        dateOfBirth: "",
+        ...(profile?.phoneNumber ? { phoneNumber: profile.phoneNumber } : {}),
+      });
+      if (res.verified) {
+        setResult({
+          kind: "verified",
+          message: "BVN verified successfully against the registry.",
+        });
+      } else {
+        setResult({
+          kind: "rejected",
+          message: `BVN verification failed${res.error ? `: ${res.error}` : " — the details did not match the registry"}. Please check and try again, or skip and verify later.`,
+        });
+      }
+    } catch (err) {
+      setResult({
+        kind: "unavailable",
+        message:
+          "Verification service unavailable — you can continue, but your account stays at Tier 0 until your BVN is verified from the KYC page after login.",
+      });
+      console.warn("[onboarding] BVN verification unavailable:", err);
+    } finally {
+      setIsVerifying(false);
+    }
   };
 
   const handleContinue = () => {
-    if (bvn.trim()) {
+    // Only carry a BVN forward when it actually verified; a rejected or
+    // unverified BVN must not be submitted as if it were validated.
+    if (bvn.trim() && result?.kind === "verified") {
       onboardingService.setBvn(bvn);
     } else {
       onboardingService.setBvn("");
     }
     navigate("/onboarding/address", { state: { accountType } });
   };
+
+  const continueDisabled =
+    isVerifying || (Boolean(bvn) && result?.kind === "rejected");
 
   return (
     <div className="min-h-screen bg-slate-50 py-10 px-4">
@@ -54,7 +131,9 @@ const OnboardingBvn: React.FC = () => {
         </p>
 
         <div className="p-3 rounded-lg bg-indigo-50 border border-indigo-200 text-sm text-indigo-800 mb-6">
-          CBN requires BVN for complete profile verification.
+          CBN requires BVN for complete profile verification. Skipping keeps
+          your account at Tier 0 (no transfers) until verification is
+          completed.
         </div>
 
         <label className="block text-sm font-medium text-slate-700 mb-2">
@@ -76,9 +155,15 @@ const OnboardingBvn: React.FC = () => {
         {isVerifying && (
           <p className="text-sm text-indigo-600 mt-2">Verifying...</p>
         )}
-        {result && (
+        {result && !isVerifying && (
           <p
-            className={`text-sm mt-2 ${result.valid ? "text-emerald-600" : "text-red-600"}`}
+            className={`text-sm mt-2 ${
+              result.kind === "verified"
+                ? "text-emerald-600"
+                : result.kind === "rejected"
+                  ? "text-red-600"
+                  : "text-amber-600"
+            }`}
           >
             {result.message}
           </p>
@@ -92,11 +177,11 @@ const OnboardingBvn: React.FC = () => {
             }}
             className="flex-1 py-3.5 border border-slate-200 text-slate-700 font-semibold rounded-xl hover:bg-slate-50"
           >
-            Skip
+            Skip (stay Tier 0)
           </button>
           <button
             onClick={handleContinue}
-            disabled={Boolean(bvn) && (!result || !result.valid)}
+            disabled={continueDisabled}
             className="flex-1 py-3.5 bg-gradient-to-r from-indigo-600 to-violet-600 text-white font-semibold rounded-xl disabled:opacity-50"
           >
             Continue

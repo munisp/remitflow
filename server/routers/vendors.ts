@@ -19,11 +19,12 @@
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq, ne, notInArray, sql } from "drizzle-orm";
 import { z } from "zod";
-import { auditedProcedure, protectedProcedure, router } from "../_core/trpc";
-import { getDb } from "../db";
-import { vendorBills, vendors, type Vendor } from "../../drizzle/schema";
+import { auditedAdminProcedure, auditedProcedure, protectedProcedure, router } from "../_core/trpc";
+import { createAuditLog, getDb } from "../db";
+import { payrollCompanies, vendorBills, vendors, type Vendor } from "../../drizzle/schema";
 import { resolveTenantContext } from "../tenantMiddleware";
 import { validateFile } from "../_core/serviceRegistry";
+import { requireTotpStepUp } from "../_core/totpStepUp";
 import { logger } from "../_core/logger";
 import { indexVendor } from "../services/searchIndexer";
 
@@ -398,5 +399,85 @@ export const vendorsRouter = router({
         .limit(input.limit)
         .offset(input.offset);
       return rows;
+    }),
+
+  /**
+   * W13-MERCHANT (F-T4): the missing 'verified' writer for vendor KYB.
+   * Admin + TOTP step-up; guarded single-winner transition
+   * pending_review→verified (UPDATE ... WHERE kyb_status='pending_review'
+   * RETURNING, affected==1 else CONFLICT). Audited.
+   */
+  adminVerifyKyb: auditedAdminProcedure
+    .input(z.object({
+      vendorId: z.number().int().positive(),
+      totpCode: z.string().optional(),
+      notes: z.string().max(2000).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "vendor KYB verification");
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      const [updated] = await db.update(vendors)
+        .set({ kybStatus: "verified", updatedAt: new Date() })
+        .where(and(eq(vendors.id, input.vendorId), eq(vendors.kybStatus, "pending_review")))
+        .returning();
+      if (!updated) {
+        throw new TRPCError({ code: "CONFLICT", message: `Vendor ${input.vendorId} is not pending KYB review (already decided or unknown)` });
+      }
+
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "VENDOR_KYB_VERIFIED",
+        targetType: "vendors",
+        targetId: updated.id,
+        severity: "info",
+        description: `Vendor ${updated.id} KYB verified by admin ${ctx.user.id}`,
+        metadata: { vendorId: updated.id, tenantId: updated.tenantId, notes: input.notes ?? null },
+      });
+      tryIndexVendor(updated);
+      return { vendorId: updated.id, kybStatus: "verified" as const };
+    }),
+
+  /**
+   * W13-MERCHANT (F-23): payroll company KYB verification. The
+   * payroll_company_status enum is ('active','suspended','pending_kyb') —
+   * there is NO 'verified' literal, so the schema-valid terminal state for a
+   * verified company is 'active' via the guarded pending_kyb→active
+   * transition here (affected==1 else CONFLICT). NOTE: tier3.ts reads
+   * `company.kybStatus === 'verified'`, but payroll_companies has NO
+   * kybStatus column — that reader is broken independently of this fix and
+   * is flagged for the orchestrator (tier3.ts is outside W13-C2 scope).
+   * Admin + TOTP step-up; audited.
+   */
+  adminVerifyCompanyKyb: auditedAdminProcedure
+    .input(z.object({
+      companyId: z.number().int().positive(),
+      totpCode: z.string().optional(),
+      notes: z.string().max(2000).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "payroll company KYB verification");
+      const db = await getDb();
+      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      const [updated] = await db.update(payrollCompanies)
+        .set({ status: "active", updatedAt: new Date() })
+        .where(and(eq(payrollCompanies.id, input.companyId), eq(payrollCompanies.status, "pending_kyb")))
+        .returning();
+      if (!updated) {
+        throw new TRPCError({ code: "CONFLICT", message: `Payroll company ${input.companyId} is not pending_kyb (already decided or unknown)` });
+      }
+
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "PAYROLL_COMPANY_KYB_VERIFIED",
+        targetType: "payroll_companies",
+        targetId: updated.id,
+        severity: "info",
+        description: `Payroll company ${updated.id} KYB verified (pending_kyb→active) by admin ${ctx.user.id}`,
+        metadata: { companyId: updated.id, ownerId: updated.ownerId, notes: input.notes ?? null },
+      });
+      return { companyId: updated.id, status: "active" as const };
     }),
 });

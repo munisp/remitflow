@@ -1,94 +1,123 @@
 /**
- * RemitFlow — Multi-Tenancy & White-Label API Router
+ * RemitFlow — Multi-Tenancy Router (W13 rewrite)
  * ══════════════════════════════════════════════════════════════════════════════
- * Exposes tenant branding, feature flags, billing, and white-label
- * configuration to the frontend and partner integrations.
+ * Thin tRPC gateway over the tenant-management service
+ * (services/tenant-management — Express). Real service contract (verified
+ * against services/tenant-management/src):
  *
- * Architecture:
- *   tRPC Router → tenant-management service (TypeScript/Express)
- *               → Keycloak (realm-per-tenant isolation)
- *               → Permify (tenant-scoped RBAC)
- *               → Redis (tenant config cache, 5-minute TTL)
+ *   Auth:     `Authorization: Bearer <TENANT_MANAGEMENT_API_TOKEN>` on EVERY
+ *             call (middlewares/auth.ts requireServiceAuth — constant-time
+ *             compare; the service refuses to boot without it in production).
+ *   Routes:   POST /system/create-tenant        (requires x-tenant-id header)
+ *             GET  /tenant/all
+ *             GET  /tenant/:tenant_id
+ *             PUT  /tenant/:tenant_id
+ *             POST /tenant/:tenant_id/suspend
+ *             POST /tenant/:tenant_id/unsuspend
+ *             GET  /billing/                    (x-tenant-id scoped)
+ *   Payload:  validations/index.ts PostCreateTenantSchema —
+ *             { name, type: bank|microfinance|fintech|mto, cacCertificateUrl?,
+ *               cbnLicenseUrl?, contact: { email, name, phone? }, branding?,
+ *               features: [{ flag, config }], plan?, billingPeriod?,
+ *               apiConfiguration? }
  *
- * Tenant isolation model:
- *   - Each tenant has a dedicated Keycloak realm
- *   - Row-Level Security (RLS) enforced via withTenantContext()
- *   - Feature flags are per-tenant and per-branch
- *   - Branding (logo, colors, domain) is fully customizable
- *   - API keys are scoped to tenants for partner integrations
+ * W13 honesty rules (F-14): NO fabricated fallbacks. When the service is
+ * unreachable or returns non-2xx the procedure throws UNAVAILABLE — nothing is
+ * "queued", nothing returns fake `provisioning`/`updated:true`/`suspended:true`
+ * payloads, and no Redis-only API keys are minted (no verifier exists, so the
+ * generateApiKey procedure was deleted).
  *
- * White-label capabilities:
- *   - Custom domain support (e.g., send.acmebank.com)
- *   - Custom logo, primary/secondary colors, font
- *   - Custom email templates (from-name, reply-to)
- *   - Custom fee schedules per corridor
- *   - Custom KYC tier limits
- *   - Custom compliance rules per jurisdiction
+ * NOTE: realm-per-tenant Keycloak provisioning and Permify RBAC are NOT
+ * implemented by the service — earlier revisions of this file claimed
+ * otherwise. Tenant lifecycle here is exactly what the service implements.
  */
 
 import { z } from "zod";
-import { router, protectedProcedure, adminProcedure, publicProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { TRPCError } from "@trpc/server";
+import { eq, and } from "drizzle-orm";
 import { logger } from "../_core/logger";
+import { getDb } from "../db";
+import { tenantUsers } from "../../drizzle/schema";
 import { getRedisClient } from "../middleware/redis";
-const redis = getRedisClient();
 import { sanitizeHtml } from "../_core/featurePersistence";
-import crypto from "node:crypto";
+import { requireTotpStepUp } from "../_core/totpStepUp";
+import { createAuditLog } from "../audit.service";
 
-// ── Service URL ───────────────────────────────────────────────────────────────
+const redis = getRedisClient();
+
+// ── Service config ────────────────────────────────────────────────────────────
 
 const TENANT_SVC_URL = process.env.TENANT_MANAGEMENT_URL ?? "http://tenant-management:3010";
+/** Service bearer token — must match the service's TENANT_MANAGEMENT_API_TOKEN. */
+const TENANT_SVC_TOKEN = process.env.TENANT_MANAGEMENT_API_TOKEN ?? "";
 const TENANT_CACHE_TTL = 300; // 5 minutes
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Types (service response shapes) ───────────────────────────────────────────
 
-interface TenantBranding {
-  logoUrl: string;
-  faviconUrl: string;
-  primaryColor: string;
-  secondaryColor: string;
-  accentColor: string;
-  fontFamily: string;
-  customDomain: string | null;
-  emailFromName: string;
-  emailReplyTo: string;
-  supportEmail: string;
-  supportPhone: string | null;
-  termsUrl: string | null;
-  privacyUrl: string | null;
+interface ServiceTenant {
+  tenantId?: string;
+  tenant_id?: string;
+  name?: string;
+  status?: string;
+  plan?: string;
+  [k: string]: unknown;
 }
 
-interface TenantFeatureFlags {
-  cbdcEnabled: boolean;
-  stablecoinEnabled: boolean;
-  bnplEnabled: boolean;
-  socialLedgerEnabled: boolean;
-  investmentEnabled: boolean;
-  propertyEscrowEnabled: boolean;
-  agentNetworkEnabled: boolean;
-  multiCurrencyWalletEnabled: boolean;
-  webauthnEnabled: boolean;
-  biometricKycEnabled: boolean;
-  openBankingEnabled: boolean;
-  apiSandboxEnabled: boolean;
+// ── Service caller (fail-closed, honest errors) ───────────────────────────────
+
+/**
+ * Call the tenant-management service with service auth. Throws UNAVAILABLE
+ * when the token is unconfigured, the service is unreachable, or the response
+ * is non-2xx — callers NEVER fabricate a success payload.
+ */
+async function tenantServiceCall<T>(
+  path: string,
+  opts: { method?: "GET" | "POST" | "PUT"; body?: unknown; tenantId?: string } = {},
+): Promise<T> {
+  if (!TENANT_SVC_TOKEN) {
+    logger.error({ path }, "[MultiTenancy] TENANT_MANAGEMENT_API_TOKEN not configured — refusing service call (fail-closed)");
+    throw new TRPCError({
+      code: "UNAVAILABLE",
+      message: "Tenant management service authentication is not configured",
+    });
+  }
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${TENANT_SVC_TOKEN}`,
+  };
+  if (opts.tenantId) headers["x-tenant-id"] = opts.tenantId;
+
+  let res: Response;
+  try {
+    res = await fetch(`${TENANT_SVC_URL}${path}`, {
+      method: opts.method ?? "GET",
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (err) {
+    logger.warn({ path, err: err instanceof Error ? err.message : String(err) }, "[MultiTenancy] tenant-management service unreachable");
+    throw new TRPCError({
+      code: "UNAVAILABLE",
+      message: "Tenant management service is unavailable — operation not performed",
+    });
+  }
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    logger.warn({ path, status: res.status, detail: detail.slice(0, 300) }, "[MultiTenancy] tenant-management service rejected request");
+    throw new TRPCError({
+      code: res.status === 401 || res.status === 403 ? "FORBIDDEN" : "UNAVAILABLE",
+      message: `Tenant management service rejected the request (HTTP ${res.status})`,
+    });
+  }
+  return (await res.json().catch(() => ({}))) as T;
 }
 
-interface TenantConfig {
-  tenantId: string;
-  name: string;
-  slug: string;
-  status: "active" | "suspended" | "trial";
-  plan: "starter" | "growth" | "enterprise";
-  branding: TenantBranding;
-  features: TenantFeatureFlags;
-  corridors: string[];
-  kycTierLimits: Record<string, number>;
-  createdAt: string;
-}
+// ── Cache helpers (read-through cache for successful service reads only) ──────
 
-// ── Cache Helpers ─────────────────────────────────────────────────────────────
-
-async function getCachedTenant(tenantId: string): Promise<TenantConfig | null> {
+async function getCachedTenant(tenantId: string): Promise<ServiceTenant | null> {
   try {
     if (!redis) return null;
     const cached = await redis.get(`tenant:config:${tenantId}`);
@@ -98,7 +127,7 @@ async function getCachedTenant(tenantId: string): Promise<TenantConfig | null> {
   }
 }
 
-async function cacheTenant(tenantId: string, config: TenantConfig): Promise<void> {
+async function cacheTenant(tenantId: string, config: ServiceTenant): Promise<void> {
   try {
     if (!redis) return;
     await redis.set(`tenant:config:${tenantId}`, JSON.stringify(config), "EX", TENANT_CACHE_TTL);
@@ -107,343 +136,244 @@ async function cacheTenant(tenantId: string, config: TenantConfig): Promise<void
   }
 }
 
-// ── Service Caller ────────────────────────────────────────────────────────────
-
-async function tenantServiceCall<T>(
-  path: string,
-  method: "GET" | "POST" | "PUT" | "DELETE" = "GET",
-  body?: unknown
-): Promise<T | null> {
+async function invalidateTenantConfigCache(tenantId: string): Promise<void> {
   try {
-    const res = await fetch(`${TENANT_SVC_URL}${path}`, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: body ? JSON.stringify(body) : undefined,
-      signal: AbortSignal.timeout(3000),
-    });
-    if (!res.ok) return null;
-    return res.json() as Promise<T>;
+    if (redis) await redis.del(`tenant:config:${tenantId}`);
   } catch {
-    return null;
+    // Redis unavailable — non-fatal
   }
 }
 
-// ── Default Config (used when service is unavailable) ─────────────────────────
-
-const DEFAULT_BRANDING: TenantBranding = {
-  logoUrl: "/assets/remitflow-logo.svg",
-  faviconUrl: "/assets/favicon.ico",
-  primaryColor: "#2563EB",
-  secondaryColor: "#1E40AF",
-  accentColor: "#F59E0B",
-  fontFamily: "Inter",
-  customDomain: null,
-  emailFromName: "RemitFlow",
-  emailReplyTo: "support@remitflow.io",
-  supportEmail: "support@remitflow.io",
-  supportPhone: null,
-  termsUrl: "https://remitflow.io/terms",
-  privacyUrl: "https://remitflow.io/privacy",
-};
-
-const DEFAULT_FEATURES: TenantFeatureFlags = {
-  cbdcEnabled: false,
-  stablecoinEnabled: true,
-  bnplEnabled: false,
-  socialLedgerEnabled: true,
-  investmentEnabled: false,
-  propertyEscrowEnabled: false,
-  agentNetworkEnabled: true,
-  multiCurrencyWalletEnabled: true,
-  webauthnEnabled: true,
-  biometricKycEnabled: true,
-  openBankingEnabled: false,
-  apiSandboxEnabled: false,
-};
+/**
+ * Scope check for per-tenant reads: global admin OR a tenant_users member of
+ * the (numeric) local tenant id. Service-side string tenant ids that do not
+ * map to a local tenants row require global admin (fail closed).
+ */
+async function assertTenantReadScope(user: { id: number; role: string }, tenantId: string): Promise<void> {
+  if (user.role === "admin") return;
+  const numericId = Number(tenantId);
+  if (!Number.isInteger(numericId)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Access denied — tenant config requires membership" });
+  }
+  const db = await getDb();
+  if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+  const [membership] = await db.select({ id: tenantUsers.id }).from(tenantUsers)
+    .where(and(eq(tenantUsers.tenantId, numericId), eq(tenantUsers.userId, user.id)))
+    .limit(1);
+  if (!membership) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Access denied — you are not a member of this tenant" });
+  }
+}
 
 // ── tRPC Router ───────────────────────────────────────────────────────────────
 
 export const multiTenancyRouter = router({
   /**
-   * Get tenant configuration for the current request context.
-   * Used by the frontend to apply branding and feature flags.
+   * Get a tenant's configuration. W13 (F-24): was publicProcedure leaking any
+   * tenant's config — now protected + membership/global-admin scoped, and fails
+   * honestly (UNAVAILABLE) instead of returning a fabricated default config.
    */
-  getTenantConfig: publicProcedure
+  getTenantConfig: protectedProcedure
     .input(z.object({
-      tenantId: z.string().optional(),
-      domain: z.string().optional(),
+      tenantId: z.string().min(1).max(100),
     }))
-    .query(async ({ input }) => {
-      const tenantId = input.tenantId ?? "default";
+    .query(async ({ ctx, input }) => {
+      await assertTenantReadScope(ctx.user, input.tenantId);
 
-      // Check cache first
-      const cached = await getCachedTenant(tenantId);
+      const cached = await getCachedTenant(input.tenantId);
       if (cached) return cached;
 
-      // Fetch from tenant management service
-      const config = await tenantServiceCall<TenantConfig>(
-        `/api/tenants/${tenantId}`
+      const result = await tenantServiceCall<{ tenant?: ServiceTenant } & ServiceTenant>(
+        `/tenant/${encodeURIComponent(input.tenantId)}`,
+        { tenantId: input.tenantId },
       );
-
-      if (config) {
-        await cacheTenant(tenantId, config);
-        return config;
-      }
-
-      // Return default config for the main platform
-      const defaultConfig: TenantConfig = {
-        tenantId: "default",
-        name: "RemitFlow",
-        slug: "remitflow",
-        status: "active",
-        plan: "enterprise",
-        branding: DEFAULT_BRANDING,
-        features: DEFAULT_FEATURES,
-        corridors: ["NGN", "GHS", "KES", "ZAR", "USD", "GBP", "EUR"],
-        kycTierLimits: { tier1: 500, tier2: 5000, tier3: 50000 },
-        createdAt: new Date().toISOString(),
-      };
-
-      return defaultConfig;
+      const tenant = (result.tenant ?? result) as ServiceTenant;
+      await cacheTenant(input.tenantId, tenant);
+      return tenant;
     }),
 
-  /**
-   * List all tenants (admin only).
-   */
+  /** List all tenants (admin only) — real service call, honest failure. */
   listTenants: adminProcedure
-    .input(z.object({
-      page: z.number().int().min(1).default(1),
-      limit: z.number().int().min(1).max(100).default(20),
-      status: z.enum(["active", "suspended", "trial", "all"]).default("all"),
-    }))
-    .query(async ({ input }) => {
-      const result = await tenantServiceCall<{
-        tenants: TenantConfig[];
-        total: number;
-        page: number;
-        limit: number;
-      }>(`/api/tenants?page=${input.page}&limit=${input.limit}&status=${input.status}`);
-
-      return result ?? { tenants: [], total: 0, page: input.page, limit: input.limit };
+    .query(async () => {
+      const result = await tenantServiceCall<{ tenants?: ServiceTenant[] } | ServiceTenant[]>("/tenant/all");
+      return Array.isArray(result) ? result : (result.tenants ?? []);
     }),
 
   /**
-   * Create a new tenant (white-label partner onboarding).
+   * Create a tenant via POST /system/create-tenant (real contract —
+   * validations/index.ts PostCreateTenantSchema). The service-side tenant id
+   * is supplied via the required x-tenant-id header (we use the slug).
+   * Non-2xx → honest UNAVAILABLE. The fabricated "queued/provisioning"
+   * fallback was deleted (F-14).
    */
   createTenant: adminProcedure
     .input(z.object({
-      name: z.string().min(2).max(100),
-      slug: z.string().min(2).max(50).regex(/^[a-z0-9-]+$/),
-      plan: z.enum(["starter", "growth", "enterprise"]).default("starter"),
-      adminEmail: z.string().email(),
-      adminName: z.string().min(2).max(100),
-      customDomain: z.string().optional(),
-      primaryColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
-      corridors: z.array(z.string().length(3)).min(1).default(["USD", "NGN"]),
+      name: z.string().min(2).max(200),
+      slug: z.string().min(2).max(63).regex(/^[a-z0-9-]+$/),
+      type: z.enum(["bank", "microfinance", "fintech", "mto"]),
+      contact: z.object({
+        email: z.string().email(),
+        name: z.string().min(2).max(200),
+        phone: z.string().max(32).optional(),
+      }),
+      cacCertificateUrl: z.string().url().optional(),
+      cbnLicenseUrl: z.string().url().optional(),
+      branding: z.object({
+        logoUrl: z.string().optional(),
+        faviconUrl: z.string().optional(),
+        primaryColor: z.string().optional(),
+        secondaryColor: z.string().optional(),
+        domain: z.string().optional(),
+      }).optional(),
+      features: z.array(z.object({
+        flag: z.string().min(1).max(64),
+        config: z.record(z.any()),
+      })).default([]),
+      plan: z.enum(["standard", "premium", "enterprise"]).optional(),
+      billingPeriod: z.enum(["monthly", "annual"]).optional(),
+      apiConfiguration: z.object({
+        webhookUrl: z.string().optional(),
+        callbackUrl: z.string().optional(),
+      }).optional(),
     }))
-    .mutation(async ({ input }) => {
-      const result = await tenantServiceCall<{ tenantId: string; keycloakRealmId: string }>(
-        "/api/tenants",
-        "POST",
-        {
-          name: input.name,
-          slug: input.slug,
-          plan: input.plan,
-          admin_email: input.adminEmail,
-          admin_name: input.adminName,
-          custom_domain: input.customDomain,
-          branding: {
-            primaryColor: input.primaryColor ?? DEFAULT_BRANDING.primaryColor,
-            customDomain: input.customDomain ?? null,
-          },
-          corridors: input.corridors,
-        }
-      );
+    .mutation(async ({ ctx, input }) => {
+      const { slug, ...payload } = input;
+      const result = await tenantServiceCall<{
+        status?: string;
+        tenant?: ServiceTenant;
+        billingProfile?: unknown;
+      }>("/system/create-tenant", { method: "POST", body: payload, tenantId: slug });
 
-      if (!result) {
-        // Fallback: generate tenant ID locally
-        const tenantId = `tenant-${crypto.randomBytes(8).toString("hex")}`;
-        logger.warn({ slug: input.slug }, "[MultiTenancy] Tenant service unavailable — queued creation");
-        return {
-          tenantId,
-          slug: input.slug,
-          status: "provisioning",
-          message: "Tenant creation queued. You will receive an email when ready.",
-        };
-      }
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "TENANT_CREATED_VIA_SERVICE",
+        targetType: "tenants",
+        description: `Tenant '${slug}' (${input.name}) created via tenant-management service`,
+        metadata: { slug, name: input.name, type: input.type, plan: input.plan ?? null },
+      });
 
-      logger.info({ tenantId: result.tenantId, slug: input.slug }, "[MultiTenancy] Tenant created");
+      logger.info({ slug, tenant: result.tenant }, "[MultiTenancy] Tenant created via service");
       return {
-        tenantId: result.tenantId,
-        slug: input.slug,
-        keycloakRealmId: result.keycloakRealmId,
-        status: "active",
-        message: "Tenant created successfully.",
+        slug,
+        tenant: result.tenant ?? null,
+        billingProfileCreated: result.billingProfile != null,
+        message: "Tenant created by the tenant-management service.",
       };
     }),
 
-  /**
-   * Update tenant branding.
-   */
+  /** Update tenant branding (PUT /tenant/:id { branding }) — honest failure. */
   updateBranding: adminProcedure
     .input(z.object({
-      tenantId: z.string(),
+      tenantId: z.string().min(1).max(100),
       logoUrl: z.string().url().optional(),
       primaryColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
       secondaryColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
-      accentColor: z.string().regex(/^#[0-9A-Fa-f]{6}$/).optional(),
-      fontFamily: z.string().optional(),
-      customDomain: z.string().optional(),
-      emailFromName: z.string().optional(),
-      supportEmail: z.string().email().optional(),
+      domain: z.string().optional(),
     }))
     .mutation(async ({ input }) => {
       const { tenantId, ...rawBranding } = input;
       // Sanitize text fields to prevent XSS
       const branding = {
         ...rawBranding,
-        emailFromName: rawBranding.emailFromName ? sanitizeHtml(rawBranding.emailFromName) : rawBranding.emailFromName,
-        fontFamily: rawBranding.fontFamily ? sanitizeHtml(rawBranding.fontFamily) : rawBranding.fontFamily,
-        customDomain: rawBranding.customDomain ? sanitizeHtml(rawBranding.customDomain) : rawBranding.customDomain,
+        domain: rawBranding.domain ? sanitizeHtml(rawBranding.domain) : rawBranding.domain,
       };
-      await tenantServiceCall(
-        `/api/tenants/${tenantId}/branding`,
-        "PUT",
-        branding
-      );
-      // Invalidate cache (redis may be null in dev/test)
-      if (redis) {
-        try {
-          await redis.del(`tenant:config:${tenantId}`);
-        } catch {
-          // Redis unavailable in test/dev — non-fatal
-        }
-      }
-      logger.info({ tenantId }, "[MultiTenancy] Branding updated");
-      return { updated: true, tenantId, sanitized: branding };
+      await tenantServiceCall(`/tenant/${encodeURIComponent(tenantId)}`, {
+        method: "PUT",
+        body: { branding },
+        tenantId,
+      });
+      await invalidateTenantConfigCache(tenantId);
+      logger.info({ tenantId }, "[MultiTenancy] Branding updated via service");
+      return { updated: true, tenantId };
     }),
+
   /**
-   * Update tenant feature flags.
+   * Update tenant feature flags (PUT /tenant/:id { features }) using the
+   * service's real shape: [{ flag, config }].
    */
   updateFeatureFlags: adminProcedure
     .input(z.object({
-      tenantId: z.string(),
-      flags: z.object({
-        cbdcEnabled: z.boolean().optional(),
-        stablecoinEnabled: z.boolean().optional(),
-        bnplEnabled: z.boolean().optional(),
-        socialLedgerEnabled: z.boolean().optional(),
-        investmentEnabled: z.boolean().optional(),
-        propertyEscrowEnabled: z.boolean().optional(),
-        agentNetworkEnabled: z.boolean().optional(),
-        webauthnEnabled: z.boolean().optional(),
-        openBankingEnabled: z.boolean().optional(),
-        apiSandboxEnabled: z.boolean().optional(),
-      }),
+      tenantId: z.string().min(1).max(100),
+      features: z.array(z.object({
+        flag: z.string().min(1).max(64),
+        config: z.record(z.any()),
+      })).min(1),
     }))
     .mutation(async ({ input }) => {
-      await tenantServiceCall(
-        `/api/tenants/${input.tenantId}/features`,
-        "PUT",
-        input.flags
-      );
-
-      // Invalidate cache (redis may be null in dev/test)
-      if (redis) await redis.del(`tenant:config:${input.tenantId}`);
-
-      logger.info({ tenantId: input.tenantId, flags: input.flags }, "[MultiTenancy] Feature flags updated");
-      return { updated: true, tenantId: input.tenantId, flags: input.flags };
-    }),
-
-  /**
-   * Generate an API key for a tenant (partner integration).
-   */
-  generateApiKey: adminProcedure
-    .input(z.object({
-      tenantId: z.string(),
-      keyName: z.string().min(2).max(50),
-      scopes: z.array(z.enum(["transfers:read", "transfers:write", "kyc:read", "webhooks:write", "rates:read"])),
-      expiresInDays: z.number().int().min(1).max(365).default(90),
-    }))
-    .mutation(async ({ input }) => {
-      const apiKey = `rmf_${input.tenantId}_${crypto.randomBytes(24).toString("base64url")}`;
-      const expiresAt = new Date(Date.now() + input.expiresInDays * 86400_000);
-
-      // Store in Redis with TTL (if available)
-      if (redis) {
-        await redis.set(
-          `tenant:apikey:${apiKey}`,
-          JSON.stringify({ tenantId: input.tenantId, scopes: input.scopes, keyName: input.keyName }),
-          "EX",
-          input.expiresInDays * 86400
-        );
-      }
-
-      logger.info({ tenantId: input.tenantId, keyName: input.keyName }, "[MultiTenancy] API key generated");
-
-      return {
-        apiKey,
-        keyName: input.keyName,
+      await tenantServiceCall(`/tenant/${encodeURIComponent(input.tenantId)}`, {
+        method: "PUT",
+        body: { features: input.features },
         tenantId: input.tenantId,
-        scopes: input.scopes,
-        expiresAt,
-        // Only returned once — store securely
-        warning: "This API key will only be shown once. Store it securely.",
-      };
+      });
+      await invalidateTenantConfigCache(input.tenantId);
+      logger.info({ tenantId: input.tenantId, flags: input.features.map((f) => f.flag) }, "[MultiTenancy] Feature flags updated via service");
+      return { updated: true, tenantId: input.tenantId, features: input.features };
     }),
 
-  /**
-   * Get tenant billing summary.
-   */
+  // NOTE: generateApiKey was DELETED (F-14) — it minted Redis-only keys with
+  // no verifier anywhere, i.e. keys that authenticated nothing. A real
+  // API-key path requires a verifier; partnerApiKeys (partnerApplications.ts)
+  // is the canonical partner-key flow.
+
+  /** Tenant billing info (GET /billing/, x-tenant-id scoped) — honest failure. */
   getBillingSummary: protectedProcedure
-    .input(z.object({
-      tenantId: z.string(),
-      month: z.number().int().min(1).max(12).optional(),
-      year: z.number().int().min(2024).optional(),
-    }))
-    .query(async ({ input }) => {
-      const month = input.month ?? new Date().getMonth() + 1;
-      const year = input.year ?? new Date().getFullYear();
-
-      const result = await tenantServiceCall<{
-        totalTransactions: number;
-        totalVolume: number;
-        platformFees: number;
-        partnerRevenue: number;
-        currency: string;
-      }>(`/api/billing/${input.tenantId}/summary?month=${month}&year=${year}`);
-
-      return result ?? {
+    .input(z.object({ tenantId: z.string().min(1).max(100) }))
+    .query(async ({ ctx, input }) => {
+      await assertTenantReadScope(ctx.user, input.tenantId);
+      const result = await tenantServiceCall<{ billing_info?: unknown }>("/billing/", {
         tenantId: input.tenantId,
-        month,
-        year,
-        totalTransactions: 0,
-        totalVolume: 0,
-        platformFees: 0,
-        partnerRevenue: 0,
-        currency: "USD",
-        serviceAvailable: false,
-      };
+      });
+      return { tenantId: input.tenantId, billingInfo: result.billing_info ?? null };
     }),
 
-  /**
-   * Suspend a tenant (admin only).
-   */
+  /** Suspend a tenant (admin + TOTP) — POST /tenant/:id/suspend, honest failure. */
   suspendTenant: adminProcedure
     .input(z.object({
-      tenantId: z.string(),
+      tenantId: z.string().min(1).max(100),
       reason: z.string().min(10).max(500),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
-    .mutation(async ({ input }) => {
-      await tenantServiceCall(
-        `/api/tenants/${input.tenantId}/suspend`,
-        "POST",
-        { reason: input.reason }
-      );
-
-      if (redis) await redis.del(`tenant:config:${input.tenantId}`);
-
-      logger.warn({ tenantId: input.tenantId, reason: input.reason }, "[MultiTenancy] Tenant suspended");
+    .mutation(async ({ ctx, input }) => {
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "tenant suspension (service)");
+      await tenantServiceCall(`/tenant/${encodeURIComponent(input.tenantId)}/suspend`, {
+        method: "POST",
+        body: { reason: input.reason },
+        tenantId: input.tenantId,
+      });
+      await invalidateTenantConfigCache(input.tenantId);
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "TENANT_SUSPENDED_VIA_SERVICE",
+        targetType: "tenants",
+        severity: "warning",
+        description: `Tenant '${input.tenantId}' suspended via tenant-management service: ${input.reason}`,
+        metadata: { tenantId: input.tenantId, reason: input.reason },
+      });
+      logger.warn({ tenantId: input.tenantId, reason: input.reason }, "[MultiTenancy] Tenant suspended via service");
       return { suspended: true, tenantId: input.tenantId };
+    }),
+
+  /** Unsuspend a tenant (admin + TOTP) — POST /tenant/:id/unsuspend. */
+  unsuspendTenant: adminProcedure
+    .input(z.object({
+      tenantId: z.string().min(1).max(100),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "tenant unsuspension (service)");
+      await tenantServiceCall(`/tenant/${encodeURIComponent(input.tenantId)}/unsuspend`, {
+        method: "POST",
+        tenantId: input.tenantId,
+      });
+      await invalidateTenantConfigCache(input.tenantId);
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "TENANT_UNSUSPENDED_VIA_SERVICE",
+        targetType: "tenants",
+        description: `Tenant '${input.tenantId}' unsuspended via tenant-management service`,
+        metadata: { tenantId: input.tenantId },
+      });
+      logger.info({ tenantId: input.tenantId }, "[MultiTenancy] Tenant unsuspended via service");
+      return { suspended: false, tenantId: input.tenantId };
     }),
 });

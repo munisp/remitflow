@@ -392,8 +392,11 @@ export const embeddedPayoutsRouter = router({
       if (input.vendorId != null) {
         const [vendor] = await db.select().from(vendors)
           .where(and(eq(vendors.id, input.vendorId), eq(vendors.tenantId, partnerTenantId))).limit(1);
-        if (!vendor || vendor.kybStatus === "deactivated") {
-          const row = await transition(db, payout.id, partnerTenantId, ["received"], "failed", { failureReason: "vendor_not_found_or_deactivated" });
+        // W13-MERCHANT (F-T4): fail closed — ONLY KYB-verified vendors are
+        // payable. 'unverified'/'pending_review' vendors fail honestly.
+        if (!vendor || vendor.kybStatus !== "verified") {
+          const reason = !vendor ? "vendor_not_found_or_deactivated" : "vendor_kyb_not_verified";
+          const row = await transition(db, payout.id, partnerTenantId, ["received"], "failed", { failureReason: reason });
           return finish(row, "payout.failed");
         }
         const pm = (vendor.payoutMethod ?? {}) as Record<string, unknown>;

@@ -3,6 +3,7 @@ import { randomBytes } from "crypto";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { applyTenantGuc, getRequestTenantContext } from "./_core/tenantGuc";
+import { ENV } from "./_core/env";
 import {
   InsertUser, auditLogs, batchPayments, beneficiaries, bnplPlans, cards, caseComments,
   cbdcWallets, complianceCases, directDebitMandates, disputes, fxAlerts, fxRateCache,
@@ -122,6 +123,14 @@ export async function upsertUser(user: InsertUser): Promise<{ isNew: boolean }> 
   if (user.lastSignedIn !== undefined) { values.lastSignedIn = user.lastSignedIn; updateSet.lastSignedIn = user.lastSignedIn; }
   if (!values.lastSignedIn) values.lastSignedIn = new Date();
   if (Object.keys(updateSet).length === 0) updateSet.lastSignedIn = new Date();
+  // W13 (F-T10): first-admin bootstrap. OWNER_OPEN_ID (env.ts:39) designates
+  // the platform owner; when that user logs in their row is promoted to
+  // role 'admin'. Previously the env var was defined but never read, so no
+  // first admin could ever be created (promoteUser requires an existing admin).
+  if (ENV.ownerOpenId && user.openId === ENV.ownerOpenId) {
+    values.role = "admin";
+    updateSet.role = "admin";
+  }
   await db.insert(users).values(values).onConflictDoUpdate({ target: users.openId, set: updateSet });
   const dbUser = await getUserByOpenId(user.openId);
   if (dbUser) await autoSeedUser(dbUser.id);
@@ -1965,72 +1974,6 @@ export async function deleteInvestmentPriceHistory(db: any, id: number) {
   if (!db) return false;
   try {
     await db.delete(investmentPriceHistory).where((investmentPriceHistory as any).id === id);
-    return true;
-  } catch { return false; }
-}
-
-// ── tenants ──
-export async function getTenants(db: any, filters?: Record<string, any>) {
-  if (!db) return [];
-  try {
-    const rows = await db.select().from(tenants).limit(100);
-    return rows;
-  } catch { return []; }
-}
-
-export async function createTenants(db: any, data: Record<string, any>) {
-  if (!db) return null;
-  try {
-    const [row] = await db.insert(tenants).values(data).returning();
-    return row;
-  } catch { return null; }
-}
-
-export async function updateTenants(db: any, id: number, data: Record<string, any>) {
-  if (!db) return null;
-  try {
-    const [row] = await db.update(tenants).set(data).where((tenants as any).id === id).returning();
-    return row;
-  } catch { return null; }
-}
-
-export async function deleteTenants(db: any, id: number) {
-  if (!db) return false;
-  try {
-    await db.delete(tenants).where((tenants as any).id === id);
-    return true;
-  } catch { return false; }
-}
-
-// ── tenantUsers ──
-export async function getTenantUsers(db: any, filters?: Record<string, any>) {
-  if (!db) return [];
-  try {
-    const rows = await db.select().from(tenantUsers).limit(100);
-    return rows;
-  } catch { return []; }
-}
-
-export async function createTenantUsers(db: any, data: Record<string, any>) {
-  if (!db) return null;
-  try {
-    const [row] = await db.insert(tenantUsers).values(data).returning();
-    return row;
-  } catch { return null; }
-}
-
-export async function updateTenantUsers(db: any, id: number, data: Record<string, any>) {
-  if (!db) return null;
-  try {
-    const [row] = await db.update(tenantUsers).set(data).where((tenantUsers as any).id === id).returning();
-    return row;
-  } catch { return null; }
-}
-
-export async function deleteTenantUsers(db: any, id: number) {
-  if (!db) return false;
-  try {
-    await db.delete(tenantUsers).where((tenantUsers as any).id === id);
     return true;
   } catch { return false; }
 }

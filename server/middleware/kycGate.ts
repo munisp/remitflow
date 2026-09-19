@@ -23,9 +23,9 @@
  */
 
 import { TRPCError } from "@trpc/server";
-import { db } from "../db-shim";
-import { users } from "../../drizzle/schema";
-import { eq } from "drizzle-orm";
+import { getDb } from "../db";
+import { users, kycLifecycle } from "../../drizzle/schema";
+import { desc, eq } from "drizzle-orm";
 
 // ── KYC Tier Definitions ─────────────────────────────────────────────────────
 
@@ -96,26 +96,76 @@ export interface KYCStatus {
   kycExpiresAt?: Date;
 }
 
-export async function getUserKYCStatus(userId: string): Promise<KYCStatus | null> {
+/**
+ * W13 fix (F-T6): `users` has NO kycStatus column — the previous version read
+ * it (always undefined via the broken db-shim `db.query` proxy) and compared
+ * the kycTier STRING enum ('tier0'..'tier3') against NUMERIC tiers, so every
+ * gate evaluation was garbage. `users.kycTier` is the pgEnum source of truth
+ * for the tier; lifecycle state (rejected/suspended/expired) comes from the
+ * latest kyc_lifecycle row.
+ */
+const TIER_NAME_TO_LEVEL: Record<string, KYCTier> = {
+  tier0: KYC_TIERS.TIER_0,
+  tier1: KYC_TIERS.TIER_1,
+  tier2: KYC_TIERS.TIER_2,
+  tier3: KYC_TIERS.TIER_3,
+  // Forward-compatible: enum tops out at tier3 today.
+  tier4: KYC_TIERS.TIER_4,
+};
+
+export function kycTierNameToLevel(name: string | null | undefined): KYCTier {
+  return TIER_NAME_TO_LEVEL[name ?? ""] ?? KYC_TIERS.TIER_0;
+}
+
+/**
+ * Returns null only when the user does not exist.
+ * Throws INTERNAL_SERVER_ERROR when the database is unavailable — fail closed.
+ */
+export async function getUserKYCStatus(userId: string | number): Promise<KYCStatus | null> {
   const numericUserId = Number(userId);
   if (!Number.isSafeInteger(numericUserId) || numericUserId <= 0) return null;
-  const user = await db.query.users.findFirst({
-    where: eq(users.id, numericUserId),
-    columns: {
-      id: true,
-      kycStatus: true,
-      kycTier: true,
-    },
-  }).catch(() => null);
+
+  const db = await getDb();
+  if (!db) {
+    throw new TRPCError({
+      code: "INTERNAL_SERVER_ERROR",
+      message: "KYC status unavailable — database unreachable. Action blocked.",
+    });
+  }
+
+  const [user] = await db
+    .select({ id: users.id, kycTier: users.kycTier })
+    .from(users)
+    .where(eq(users.id, numericUserId))
+    .limit(1);
 
   if (!user) return null;
 
+  // Latest lifecycle row supplies review state (rejected/suspended/expired).
+  const [lifecycle] = await db
+    .select({ stage: kycLifecycle.stage, rejectionReason: kycLifecycle.rejectionReason, expiresAt: kycLifecycle.expiresAt })
+    .from(kycLifecycle)
+    .where(eq(kycLifecycle.userId, numericUserId))
+    .orderBy(desc(kycLifecycle.updatedAt))
+    .limit(1);
+
+  const stage = lifecycle?.stage;
+  const kycStatus: KYCStatus["kycStatus"] =
+    stage === "rejected" ? "rejected"
+    : stage === "suspended" ? "frozen"
+    : stage === "expired" ? "expired"
+    : stage === "under_review" || stage === "documents_submitted" || stage === "additional_info_required" ? "in_review"
+    : stage === "approved" ? "verified"
+    : "pending";
+
   return {
-    userId,
-    kycTier: (user.kycTier as KYCTier) ?? KYC_TIERS.TIER_0,
-    kycStatus: (user.kycStatus as KYCStatus["kycStatus"]) ?? "pending",
-    frozen: user.kycStatus === "frozen",
-    requiresReKYC: user.kycStatus === "expired",
+    userId: String(userId),
+    kycTier: kycTierNameToLevel(user.kycTier),
+    kycStatus,
+    frozen: kycStatus === "frozen",
+    freezeReason: kycStatus === "frozen" ? (lifecycle?.rejectionReason ?? "compliance review") : undefined,
+    requiresReKYC: kycStatus === "expired",
+    kycExpiresAt: lifecycle?.expiresAt ?? undefined,
   };
 }
 
@@ -123,10 +173,12 @@ export async function getUserKYCStatus(userId: string): Promise<KYCStatus | null
 
 /**
  * Enforces minimum KYC tier on a tRPC procedure.
- * Usage: in a tRPC router, wrap the procedure with requireKYCTier(2).
+ * Usage: in a tRPC router, `await requireKYCTier(KYC_TIERS.TIER_1)(ctx.user.id)`
+ * at the top of the mutation. Fails closed: throws when the user is missing,
+ * frozen, rejected, below the required tier, or when the DB is unreachable.
  */
 export function requireKYCTier(minimumTier: KYCTier) {
-  return async (userId: string): Promise<void> => {
+  return async (userId: string | number): Promise<void> => {
     const kycStatus = await getUserKYCStatus(userId);
 
     if (!kycStatus) {
@@ -153,11 +205,12 @@ export function requireKYCTier(minimumTier: KYCTier) {
     if (kycStatus.kycTier < minimumTier) {
       // Fire first_transfer_attempt trigger if this is a Tier-0 user trying to transact
       if (kycStatus.kycTier === KYC_TIERS.TIER_0) {
+        const uid = String(userId);
         void fireTrigger({
           trigger_type: "first_transfer_attempt",
           entity_type: "user",
-          entity_id: userId,
-          user_id: userId,
+          entity_id: uid,
+          user_id: uid,
           correlation_id: crypto.randomUUID(),
           timestamp: new Date().toISOString(),
           metadata: { required_tier: minimumTier, current_tier: kycStatus.kycTier },
@@ -176,12 +229,13 @@ export function requireKYCTier(minimumTier: KYCTier) {
  * Transaction amount gate — checks KYC tier limits and fires compliance triggers.
  */
 export async function checkTransactionLimits(
-  userId: string,
+  userId: string | number,
   amount: number,
   currency: string,
   correlationId?: string,
 ): Promise<void> {
   const corrId = correlationId ?? crypto.randomUUID();
+  const uid = String(userId);
   const kycStatus = await getUserKYCStatus(userId);
 
   if (!kycStatus) {
@@ -202,8 +256,8 @@ export async function checkTransactionLimits(
     void fireTrigger({
       trigger_type: kycStatus.kycTier === KYC_TIERS.TIER_0 ? "first_transfer_attempt" : "kyc_tier_upgrade_required",
       entity_type: "user",
-      entity_id: userId,
-      user_id: userId,
+      entity_id: uid,
+      user_id: uid,
       amount,
       currency,
       correlation_id: corrId,
@@ -222,8 +276,8 @@ export async function checkTransactionLimits(
     void fireTrigger({
       trigger_type: "transaction_over_10000",
       entity_type: "user",
-      entity_id: userId,
-      user_id: userId,
+      entity_id: uid,
+      user_id: uid,
       amount,
       currency,
       correlation_id: corrId,
@@ -233,33 +287,14 @@ export async function checkTransactionLimits(
     void fireTrigger({
       trigger_type: "transaction_over_1000",
       entity_type: "user",
-      entity_id: userId,
-      user_id: userId,
+      entity_id: uid,
+      user_id: uid,
       amount,
       currency,
       correlation_id: corrId,
       timestamp: new Date().toISOString(),
     });
   }
-}
-
-// ── User Registration Trigger ─────────────────────────────────────────────────
-
-/**
- * Call this immediately after creating a new user record.
- * Fires the user_registration KYC trigger to initiate Tier-0 onboarding.
- */
-export async function onUserRegistered(userId: string, email: string, country?: string): Promise<void> {
-  void fireTrigger({
-    trigger_type: "user_registration",
-    entity_type: "user",
-    entity_id: userId,
-    user_id: userId,
-    country,
-    correlation_id: crypto.randomUUID(),
-    timestamp: new Date().toISOString(),
-    metadata: { email, registration_source: "web" },
-  });
 }
 
 // ── Business Registration Trigger ─────────────────────────────────────────────
@@ -324,26 +359,6 @@ export async function onBeneficialOwnerChanged(
       metadata: { owner_name: ownerName, ownership_percentage: ownershipPercentage },
     });
   }
-}
-
-// ── Merchant Onboarding Trigger ───────────────────────────────────────────────
-
-export async function onMerchantOnboarded(
-  merchantId: string,
-  userId: string,
-  merchantCategory: string,
-  country?: string,
-): Promise<void> {
-  void fireTrigger({
-    trigger_type: "merchant_onboarding",
-    entity_type: "business",
-    entity_id: merchantId,
-    user_id: userId,
-    country,
-    correlation_id: crypto.randomUUID(),
-    timestamp: new Date().toISOString(),
-    metadata: { merchant_category: merchantCategory },
-  });
 }
 
 // ── License Expiry Trigger ────────────────────────────────────────────────────

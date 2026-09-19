@@ -41,6 +41,11 @@ const OnboardingCompletion: React.FC = () => {
           <p className="text-sm text-amber-50 mt-1">
             Verify your identity to unlock higher transaction limits.
           </p>
+          {/* W13: honest tier consequence — no transfers until KYC approval. */}
+          <p className="text-sm text-amber-100 mt-2">
+            Until KYC is approved your account remains at Tier 0 and cannot
+            send money.
+          </p>
           {verificationUrl ? (
             <a
               href={verificationUrl}

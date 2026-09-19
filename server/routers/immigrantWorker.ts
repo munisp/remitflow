@@ -8,7 +8,16 @@ import { eq } from "drizzle-orm";
 import { safeParseAmount } from "../lib/safeDecimal";
 import { executeTransferPipeline, settleTransferHold, compensateFailedTransfer } from "../_core/transferPipeline";
 import { validateFile } from "../_core/serviceRegistry";
+import { encryptField, decryptField } from "../_core/secretBox";
 import { logger } from "../_core/logger";
+
+// W13-C6: BVN/NIN are stored encrypted at rest (bvn_enc / nin_enc columns,
+// migration 0093_wave13b). Display is always masked (last 3 digits only).
+function maskId(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const plain = decryptField(value);
+  return `********${plain.slice(-3)}`;
+}
 
 const KYC_SERVICE_URL = process.env.IMMIGRANT_WORKER_KYC_URL ?? "http://rust-immigrant-worker-kyc:8099";
 const XOF_ADAPTER_URL = process.env.XOF_ADAPTER_URL ?? "http://go-xof-adapter:8095";
@@ -68,7 +77,7 @@ export const immigrantWorkerRouter = router({
         await db.insert(immigrantWorkerKyc).values({
           userId: ctx.user.id,
           kycTier: "tier1",
-          nin: input.nin,
+          ninEnc: encryptField(input.nin),
           selfieVerified: result.selfie_verified ?? false,
           monthlyLimitUsd: "500.00",
           monthlyUsedUsd: "0.00",
@@ -88,7 +97,10 @@ export const immigrantWorkerRouter = router({
     const [record] = await db.select().from(immigrantWorkerKyc)
       .where(eq(immigrantWorkerKyc.userId, ctx.user.id));
     if (!record) return { kycTier: "none", verified: false };
-    return record;
+    // W13-C6: never return raw BVN/NIN — masked display only. Reads prefer the
+    // encrypted columns; decryptField passes legacy plaintext rows through.
+    const { ninEnc, bvnEnc, nin, bvn, ...rest } = record;
+    return { ...rest, nin: maskId(ninEnc ?? nin), bvn: maskId(bvnEnc ?? bvn) };
   }),
 
   upgradeKycTier: protectedProcedure
@@ -137,7 +149,7 @@ export const immigrantWorkerRouter = router({
             kycTier: newTier,
             documentType: input.documentType,
             documentVerified: true,
-            bvn: input.bvn,
+            ...(input.bvn ? { bvnEnc: encryptField(input.bvn) } : {}),
             monthlyLimitUsd: newMonthlyLimit,
             annualLimitUsd: newAnnualLimit,
             verifiedAt: new Date(),

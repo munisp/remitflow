@@ -619,47 +619,6 @@ const settlementEngineRouter = router({
     }),
 });
 
-// ── 13. Merchant Onboarding ───────────────────────────────────────────────────
-const merchantOnboardingRouter = router({
-  getMerchants: adminProcedure
-    .input(z.object({ status: z.enum(["pending", "active", "suspended", "rejected", "all"]).default("all"), limit: z.number().int().min(1).max(50).default(20) }))
-    .query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const docs = await db.select().from(kycDocuments)
-        .where(input.status !== "all" ? eq(kycDocuments.status, input.status as "pending" | "approved" | "rejected") : undefined)
-        .orderBy(desc(kycDocuments.createdAt)).limit(input.limit);
-      return docs.map((doc: any) => ({
-        id: doc.id, businessName: doc.fullName ?? `Merchant ${doc.id}`,
-        businessType: doc.documentType ?? "retail",
-        country: doc.country ?? "NG", email: null,
-        status: doc.status === "approved" ? "active" : doc.status,
-        monthlyVolume: null, feeRate: 1.5,
-        kybStatus: doc.status, createdAt: doc.createdAt?.toISOString() ?? new Date().toISOString(),
-      }));
-    }),
-
-  approveMerchant: auditedAdminProcedure
-    .input(z.object({ merchantId: z.number().int(), feeRate: z.number().min(0).max(10), notes: z.string().optional() }))
-    .mutation(async ({ input }) => {
-      return { success: true, verified: true, merchantId: input.merchantId, status: "active", feeRate: input.feeRate, approvedAt: new Date().toISOString() };
-    }),
-
-  applyAsMerchant: auditedProcedure
-    .input(z.object({
-      businessName: z.string().min(2).max(100), businessType: z.string(),
-      country: z.string().length(2), registrationNumber: z.string(),
-      expectedMonthlyVolume: z.number().positive(), website: z.string().url().optional(),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      return {
-        success: true, verified: true, applicationId: `MER-${Date.now()}`,
-        status: "pending", message: "Application submitted. Review takes 2-3 business days.",
-        submittedAt: new Date().toISOString(),
-      };
-    }),
-});
-
 // ── 14. Loyalty Rewards V2 ────────────────────────────────────────────────────
 const loyaltyRewardsV2Router = router({
   getBalance: protectedProcedure.query(async ({ ctx }) => {
@@ -1009,7 +968,6 @@ export const v100Router = router({
   beneficiaryVerification: beneficiaryVerificationRouter,
   paymentOrchestration: paymentOrchestrationRouter,
   settlementEngine: settlementEngineRouter,
-  merchantOnboarding: merchantOnboardingRouter,
   loyaltyRewardsV2: loyaltyRewardsV2Router,
   referralEngineV2: referralEngineV2Router,
   carbonOffset: carbonOffsetRouter,

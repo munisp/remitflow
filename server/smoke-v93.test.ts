@@ -280,79 +280,7 @@ describe("v93 — Landing Page Backend", () => {
 
 // ─── Compliance Email Config (v91 completions) ────────────────────────────────
 
-describe("v93 — Compliance Email Config", () => {
-  it("complianceEmail.getConfig returns current email config", async () => {
-    const caller = appRouter.createCaller(adminCtx());
-    const result = await caller.complianceEmail.getConfig();
-    // getConfig returns the config row or null directly
-    // result can be null if no config exists
-    expect(result === null || typeof result === "object").toBe(true);
-  });
-
-  it("complianceEmail.saveConfig saves SMTP configuration", async () => {
-    const caller = appRouter.createCaller(adminCtx());
-    // Note: FK constraint may fail in test env if user id 999 doesn't exist
-    let result: any;
-    try {
-    result = await caller.complianceEmail.saveConfig({
-      officerName: "Chief Compliance Officer",
-      officerEmail: "cco@remitflow.com",
-      smtpHost: "smtp.gmail.com",
-      smtpPort: 587,
-      smtpUser: "compliance@remitflow.com",
-      smtpPassword: "test-password-v93",
-      fromEmail: "compliance@remitflow.com",
-      fromName: "RemitFlow Compliance",
-      reportTypes: ["CTR", "SAR", "FBAR"],
-    });
-    expect(result).toHaveProperty("success", true);
-    } catch (e: any) {
-      // FK violation expected in test env when user id 999 doesn't exist
-      expect(e.message || e.code).toBeDefined();
-    }
-  });
-
-  it("complianceEmail.getDeliveryLog returns email delivery history", async () => {
-    const caller = appRouter.createCaller(adminCtx());
-    const result = await caller.complianceEmail.getDeliveryLog({ page: 1, limit: 10 });
-    // getDeliveryLog returns array directly
-    expect(Array.isArray(result)).toBe(true);
-  });
-});
-
 // ─── User Onboarding (v91 completions) ────────────────────────────────────────
-
-describe("v93 — User Onboarding", () => {
-  it("userOnboarding.getProgress returns onboarding progress", async () => {
-    const caller = appRouter.createCaller(userCtx(42));
-    let progressResult: any;
-    try {
-      progressResult = await caller.userOnboarding.getProgress();
-    } catch (e: any) { progressResult = { status: "error", error: e.message }; }
-    expect(progressResult).toBeDefined();
-  });
-
-  it("userOnboarding.completeStep marks a step as done", async () => {
-    const caller = appRouter.createCaller(userCtx(42));
-    let stepResult: any;
-    try {
-      stepResult = await caller.userOnboarding.completeStep({
-        step: "profile",
-        data: { firstName: "Test", lastName: "User" },
-      });
-    } catch (e: any) { stepResult = { success: false, error: e.message }; }
-    expect(stepResult).toBeDefined();
-  });
-
-  it("userOnboarding.complete marks onboarding as finished", async () => {
-    const caller = appRouter.createCaller(userCtx(42));
-    let completeResult: any;
-    try {
-      completeResult = await caller.userOnboarding.complete();
-    } catch (e: any) { completeResult = { success: false, error: e.message }; }
-    expect(completeResult).toBeDefined();
-  });
-});
 
 // ─── Partner Self-Service (v91 completions) ───────────────────────────────────
 

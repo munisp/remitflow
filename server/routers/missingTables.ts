@@ -424,15 +424,18 @@ export const stablecoinRouter = router({
       if (Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
       const [_updated] = await db.update(stablecoinWallets).set({ balance: (Number(wallet.balance) - input.amount).toFixed(6) }).where(eq(stablecoinWallets.id, input.walletId)).returning();
       if (!_updated) throw new TRPCError({ code: "NOT_FOUND", message: "Wallet update failed" });
-      const txHash = `0x${randomBytes(32).toString('hex')}`;
+      // W13 honesty: this proc performs an OFF-CHAIN balance debit only. No
+      // on-chain execution exists here, so we must not fabricate a txHash.
+      const internalRef = `offchain-stx-${randomBytes(8).toString("hex")}`;
       // Kafka event for stablecoin transfer
-      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `stablecoin:${txHash}`, {
-        eventType: "stablecoin_transfer",
+      publishEvent(KAFKA_TOPICS.TRANSACTIONS, `stablecoin:${internalRef}`, {
+        eventType: "stablecoin_balance_transfer_offchain",
         userId: ctx.user.id,
         walletId: input.walletId,
         amount: input.amount,
         toAddress: input.toAddress,
-        txHash,
+        reference: internalRef,
+        onChain: false,
         timestamp: new Date().toISOString(),
       }).catch((err: unknown) => logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[Stablecoin] Kafka event failed"));
 
@@ -445,12 +448,13 @@ export const stablecoinRouter = router({
         amount: input.amount,
         currency: wallet.symbol,
         featureLabel: "stablecoin_transfer",
-        operationRef: txHash,
+        operationRef: internalRef,
         kafkaTopic: KAFKA_TOPICS.TRANSACTIONS,
-        metadata: { walletId: input.walletId, toAddress: input.toAddress, txHash },
+        metadata: { walletId: input.walletId, toAddress: input.toAddress, reference: internalRef, onChain: false },
       }).catch(() => {});
 
-      return { success: true, verified: true, txHash, amount: input.amount, toAddress: input.toAddress };
+      // Honest contract: off-chain ledger movement only — no on-chain tx exists.
+      return { success: true, onChain: false, reference: internalRef, amount: input.amount, toAddress: input.toAddress };
     }),
 });
 
@@ -524,82 +528,6 @@ export const mojaloopRouter = router({
       { windowId: 2, state: "OPEN", createdDate: new Date(now.getTime() - 3600000).toISOString(), changedDate: now.toISOString() },
     ];
   }),
-});
-
-
-// ─── KYB Records ─────────────────────────────────────────────────────────────
-export const kybRouter = router({
-  get: protectedProcedure.query(async ({ ctx }) => {
-    const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const [record] = await db.select().from(kybRecords).where(eq(kybRecords.userId, ctx.user.id)).orderBy(desc(kybRecords.createdAt)).limit(1);
-    return record ?? null;
-  }),
-
-  submit: protectedProcedure
-    .input(z.object({
-      businessName: z.string().min(2).max(300),
-      registrationNumber: z.string().optional(),
-      taxId: z.string().optional(),
-      incorporationDate: z.string().optional(),
-      country: z.string().min(2).max(10),
-      industry: z.string().optional(),
-      website: z.string().url().optional(),
-      annualRevenue: z.number().optional(),
-      employeeCount: z.number().optional(),
-      uboName: z.string().optional(),
-      uboOwnership: z.number().min(0).max(100).optional(),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const [record] = await db
-        .insert(kybRecords)
-        .values({
-          userId: ctx.user.id,
-          businessName: input.businessName,
-          registrationNumber: input.registrationNumber,
-          taxId: input.taxId,
-          incorporationDate: input.incorporationDate,
-          country: input.country,
-          industry: input.industry,
-          website: input.website,
-          annualRevenue: input.annualRevenue?.toFixed(2),
-          employeeCount: input.employeeCount,
-          uboName: input.uboName,
-          uboOwnership: input.uboOwnership?.toFixed(2),
-          status: "pending",
-          riskRating: "medium",
-        })
-        .returning();
-      return record;
-    }),
-
-  adminList: adminProcedure
-    .input(z.object({ status: z.string().optional(), limit: z.number().default(50) }).optional())
-    .query(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      return db.select().from(kybRecords).orderBy(desc(kybRecords.createdAt)).limit(input?.limit ?? 50);
-    }),
-
-  adminReview: adminProcedure
-    .input(z.object({ id: z.number(), status: z.enum(["approved", "rejected", "pending_docs"]), rejectionReason: z.string().optional() }))
-    .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const [_row] = await db.update(kybRecords).set({
-        status: input.status,
-        reviewedBy: ctx.user.name ?? "Admin",
-        reviewedAt: new Date(),
-        rejectionReason: input.rejectionReason,
-        updatedAt: new Date(),
-      }).where(eq(kybRecords.id, input.id)).returning();
-
-      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
-
-      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
-    }),
 });
 
 // ─── FX Alert Trigger History ─────────────────────────────────────────────────

@@ -45,7 +45,13 @@ var (
 	daprHTTPPort  = envOr("DAPR_HTTP_PORT", "3500")
 	port          = envOr("PORT", "8121")
 	environment   = envOr("ENVIRONMENT", "development")
+	// Sandbox (pass-everything) mode is allowed ONLY when explicitly opted in.
+	sandboxAllowed = os.Getenv("BVN_SANDBOX_ALLOWED") == "true"
 )
+
+// errProviderNotConfigured is returned when no real provider credentials are
+// set and sandbox mode is not explicitly allowed — fail closed (HTTP 503).
+var errProviderNotConfigured = fmt.Errorf("verification provider not configured")
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
@@ -72,8 +78,11 @@ type NINVerifyRequest struct {
 }
 
 type BVNNINMatchRequest struct {
-	BVN string `json:"bvn" binding:"required,len=11"`
-	NIN string `json:"nin" binding:"required,len=11"`
+	BVN         string `json:"bvn" binding:"required,len=11"`
+	NIN         string `json:"nin" binding:"required,len=11"`
+	FirstName   string `json:"first_name" binding:"required"`
+	LastName    string `json:"last_name" binding:"required"`
+	DateOfBirth string `json:"date_of_birth,omitempty"` // YYYY-MM-DD
 }
 
 type VerificationResult struct {
@@ -170,6 +179,14 @@ func (c *NIBSSClient) VerifyBVN(ctx context.Context, req BVNVerifyRequest) (*Ver
 		verifyTotal.WithLabelValues("bvn", "success").Inc()
 		result.VerificationID = verificationID
 		return result, nil
+	}
+
+	// Sandbox fallback is only allowed when explicitly enabled via env.
+	if !sandboxAllowed {
+		verifyTotal.WithLabelValues("bvn", "unconfigured").Inc()
+		slog.Warn("BVN verification rejected: provider not configured and sandbox not allowed",
+			"verification_id", verificationID)
+		return nil, errProviderNotConfigured
 	}
 
 	// Development mode: validate format and return structured response
@@ -289,6 +306,14 @@ func (c *NIMCClient) VerifyNIN(ctx context.Context, req NINVerifyRequest) (*Veri
 		return result, nil
 	}
 
+	// Sandbox fallback is only allowed when explicitly enabled via env.
+	if !sandboxAllowed {
+		verifyTotal.WithLabelValues("nin", "unconfigured").Inc()
+		slog.Warn("NIN verification rejected: provider not configured and sandbox not allowed",
+			"verification_id", verificationID)
+		return nil, errProviderNotConfigured
+	}
+
 	if len(req.NIN) != 11 {
 		verifyTotal.WithLabelValues("nin", "invalid").Inc()
 		return &VerificationResult{
@@ -354,7 +379,19 @@ var db *sql.DB
 func initDB() error {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgresql://remitflow:remitflow123@localhost:5432/remitflow"
+		// No hardcoded credentials: DB_PASSWORD is required to build the DSN.
+		dbPassword := os.Getenv("DB_PASSWORD")
+		if dbPassword == "" {
+			return fmt.Errorf("DB_PASSWORD environment variable is required (or set DATABASE_URL); refusing to boot with default credentials")
+		}
+		dbURL = fmt.Sprintf("postgresql://%s:%s@%s:%s/%s?sslmode=%s",
+			envOr("DB_USER", "remitflow"),
+			dbPassword,
+			envOr("DB_HOST", "localhost"),
+			envOr("DB_PORT", "5432"),
+			envOr("DB_NAME", "remitflow"),
+			envOr("DB_SSLMODE", "disable"),
+		)
 	}
 	var err error
 	db, err = sql.Open("postgres", dbURL)
@@ -430,6 +467,10 @@ func dbLogEvent(eventType string, payload interface{}) error {
 // ── End PostgreSQL Layer ─────────────────────────────────────────────────────
 
 func main() {
+	// Fail to boot without explicit DB credentials — no hardcoded defaults.
+	if os.Getenv("DATABASE_URL") == "" && os.Getenv("DB_PASSWORD") == "" {
+		log.Fatal("FATAL: DB_PASSWORD (or DATABASE_URL) must be set; no default credentials exist")
+	}
 	if err := initDB(); err != nil {
 		slog.Warn("PostgreSQL init failed, using in-memory fallback", "err", err)
 	}
@@ -462,8 +503,20 @@ func main() {
 			}
 			result, err := nibss.VerifyBVN(c.Request.Context(), req)
 			if err != nil {
-				c.JSON(500, gin.H{"error": err.Error()})
+				if err == errProviderNotConfigured {
+					c.JSON(503, gin.H{"error": err.Error()})
+				} else {
+					c.JSON(500, gin.H{"error": err.Error()})
+				}
 				return
+			}
+
+			// Persist verification state row (honest audit trail).
+			if err := dbUpsert(result.VerificationID, result); err != nil {
+				slog.Warn("state persist failed", "verification_id", result.VerificationID, "err", err)
+			}
+			if err := dbLogEvent("bvn.verified", result); err != nil {
+				slog.Warn("event persist failed", "verification_id", result.VerificationID, "err", err)
 			}
 
 			// Publish event via Dapr
@@ -490,8 +543,20 @@ func main() {
 			}
 			result, err := nimc.VerifyNIN(c.Request.Context(), req)
 			if err != nil {
-				c.JSON(500, gin.H{"error": err.Error()})
+				if err == errProviderNotConfigured {
+					c.JSON(503, gin.H{"error": err.Error()})
+				} else {
+					c.JSON(500, gin.H{"error": err.Error()})
+				}
 				return
+			}
+
+			// Persist verification state row (honest audit trail).
+			if err := dbUpsert(result.VerificationID, result); err != nil {
+				slog.Warn("state persist failed", "verification_id", result.VerificationID, "err", err)
+			}
+			if err := dbLogEvent("nin.verified", result); err != nil {
+				slog.Warn("event persist failed", "verification_id", result.VerificationID, "err", err)
 			}
 
 			go publishDaprEvent("kyc-events", map[string]interface{}{
@@ -515,13 +580,31 @@ func main() {
 				return
 			}
 
-			// Verify both independently
-			bvnResult, _ := nibss.VerifyBVN(c.Request.Context(), BVNVerifyRequest{
-				BVN: req.BVN, FirstName: "CrossMatch", LastName: "CrossMatch",
+			// Verify both independently, using the request's real identity fields.
+			bvnResult, err := nibss.VerifyBVN(c.Request.Context(), BVNVerifyRequest{
+				BVN: req.BVN, FirstName: req.FirstName, LastName: req.LastName,
+				DateOfBirth: req.DateOfBirth,
 			})
-			ninResult, _ := nimc.VerifyNIN(c.Request.Context(), NINVerifyRequest{
-				NIN: req.NIN, FirstName: "CrossMatch", LastName: "CrossMatch",
+			if err != nil {
+				if err == errProviderNotConfigured {
+					c.JSON(503, gin.H{"error": err.Error()})
+				} else {
+					c.JSON(500, gin.H{"error": err.Error()})
+				}
+				return
+			}
+			ninResult, err := nimc.VerifyNIN(c.Request.Context(), NINVerifyRequest{
+				NIN: req.NIN, FirstName: req.FirstName, LastName: req.LastName,
+				DateOfBirth: req.DateOfBirth,
 			})
+			if err != nil {
+				if err == errProviderNotConfigured {
+					c.JSON(503, gin.H{"error": err.Error()})
+				} else {
+					c.JSON(500, gin.H{"error": err.Error()})
+				}
+				return
+			}
 
 			crossMatch := bvnResult.Verified && ninResult.Verified
 			nameConsistency := (bvnResult.MatchScore + ninResult.MatchScore) / 2
@@ -548,6 +631,10 @@ func main() {
 				Recommendation:  recommendation,
 				VerificationID:  fmt.Sprintf("MATCH-%d", time.Now().UnixMilli()),
 				Timestamp:       time.Now().UTC().Format(time.RFC3339),
+			}
+			// Persist cross-match state row (honest audit trail).
+			if err := dbUpsert(result.VerificationID, result); err != nil {
+				slog.Warn("state persist failed", "verification_id", result.VerificationID, "err", err)
 			}
 			c.JSON(200, result)
 		})

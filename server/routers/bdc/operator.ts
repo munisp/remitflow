@@ -11,6 +11,10 @@
  *   listBranches         filters: status / stateCode
  *   registerFranchisee   admin; Tier-1 ONLY; ≤5 per stateCode; 1km geofence
  *                        (airportExempt flag bypasses, reason logged in _shared)
+ *   approveFranchisee    admin + TOTP; guarded pending→active (W13 F-12)
+ *   suspendFranchisee    admin + TOTP; guarded active→suspended (W13 F-12)
+ *   provisionVault       admin + TOTP; bdc_vaults insert (W13 F-12 — no prior writer)
+ *   provisionDrawer      admin + TOTP; bdc_teller_drawers insert (W13 F-12)
  *   listFranchisees      filters: status / stateCode
  *
  * Conventions: auditedAdminProcedure/auditedProcedure from server/_core/trpc.ts
@@ -25,14 +29,24 @@ import { auditedAdminProcedure, auditedProcedure, router } from "../../_core/trp
 import { getDb } from "../../db";
 import { resolveTenantContext } from "../../tenantMiddleware";
 import { requireTotpStepUp } from "../../_core/totpStepUp";
+import { createAuditLog } from "../../audit.service";
+import { claimIdempotency, storeIdempotency, releaseIdempotencyClaim } from "../../middleware/coreAtomicity";
 import { logger } from "../../_core/logger";
 import {
   bdcBranches,
   bdcFranchisees,
   bdcOperatorProfiles,
+  bdcVaults,
+  bdcTellerDrawers,
   type BdcOperatorProfile,
 } from "../../../drizzle/schema";
-import { checkGeofence, getBdcProfile, toCents } from "./_shared";
+import { assertBranchActive, assertTenantActive, checkGeofence, getBdcProfile, toCents } from "./_shared";
+
+/** True for a Postgres unique-violation error (pg sqlstate 23505). */
+function isUniqueViolation(err: unknown): boolean {
+  const e = err as { code?: string; message?: string };
+  return e?.code === "23505" || /duplicate key value violates unique constraint/.test(e?.message ?? "");
+}
 
 // ─── Local helpers (mirror server/routers/accountingSync.ts conventions) ──────
 
@@ -131,6 +145,8 @@ export const operatorRouter = router({
       const tenantId = await requireTenantId(ctx.user.id);
       await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC operator profile update");
       const db = await requireDb();
+      // W13: profile config is blocked once a tenant offboarding has COMPLETED.
+      await assertTenantActive(db, tenantId);
 
       const existing = await db
         .select()
@@ -206,6 +222,8 @@ export const operatorRouter = router({
         lat: z.number().min(-90).max(90),
         lng: z.number().min(-180).max(180),
         isHeadOffice: z.boolean().default(false),
+        /** Optional client idempotency key — stops double-registration (W13). */
+        idempotencyKey: z.string().min(8).max(64).optional(),
         totpCode: totpCodeSchema,
       }),
     )
@@ -214,47 +232,76 @@ export const operatorRouter = router({
       // Registry mutation — canonical step-up (F15), same pattern as updateBranchStatus.
       await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC branch registration");
       const db = await requireDb();
-      const profile = await getBdcProfile(db, tenantId);
 
-      // 1km geofence vs existing branches AND franchisees.
-      const geo = await checkGeofence(db, tenantId, input.lat, input.lng);
-      if (!geo.ok) {
-        throw new TRPCError({
-          code: "PRECONDITION_FAILED",
-          message: `Branch violates the 1km separation rule: ${geo.conflicts
-            .map((c) => `${c.kind} ${c.name} at ${c.distanceMeters}m`)
-            .join("; ")}`,
-        });
+      // W13: tenant-prefixed idempotency claim (Redis SET NX PX, same pattern
+      // as sales.ts) — a retried double-submit replays the stored result
+      // instead of inserting twice.
+      const claimKey = input.idempotencyKey ? `BDC-REG-BRANCH-${tenantId}-${input.idempotencyKey}` : null;
+      if (claimKey) {
+        const claim = await claimIdempotency(claimKey);
+        if (claim.cached) return claim.result;
       }
 
-      // Tier-2 prudential rules (single stateCode + ≤5 branches in that state).
-      if (profile.tier === "tier_2") {
-        const existing = (await db
-          .select({ stateCode: bdcBranches.stateCode, status: bdcBranches.status })
-          .from(bdcBranches)
-          .where(eq(bdcBranches.tenantId, tenantId))) as Array<{
-          stateCode: string | null;
-          status: string | null;
-        }>;
-        const violation = tier2Violation(existing, input.stateCode);
-        if (violation) throw new TRPCError({ code: "BAD_REQUEST", message: violation });
-      }
+      try {
+        const profile = await getBdcProfile(db, tenantId);
 
-      const inserted = await db
-        .insert(bdcBranches)
-        .values({
-          tenantId,
-          code: input.code,
-          name: input.name,
-          address: input.address ?? null,
-          stateCode: input.stateCode,
-          lat: input.lat.toFixed(7),
-          lng: input.lng.toFixed(7),
-          isHeadOffice: input.isHeadOffice,
-          status: "pending",
-        })
-        .returning();
-      return inserted[0];
+        // 1km geofence vs existing branches AND franchisees.
+        const geo = await checkGeofence(db, tenantId, input.lat, input.lng);
+        if (!geo.ok) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `Branch violates the 1km separation rule: ${geo.conflicts
+              .map((c) => `${c.kind} ${c.name} at ${c.distanceMeters}m`)
+              .join("; ")}`,
+          });
+        }
+
+        // Tier-2 prudential rules (single stateCode + ≤5 branches in that state).
+        if (profile.tier === "tier_2") {
+          const existing = (await db
+            .select({ stateCode: bdcBranches.stateCode, status: bdcBranches.status })
+            .from(bdcBranches)
+            .where(eq(bdcBranches.tenantId, tenantId))) as Array<{
+            stateCode: string | null;
+            status: string | null;
+          }>;
+          const violation = tier2Violation(existing, input.stateCode);
+          if (violation) throw new TRPCError({ code: "BAD_REQUEST", message: violation });
+        }
+
+        let inserted;
+        try {
+          inserted = await db
+            .insert(bdcBranches)
+            .values({
+              tenantId,
+              code: input.code,
+              name: input.name,
+              address: input.address ?? null,
+              stateCode: input.stateCode,
+              lat: input.lat.toFixed(7),
+              lng: input.lng.toFixed(7),
+              isHeadOffice: input.isHeadOffice,
+              status: "pending",
+            })
+            .returning();
+        } catch (err) {
+          // bdc_branches_tenant_code_uidx (tenant_id, code) — honest conflict.
+          if (isUniqueViolation(err)) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: `Branch code '${input.code}' is already registered for this tenant`,
+            });
+          }
+          throw err;
+        }
+        const result = inserted[0];
+        if (claimKey) storeIdempotency(claimKey, result);
+        return result;
+      } catch (err) {
+        if (claimKey) await releaseIdempotencyClaim(claimKey);
+        throw err;
+      }
     }),
 
   updateBranchStatus: auditedAdminProcedure
@@ -340,6 +387,8 @@ export const operatorRouter = router({
         royaltyBps: z.number().int().min(0).max(10000).default(0),
         /** CBN airport-location exemption from the 1km rule (reason logged). */
         airportExempt: z.boolean().default(false),
+        /** Optional client idempotency key — stops double-registration (W13). */
+        idempotencyKey: z.string().min(8).max(64).optional(),
         totpCode: totpCodeSchema,
       }),
     )
@@ -348,67 +397,297 @@ export const operatorRouter = router({
       // Registry mutation — canonical step-up (F15).
       await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC franchisee registration");
       const db = await requireDb();
-      const profile = await getBdcProfile(db, tenantId);
 
-      if (profile.tier !== "tier_1") {
-        throw new TRPCError({
-          code: "FORBIDDEN",
-          message: "Only Tier-1 BDC operators may register franchisees",
+      // W13: tenant-prefixed idempotency claim (Redis SET NX PX, same pattern
+      // as sales.ts) — a retried double-submit replays the stored result
+      // instead of inserting twice.
+      const claimKey = input.idempotencyKey ? `BDC-REG-FRANCHISEE-${tenantId}-${input.idempotencyKey}` : null;
+      if (claimKey) {
+        const claim = await claimIdempotency(claimKey);
+        if (claim.cached) return claim.result;
+      }
+
+      try {
+        const profile = await getBdcProfile(db, tenantId);
+
+        if (profile.tier !== "tier_1") {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "Only Tier-1 BDC operators may register franchisees",
+          });
+        }
+
+        // ≤5 franchisees per stateCode (non-closed).
+        const inState = (await db
+          .select({ id: bdcFranchisees.id })
+          .from(bdcFranchisees)
+          .where(
+            and(
+              eq(bdcFranchisees.tenantId, tenantId),
+              eq(bdcFranchisees.stateCode, input.stateCode),
+              ne(bdcFranchisees.status, "closed"),
+            ),
+          )) as Array<{ id: number }>;
+        if (inState.length >= TIER1_MAX_FRANCHISEES_PER_STATE) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `At most ${TIER1_MAX_FRANCHISEES_PER_STATE} franchisees per stateCode (${input.stateCode})`,
+          });
+        }
+
+        // 1km geofence vs branches AND franchisees (airport exemption bypasses,
+        // with the reason logged inside checkGeofence).
+        const geo = await checkGeofence(db, tenantId, input.lat, input.lng, {
+          airportExempt: input.airportExempt,
         });
-      }
+        if (!geo.ok) {
+          throw new TRPCError({
+            code: "PRECONDITION_FAILED",
+            message: `Franchisee violates the 1km separation rule: ${geo.conflicts
+              .map((c) => `${c.kind} ${c.name} at ${c.distanceMeters}m`)
+              .join("; ")}`,
+          });
+        }
+        if (input.airportExempt) {
+          logger.warn(
+            { tenantId, name: input.name, stateCode: input.stateCode },
+            "[BDC] franchisee registered under airport geofence exemption",
+          );
+        }
 
-      // ≤5 franchisees per stateCode (non-closed).
-      const inState = (await db
-        .select({ id: bdcFranchisees.id })
-        .from(bdcFranchisees)
-        .where(
-          and(
-            eq(bdcFranchisees.tenantId, tenantId),
-            eq(bdcFranchisees.stateCode, input.stateCode),
-            ne(bdcFranchisees.status, "closed"),
-          ),
-        )) as Array<{ id: number }>;
-      if (inState.length >= TIER1_MAX_FRANCHISEES_PER_STATE) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: `At most ${TIER1_MAX_FRANCHISEES_PER_STATE} franchisees per stateCode (${input.stateCode})`,
-        });
+        const inserted = await db
+          .insert(bdcFranchisees)
+          .values({
+            tenantId,
+            name: input.name,
+            licenseRef: input.licenseRef ?? null,
+            stateCode: input.stateCode,
+            lat: input.lat.toFixed(7),
+            lng: input.lng.toFixed(7),
+            royaltyBps: input.royaltyBps,
+            status: "pending",
+          })
+          .returning();
+        const result = inserted[0];
+        if (claimKey) storeIdempotency(claimKey, result);
+        return result;
+      } catch (err) {
+        if (claimKey) await releaseIdempotencyClaim(claimKey);
+        throw err;
       }
+    }),
 
-      // 1km geofence vs branches AND franchisees (airport exemption bypasses,
-      // with the reason logged inside checkGeofence).
-      const geo = await checkGeofence(db, tenantId, input.lat, input.lng, {
-        airportExempt: input.airportExempt,
-      });
-      if (!geo.ok) {
-        throw new TRPCError({
-          code: "PRECONDITION_FAILED",
-          message: `Franchisee violates the 1km separation rule: ${geo.conflicts
-            .map((c) => `${c.kind} ${c.name} at ${c.distanceMeters}m`)
-            .join("; ")}`,
-        });
-      }
-      if (input.airportExempt) {
-        logger.warn(
-          { tenantId, name: input.name, stateCode: input.stateCode },
-          "[BDC] franchisee registered under airport geofence exemption",
-        );
-      }
+  /**
+   * approveFranchisee (admin + TOTP) — W13 (F-12): franchisees were
+   * register-only with no activation path. Guarded single-winner
+   * pending→active, tenant-scoped, audited.
+   */
+  approveFranchisee: auditedAdminProcedure
+    .input(z.object({ franchiseeId: z.number().int().positive(), totpCode: totpCodeSchema }))
+    .mutation(async ({ ctx, input }) => {
+      const tenantId = await requireTenantId(ctx.user.id);
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC franchisee approval");
+      const db = await requireDb();
 
-      const inserted = await db
-        .insert(bdcFranchisees)
-        .values({
-          tenantId,
-          name: input.name,
-          licenseRef: input.licenseRef ?? null,
-          stateCode: input.stateCode,
-          lat: input.lat.toFixed(7),
-          lng: input.lng.toFixed(7),
-          royaltyBps: input.royaltyBps,
-          status: "pending",
-        })
+      const updated = await db
+        .update(bdcFranchisees)
+        .set({ status: "active", updatedAt: new Date() })
+        .where(and(
+          eq(bdcFranchisees.id, input.franchiseeId),
+          eq(bdcFranchisees.tenantId, tenantId),
+          eq(bdcFranchisees.status, "pending"),
+        ))
         .returning();
-      return inserted[0];
+      if (updated.length !== 1) {
+        const [existing] = await db
+          .select({ status: bdcFranchisees.status })
+          .from(bdcFranchisees)
+          .where(and(eq(bdcFranchisees.id, input.franchiseeId), eq(bdcFranchisees.tenantId, tenantId)))
+          .limit(1);
+        if (!existing) {
+          throw new TRPCError({ code: "NOT_FOUND", message: `Franchisee ${input.franchiseeId} not found for this tenant` });
+        }
+        throw new TRPCError({
+          code: "CONFLICT",
+          message: `Franchisee ${input.franchiseeId} cannot be approved from status '${existing.status}' (only pending)`,
+        });
+      }
+
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "BDC_FRANCHISEE_APPROVED",
+        targetType: "bdc_franchisees",
+        targetId: input.franchiseeId,
+        description: `Franchisee ${input.franchiseeId} approved (pending → active)`,
+        metadata: { tenantId, franchiseeId: input.franchiseeId },
+      });
+      return updated[0];
+    }),
+
+  /**
+   * suspendFranchisee (admin + TOTP) — guarded single-winner active→suspended,
+   * tenant-scoped, audited.
+   */
+  suspendFranchisee: auditedAdminProcedure
+    .input(z.object({
+      franchiseeId: z.number().int().positive(),
+      reason: z.string().max(500).optional(),
+      totpCode: totpCodeSchema,
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const tenantId = await requireTenantId(ctx.user.id);
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC franchisee suspension");
+      const db = await requireDb();
+
+      const updated = await db
+        .update(bdcFranchisees)
+        .set({ status: "suspended", updatedAt: new Date() })
+        .where(and(
+          eq(bdcFranchisees.id, input.franchiseeId),
+          eq(bdcFranchisees.tenantId, tenantId),
+          eq(bdcFranchisees.status, "active"),
+        ))
+        .returning();
+      if (updated.length !== 1) {
+        const [existing] = await db
+          .select({ status: bdcFranchisees.status })
+          .from(bdcFranchisees)
+          .where(and(eq(bdcFranchisees.id, input.franchiseeId), eq(bdcFranchisees.tenantId, tenantId)))
+          .limit(1);
+        if (!existing) {
+          throw new TRPCError({ code: "NOT_FOUND", message: `Franchisee ${input.franchiseeId} not found for this tenant` });
+        }
+        throw new TRPCError({
+          code: "CONFLICT",
+          message: `Franchisee ${input.franchiseeId} cannot be suspended from status '${existing.status}' (only active)`,
+        });
+      }
+
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "BDC_FRANCHISEE_SUSPENDED",
+        targetType: "bdc_franchisees",
+        targetId: input.franchiseeId,
+        severity: "warning",
+        description: `Franchisee ${input.franchiseeId} suspended${input.reason ? `: ${input.reason}` : ""}`,
+        metadata: { tenantId, franchiseeId: input.franchiseeId, reason: input.reason ?? null },
+      });
+      return updated[0];
+    }),
+
+  // ── Vault / drawer provisioning (W13 F-12: bdc_vaults / bdc_teller_drawers
+  //    previously had ZERO insert paths, so sales could never run) ──────────
+
+  /**
+   * provisionVault (admin + TOTP) — insert a bdc_vaults row for an ACTIVE
+   * branch. Idempotent via the natural key (tenant, branch, name): a repeat
+   * call returns the existing vault with created=false (checked inside the
+   * transaction so concurrent provisions single-win).
+   */
+  provisionVault: auditedAdminProcedure
+    .input(z.object({
+      branchId: z.number().int().positive(),
+      name: z.string().min(1).max(64),
+      vaultType: z.enum(["branch_vault", "head_vault"]).default("branch_vault"),
+      totpCode: totpCodeSchema,
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const tenantId = await requireTenantId(ctx.user.id);
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC vault provisioning");
+      const db = await requireDb();
+      // Branch must exist, belong to the tenant, and be active.
+      await assertBranchActive(db, tenantId, input.branchId);
+
+      const outcome = await db.transaction(async (tx: any) => {
+        const [existing] = await tx
+          .select()
+          .from(bdcVaults)
+          .where(and(
+            eq(bdcVaults.tenantId, tenantId),
+            eq(bdcVaults.branchId, input.branchId),
+            eq(bdcVaults.name, input.name),
+          ))
+          .limit(1);
+        if (existing) return { vault: existing, created: false };
+        const [inserted] = await tx
+          .insert(bdcVaults)
+          .values({
+            tenantId,
+            branchId: input.branchId,
+            name: input.name,
+            vaultType: input.vaultType,
+            status: "active",
+          })
+          .returning();
+        return { vault: inserted, created: true };
+      });
+
+      if (outcome.created) {
+        await createAuditLog({
+          userId: ctx.user.id,
+          action: "BDC_VAULT_PROVISIONED",
+          targetType: "bdc_vaults",
+          targetId: outcome.vault.id,
+          description: `Vault '${input.name}' provisioned at branch ${input.branchId}`,
+          metadata: { tenantId, branchId: input.branchId, vaultType: input.vaultType },
+        });
+      }
+      return outcome;
+    }),
+
+  /**
+   * provisionDrawer (admin + TOTP) — insert a bdc_teller_drawers row (the
+   * teller's cash till) at an ACTIVE branch. Idempotent via the natural key
+   * (tenant, branch, holderUserId): one drawer per holder per branch; a repeat
+   * call returns the existing drawer with created=false.
+   */
+  provisionDrawer: auditedAdminProcedure
+    .input(z.object({
+      branchId: z.number().int().positive(),
+      holderUserId: z.number().int().positive(),
+      totpCode: totpCodeSchema,
+    }))
+    .mutation(async ({ ctx, input }) => {
+      const tenantId = await requireTenantId(ctx.user.id);
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "BDC teller drawer provisioning");
+      const db = await requireDb();
+      // Branch must exist, belong to the tenant, and be active.
+      await assertBranchActive(db, tenantId, input.branchId);
+
+      const outcome = await db.transaction(async (tx: any) => {
+        const [existing] = await tx
+          .select()
+          .from(bdcTellerDrawers)
+          .where(and(
+            eq(bdcTellerDrawers.tenantId, tenantId),
+            eq(bdcTellerDrawers.branchId, input.branchId),
+            eq(bdcTellerDrawers.holderUserId, input.holderUserId),
+          ))
+          .limit(1);
+        if (existing) return { drawer: existing, created: false };
+        const [inserted] = await tx
+          .insert(bdcTellerDrawers)
+          .values({
+            tenantId,
+            branchId: input.branchId,
+            holderUserId: input.holderUserId,
+            status: "active",
+          })
+          .returning();
+        return { drawer: inserted, created: true };
+      });
+
+      if (outcome.created) {
+        await createAuditLog({
+          userId: ctx.user.id,
+          action: "BDC_DRAWER_PROVISIONED",
+          targetType: "bdc_teller_drawers",
+          targetId: outcome.drawer.id,
+          description: `Teller drawer provisioned at branch ${input.branchId} for holder user ${input.holderUserId}`,
+          metadata: { tenantId, branchId: input.branchId, holderUserId: input.holderUserId },
+        });
+      }
+      return outcome;
     }),
 
   listFranchisees: auditedProcedure

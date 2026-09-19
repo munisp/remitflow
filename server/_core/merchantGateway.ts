@@ -20,6 +20,9 @@
 
 import { z } from "zod";
 import { createHmac, randomBytes } from "crypto";
+import { TRPCError } from "@trpc/server";
+import { eq } from "drizzle-orm";
+import { merchants as merchantRecords } from "../../drizzle/schema";
 import { protectedProcedure, rateLimitedProcedure, strictRateLimitedProcedure, router } from "./trpc";
 import { ENV } from "./env";
 import { logger } from "./logger";
@@ -130,6 +133,28 @@ export const merchantGatewayRouter = router({
       webhookUrl: z.string().url().optional(),
     }))
     .mutation(async ({ input, ctx }) => {
+      // W13-MERCHANT (F-T8): gateway credentials are issued ONLY to merchants
+      // with an approved KYB (merchants.status='active' for this user). Fail
+      // closed — no active merchant row → FORBIDDEN; DB unavailable → refuse.
+      const gateDb = await _getWtDb_merchantGatewayts();
+      if (!gateDb) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Database unavailable — merchant gateway registration blocked (fail-closed)",
+        });
+      }
+      const [kybMerchant] = await gateDb
+        .select({ id: merchantRecords.id, status: merchantRecords.status })
+        .from(merchantRecords)
+        .where(eq(merchantRecords.userId, ctx.user.id))
+        .limit(1);
+      if (!kybMerchant || kybMerchant.status !== "active") {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Approved merchant KYB required — complete merchant onboarding (merchantOnboarding.apply) and await admin approval before gateway registration",
+        });
+      }
+
       const merchantId = `merch-${randomBytes(8).toString("hex")}`;
       const merchant: MerchantAccount = {
         merchantId,
@@ -181,7 +206,46 @@ export const merchantGatewayRouter = router({
       if (merchant.userId !== ctx.user.id) throw new Error("Not authorized for this merchant");
 
       const intentId = `pi_${randomBytes(16).toString("hex")}`;
-      const depositAddress = `0x${randomBytes(20).toString("hex")}`;
+
+      // W13-MERCHANT (F-T8): the fabricated `0x${randomBytes}` deposit address
+      // is DELETED. A real deposit address requires an address-provisioning
+      // provider (MERCHANT_DEPOSIT_PROVIDER_URL). Fail closed: unconfigured or
+      // erroring provider → UNAVAILABLE, intent NOT created.
+      const depositProviderUrl = process.env.MERCHANT_DEPOSIT_PROVIDER_URL;
+      if (!depositProviderUrl) {
+        throw new TRPCError({
+          code: "UNAVAILABLE",
+          message: "deposit address provisioning not configured",
+        });
+      }
+      let depositAddress: string;
+      try {
+        const res = await fetch(`${depositProviderUrl.replace(/\/$/, "")}/v1/addresses`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            merchantId: input.merchantId,
+            intentId,
+            coin: input.stablecoin ?? input.currency,
+          }),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!res.ok) throw new Error(`provider HTTP ${res.status}`);
+        const data = (await res.json().catch(() => null)) as { address?: unknown } | null;
+        if (!data || typeof data.address !== "string" || data.address.length < 8) {
+          throw new Error("malformed provider response (missing address)");
+        }
+        depositAddress = data.address;
+      } catch (err) {
+        logger.warn(
+          { err: err instanceof Error ? err.message : String(err), merchantId: input.merchantId },
+          "[MerchantGateway] deposit address provider error — intent not created (fail-closed)",
+        );
+        throw new TRPCError({
+          code: "UNAVAILABLE",
+          message: "deposit address provider error — payment intent not created (fail-closed)",
+        });
+      }
 
       const intent: PaymentIntent = {
         intentId,

@@ -73,6 +73,8 @@ export const users = pgTable("users", {
   lastSignedIn: timestamp("lastSignedIn"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().notNull(),
+  // W13 additive (0092_wave13.sql): tenant membership column read by resolveTenantContext.
+  tenantId: integer("tenant_id"),
 });
 
 // ─── Wallets ──────────────────────────────────────────────────────────────────
@@ -2305,6 +2307,8 @@ export const partnerApplications = pgTable("partner_applications", {
   slaVersion: varchar("sla_version", { length: 20 }).default("v1.0"),
   inviteCodeId: integer("invite_code_id").references(() => partnerInviteCodes.id),
   submittedByUserId: integer("submitted_by_user_id").references(() => users.id),
+  // W13 additive (0092_wave13.sql): claim token for public applicants (closes OR IS NULL bypass).
+  claimToken: varchar("claim_token", { length: 64 }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
@@ -4061,6 +4065,10 @@ export const immigrantWorkerKyc = pgTable("immigrant_worker_kyc", {
   kycTier: varchar("kyc_tier", { length: 20 }).default("tier1"), // tier1, tier2, tier3
   nin: varchar("nin", { length: 11 }),
   bvn: varchar("bvn", { length: 11 }),
+  // W13-C6 additive: encrypted-at-rest BVN/NIN (secretBox encryptField). Plaintext
+  // columns above are legacy read-only; new writes go to these columns only.
+  ninEnc: text("nin_enc"),
+  bvnEnc: text("bvn_enc"),
   selfieVerified: boolean("selfie_verified").default(false),
   documentType: varchar("document_type", { length: 50 }),
   documentVerified: boolean("document_verified").default(false),
@@ -6975,3 +6983,55 @@ export const stablecoinSettlementEvents = pgTable("stablecoin_settlement_events"
 ]);
 export type StablecoinSettlementEvent = typeof stablecoinSettlementEvents.$inferSelect;
 export type InsertStablecoinSettlementEvent = typeof stablecoinSettlementEvents.$inferInsert;
+
+// ─── Wave 13: Stakeholder onboarding robustness (0092_wave13.sql — additive) ──
+export const merchants = pgTable("merchants", {
+  id: serial("id").primaryKey(),
+  tenantId: integer("tenant_id").references(() => tenants.id),
+  userId: integer("user_id").notNull().references(() => users.id),
+  kybRecordId: integer("kyb_record_id"),
+  businessName: varchar("business_name", { length: 200 }).notNull(),
+  country: varchar("country", { length: 2 }),
+  status: varchar("status", { length: 20 }).notNull().default("pending_kyb"), // 'pending_kyb'|'active'|'suspended'|'rejected'
+  riskRating: varchar("risk_rating", { length: 10 }).notNull().default("medium"),
+  termsAcceptedAt: timestamp("terms_accepted_at"),
+  termsVersion: varchar("terms_version", { length: 20 }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("merchants_user_uniq").on(t.userId),
+  index("merchants_tenant_idx").on(t.tenantId, t.status),
+]);
+export type Merchant = typeof merchants.$inferSelect;
+export type InsertMerchant = typeof merchants.$inferInsert;
+
+export const merchantDirectors = pgTable("merchant_directors", {
+  id: serial("id").primaryKey(),
+  merchantId: integer("merchant_id").notNull().references(() => merchants.id),
+  fullName: varchar("full_name", { length: 200 }).notNull(),
+  idDocUrl: text("id_doc_url"),
+  isUbo: boolean("is_ubo").notNull().default(false),
+  ownershipPct: numeric("ownership_pct", { precision: 5, scale: 2 }),
+  screeningVerdict: varchar("screening_verdict", { length: 16 }), // 'clear'|'match'|'error'|NULL
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (t) => [
+  index("merchant_directors_merchant_idx").on(t.merchantId),
+]);
+export type MerchantDirector = typeof merchantDirectors.$inferSelect;
+export type InsertMerchantDirector = typeof merchantDirectors.$inferInsert;
+
+export const bdcTellers = pgTable("bdc_tellers", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedByDefaultAsIdentity(),
+  tenantId: integer("tenant_id").notNull().references(() => tenants.id),
+  branchId: bigint("branch_id", { mode: "number" }).notNull().references(() => bdcBranches.id),
+  tellerUserId: integer("teller_user_id").notNull().references(() => users.id),
+  displayName: varchar("display_name", { length: 120 }),
+  status: varchar("status", { length: 16 }).notNull().default("pending"), // 'pending'|'active'|'suspended'
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("bdc_tellers_uniq").on(t.tenantId, t.tellerUserId),
+  index("bdc_tellers_branch_idx").on(t.branchId, t.status),
+]);
+export type BdcTeller = typeof bdcTellers.$inferSelect;
+export type InsertBdcTeller = typeof bdcTellers.$inferInsert;

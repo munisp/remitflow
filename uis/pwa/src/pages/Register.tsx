@@ -43,8 +43,10 @@ const Register: React.FC = () => {
       /^(0|234|\+234)?[789]\d{9}$/.test(phone) || /^[789]\d{9}$/.test(digits);
     return {
       valid,
+      // W13: this is a client-side FORMAT check only — the number is not
+      // verified against any registry here. Verification happens during KYC.
       message: valid
-        ? "Phone number verified successfully"
+        ? "Phone number format OK — verified during KYC"
         : "Invalid Nigerian phone number format",
     };
   };
@@ -53,9 +55,10 @@ const Register: React.FC = () => {
     const valid = /^\d{11}$/.test(uin) && !uin.startsWith("0000");
     return {
       valid,
+      // W13: format check only — NOT identity verification.
       message: valid
-        ? "NIN verified successfully"
-        : "Invalid NIN. Please check and try again.",
+        ? "NIN format OK — identity is verified during KYC"
+        : "Invalid NIN format. Please check and try again.",
     };
   };
 
@@ -246,14 +249,14 @@ const Register: React.FC = () => {
             {step === 1
               ? "Create your account"
               : step === 2
-                ? "Contact & Verification"
+                ? "Contact details"
                 : "Secure your account"}
           </h2>
           <p className="text-slate-500 mb-8">
             {step === 1
               ? "Enter your personal details to get started"
               : step === 2
-                ? "Provide phone and optional NIN verification"
+                ? "Provide your phone and optional NIN (format check only — verification happens during KYC)"
                 : "Choose a strong password to secure your account"}
           </p>
 

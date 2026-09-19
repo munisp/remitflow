@@ -242,10 +242,13 @@ describe("RemitFlow tRPC Routers", () => {
 
   // POS
   it("pos.terminals returns POS terminal list", async () => {
+    // W13-C6: no fabricated seed terminals — a fresh user gets an honest empty list.
     const terminals = await caller.pos.terminals();
     expect(Array.isArray(terminals)).toBe(true);
-    expect(terminals[0]).toHaveProperty("terminalId");
-    expect(terminals[0]).toHaveProperty("merchant");
+    if (terminals.length > 0) {
+      expect(terminals[0]).toHaveProperty("terminalId");
+      expect(terminals[0]).toHaveProperty("merchant");
+    }
   });
 
   // Payment Methods

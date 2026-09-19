@@ -148,7 +148,12 @@ export const onboardingService = {
     localStorage.removeItem(KEYS.postalCode);
   },
 
-  verifyBvnLocally(bvn: string): { valid: boolean; message: string } {
+  /**
+   * W13: renamed from `verifyBvnLocally` — this is a client-side FORMAT
+   * check only. It does NOT verify the BVN against NIBSS or any registry;
+   * real verification happens server-side via `bvnNin.verifyBVN` during KYC.
+   */
+  checkBvnFormat(bvn: string): { valid: boolean; message: string } {
     if (!/^\d{11}$/.test(bvn)) {
       return { valid: false, message: "BVN must be 11 digits" };
     }
@@ -156,11 +161,14 @@ export const onboardingService = {
     if (bvn.startsWith("0000")) {
       return {
         valid: false,
-        message: "Invalid BVN. Please check and try again.",
+        message: "Invalid BVN format. Please check and try again.",
       };
     }
 
-    return { valid: true, message: "BVN verified successfully" };
+    return {
+      valid: true,
+      message: "BVN format OK — verified during KYC",
+    };
   },
 
   async createCustomerFromOnboarding(params: {
@@ -200,10 +208,22 @@ export const onboardingService = {
       ...(onboardingData.uin ? { uin: onboardingData.uin } : {}),
     };
 
-    const response = await api.post<CustomerCreateResponse>(
-      "/orchestrator/customer",
-      payload,
-    );
+    // W13: fail honestly. If the orchestrator endpoint is unreachable or
+    // rejects, surface a truthful provisioning error — never fake success.
+    let response: { data: CustomerCreateResponse };
+    try {
+      response = await api.post<CustomerCreateResponse>(
+        "/orchestrator/customer",
+        payload,
+      );
+    } catch (err) {
+      // Log the underlying transport/server error for debugging, but show
+      // the user an honest provisioning failure.
+      console.error("[onboarding] customer provisioning failed:", err);
+      throw new Error(
+        "Account provisioning unavailable — your account could not be created right now. Please contact support or try again later.",
+      );
+    }
     const verificationUrl =
       response.data.verification ||
       response.data.creation_link ||

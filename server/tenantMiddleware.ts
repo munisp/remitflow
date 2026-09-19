@@ -10,10 +10,10 @@ import {
   tenants,
   tenantFeatureFlags,
   featureFlags,
-  whiteLabelConfigs,
   users,
 } from "../drizzle/schema.js";
-import { eq, and } from "drizzle-orm";
+import { TRPCError } from "@trpc/server";
+import { eq } from "drizzle-orm";
 import { BoundedCache, registerCache } from "./lib/boundedCache";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -21,6 +21,8 @@ import { BoundedCache, registerCache } from "./lib/boundedCache";
 export interface TenantContext {
   tenantId: number | null;
   tenantSlug: string;
+  /** tenants.status ('trial'|'active'|'suspended'|'churned') — null when no tenant resolved. */
+  tenantStatus: string | null;
   featureFlags: Record<string, boolean>;
   whiteLabelConfig: WhiteLabelConfig | null;
 }
@@ -65,18 +67,14 @@ export async function resolveTenantContext(userId: number): Promise<TenantContex
 
   const db = await getDb();
   if (!db) {
-    return { tenantId: null, tenantSlug: "remitflow-default", featureFlags: {}, whiteLabelConfig: null };
+    return { tenantId: null, tenantSlug: "remitflow-default", tenantStatus: null, featureFlags: {}, whiteLabelConfig: null };
   }
 
-  // Find user's tenant
-  const [tenantUser] = await db
-    .select()
-    .from(tenantFeatureFlags) // reuse join path
-    .limit(0); // just to warm the connection
-
-  // Get user record for tenant_id
+  // W13 (F-T1): resolve the caller's tenant via the real users.tenant_id
+  // column (additive 0092_wave13.sql). Before this column existed every user
+  // collapsed onto the default tenant, breaking BDC tenant isolation.
   const [userRow] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-  const tenantId: number | null = (userRow as any)?.tenantId ?? null;
+  const tenantId: number | null = userRow?.tenantId ?? null;
 
   let tenant = null;
   if (tenantId) {
@@ -86,57 +84,52 @@ export async function resolveTenantContext(userId: number): Promise<TenantContex
     [tenant] = await db.select().from(tenants).where(eq(tenants.slug, "remitflow-default")).limit(1);
   }
 
-  // Resolve feature flags: platform defaults + tenant overrides
+  // Resolve feature flags: platform defaults + tenant overrides.
+  // Real columns: feature_flags.key / default_enabled; tenant overrides join
+  // tenant_feature_flags.flag_id → feature_flags.id (there is no flag_key on
+  // tenant_feature_flags).
   const platformFlags = await db.select().from(featureFlags);
   const flags: Record<string, boolean> = {};
   for (const f of platformFlags) {
-    flags[f.key] = f.default_enabled ?? false;
+    flags[f.key] = f.defaultEnabled ?? false;
   }
 
   if (tenant) {
     const overrides = await db
-      .select()
+      .select({
+        key: featureFlags.key,
+        enabled: tenantFeatureFlags.enabled,
+      })
       .from(tenantFeatureFlags)
+      .innerJoin(featureFlags, eq(tenantFeatureFlags.flagId, featureFlags.id))
       .where(eq(tenantFeatureFlags.tenantId, tenant.id));
     for (const o of overrides) {
-      flags[o.flagKey] = o.enabled ?? flags[o.flagKey];
+      flags[o.key] = o.enabled ?? flags[o.key];
     }
   }
 
-  // Resolve white-label config
+  // Resolve white-label config. NOTE: white_label_configs has NO color/brand
+  // columns (onboarding steps, nav sections, legal URLs only) — branding comes
+  // from the tenants row. Earlier revisions read wl.primaryColor etc. which
+  // do not exist.
   let whiteLabelConfig: WhiteLabelConfig | null = null;
   if (tenant) {
-    const [wl] = await db
-      .select()
-      .from(whiteLabelConfigs)
-      .where(eq(whiteLabelConfigs.tenantId, tenant.id))
-      .limit(1);
-    whiteLabelConfig = wl
-      ? {
-          primaryColor: wl.primaryColor ?? tenant.primary_color ?? "#7c3aed",
-          secondaryColor: wl.secondaryColor ?? tenant.secondary_color ?? "#06b6d4",
-          accentColor: wl.accentColor ?? tenant.accent_color ?? "#f59e0b",
-          brandName: wl.brandName ?? tenant.brand_name ?? "RemitFlow",
-          logoUrl: wl.logoUrl ?? null,
-          faviconUrl: wl.faviconUrl ?? null,
-          supportEmail: wl.supportEmail ?? tenant.support_email ?? "support@remitflow.app",
-          customDomain: tenant.custom_domain ?? null,
-        }
-      : {
-          primaryColor: tenant.primary_color ?? "#7c3aed",
-          secondaryColor: tenant.secondary_color ?? "#06b6d4",
-          accentColor: tenant.accent_color ?? "#f59e0b",
-          brandName: tenant.brand_name ?? "RemitFlow",
-          logoUrl: null,
-          faviconUrl: null,
-          supportEmail: tenant.support_email ?? "support@remitflow.app",
-          customDomain: tenant.custom_domain ?? null,
-        };
+    whiteLabelConfig = {
+      primaryColor: tenant.primaryColor ?? "#7c3aed",
+      secondaryColor: tenant.secondaryColor ?? "#06b6d4",
+      accentColor: tenant.accentColor ?? "#f59e0b",
+      brandName: tenant.brandName ?? "RemitFlow",
+      logoUrl: tenant.logoUrl ?? null,
+      faviconUrl: tenant.faviconUrl ?? null,
+      supportEmail: tenant.supportEmail ?? "support@remitflow.app",
+      customDomain: tenant.customDomain ?? null,
+    };
   }
 
   const ctx: TenantContext = {
     tenantId: tenant?.id ?? null,
     tenantSlug: tenant?.slug ?? "remitflow-default",
+    tenantStatus: tenant?.status ?? null,
     featureFlags: flags,
     whiteLabelConfig,
   };
@@ -218,6 +211,25 @@ export async function tenantConfigHandler(req: Request, res: Response) {
  */
 export function invalidateTenantCache(userId: number) {
   tenantCache.delete(userId);
+}
+
+/**
+ * W13 (F-16): tenant-lifecycle money guard. Throws FORBIDDEN when the caller's
+ * tenant is 'suspended' or 'churned'. 'trial' tenants are ALLOWED (documented
+ * product decision: trial users may transact within their plan limits).
+ * A user with no resolvable tenant (tenantId null) is NOT blocked here —
+ * platform-default users have no tenant lifecycle state.
+ * Wired into the canonical transfer creation path (_core/transferPipeline.ts).
+ */
+export async function assertTenantNotSuspended(userId: number): Promise<void> {
+  const ctx = await resolveTenantContext(userId);
+  if (ctx.tenantId == null) return;
+  if (ctx.tenantStatus === "suspended" || ctx.tenantStatus === "churned") {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: `Tenant '${ctx.tenantSlug}' is ${ctx.tenantStatus} — transfers are disabled. Contact support.`,
+    });
+  }
 }
 
 export { tenantCache, flagCache as tenantFlagCacheMap };

@@ -1,5 +1,5 @@
 import { TRPCError } from "@trpc/server";
-import { and, eq, gt, lt, sql } from "drizzle-orm";
+import { and, eq, gt, lt, sql, inArray } from "drizzle-orm";
 import { randomBytes, randomInt } from "crypto";
 import { z } from "zod";
 import { adminProcedure, protectedProcedure, publicProcedure, router ,
@@ -18,6 +18,9 @@ import {
   transactions,
 } from "../../drizzle/schema";
 import { safeParseAmount } from "../lib/safeDecimal";
+import { requireTotpStepUp } from "../_core/totpStepUp";
+import { createAuditLog } from "../audit.service";
+import { invalidateTenantCache } from "../tenantMiddleware";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function generateCode(prefix = "RF"): string {
@@ -239,71 +242,105 @@ export const partnerOnboardingRouter = router({
       const branding = (data.branding as Record<string, unknown>) ?? {};
       const corridorConfig = (data.corridors as Record<string, unknown>) ?? {};
 
-      // Create the tenant
-      const [newTenant] = await db.insert(tenants).values({
-        slug: data.slug as string,
-        name: data.companyName as string,
-        brandName: data.brandName as string,
-        plan: (data.plan as string) ?? "starter",
-        status: "trial",
-        ownerId: ctx.user.id,
-        primaryColor: (branding.primaryColor as string) ?? "#7c3aed",
-        secondaryColor: (branding.secondaryColor as string) ?? "#06b6d4",
-        accentColor: (branding.accentColor as string) ?? "#f59e0b",
-        logoUrl: branding.logoUrl as string | undefined,
-        faviconUrl: branding.faviconUrl as string | undefined,
-        customDomain: branding.customDomain as string | undefined,
-        supportEmail: data.supportEmail as string,
-        defaultCurrency: (data.defaultCurrency as string) ?? "USD",
-        defaultLocale: "en",
-        allowedCountries: (corridorConfig.allowedCountries as string[]) ?? [],
-        maxMonthlyVolume: String(corridorConfig.maxTransferAmount ?? 50000),
-        metadata: {
-          website: data.website,
-          description: data.description,
-          onboardedAt: new Date().toISOString(),
-          corridors: corridorConfig.corridors,
-          defaultFeePercent: corridorConfig.defaultFeePercent,
-          defaultFeeFixed: corridorConfig.defaultFeeFixed,
-        },
-      }).returning();
+      // W13 (F-24): all five writes in ONE db.transaction; the invite code is
+      // re-validated and its used_count incremented with a guarded single-winner
+      // update (TOCTOU-safe), and users.tenant_id is set for the tenant admin.
+      const newTenant = await db.transaction(async (tx) => {
+        // Re-validate the invite inside the transaction (it may have been
+        // deactivated or exhausted since verifyInviteCode ran).
+        const [invite] = await tx.select().from(partnerInviteCodes)
+          .where(eq(partnerInviteCodes.id, session.inviteCodeId)).limit(1);
+        if (!invite || !invite.isActive) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "This invite code has been deactivated." });
+        }
+        if (invite.expiresAt && new Date() > invite.expiresAt) {
+          throw new TRPCError({ code: "FORBIDDEN", message: "This invite code has expired." });
+        }
 
-      // Add owner as tenant admin
-      await db.insert(tenantUsers).values({
-        tenantId: newTenant.id,
-        userId: ctx.user.id,
-        role: "admin",
-      }).returning();
+        // 1. Create the tenant
+        const [created] = await tx.insert(tenants).values({
+          slug: data.slug as string,
+          name: data.companyName as string,
+          brandName: data.brandName as string,
+          plan: (data.plan as string) ?? "starter",
+          status: "trial",
+          ownerId: ctx.user.id,
+          primaryColor: (branding.primaryColor as string) ?? "#7c3aed",
+          secondaryColor: (branding.secondaryColor as string) ?? "#06b6d4",
+          accentColor: (branding.accentColor as string) ?? "#f59e0b",
+          logoUrl: branding.logoUrl as string | undefined,
+          faviconUrl: branding.faviconUrl as string | undefined,
+          customDomain: branding.customDomain as string | undefined,
+          supportEmail: data.supportEmail as string,
+          defaultCurrency: (data.defaultCurrency as string) ?? "USD",
+          defaultLocale: "en",
+          allowedCountries: (corridorConfig.allowedCountries as string[]) ?? [],
+          maxMonthlyVolume: String(corridorConfig.maxTransferAmount ?? 50000),
+          metadata: {
+            website: data.website,
+            description: data.description,
+            onboardedAt: new Date().toISOString(),
+            corridors: corridorConfig.corridors,
+            defaultFeePercent: corridorConfig.defaultFeePercent,
+            defaultFeeFixed: corridorConfig.defaultFeeFixed,
+          },
+        }).returning();
 
-      // Create white-label config
-      await db.insert(whiteLabelConfigs).values({
-        tenantId: newTenant.id,
-        showPoweredBy: (branding.showPoweredBy as boolean) ?? true,
-        termsUrl: branding.termsUrl as string | undefined,
-        privacyUrl: branding.privacyUrl as string | undefined,
-        requireInviteCode: false,
-        allowSelfRegistration: true,
-        onboardingSteps: [
-          { id: "profile", label: "Complete Profile", required: true, order: 1, enabled: true },
-          { id: "kyc", label: "Identity Verification", required: true, order: 2, enabled: true },
-          { id: "wallet", label: "Fund Wallet", required: false, order: 3, enabled: true },
-          { id: "transfer", label: "First Transfer", required: false, order: 4, enabled: true },
-        ],
-      }).returning();
+        // 2. Add owner as tenant admin
+        await tx.insert(tenantUsers).values({
+          tenantId: created.id,
+          userId: ctx.user.id,
+          role: "admin",
+        }).returning();
 
-      // Mark invite code as used
-      await db.update(partnerInviteCodes)
-        .set({ usedCount: sql`${partnerInviteCodes.usedCount} + 1` })
-        .where(eq(partnerInviteCodes.id, session.inviteCodeId)).returning();
+        // 3. Set the admin's home tenant (W0 additive users.tenant_id) so
+        // resolveTenantContext resolves them to this tenant.
+        await tx.update(users)
+          .set({ tenantId: created.id, updatedAt: new Date() })
+          .where(eq(users.id, ctx.user.id));
 
-      // Mark session as completed
-      await db.update(tenantOnboardingSessions)
-        .set({ status: "completed", completedAt: new Date(), tenantId: newTenant.id, userId: ctx.user.id, step: 6, updatedAt: new Date() })
-        .where(eq(tenantOnboardingSessions.id, session.id)).returning();
+        // 4. Create white-label config
+        await tx.insert(whiteLabelConfigs).values({
+          tenantId: created.id,
+          showPoweredBy: (branding.showPoweredBy as boolean) ?? true,
+          termsUrl: branding.termsUrl as string | undefined,
+          privacyUrl: branding.privacyUrl as string | undefined,
+          requireInviteCode: false,
+          allowSelfRegistration: true,
+          onboardingSteps: [
+            { id: "profile", label: "Complete Profile", required: true, order: 1, enabled: true },
+            { id: "kyc", label: "Identity Verification", required: true, order: 2, enabled: true },
+            { id: "wallet", label: "Fund Wallet", required: false, order: 3, enabled: true },
+            { id: "transfer", label: "First Transfer", required: false, order: 4, enabled: true },
+          ],
+        }).returning();
+
+        // 5a. Guarded invite usage increment — single winner, fails when the
+        // code is exhausted (used_count < max_uses guard; NULL max_uses = unlimited).
+        const bumped = await tx.update(partnerInviteCodes)
+          .set({ usedCount: sql`${partnerInviteCodes.usedCount} + 1` })
+          .where(and(
+            eq(partnerInviteCodes.id, session.inviteCodeId),
+            sql`(${partnerInviteCodes.maxUses} IS NULL OR ${partnerInviteCodes.usedCount} < ${partnerInviteCodes.maxUses})`,
+          ))
+          .returning({ id: partnerInviteCodes.id });
+        if (bumped.length !== 1) {
+          throw new TRPCError({ code: "CONFLICT", message: "This invite code has reached its maximum usage limit." });
+        }
+
+        // 5b. Mark session as completed
+        await tx.update(tenantOnboardingSessions)
+          .set({ status: "completed", completedAt: new Date(), tenantId: created.id, userId: ctx.user.id, step: 6, updatedAt: new Date() })
+          .where(eq(tenantOnboardingSessions.id, session.id)).returning();
+
+        return created;
+      });
+
+      // Tenant assignment changed — drop the cached tenant context.
+      invalidateTenantCache(ctx.user.id);
 
       return {
         success: true,
-        verified: true,
         tenantId: newTenant.id,
         slug: newTenant.slug,
         dashboardUrl: `/tenant/${newTenant.slug}/dashboard`,
@@ -433,7 +470,10 @@ export const partnerOnboardingRouter = router({
 
       if (_deleted.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      // W13: membership changed — invalidate the removed member's cached tenant context.
+      invalidateTenantCache(input.targetUserId);
+
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Get white-label config ────────────────────────────────────────────────
@@ -500,19 +540,56 @@ export const partnerOnboardingRouter = router({
       const [memberCount] = await db.select({ count: sql<number>`count(*)` })
         .from(tenantUsers).where(eq(tenantUsers.tenantId, input.tenantId));
 
+      // W13 (F-24): real counts from the DB — no hardcoded 99.2% success rate
+      // or fabricated corridors. Volume/success metrics are derived from the
+      // transactions of this tenant's member users.
+      const memberIds = (await db.select({ userId: tenantUsers.userId })
+        .from(tenantUsers).where(eq(tenantUsers.tenantId, input.tenantId)))
+        .map((m) => m.userId);
+
+      let totalVolume = 0;
+      let monthlyVolume = 0;
+      let successRate: number | null = null;
+      let recentActivity: Array<{
+        id: number; type: string | null; status: string | null;
+        fromAmount: string | null; fromCurrency: string | null; createdAt: Date | null;
+      }> = [];
+
+      if (memberIds.length > 0) {
+        const [totals] = await db.select({
+          total: sql<number>`count(*)`,
+          completed: sql<number>`count(*) filter (where ${transactions.status} = 'completed')`,
+          volume: sql<string>`coalesce(sum(${transactions.fromAmount}) filter (where ${transactions.status} = 'completed'), 0)`,
+          monthlyVol: sql<string>`coalesce(sum(${transactions.fromAmount}) filter (where ${transactions.status} = 'completed' and ${transactions.createdAt} >= now() - interval '30 days'), 0)`,
+        }).from(transactions).where(inArray(transactions.userId, memberIds));
+
+        const totalN = Number(totals?.total ?? 0);
+        const completedN = Number(totals?.completed ?? 0);
+        totalVolume = Number(totals?.volume ?? 0);
+        monthlyVolume = Number(totals?.monthlyVol ?? 0);
+        // Honest: null when the tenant has no transfers yet (rate undefined).
+        successRate = totalN > 0 ? Math.round((completedN / totalN) * 1000) / 10 : null;
+
+        recentActivity = await db.select({
+          id: transactions.id,
+          type: transactions.type,
+          status: transactions.status,
+          fromAmount: transactions.fromAmount,
+          fromCurrency: transactions.fromCurrency,
+          createdAt: transactions.createdAt,
+        }).from(transactions).where(inArray(transactions.userId, memberIds))
+          .orderBy(sql`${transactions.createdAt} DESC`).limit(20);
+      }
+
       return {
         totalMembers: Number(memberCount?.count ?? 0),
         activeMembers: Number(memberCount?.count ?? 0),
-        totalVolume: 0,
-        monthlyVolume: 0,
-        successRate: 99.2,
-        avgTransferTime: "2.3 min",
-        topCorridors: [
-          { from: "GB", to: "NG", volume: 45000, count: 23 },
-          { from: "US", to: "GH", volume: 32000, count: 18 },
-          { from: "CA", to: "KE", volume: 28000, count: 15 },
-        ],
-        recentActivity: [],
+        totalVolume,
+        monthlyVolume,
+        successRate,
+        avgTransferTime: null, // not measured — no timing instrumentation exists
+        topCorridors: [], // corridor breakdown requires recipientCountry aggregation — not computed yet
+        recentActivity,
       };
     }),
 });
@@ -695,22 +772,56 @@ export const adminInviteCodesRouter = router({
     }),
 
   // ── Update tenant status (admin) ──────────────────────────────────────────
-  updateTenantStatus: adminProcedure
+  // W13 (F-24): TOTP step-up + audit + guarded single-winner transitions.
+  // The pgEnum has 'churned', NOT 'cancelled' — using 'cancelled' was a runtime
+  // failure. Allowed transitions: trial→active|suspended|churned,
+  // active→suspended|churned, suspended→active|churned. churned is terminal.
+  updateTenantStatus: auditedAdminProcedure
     .input(z.object({
       tenantId: z.number().int().positive(),
-      status: z.enum(["trial", "active", "suspended", "cancelled"]),
+      status: z.enum(["trial", "active", "suspended", "churned"]),
       reason: z.string().max(500).optional(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      await requireTotpStepUp(ctx.user.id, input.totpCode, `tenant status change to ${input.status}`);
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      const [_row] = await db.update(tenants)
-        .set({ status: input.status as any, updatedAt: new Date() })
-        .where(eq(tenants.id, input.tenantId)).returning();
+      const ALLOWED_FROM: Record<string, string[]> = {
+        active: ["trial", "suspended"],
+        suspended: ["trial", "active"],
+        churned: ["trial", "active", "suspended"],
+        trial: [], // trial is the initial state — no transition back
+      };
+      const fromStatuses = ALLOWED_FROM[input.status] ?? [];
 
-      if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found or access denied" });
-      return { success: true, id: (_row as any).id, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      const [_row] = await db.update(tenants)
+        .set({ status: input.status, updatedAt: new Date() })
+        .where(and(eq(tenants.id, input.tenantId), inArray(tenants.status, fromStatuses)))
+        .returning();
+
+      if (!_row) {
+        const [existing] = await db.select({ status: tenants.status }).from(tenants)
+          .where(eq(tenants.id, input.tenantId)).limit(1);
+        if (!existing) throw new TRPCError({ code: "NOT_FOUND", message: "Tenant not found" });
+        throw new TRPCError({
+          code: "CONFLICT",
+          message: `Tenant cannot transition from '${existing.status}' to '${input.status}'`,
+        });
+      }
+
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: "TENANT_STATUS_CHANGED",
+        targetType: "tenants",
+        targetId: input.tenantId,
+        severity: input.status === "churned" || input.status === "suspended" ? "warning" : "info",
+        description: `Tenant ${input.tenantId} status → ${input.status}${input.reason ? `: ${input.reason}` : ""}`,
+        metadata: { tenantId: input.tenantId, newStatus: input.status, reason: input.reason ?? null },
+      });
+
+      return { success: true, id: (_row as any).id, status: input.status, updatedAt: new Date().toISOString() };
     }),
 
   // ── Real-time partner analytics dashboard ──────────────────────────────────
@@ -880,50 +991,5 @@ export const adminInviteCodesRouter = router({
       const [{ total }] = await db.select({ total: sql<number>`count(*)` }).from(tenantOnboardingSessions);
 
       return { sessions, total: Number(total) };
-    }),
-});
-
-// ─── Travel Rule Router ────────────────────────────────────────────────────────
-export const travelRuleDbRouter = router({
-  myRecords: protectedProcedure
-    .input(z.object({ page: z.number().int().min(1).default(1), limit: z.number().int().min(1).max(50).default(20) }))
-    .query(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const offset = (input.page - 1) * input.limit;
-      const records = await db.select().from(travelRuleRecords)
-        .where(eq(travelRuleRecords.userId, ctx.user.id))
-        .orderBy(sql`${travelRuleRecords.createdAt} DESC`)
-        .limit(input.limit).offset(offset);
-      const [{ total }] = await db.select({ total: sql<number>`count(*)` })
-        .from(travelRuleRecords).where(eq(travelRuleRecords.userId, ctx.user.id));
-      return { records: records.map((r: any) => ({ ...r, amount: Number(r.amount) })), total: Number(total) };
-    }),
-
-  create: protectedProcedure
-    .input(z.object({
-      originatorName: z.string().min(2).max(255),
-      originatorAccount: z.string().max(100).optional(),
-      originatorCountry: z.string().length(2).toUpperCase(),
-      beneficiaryName: z.string().min(2).max(255),
-      beneficiaryAccount: z.string().max(100).optional(),
-      beneficiaryCountry: z.string().length(2).toUpperCase(),
-      amount: z.number().positive().max(10_000_000),
-      currency: z.string().length(3).toUpperCase(),
-      vasp: z.string().max(255).optional(),
-      direction: z.enum(["outbound", "inbound"]).default("outbound"),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-
-      const [record] = await db.insert(travelRuleRecords).values({
-        userId: ctx.user.id,
-        ...input,
-        amount: String(input.amount),
-        status: "pending",
-      }).returning();
-
-      return { success: true, verified: true, id: record.id };
     }),
 });

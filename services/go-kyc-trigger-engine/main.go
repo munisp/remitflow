@@ -17,7 +17,7 @@
 //  KYB Triggers:
 //  11.  business_registration     → KYB initiation
 //  12.  director_ubo_change       → KYB re-verification
-//  13.  merchant_onboarding       → Merchant KYB workflow
+//  13.  (removed — merchant review events flow from merchantOnboarding.adminReview via Kafka)
 //  14.  business_license_expiry   → KYB renewal
 //  15.  beneficial_ownership_change → KYB re-verification
 //
@@ -127,7 +127,7 @@ const (
 	// KYB Triggers
 	TriggerBusinessRegistration       TriggerType = "business_registration"
 	TriggerDirectorUBOChange          TriggerType = "director_ubo_change"
-	TriggerMerchantOnboarding         TriggerType = "merchant_onboarding"
+	// TriggerMerchantOnboarding deleted (trigger 13 removed — zero callers).
 	TriggerBusinessLicenseExpiry      TriggerType = "business_license_expiry"
 	TriggerBeneficialOwnershipChange  TriggerType = "beneficial_ownership_change"
 )
@@ -322,8 +322,8 @@ func (e *TriggerEngine) Process(ctx context.Context, event KYCTriggerEvent) Trig
 		result = e.handleBusinessRegistration(ctx, event)
 	case TriggerDirectorUBOChange:
 		result = e.handleDirectorUBOChange(ctx, event)
-	case TriggerMerchantOnboarding:
-		result = e.handleMerchantOnboarding(ctx, event)
+	// Trigger 13 (merchant_onboarding) removed: zero callers — merchant review
+	// events now flow from merchantOnboarding.adminReview via Kafka.
 	case TriggerBusinessLicenseExpiry:
 		result = e.handleBusinessLicenseExpiry(ctx, event)
 	case TriggerBeneficialOwnershipChange:
@@ -746,30 +746,8 @@ func (e *TriggerEngine) handleDirectorUBOChange(ctx context.Context, event KYCTr
 	}
 }
 
-// Trigger 13: Merchant Onboarding → Merchant KYB Workflow
-func (e *TriggerEngine) handleMerchantOnboarding(ctx context.Context, event KYCTriggerEvent) TriggerResult {
-	workflowID := fmt.Sprintf("kyb-merchant-%s-%d", event.BusinessID, time.Now().UnixMilli())
-
-	_ = e.dapr.Publish("kyb.merchant.onboarding", map[string]interface{}{
-		"merchantId":   event.BusinessID,
-		"userId":       event.UserID,
-		"workflowId":   workflowID,
-		"merchantType": event.Metadata["merchant_type"],
-		"requiredDocs": []string{"business_license", "bank_statement", "pci_compliance", "mcc_code"},
-	})
-
-	return TriggerResult{
-		TriggerType:  TriggerMerchantOnboarding,
-		EntityID:     event.BusinessID,
-		Action:       "merchant_kyb_initiated",
-		WorkflowID:   workflowID,
-		RequiredTier: 2,
-		Frozen:       false,
-		Message:      "Merchant KYB workflow initiated. PCI compliance and business license verification required.",
-		NextSteps:    []string{"verify_business_license", "verify_bank_account", "check_pci_compliance", "assign_mcc_code", "set_fee_schedule"},
-		Timestamp:    time.Now(),
-	}
-}
+// Trigger 13 (Merchant Onboarding) handler deleted — zero callers; merchant
+// review events now flow from merchantOnboarding.adminReview via Kafka.
 
 // Trigger 14: Business License Expiry → KYB Renewal
 func (e *TriggerEngine) handleBusinessLicenseExpiry(ctx context.Context, event KYCTriggerEvent) TriggerResult {

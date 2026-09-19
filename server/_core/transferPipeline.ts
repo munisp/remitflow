@@ -8,6 +8,8 @@
  * that core transfer.send and p2p.sendByAlias already use.
  *
  * Steps actually executed (in order):
+ *   0. Tenant-status guard — suspended/churned tenants cannot create transfers
+ *      (W13 F-16; trial tenants are allowed)
  *   1. Sanctions screening (fail-closed in production)
  *   2. Fraud ML scoring (fail-closed in production unless ALLOW_DEGRADED_FRAUD_VELOCITY=1)
  *   3. Velocity check (fail-closed in production unless ALLOW_DEGRADED_FRAUD_VELOCITY=1)
@@ -35,6 +37,7 @@ import { checkFraud, checkVelocity } from "../fraud.service";
 import { and, eq, sql } from "drizzle-orm";
 import { tigerbeetleAccounts } from "../../drizzle/schema.integrations";
 import { TB_LEDGERS, TB_ACCOUNT_CODES, PLATFORM_SYSTEM_USER_ID } from "./tigerBeetle";
+import { assertTenantNotSuspended } from "../tenantMiddleware";
 
 /**
  * Deterministic TigerBeetle transfer id derived from the transfer id string.
@@ -271,6 +274,12 @@ export async function executeTransferPipeline(input: TransferPipelineInput): Pro
     notificationSent: false,
     auditLogged: false,
   };
+
+  // 0. Tenant-status guard (W13 F-16): suspended/churned tenants are denied
+  // BEFORE any screening or ledger hold. Trial tenants are allowed (documented).
+  // Fail-open is NOT acceptable here — the guard throws on resolution errors
+  // only via TRPCError; a missing tenant row resolves to the default tenant.
+  await assertTenantNotSuspended(input.userId);
 
   // 1. Sanctions screening (Go service)
   try {

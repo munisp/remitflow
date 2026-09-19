@@ -61,6 +61,13 @@ const BdcRescreening = lazy(() => import("./pages/bdc/BdcRescreening"));
 const BdcOffboarding = lazy(() => import("./pages/bdc/BdcOffboarding"));
 const BdcPickup = lazy(() => import("./pages/bdc/BdcPickup"));
 const BdcTellerFraud = lazy(() => import("./pages/bdc/BdcTellerFraud"));
+// W13-MERCHANT
+const MerchantOnboarding = lazy(() => import("./pages/MerchantOnboarding"));
+const MerchantKybConsole = lazy(() => import("./pages/MerchantKybConsole"));
+// W13-PARTNER
+const PartnerApply = lazy(() => import("./pages/PartnerApply"));
+const PartnerApplicationsConsole = lazy(() => import("./pages/PartnerApplicationsConsole"));
+// /W13-PARTNER
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -191,6 +198,9 @@ const App: React.FC = () => {
             path="/onboarding/completion"
             element={<OnboardingCompletion />}
           />
+          {/* W13-PARTNER — public partner application (submit + status check) */}
+          <Route path="/partner/apply" element={<PartnerApply />} />
+          {/* /W13-PARTNER */}
 
           <Route
             path="/"
@@ -258,6 +268,13 @@ const App: React.FC = () => {
             <Route path="bdc/offboarding" element={<AdminRoute><BdcOffboarding /></AdminRoute>} />
             <Route path="bdc/pickup" element={<BdcPickup />} />
             <Route path="bdc/teller-fraud" element={<AdminRoute><BdcTellerFraud /></AdminRoute>} />
+            {/* W13-MERCHANT: /merchant/onboarding is user-facing;
+                /admin/merchant-kyb is the admin review console. */}
+            <Route path="merchant/onboarding" element={<MerchantOnboarding />} />
+            <Route path="admin/merchant-kyb" element={<AdminRoute><MerchantKybConsole /></AdminRoute>} />
+            {/* W13-PARTNER — admin review queue for partner applications */}
+            <Route path="admin/partner-applications" element={<AdminRoute><PartnerApplicationsConsole /></AdminRoute>} />
+            {/* /W13-PARTNER */}
           </Route>
 
           <Route path="*" element={<Navigate to="/" replace />} />

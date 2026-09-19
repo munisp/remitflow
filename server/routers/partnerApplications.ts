@@ -17,7 +17,9 @@ import { getDb } from "../db.js";
 import { sql } from "drizzle-orm";
 import { logger } from '../_core/logger';
 import { validateFile, type FileValidationResult } from "../_core/serviceRegistry";
-import { resolveTenantContext } from "../tenantMiddleware";
+import { requireTotpStepUp } from "../_core/totpStepUp";
+import { sendPartnerApproval } from "../email";
+import { encryptField } from "../_core/secretBox";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function generateApiKey(env: "sandbox" | "production"): { fullKey: string; prefix: string; hash: string } {
@@ -39,6 +41,47 @@ function slugify(name: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
     .substring(0, 63);
+}
+
+// W13 (SPEC §5.1): best-effort in-memory rate limiter for the PUBLIC submit
+// endpoint (no new deps; rateLimitedProcedure is protected-only). Keyed by
+// client IP; 5 submissions per 10 minutes. Fail-closed on excess.
+const _submitHits = new Map<string, number[]>();
+function submitRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const windowMs = 10 * 60 * 1000;
+  const hits = (_submitHits.get(ip) ?? []).filter((t) => now - t < windowMs);
+  if (hits.length >= 5) {
+    _submitHits.set(ip, hits);
+    return false;
+  }
+  hits.push(now);
+  _submitHits.set(ip, hits);
+  if (_submitHits.size > 10_000) {
+    for (const [k, v] of _submitHits) {
+      if (v.every((t) => now - t >= windowMs)) _submitHits.delete(k);
+    }
+  }
+  return true;
+}
+
+// W13 (SPEC §5.1 F-T2): tenant membership oracle for partner self-service
+// (API keys, webhooks). Caller must be a global admin OR hold a tenant_users
+// row for the target tenant. Returns the verified tenantId.
+async function assertPartnerTenantMembership(
+  db: any,
+  userId: number,
+  userRole: string,
+  tenantId: number,
+): Promise<number> {
+  if (userRole === "admin") return tenantId;
+  const rows = await db.execute(sql`
+    SELECT 1 AS ok FROM tenant_users WHERE tenant_id = ${tenantId} AND user_id = ${userId} LIMIT 1
+  `);
+  if (!(rows as any[]).length) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Not a member of this tenant" });
+  }
+  return tenantId;
 }
 
 // ─── Partner Application Router ───────────────────────────────────────────────
@@ -69,14 +112,27 @@ export const partnerApplicationsRouter = router({
       primaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).default("#7c3aed"),
       secondaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).default("#06b6d4"),
     }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
 
-      // Generate unique slug
-      const baseSlug = slugify(input.brandName);
-      const uniqueSuffix = randomBytes(3).toString("hex");
+      // W13: best-effort in-memory rate limit (public endpoint; see helper).
+      const ip = (ctx as any).req?.ip ?? (ctx as any).req?.socket?.remoteAddress ?? "unknown";
+      if (!submitRateLimit(String(ip))) {
+        throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Too many submissions — please retry later" });
+      }
+
+      // W13 (SPEC §5.1): slug entropy raised to randomBytes(8); base truncated
+      // so base + "-" + 16 hex chars never exceeds slug varchar(63).
+      const baseSlug = slugify(input.brandName).substring(0, 46) || "partner";
+      const uniqueSuffix = randomBytes(8).toString("hex");
       const slug = `${baseSlug}-${uniqueSuffix}`;
+
+      // W13: claim token authorizes later document/SLA/info updates for
+      // applicants without a session (replaces the `submitted_by_user_id IS
+      // NULL` bypass). Returned ONCE here; stored in claim_token varchar(64).
+      const claimToken = randomBytes(32).toString("hex");
+      const submittedByUserId = ctx.user?.id ?? null;
 
       const result = await db.execute(sql`
         INSERT INTO partner_applications (
@@ -87,7 +143,7 @@ export const partnerApplicationsRouter = router({
           target_corridors, requested_plan,
           has_aml_policy, has_kyc_process, is_regulated, regulatory_licenses,
           primary_color, secondary_color,
-          status, submitted_at, created_at, updated_at
+          status, submitted_at, claim_token, submitted_by_user_id, created_at, updated_at
         ) VALUES (
           ${input.companyName}, ${input.brandName}, ${slug}, ${input.applicationType},
           ${input.contactName}, ${input.contactEmail}, ${input.contactPhone ?? null}, ${input.website ?? null},
@@ -96,35 +152,46 @@ export const partnerApplicationsRouter = router({
           ${JSON.stringify(input.targetCorridors)}, ${input.requestedPlan},
           ${input.hasAmlPolicy}, ${input.hasKycProcess}, ${input.isRegulated}, ${JSON.stringify(input.regulatoryLicenses)},
           ${input.primaryColor}, ${input.secondaryColor},
-          'submitted', NOW(), NOW(), NOW()
+          'submitted', NOW(), ${claimToken}, ${submittedByUserId}, NOW(), NOW()
         ) RETURNING id, slug, status
       `);
       const row = (result as any[])[0];
       return {
-        success: true, verified: true,
+        success: true,
         applicationId: row.id,
         slug: row.slug,
         status: "submitted",
+        // Shown ONCE — required to manage this application without an account.
+        claimToken,
         message: "Your application has been submitted. Our team will review it within 2-3 business days.",
         trackingUrl: `/partner/application/${row.slug}`,
       };
     }),
 
   // ── Public: Check application status by slug ─────────────────────────────
+  // W13 (SPEC §5.1): PII stripped — status + timestamps ONLY. No contact
+  // email, no rejection-reason detail, no internal request text.
   checkStatus: publicProcedure
     .input(z.object({ slug: z.string() }))
     .query(async ({ input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const rows = await db.execute(sql`
-        SELECT id, slug, company_name, brand_name, status, submitted_at, reviewed_at,
-               rejection_reason, additional_info_request, approved_at, sla_signed_at,
-               requested_plan, contact_email
+        SELECT slug, status, submitted_at, reviewed_at, approved_at, sla_signed_at,
+               (additional_info_request IS NOT NULL) AS additional_info_requested
         FROM partner_applications WHERE slug = ${input.slug} LIMIT 1
       `);
       const app = (rows as any[])[0];
       if (!app) throw new TRPCError({ code: "NOT_FOUND", message: "Application not found" });
-      return app;
+      return {
+        slug: app.slug,
+        status: app.status,
+        submittedAt: app.submitted_at,
+        reviewedAt: app.reviewed_at,
+        approvedAt: app.approved_at,
+        slaSignedAt: app.sla_signed_at,
+        additionalInfoRequested: !!app.additional_info_requested,
+      };
     }),
 
   // ── Protected: Get my applications ──────────────────────────────────────────
@@ -147,6 +214,8 @@ export const partnerApplicationsRouter = router({
       applicationId: z.number().int(),
       docType: z.enum(["businessRegDocUrl", "amlPolicyDocUrl", "directorIdDocUrl", "bankStatementDocUrl"]),
       fileUrl: z.string().url(),
+      // W13: authorizes applicants whose submission has no linked account yet.
+      claimToken: z.string().max(64).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -173,14 +242,19 @@ export const partnerApplicationsRouter = router({
         logger.warn({ applicationId: input.applicationId, docType: input.docType, threats: scan.threats }, "[Partner] Unsafe document rejected");
         throw new TRPCError({ code: "BAD_REQUEST", message: `Document rejected by security scan: ${scan.threats.join(", ") || "unsafe content"}` });
       }
+      // W13 (F-T3): ownership = linked account OR valid claim token. The
+      // `OR submitted_by_user_id IS NULL` bypass is removed; NULL claim_token
+      // never matches (SQL NULL comparison is false) so token-less public
+      // rows fail closed.
       const result = await db.execute(sql`
         UPDATE partner_applications
         SET ${sql.raw(col)} = ${input.fileUrl}, submitted_by_user_id = ${ctx.user.id}, updated_at = NOW()
-        WHERE id = ${input.applicationId} AND (submitted_by_user_id = ${ctx.user.id} OR submitted_by_user_id IS NULL)
+        WHERE id = ${input.applicationId}
+          AND (submitted_by_user_id = ${ctx.user.id} OR claim_token = ${input.claimToken ?? null})
         RETURNING id
       `);
       if (!result.length) throw new TRPCError({ code: "NOT_FOUND", message: "Application not found or access denied" });
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Protected: Sign SLA ──────────────────────────────────────────────────
@@ -188,6 +262,7 @@ export const partnerApplicationsRouter = router({
     .input(z.object({
       applicationId: z.number().int(),
       slaVersion: z.string().default("v1.0"),
+      claimToken: z.string().max(64).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -195,11 +270,12 @@ export const partnerApplicationsRouter = router({
       const result = await db.execute(sql`
         UPDATE partner_applications
         SET sla_signed_at = NOW(), sla_version = ${input.slaVersion}, submitted_by_user_id = ${ctx.user.id}, updated_at = NOW()
-        WHERE id = ${input.applicationId} AND (submitted_by_user_id = ${ctx.user.id} OR submitted_by_user_id IS NULL)
+        WHERE id = ${input.applicationId}
+          AND (submitted_by_user_id = ${ctx.user.id} OR claim_token = ${input.claimToken ?? null})
         RETURNING id
       `);
       if (!result.length) throw new TRPCError({ code: "NOT_FOUND", message: "Application not found or access denied" });
-      return { success: true, verified: true, signedAt: new Date().toISOString() };
+      return { success: true, signedAt: new Date().toISOString() };
     }),
 
   // ── Protected: Provide additional info ──────────────────────────────────
@@ -207,6 +283,7 @@ export const partnerApplicationsRouter = router({
     .input(z.object({
       applicationId: z.number().int(),
       response: z.string().min(10),
+      claimToken: z.string().max(64).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
@@ -218,12 +295,13 @@ export const partnerApplicationsRouter = router({
             submitted_by_user_id = ${ctx.user.id},
             business_description = COALESCE(business_description, '') || E'\n\n[Additional Info]\n' || ${input.response},
             updated_at = NOW()
-        WHERE id = ${input.applicationId} AND (submitted_by_user_id = ${ctx.user.id} OR submitted_by_user_id IS NULL)
+        WHERE id = ${input.applicationId}
+          AND (submitted_by_user_id = ${ctx.user.id} OR claim_token = ${input.claimToken ?? null})
           AND status = 'additional_info_required'
         RETURNING id
       `);
       if (!result.length) throw new TRPCError({ code: "NOT_FOUND", message: "Application not found or not awaiting additional info" });
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Admin: List all applications with filters ────────────────────────────
@@ -293,87 +371,170 @@ export const partnerApplicationsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.execute(sql`
+      // W13: guarded transition — affected==1 else CONFLICT.
+      const res = await db.execute(sql`
         UPDATE partner_applications
         SET status = 'under_review', reviewed_by = ${ctx.user.id}, updated_at = NOW()
         WHERE id = ${input.id} AND status IN ('submitted', 'additional_info_required')
+        RETURNING id
       `);
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      if (!(res as any[]).length) {
+        throw new TRPCError({ code: "CONFLICT", message: "Application is not in a reviewable state (already moved)" });
+      }
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Admin: Approve application ───────────────────────────────────────────
-  approve: adminProcedure
+  // W13 (SPEC §5.1 F-13): TOTP step-up + SLA-signed gate + guarded transition
+  // + single db.transaction (application→approved, tenants row status 'trial'
+  // — activation happens separately after evidence —, tenant_users admin row,
+  // users.tenant_id set, invite code linked). Approval email wired honestly:
+  // transport failure is audited and reported, never fake-sent.
+  approve: auditedAdminProcedure
     .input(z.object({
       id: z.number().int(),
       reviewNotes: z.string().optional(),
       plan: z.enum(["starter", "growth", "enterprise", "white_label"]).optional(),
+      totpCode: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "partner application approval");
+
       // Get application
       const appRows = await db.execute(sql`SELECT * FROM partner_applications WHERE id = ${input.id} LIMIT 1`);
       const app = (appRows as any[])[0];
       if (!app) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
-      // Create tenant
-      const tenantRows = await db.execute(sql`
-        INSERT INTO tenants (slug, name, plan, status, brand_name, support_email, primary_color, secondary_color, logo_url, "createdAt", "updatedAt")
-        VALUES (${app.slug}, ${app.company_name}, ${input.plan ?? app.requested_plan}, 'active',
-                ${app.brand_name}, ${app.contact_email}, ${app.primary_color}, ${app.secondary_color}, ${app.logo_url ?? null},
-                NOW(), NOW())
-        RETURNING id
-      `);
-      const tenantId = (tenantRows as any[])[0].id;
+      // Fail closed: SLA must be signed before approval.
+      if (!app.sla_signed_at) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "SLA must be signed before approval" });
+      }
 
-      // Generate invite code for the partner
+      const plan = input.plan ?? app.requested_plan;
       const inviteCode = `RF-${randomBytes(4).toString("hex").toUpperCase()}-APPROVED`;
-      await db.execute(sql`
-        INSERT INTO partner_invite_codes (code, description, created_by, max_uses, plan, is_active, "createdAt")
-        VALUES (${inviteCode}, ${'Auto-generated for approved application ' + app.slug}, ${ctx.user.id}, 1, ${input.plan ?? app.requested_plan}, true, NOW())
-      `);
 
+      const { tenantId } = await db.transaction(async (tx: any) => {
+        // Guarded single-winner transition FIRST (inside txn so a lost race
+        // rolls back any tenant/invite writes).
+        const claim = await tx.execute(sql`
+          UPDATE partner_applications
+          SET status = 'approved', reviewed_by = ${ctx.user.id}, reviewed_at = NOW(),
+              approved_at = NOW(), review_notes = ${input.reviewNotes ?? null}, updated_at = NOW()
+          WHERE id = ${input.id} AND status IN ('submitted', 'under_review')
+          RETURNING id
+        `);
+        if (!(claim as any[]).length) {
+          throw new TRPCError({ code: "CONFLICT", message: "Application is not in an approvable state (already decided)" });
+        }
 
-      // Update application
-      await db.execute(sql`
-        UPDATE partner_applications
-        SET status = 'approved', reviewed_by = ${ctx.user.id}, reviewed_at = NOW(),
-            approved_at = NOW(), review_notes = ${input.reviewNotes ?? null},
-            tenant_id = ${tenantId}, updated_at = NOW()
-        WHERE id = ${input.id}
-      `);
+        // Tenant starts as 'trial' — NOT active; tenantsRouter.activate is the
+        // only activation path, after evidence.
+        const tenantRows = await tx.execute(sql`
+          INSERT INTO tenants (slug, name, plan, status, brand_name, support_email, primary_color, secondary_color, logo_url, "createdAt", "updatedAt")
+          VALUES (${app.slug}, ${app.company_name}, ${plan}, 'trial',
+                  ${app.brand_name}, ${app.contact_email}, ${app.primary_color}, ${app.secondary_color}, ${app.logo_url ?? null},
+                  NOW(), NOW())
+          RETURNING id
+        `);
+        const newTenantId = (tenantRows as any[])[0].id;
 
-      // Add audit comment
-      await db.execute(sql`
-        INSERT INTO partner_application_comments (application_id, author_id, comment, is_internal, created_at)
-        VALUES (${input.id}, ${ctx.user.id}, ${`Application approved. Tenant created with ID ${tenantId}. Plan: ${input.plan ?? app.requested_plan}`}, false, NOW())
-      `);
+        // Invite code + link back to the application.
+        const inviteRows = await tx.execute(sql`
+          INSERT INTO partner_invite_codes (code, description, created_by, max_uses, plan, is_active, "createdAt")
+          VALUES (${inviteCode}, ${'Auto-generated for approved application ' + app.slug}, ${ctx.user.id}, 1, ${plan}, true, NOW())
+          RETURNING id
+        `);
+        const inviteCodeId = (inviteRows as any[])[0].id;
 
-      return { success: true, verified: true, tenantId, inviteCode };
+        await tx.execute(sql`
+          UPDATE partner_applications
+          SET tenant_id = ${newTenantId}, invite_code_id = ${inviteCodeId}, updated_at = NOW()
+          WHERE id = ${input.id}
+        `);
+
+        // Partner admin membership + users.tenant_id (W13 column). Does not
+        // clobber an existing different-tenant assignment.
+        if (app.submitted_by_user_id != null) {
+          await tx.execute(sql`
+            INSERT INTO tenant_users (tenant_id, user_id, role, joined_at)
+            VALUES (${newTenantId}, ${app.submitted_by_user_id}, 'admin', NOW())
+            ON CONFLICT (tenant_id, user_id) DO NOTHING
+          `);
+          await tx.execute(sql`
+            UPDATE users SET tenant_id = ${newTenantId}
+            WHERE id = ${app.submitted_by_user_id} AND (tenant_id IS NULL OR tenant_id = ${newTenantId})
+          `);
+        }
+
+        await tx.execute(sql`
+          INSERT INTO partner_application_comments (application_id, author_id, comment, is_internal, created_at)
+          VALUES (${input.id}, ${ctx.user.id}, ${`Application approved. Tenant created with ID ${newTenantId} (status: trial). Plan: ${plan}`}, false, NOW())
+        `);
+
+        return { tenantId: newTenantId as number };
+      });
+
+      // Wire the existing approval email — honest failure handling: a
+      // transport failure is logged + audited as a warning comment and
+      // reported via emailSent:false. The approval itself stands.
+      let emailSent = false;
+      let emailError: string | undefined;
+      try {
+        const emailResult = await sendPartnerApproval({
+          to: app.contact_email,
+          partnerName: app.company_name,
+          contactName: app.contact_name,
+          plan,
+          inviteCode,
+        });
+        emailSent = emailResult.success;
+        if (!emailResult.success) emailError = emailResult.error ?? "unknown transport error";
+      } catch (err: any) {
+        emailError = err?.message ?? String(err);
+      }
+      if (!emailSent) {
+        logger.warn({ applicationId: input.id, err: emailError }, "[Partner] Approval email NOT sent — transport unavailable");
+        await db.execute(sql`
+          INSERT INTO partner_application_comments (application_id, author_id, comment, is_internal, created_at)
+          VALUES (${input.id}, ${ctx.user.id}, ${`WARNING: approval email to ${app.contact_email} was NOT sent (${emailError ?? "transport unavailable"}). Invite code must be delivered manually.`}, true, NOW())
+        `).catch(() => {});
+      }
+
+      return { success: true, tenantId, inviteCode, emailSent, ...(emailError ? { emailError } : {}) };
     }),
 
   // ── Admin: Reject application ────────────────────────────────────────────
-  reject: adminProcedure
+  // W13: TOTP step-up + guarded transition (never from 'approved').
+  reject: auditedAdminProcedure
     .input(z.object({
       id: z.number().int(),
       rejectionReason: z.string().min(10),
       reviewNotes: z.string().optional(),
+      totpCode: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.execute(sql`
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "partner application rejection");
+      const res = await db.execute(sql`
         UPDATE partner_applications
         SET status = 'rejected', reviewed_by = ${ctx.user.id}, reviewed_at = NOW(),
             rejection_reason = ${input.rejectionReason},
             review_notes = ${input.reviewNotes ?? null}, updated_at = NOW()
-        WHERE id = ${input.id}
+        WHERE id = ${input.id} AND status <> 'approved'
+        RETURNING id
       `);
+      if (!(res as any[]).length) {
+        throw new TRPCError({ code: "CONFLICT", message: "Application not found or already approved (approved applications cannot be rejected)" });
+      }
       await db.execute(sql`
         INSERT INTO partner_application_comments (application_id, author_id, comment, is_internal, created_at)
         VALUES (${input.id}, ${ctx.user.id}, ${`Application rejected: ${input.rejectionReason}`}, false, NOW())
       `);
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Admin: Request additional info ──────────────────────────────────────
@@ -385,18 +546,22 @@ export const partnerApplicationsRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.execute(sql`
+      const res = await db.execute(sql`
         UPDATE partner_applications
         SET status = 'additional_info_required',
             additional_info_request = ${input.request},
             reviewed_by = ${ctx.user.id}, updated_at = NOW()
-        WHERE id = ${input.id}
+        WHERE id = ${input.id} AND status IN ('submitted', 'under_review')
+        RETURNING id
       `);
+      if (!(res as any[]).length) {
+        throw new TRPCError({ code: "CONFLICT", message: "Application is not in a state that accepts info requests" });
+      }
       await db.execute(sql`
         INSERT INTO partner_application_comments (application_id, author_id, comment, is_internal, created_at)
         VALUES (${input.id}, ${ctx.user.id}, ${`Additional info requested: ${input.request}`}, false, NOW())
       `);
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Admin: Add comment ───────────────────────────────────────────────────
@@ -413,7 +578,7 @@ export const partnerApplicationsRouter = router({
         INSERT INTO partner_application_comments (application_id, author_id, comment, is_internal, created_at)
         VALUES (${input.applicationId}, ${ctx.user.id}, ${input.comment}, ${input.isInternal}, NOW())
       `);
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   // ── Admin: Dashboard stats ───────────────────────────────────────────────
@@ -435,13 +600,17 @@ export const partnerApplicationsRouter = router({
 });
 
 // ─── Partner API Keys Router ──────────────────────────────────────────────────
+// W13 (SPEC §5.1 F-T2): every proc requires global admin OR a tenant_users
+// membership row for the target tenant — these keys authenticate the
+// embedded-payouts money API. Production keys additionally require TOTP.
 export const partnerApiKeysRouter = router({
   // List keys for a tenant
   list: protectedProcedure
     .input(z.object({ tenantId: z.number().int() }))
-    .query(async ({ input }) => {
+    .query(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await assertPartnerTenantMembership(db, ctx.user.id, ctx.user.role, input.tenantId);
       const rows = await db.execute(sql`
         SELECT id, name, key_prefix, environment, status, permissions,
                last_used_at, expires_at, request_count, created_at
@@ -460,10 +629,15 @@ export const partnerApiKeysRouter = router({
       environment: z.enum(["sandbox", "production"]).default("sandbox"),
       permissions: z.array(z.string()).default(["transfers:read", "transfers:write", "webhooks:manage"]),
       expiresInDays: z.number().int().optional(),
+      totpCode: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      await assertPartnerTenantMembership(db, ctx.user.id, ctx.user.role, input.tenantId);
+      if (input.environment === "production") {
+        await requireTotpStepUp(ctx.user.id, input.totpCode, "production partner API key creation");
+      }
       const { fullKey, prefix, hash } = generateApiKey(input.environment);
       const expiresAt = input.expiresInDays
         ? new Date(Date.now() + input.expiresInDays * 86400000).toISOString()
@@ -476,7 +650,7 @@ export const partnerApiKeysRouter = router({
       `);
       const keyId = (keyInserted as any)[0]?.id ?? 0;
       // Return full key ONCE — never stored in DB
-      return { success: true, verified: true, fullKey, prefix, keyId, environment: input.environment };
+      return { success: true, fullKey, prefix, keyId, environment: input.environment };
     }),
 
   // Revoke key
@@ -485,33 +659,36 @@ export const partnerApiKeysRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.execute(sql`
+      const keyRows = await db.execute(sql`SELECT id, tenant_id FROM partner_api_keys WHERE id = ${input.keyId} LIMIT 1`);
+      const key = (keyRows as any[])[0];
+      if (!key) throw new TRPCError({ code: "NOT_FOUND", message: "API key not found" });
+      await assertPartnerTenantMembership(db, ctx.user.id, ctx.user.role, key.tenant_id);
+      const res = await db.execute(sql`
         UPDATE partner_api_keys
         SET status = 'revoked', revoked_by = ${ctx.user.id}, revoked_at = NOW()
-        WHERE id = ${input.keyId}
+        WHERE id = ${input.keyId} AND status = 'active'
+        RETURNING id
       `);
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      if (!(res as any[]).length) {
+        throw new TRPCError({ code: "CONFLICT", message: "Key already revoked or expired" });
+      }
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });
 
 // ─── Partner Webhooks Router ──────────────────────────────────────────────────
+// W13 (SPEC §5.1): all procs are scoped to a tenant the caller actually
+// belongs to (tenant_users row) unless they are a global admin.
 export const partnerWebhooksRouter = router({
   list: protectedProcedure
     .input(z.object({ tenantId: z.number().int() }))
     .query(async ({ input, ctx }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      // W9/Q10 (F9-7): tenant scoping comes from the session, not the client.
-      const session = await resolveTenantContext(ctx.user.id);
-      if (session.tenantId == null) {
-        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No tenant associated with your account." });
-      }
-      if (input.tenantId !== session.tenantId && ctx.user.role !== "admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Cannot list webhooks for another tenant" });
-      }
+      const tenantId = await assertPartnerTenantMembership(db, ctx.user.id, ctx.user.role, input.tenantId);
       const rows = await db.execute(sql`
         SELECT id, url, events, is_active, last_delivered_at, failure_count, created_at
-        FROM partner_webhooks WHERE tenant_id = ${session.tenantId} ORDER BY created_at DESC
+        FROM partner_webhooks WHERE tenant_id = ${tenantId} ORDER BY created_at DESC
       `);
       return rows as any[];
     }),
@@ -525,17 +702,10 @@ export const partnerWebhooksRouter = router({
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      // W9/Q10 (F9-7): the webhook tenant comes from the caller's session —
-      // a client-supplied tenantId would register webhooks (and leak signed
-      // events) under another tenant.
-      const session = await resolveTenantContext(ctx.user.id);
-      if (session.tenantId == null) {
-        throw new TRPCError({ code: "PRECONDITION_FAILED", message: "No tenant associated with your account — cannot register webhooks." });
-      }
-      if (input.tenantId !== session.tenantId && ctx.user.role !== "admin") {
-        throw new TRPCError({ code: "FORBIDDEN", message: "Cannot register webhooks for another tenant" });
-      }
-      const tenantId = session.tenantId;
+      // W13: membership-verified tenant — a client-supplied tenantId for a
+      // tenant the caller does not belong to is rejected (signed events would
+      // leak across tenants).
+      const tenantId = await assertPartnerTenantMembership(db, ctx.user.id, ctx.user.role, input.tenantId);
       const signingSecret = generateWebhookSecret();
       const whInserted = await db.execute(sql`
         INSERT INTO partner_webhooks (tenant_id, url, events, signing_secret, is_active, failure_count, created_by, created_at, updated_at)
@@ -543,311 +713,35 @@ export const partnerWebhooksRouter = router({
         RETURNING id
       `);
       const webhookId = (whInserted as any)[0]?.id ?? 0;
-      return { success: true, verified: true, signingSecret, webhookId };
+      return { success: true, signingSecret, webhookId };
     }),
 
   toggle: auditedProcedure
     .input(z.object({ webhookId: z.number().int(), isActive: z.boolean() }))
-    .mutation(async ({ input }) => {
+    .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const _res = await db.execute(sql`UPDATE partner_webhooks SET is_active = ${input.isActive}, updated_at = NOW() WHERE id = ${input.webhookId} RETURNING 1`);
+      const whRows = await db.execute(sql`SELECT id, tenant_id FROM partner_webhooks WHERE id = ${input.webhookId} LIMIT 1`);
+      const wh = (whRows as any[])[0];
+      if (!wh) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      await assertPartnerTenantMembership(db, ctx.user.id, ctx.user.role, wh.tenant_id);
+      const _res = await db.execute(sql`UPDATE partner_webhooks SET is_active = ${input.isActive}, updated_at = NOW() WHERE id = ${input.webhookId} AND tenant_id = ${wh.tenant_id} RETURNING 1`);
 
       if (!_res.length) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
 
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 
   delete: auditedProcedure
     .input(z.object({ webhookId: z.number().int() }))
-    .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.execute(sql`DELETE FROM partner_webhooks WHERE id = ${input.webhookId}`);
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
-    }),
-});
-
-// ─── User Onboarding Router ───────────────────────────────────────────────────
-export const userOnboardingRouter = router({
-  getProgress: protectedProcedure.query(async ({ ctx }) => {
-    const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`
-      SELECT * FROM user_onboarding_progress WHERE user_id = ${ctx.user.id} LIMIT 1
-    `);
-    if ((rows as any[]).length === 0) {
-      // Create initial record
-      await db.execute(sql`
-        INSERT INTO user_onboarding_progress (user_id, status, created_at, updated_at)
-        VALUES (${ctx.user.id}, 'not_started', NOW(), NOW())
-        ON CONFLICT (user_id) DO NOTHING
-      `);
-      return {
-        status: "not_started",
-        profileCompleted: false,
-        bankLinked: false,
-        kycStarted: false,
-        kycCompleted: false,
-        firstTransferMade: false,
-        notificationsEnabled: false,
-        completedSteps: 0,
-        totalSteps: 6,
-        percentComplete: 0,
-      };
-    }
-    const p = (rows as any[])[0];
-    const completedSteps = [p.profile_completed, p.bank_linked, p.kyc_started, p.kyc_completed, p.first_transfer_made, p.notifications_enabled].filter(Boolean).length;
-    return {
-      ...p,
-      completedSteps,
-      totalSteps: 6,
-      percentComplete: Math.round((completedSteps / 6) * 100),
-    };
-  }),
-
-  completeStep: auditedProcedure
-    .input(z.object({
-      step: z.enum(["profile", "bank", "kycStart", "kycComplete", "firstTransfer", "notifications"]),
-    }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
       if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const colMap: Record<string, { col: string; tsCol: string }> = {
-        profile: { col: "profile_completed", tsCol: "profile_completed_at" },
-        bank: { col: "bank_linked", tsCol: "bank_linked_at" },
-        kycStart: { col: "kyc_started", tsCol: "kyc_started_at" },
-        kycComplete: { col: "kyc_completed", tsCol: "kyc_completed_at" },
-        firstTransfer: { col: "first_transfer_made", tsCol: "first_transfer_at" },
-        notifications: { col: "notifications_enabled", tsCol: null as any },
-      };
-      const mapping = colMap[input.step];
-      if (!mapping) throw new TRPCError({ code: "BAD_REQUEST", message: "Invalid onboarding step" });
-      const { col, tsCol } = mapping;
-      const tsUpdate = tsCol ? sql`, ${sql.raw(tsCol)} = NOW()` : sql``;
-      await db.execute(sql`
-        INSERT INTO user_onboarding_progress (user_id, status, ${sql.raw(col)}, created_at, updated_at)
-        VALUES (${ctx.user.id}, 'in_progress', true, NOW(), NOW())
-        ON CONFLICT (user_id) DO UPDATE
-        SET ${sql.raw(col)} = true, status = 'in_progress', updated_at = NOW() ${tsUpdate}
-      `);
-      // Check if all steps complete
-      const rows = await db.execute(sql`SELECT * FROM user_onboarding_progress WHERE user_id = ${ctx.user.id} LIMIT 1`);
-      const p = (rows as any[])[0];
-      if (p?.profile_completed && p?.bank_linked && p?.kyc_completed && p?.first_transfer_made) {
-        await db.execute(sql`UPDATE user_onboarding_progress SET status = 'completed', completed_at = NOW() WHERE user_id = ${ctx.user.id}`);
-      }
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
-    }),
-
-  skip: auditedProcedure.mutation(async ({ ctx }) => {
-    const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    await db.execute(sql`
-      INSERT INTO user_onboarding_progress (user_id, status, skipped_at, created_at, updated_at)
-      VALUES (${ctx.user.id}, 'skipped', NOW(), NOW(), NOW())
-      ON CONFLICT (user_id) DO UPDATE SET status = 'skipped', skipped_at = NOW(), updated_at = NOW()
-    `);
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
-  }),
-
-  // Full onboarding completion — saves all collected data in one shot
-  complete: protectedProcedure
-    .input(z.object({
-      phone: z.string().optional(),
-      country: z.string().optional(),
-      address: z.string().max(2000).optional(),
-      dateOfBirth: z.string().optional(),
-      idType: z.string().optional(),
-      idNumber: z.string().optional(),
-      bankName: z.string().optional(),
-      accountNumber: z.string().optional(),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const profileCompleted = !!(input.phone && input.address);
-      const bankLinked = !!(input.bankName && input.accountNumber);
-      const kycStarted = !!(input.idType || input.idNumber);
-      await db.execute(sql`
-        INSERT INTO user_onboarding_progress
-          (user_id, status, profile_completed, bank_linked, kyc_started, created_at, updated_at)
-        VALUES
-          (${ctx.user.id}, 'in_progress', ${profileCompleted}, ${bankLinked}, ${kycStarted}, NOW(), NOW())
-        ON CONFLICT (user_id) DO UPDATE
-        SET profile_completed = ${profileCompleted},
-            bank_linked = ${bankLinked},
-            kyc_started = ${kycStarted},
-            status = 'in_progress',
-            updated_at = NOW()
-      `);
-      return { success: true, verified: true, profileCompleted, bankLinked, kycStarted };
-    }),
-});
-
-// ─── Compliance Email Config Router ──────────────────────────────────────────
-export const complianceEmailRouter = router({
-  // Multi-recipient list
-  listConfigs: adminProcedure.query(async () => {
-    const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`SELECT * FROM compliance_email_config ORDER BY created_at DESC`);
-    return (rows as any[]).map((r: any) => ({
-      ...r,
-      report_types: (() => { try { return typeof r.report_types === 'string' ? JSON.parse(r.report_types) : (r.report_types ?? []); } catch { return []; } })(),
-    }));
-  }),
-
-  createConfig: adminProcedure
-    .input(z.object({
-      recipientEmail: z.string().email(),
-      recipientName: z.string().min(2),
-      reportTypes: z.array(z.string()).min(1),
-      frequency: z.enum(["immediate", "daily_digest", "weekly_digest"]).default("immediate"),
-      includeAttachment: z.boolean().default(true),
-      encryptAttachment: z.boolean().default(false),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.execute(sql`
-        INSERT INTO compliance_email_config
-          (officer_name, officer_email, report_types, is_active, frequency, include_attachment, encrypt_attachment,
-           smtp_host, smtp_port, from_email, from_name, created_by, created_at, updated_at)
-        VALUES
-          (${input.recipientName}, ${input.recipientEmail}, ${JSON.stringify(input.reportTypes)}, true,
-           ${input.frequency}, ${input.includeAttachment}, ${input.encryptAttachment},
-           'smtp.sendgrid.net', 587, 'compliance@remitflow.com', 'RemitFlow Compliance',
-           ${ctx.user.id}, NOW(), NOW())
-      `);
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
-    }),
-
-  deleteConfig: adminProcedure
-    .input(z.object({ configId: z.number().int() }))
-    .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      await db.execute(sql`DELETE FROM compliance_email_config WHERE id = ${input.configId}`);
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
-    }),
-
-  sendTestEmail: adminProcedure
-    .input(z.object({ reportType: z.string() }))
-    .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const rows = await db.execute(sql`SELECT * FROM compliance_email_config WHERE is_active = true LIMIT 1`);
-      const config = (rows as any[])[0];
-      const toEmail = config?.officer_email ?? "compliance@remitflow.com";
-      logger.info(`[Compliance Email] TEST: ${input.reportType} → ${toEmail}`);
-      return { success: true, verified: true, sentTo: toEmail, reportType: input.reportType };
-    }),
-
-  getDeliveryLog: adminProcedure
-    .input(z.object({ limit: z.number().int().default(20) }))
-    .query(async () => {
-      // In production this would query an email_delivery_log table
-      return [] as any[];
-    }),
-
-  getConfig: adminProcedure.query(async () => {
-    const db = await getDb();
-    if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-    const rows = await db.execute(sql`
-      SELECT id, officer_name, officer_email, report_types, is_active,
-             smtp_host, smtp_port, smtp_user, from_email, from_name, created_at
-      FROM compliance_email_config WHERE is_active = true ORDER BY created_at DESC LIMIT 1
-    `);
-    return (rows as any[])[0] ?? null;
-  }),
-
-  saveConfig: adminProcedure
-    .input(z.object({
-      officerName: z.string().min(2),
-      officerEmail: z.string().email(),
-      reportTypes: z.array(z.string()).default(["CTR", "SAR", "FBAR"]),
-      smtpHost: z.string().default("smtp.sendgrid.net"),
-      smtpPort: z.number().int().default(587),
-      smtpUser: z.string().optional(),
-      smtpPassword: z.string().optional(),
-      fromEmail: z.string().email().default("compliance@remitflow.com"),
-      fromName: z.string().default("RemitFlow Compliance"),
-    }))
-    .mutation(async ({ ctx, input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      // Deactivate existing
-      await db.execute(sql`UPDATE compliance_email_config SET is_active = false`);
-      // Insert new
-      await db.execute(sql`
-        INSERT INTO compliance_email_config (
-          officer_name, officer_email, report_types, is_active,
-          smtp_host, smtp_port, smtp_user, smtp_password_encrypted,
-          from_email, from_name, created_by, created_at, updated_at
-        ) VALUES (
-          ${input.officerName}, ${input.officerEmail}, ${JSON.stringify(input.reportTypes)}, true,
-          ${input.smtpHost}, ${input.smtpPort}, ${input.smtpUser ?? null},
-          ${input.smtpPassword ? Buffer.from(input.smtpPassword).toString("base64") : null},
-          ${input.fromEmail}, ${input.fromName}, ${ctx.user.id}, NOW(), NOW()
-        )
-      `);
-      return { success: true, updatedAt: new Date().toISOString(), serverTime: Date.now(), verified: true };
-    }),
-
-  sendReport: adminProcedure
-    .input(z.object({
-      reportType: z.enum(["CTR", "SAR", "FBAR", "ANNUAL_AML"]),
-      reportId: z.string(),
-      reportPeriod: z.string(),
-      recipientEmail: z.string().email().optional(),
-    }))
-    .mutation(async ({ input }) => {
-      const db = await getDb();
-      if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-
-      // Get email config
-      const configRows = await db.execute(sql`SELECT * FROM compliance_email_config WHERE is_active = true LIMIT 1`);
-      const config = (configRows as any[])[0];
-      const toEmail = input.recipientEmail ?? config?.officer_email ?? "compliance@remitflow.com";
-
-      // In production, this would use nodemailer/sendgrid to send the actual email
-      // For now, we log the send attempt and return success
-      const emailPayload = {
-        to: toEmail,
-        from: config?.from_email ?? "compliance@remitflow.com",
-        subject: `[RemitFlow Compliance] ${input.reportType} Report — ${input.reportPeriod}`,
-        body: `
-Dear ${config?.officer_name ?? "Compliance Officer"},
-
-Please find attached the ${input.reportType} report for the period: ${input.reportPeriod}.
-
-Report ID: ${input.reportId}
-Report Type: ${input.reportType}
-Generated: ${new Date().toISOString()}
-
-This report has been generated in compliance with FinCEN regulatory requirements.
-
-Please review and file within the required timeframe:
-- CTR: Within 15 calendar days of the triggering transaction
-- SAR: Within 30 calendar days of initial detection
-- FBAR: By April 15 of the following calendar year
-
-Best regards,
-RemitFlow Compliance Team
-        `.trim(),
-        sentAt: new Date().toISOString(),
-      };
-
-      // Log the email attempt
-      logger.info({ data: emailPayload.subject }, '[Compliance Email] Sending ${input.reportType} report to ${toEmail}:');
-
-      return {
-        success: true, verified: true,
-        sentTo: toEmail,
-        subject: emailPayload.subject,
-        sentAt: emailPayload.sentAt,
-        message: `${input.reportType} report sent to ${toEmail}`,
-      };
+      const whRows = await db.execute(sql`SELECT id, tenant_id FROM partner_webhooks WHERE id = ${input.webhookId} LIMIT 1`);
+      const wh = (whRows as any[])[0];
+      if (!wh) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
+      await assertPartnerTenantMembership(db, ctx.user.id, ctx.user.role, wh.tenant_id);
+      await db.execute(sql`DELETE FROM partner_webhooks WHERE id = ${input.webhookId} AND tenant_id = ${wh.tenant_id}`);
+      return { success: true, updatedAt: new Date().toISOString() };
     }),
 });

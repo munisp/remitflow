@@ -145,6 +145,10 @@ const builderKybRouter = router({
       approved: z.boolean(),
       rejectionReason: z.string().max(1000).optional(),
       financialHealthScore: z.number().min(0).max(100).optional(),
+      // W13-MERCHANT (F-22): mandatory admin attestation (min 20 chars).
+      // These flags are ADMIN ATTESTATION ONLY, NOT registry verification —
+      // no CAC / Companies House integration exists in this codebase.
+      attestationNote: z.string().min(20).max(2000),
     }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDbConn();
@@ -160,6 +164,9 @@ const builderKybRouter = router({
       };
       if (input.approved) {
         updates.kybVerifiedAt = new Date();
+        // W13-MERCHANT (F-22): cacVerified / directorIdsVerified record an
+        // ADMIN ATTESTATION, not registry verification — no CAC / Companies
+        // House integration exists. The attestation text is audit-logged.
         updates.cacVerified = true;
         updates.directorIdsVerified = true;
         if (input.financialHealthScore != null) updates.financialHealthScore = String(input.financialHealthScore);
@@ -169,9 +176,29 @@ const builderKybRouter = router({
 
       const [_row] = await db.update(builderProfiles).set(updates as any).where(eq(builderProfiles.id, input.builderId)).returning();
       if (!_row) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
-      await createAuditLog({ userId: ctx.user.id, action: input.approved ? "BUILDER_KYB_APPROVED" : "BUILDER_KYB_REJECTED", metadata: { builderId: input.builderId, adminId: ctx.user.id } });
+      await createAuditLog({
+        userId: ctx.user.id,
+        action: input.approved ? "BUILDER_KYB_APPROVED" : "BUILDER_KYB_REJECTED",
+        targetType: "builder_profiles",
+        targetId: input.builderId,
+        severity: "info",
+        description: `Builder ${input.builderId} KYB ${input.approved ? "approved" : "rejected"} by admin attestation (NOT registry verification — no CAC/Companies House integration exists)`,
+        metadata: {
+          builderId: input.builderId,
+          adminId: ctx.user.id,
+          attestationNote: input.attestationNote,
+          attestationOnly: true,
+          registryVerification: false,
+        },
+      });
 
-      return { builderId: input.builderId, status: input.approved ? "verified" : "rejected" };
+      return {
+        builderId: input.builderId,
+        status: input.approved ? "verified" : "rejected",
+        // Honest response: flags reflect admin attestation only.
+        verificationBasis: "admin_attestation",
+        registryVerification: false,
+      };
     }),
 
   listVerified: publicProcedure
