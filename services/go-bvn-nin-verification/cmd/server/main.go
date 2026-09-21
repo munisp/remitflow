@@ -60,6 +60,25 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+func boolPtr(b bool) *bool { return &b }
+
+// boolPtrFromJSON reads a boolean field out of a decoded provider response
+// and returns nil when the key is absent or explicitly JSON null - both mean
+// "not evaluated". A plain `body[key] == true` comparison can't distinguish
+// that from a genuine false, which previously made an unevaluated dob_match
+// silently read as "did not match".
+func boolPtrFromJSON(body map[string]interface{}, key string) *bool {
+	v, ok := body[key]
+	if !ok || v == nil {
+		return nil
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return nil
+	}
+	return &b
+}
+
 // ─── Models ──────────────────────────────────────────────────────────────────
 
 type BVNVerifyRequest struct {
@@ -89,7 +108,12 @@ type VerificationResult struct {
 	Verified       bool                   `json:"verified"`
 	MatchScore     float64                `json:"match_score"`
 	NameMatch      bool                   `json:"name_match"`
-	DOBMatch       bool                   `json:"dob_match"`
+	// nil means "date of birth was not evaluated" (e.g. the NIMC request never
+	// carries a dob to compare - see NINVerifyRequest), distinct from a real
+	// false ("evaluated, did not match"). A bare bool can't represent that
+	// third state, which is what let this collapse into a false positive/
+	// negative before - see boolPtrFromJSON.
+	DOBMatch       *bool                  `json:"dob_match"`
 	PhoneMatch     bool                   `json:"phone_match"`
 	PhotoURL       string                 `json:"photo_url,omitempty"`
 	RegistrationDate string              `json:"registration_date,omitempty"`
@@ -212,7 +236,7 @@ func (c *NIBSSClient) VerifyBVN(ctx context.Context, req BVNVerifyRequest) (*Ver
 		Verified:         true,
 		MatchScore:       score,
 		NameMatch:        nameMatch,
-		DOBMatch:         dobMatch,
+		DOBMatch:         boolPtr(dobMatch),
 		PhoneMatch:       req.PhoneNumber != "",
 		Provider:         "nibss_sandbox",
 		VerificationID:   verificationID,
@@ -255,7 +279,7 @@ func (c *NIBSSClient) callNIBSSAPI(ctx context.Context, req BVNVerifyRequest) (*
 		Verified:    verified,
 		MatchScore:  matchScore,
 		NameMatch:   body["name_match"] == true,
-		DOBMatch:    body["dob_match"] == true,
+		DOBMatch:    boolPtrFromJSON(body, "dob_match"),
 		PhoneMatch:  body["phone_match"] == true,
 		Provider:    "nibss",
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
@@ -330,7 +354,7 @@ func (c *NIMCClient) VerifyNIN(ctx context.Context, req NINVerifyRequest) (*Veri
 		Verified:       true,
 		MatchScore:     0.93,
 		NameMatch:      true,
-		DOBMatch:       req.DateOfBirth != "",
+		DOBMatch:       boolPtr(req.DateOfBirth != ""),
 		Provider:       "nimc_sandbox",
 		VerificationID: verificationID,
 		Timestamp:      time.Now().UTC().Format(time.RFC3339),
@@ -359,11 +383,18 @@ func (c *NIMCClient) callNIMCAPI(ctx context.Context, req NINVerifyRequest) (*Ve
 		return nil, fmt.Errorf("decode NIMC response: %w", err)
 	}
 
+	// Was hardcoded to 0.95 regardless of what the provider actually
+	// returned - read the real value, same as callNIBSSAPI already does.
+	matchScore := 0.0
+	if s, ok := body["match_score"].(float64); ok {
+		matchScore = s
+	}
+
 	return &VerificationResult{
 		Verified:    resp.StatusCode == 200,
-		MatchScore:  0.95,
+		MatchScore:  matchScore,
 		NameMatch:   body["name_match"] == true,
-		DOBMatch:    body["dob_match"] == true,
+		DOBMatch:    boolPtrFromJSON(body, "dob_match"),
 		Provider:    "nimc",
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		RawResponse: body,
@@ -608,7 +639,10 @@ func main() {
 
 			crossMatch := bvnResult.Verified && ninResult.Verified
 			nameConsistency := (bvnResult.MatchScore + ninResult.MatchScore) / 2
-			dobConsistency := bvnResult.DOBMatch && ninResult.DOBMatch
+			// An unevaluated dob_match (nil) counts as inconsistent, same
+			// conservative default as before this was nullable.
+			dobConsistency := bvnResult.DOBMatch != nil && *bvnResult.DOBMatch &&
+				ninResult.DOBMatch != nil && *ninResult.DOBMatch
 			overallScore := nameConsistency
 			if crossMatch {
 				overallScore = (overallScore + 1.0) / 2
