@@ -1,5 +1,5 @@
 # ─── Build Stage ──────────────────────────────────────────────────────────────
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 LABEL org.opencontainers.image.vendor="RemitFlow" \
       org.opencontainers.image.licenses="Proprietary" \
@@ -32,8 +32,6 @@ EXPOSE 8091
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["/cips-adapter", "-health"]
 
-RUN addgroup --system --gid 1001 appgroup && \
-    adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
-USER appuser
+USER 1001:1001
 
 ENTRYPOINT ["/cips-adapter"]

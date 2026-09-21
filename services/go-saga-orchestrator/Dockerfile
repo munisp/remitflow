@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 LABEL org.opencontainers.image.vendor="RemitFlow" \
       org.opencontainers.image.licenses="Proprietary" \
@@ -18,8 +18,6 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /app/saga-orchestrator /saga-orchestrator
 EXPOSE 8091
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 CMD ["/saga-orchestrator", "-health"]
-RUN addgroup --system --gid 1001 appgroup && \
-    adduser --system --uid 1001 --ingroup appgroup --no-create-home appuser
-USER appuser
+USER 1001:1001
 
 ENTRYPOINT ["/saga-orchestrator"]
