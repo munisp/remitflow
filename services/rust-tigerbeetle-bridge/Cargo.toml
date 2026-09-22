@@ -28,7 +28,7 @@ opentelemetry-otlp = { version = "0.27.0", default-features = false, features = 
 tracing-opentelemetry = "0.28.0"
 # HTTP client used by the OTLP exporter. Must stay on ^0.12 — that is the
 # version opentelemetry-http 0.27 implements its HttpClient trait for.
-reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["default-tls"] }
 anyhow = "1"
 thiserror = "2"
 tower-http = { version = "0.6", features = ["trace", "timeout"] }
