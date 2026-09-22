@@ -1,5 +1,5 @@
 fastapi==0.115.0
-uvicorn[standard]==0.30.6
+uvicorn[standard]==0.52.1
 asyncpg==0.29.0
 numpy==1.26.4
 joblib==1.4.2
