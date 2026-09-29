@@ -8,4 +8,3 @@ export * from "./redis";
 export * from "./opensearch";
 export * from "./dapr";
 export * from "./permify";
-export * from "./temporal";

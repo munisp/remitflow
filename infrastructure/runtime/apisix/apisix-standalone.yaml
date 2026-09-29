@@ -1,10 +1,16 @@
 routes:
+  # W18: /api/* carries the PWA's tRPC traffic, which authenticates with the
+  # server-issued cookie session (COOKIE_NAME), not an OIDC bearer token.
+  # openid-connect bearer_only here rejected every browser session with 401 —
+  # it is REMOVED from this route and scoped to machine/partner routes below.
   - id: remitflow-api
     uri: /api/*
     methods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
     plugins:
       cors:
-        allow_origins: "*"
+        # W18: was "*" — wildcard origin with credentialed cookie sessions is
+        # an XSS/CORS exfil risk; pin to the production PWA origin.
+        allow_origins: "https://app.remitflow.com"
         allow_methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
         allow_headers: "Authorization,Content-Type,X-Request-ID,X-Tenant-ID"
         expose_headers: "X-Request-ID"
@@ -18,6 +24,26 @@ routes:
         rejected_code: 429
         key_type: var
         key: remote_addr
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:3000": 1
+
+  # Partner / machine-to-machine routes: these clients authenticate with OIDC
+  # bearer tokens (Keycloak client-credentials), so bearer_only belongs HERE.
+  - id: remitflow-partner-m2m
+    uri: /partner/*
+    methods: [GET, POST, PUT, PATCH, DELETE]
+    plugins:
+      limit-req:
+        rate: 100
+        burst: 50
+        rejected_code: 429
+        key_type: var
+        key: remote_addr
+      request-id:
+        header_name: X-Request-ID
+        include_in_response: true
       openid-connect:
         client_id: remitflow-backend
         discovery: http://keycloak:8080/realms/remitflow/.well-known/openid-configuration
@@ -25,6 +51,28 @@ routes:
         realm: remitflow
         # TLS verification to the IdP is REQUIRED. Do not disable outside
         # throwaway local dev (never in any deployed environment).
+        ssl_verify: true
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:3000": 1
+
+  # Internal service-to-service fan-out (same bearer-only machine auth).
+  - id: remitflow-services-m2m
+    uri: /services/*
+    methods: [GET, POST]
+    plugins:
+      limit-req:
+        rate: 200
+        burst: 100
+        rejected_code: 429
+        key_type: var
+        key: remote_addr
+      openid-connect:
+        client_id: remitflow-backend
+        discovery: http://keycloak:8080/realms/remitflow/.well-known/openid-configuration
+        bearer_only: true
+        realm: remitflow
         ssl_verify: true
     upstream:
       type: roundrobin

@@ -1,7 +1,14 @@
 # RemitFlow Lakehouse — Wave 10 (C6)
 
 Medallion-layout lakehouse fed by the Fluvio bronze writer and analyzed with
-Apache Sedona (Spark SQL) and the existing DuckDB/Parquet ETL service.
+the existing DuckDB/Parquet ETL service.
+
+> **Honesty note (W18):** No Apache Sedona / Spark runtime exists anywhere in
+> this platform — there is no Spark container, job, or dependency in compose,
+> deploy, or any service. `sedona_queries.sql` is **future work**: candidate
+> spatial queries to run IF a Spark+Sedona cluster is ever provisioned. Until
+> then nothing executes them; spatial analytics in production come from
+> `python-geo-analytics` (PostGIS) only.
 
 ## Layout
 
@@ -25,8 +32,8 @@ Apache Sedona (Spark SQL) and the existing DuckDB/Parquet ETL service.
   bronze never loses bytes.
 - **silver** — cleaned/typed tables (see `silver_transforms.md`):
   deduplication on `_offset`, precise decimal amounts, exploded line items,
-  validity filtering. Produced by scheduled Sedona/DuckDB jobs reading
-  bronze and writing `{LAKE_DIR}/silver/<table>/dt=...`.
+  validity filtering. Produced by scheduled DuckDB jobs (lakehouse-etl)
+  reading bronze and writing `{LAKE_DIR}/silver/<table>/dt=...`.
 - **gold** — business aggregates (corridor density, agent coverage,
   daily ledger rollups) consumed by dashboards and the TS API. Written to
   `{LAKE_DIR}/gold/<aggregate>/dt=...`.
@@ -37,25 +44,16 @@ Apache Sedona (Spark SQL) and the existing DuckDB/Parquet ETL service.
 |---|---|
 | `services/rust-lakehouse-writer` | Fluvio consumer group `lakehouse-writer` on `ledger-events-bronze` + `bill-capture-extracted`; writes bronze Parquet; `/metrics` + `/health` on :9115. Fails closed when `FLUVIO_ENDPOINT`/`LAKE_DIR` unset. |
 | `services/lakehouse-etl` (existing) | DuckDB/Parquet ETL API on :8089, shares the `lakehouse-data` volume — reads the same bronze files. |
-| Apache Sedona (Spark) | Runs `sedona_queries.sql` for spatial corridor-density / agent-coverage analysis over bronze. |
+| `sedona_queries.sql` (**future work — no runtime**) | Candidate Spark/Sedona spatial SQL for corridor-density / agent-coverage analysis over bronze. NOT executed by anything today; requires provisioning a Spark+Sedona cluster first. |
 
-## Where Apache Sedona fits
+## Spatial analytics today (and the Sedona future work)
 
-Sedona registers spatial SQL functions (`ST_GeomFromWKT`, `ST_Distance`,
-`ST_Within`, `ST_KNN`, …) on a Spark session. Bronze Parquet is plain
-flat-column data, so Sedona reads it directly via
-`spark.read.parquet("{LAKE_DIR}/bronze/...")`; geometry points are
-materialized with `ST_GeomFromWKT` in views (see `sedona_queries.sql`).
-
-Bootstrap (Spark shell / notebook / job):
-
-```scala
-import org.apache.sedona.spark.SedonaContext
-val sedona = SedonaContext.create(spark)
-```
-
-Then execute the statements in `sedona_queries.sql` in order — each
-`CREATE OR REPLACE TEMP VIEW` builds on the previous one.
+Production spatial analytics run in `python-geo-analytics` (:8114) against
+PostGIS. The Sedona path in `sedona_queries.sql` documents how corridor-
+density / agent-coverage aggregates WOULD be computed (`ST_GeomFromWKT`,
+`ST_Distance`, `ST_Within` over bronze Parquet) if a Spark+Sedona cluster is
+ever added. Do not read this as an existing capability — no Spark session,
+Sedona jar, or scheduled job exists in this repository's deployable units.
 
 ## Relational side
 

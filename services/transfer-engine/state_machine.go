@@ -65,12 +65,12 @@ var ValidTransitions = map[TransferState][]TransferState{
 
 // StateTransitionResult is returned by AdvanceState.
 type StateTransitionResult struct {
-	Success          bool
-	PreviousState    TransferState
-	NewState         TransferState
-	Message          string
-	RequiresReview   bool
-	EstimatedMs      int64
+	Success        bool
+	PreviousState  TransferState
+	NewState       TransferState
+	Message        string
+	RequiresReview bool
+	EstimatedMs    int64
 }
 
 // StateMachineService handles transfer lifecycle transitions.
@@ -196,9 +196,9 @@ func (s *StateMachineService) RunPipeline(
 ) {
 	go func() {
 		pipeline := []struct {
-			state  TransferState
-			delay  time.Duration
-			check  func() (bool, string)
+			state TransferState
+			delay time.Duration
+			check func() (bool, string)
 		}{
 			{
 				state: StateFraudCheck,

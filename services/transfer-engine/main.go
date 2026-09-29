@@ -16,6 +16,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 )
 
@@ -295,8 +297,24 @@ func main() {
 		logger.Fatal("failed to listen", zap.Error(err))
 	}
 	grpcServer := grpc.NewServer()
-	_ = srv // register with grpcServer.RegisterService in production with generated code
+	// W18 honesty fix: there is NO generated protobuf code for transfer.proto
+	// (no protoc toolchain in this repo, no *_grpc.pb.go committed), so the
+	// TransferEngine/FraudScorer services cannot be registered for real.
+	// Previously this line was `_ = srv` with a comment implying registration
+	// would happen "in production" — it never did, and clients got silent
+	// UNIMPLEMENTED. We now state that loudly and register only what genuinely
+	// works: the standard gRPC health service (backed by a real DB ping) and
+	// server reflection. Any RPC to transfer.TransferEngine / remitflow.v1.*
+	// fails closed with UNIMPLEMENTED instead of a fabricated success.
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
+	if err := srv.sm.db.Ping(); err != nil {
+		logger.Error("database ping failed at startup — reporting NOT_SERVING", zap.Error(err))
+		healthServer.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)
+	}
+	healthpb.RegisterHealthServer(grpcServer, healthServer)
 	reflection.Register(grpcServer)
+	logger.Warn("TransferEngine/FraudScorer gRPC services are NOT registered (generated code absent) — clients receive UNIMPLEMENTED; health + reflection only")
 
 	// Start Prometheus metrics server
 	metricsPort := os.Getenv("METRICS_PORT")

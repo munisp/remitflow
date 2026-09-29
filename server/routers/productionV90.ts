@@ -1,4 +1,3 @@
-import { randomBytes, randomUUID } from "crypto";
 /**
  * RemitFlow v90 Production Features Router
  * 15 remaining production features:
@@ -22,7 +21,7 @@ import { randomBytes, randomUUID } from "crypto";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { router, protectedProcedure, adminProcedure, publicProcedure ,
-  auditedProcedure, auditedAdminProcedure, rateLimitedProcedure
+  auditedProcedure, auditedAdminProcedure, rateLimitedProcedure, strictRateLimitedProcedure
 } from "../_core/trpc";
 import { getDb } from "../db";
 import { eq, desc, count, sum, gte, and, sql } from "drizzle-orm";
@@ -496,7 +495,7 @@ export const paymentRailsRouter = router({
       }
     }),
 
-  initiateRailTransfer: protectedProcedure
+  initiateRailTransfer: strictRateLimitedProcedure
     .input(z.object({
       rail: z.enum(["cips", "upi", "pix", "mojaloop", "swift", "sepa"]),
       fromCurrency: z.string().length(3),
@@ -507,8 +506,14 @@ export const paymentRailsRouter = router({
       recipientBank: z.string().optional(),
       purpose: z.string().optional(),
       reference: z.string().optional(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // W18: money-moving mutation — KYC-tier limit gate + mandatory TOTP
+      // step-up (fail closed) + audit via strictRateLimitedProcedure.
+      const { requireKycTierForAmount, requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireKycTierForAmount(ctx.user.id, input.amount, "rail transfer initiation");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "rail transfer initiation");
       const { initiateRailTransfer } = await import("../payment-rails.service.js");
       const result = await initiateRailTransfer({
         ...input,
@@ -530,37 +535,31 @@ export const paymentRailsRouter = router({
       purpose: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      const uetr = randomUUID();
-      return {
-        uetr,
-        messageType: "MT103",
-        senderBIC: DEFAULTS.SWIFT_BIC,
-        beneficiaryBIC: input.beneficiaryBIC,
-        amount: input.amount,
-        currency: input.currency,
-        valueDate: new Date(Date.now() + 86400000).toISOString().split("T")[0],
-        status: "accepted",
-        trackingUrl: `https://gpi.swift.com/tracker/${uetr}`,
-        estimatedSettlement: "1-3 business days",
-        fee: 25 + input.amount * 0.001,
-        createdAt: new Date().toISOString(),
-      };
+      // W18 fail-closed: this endpoint previously fabricated an MT103 — a
+      // random UETR, an "accepted" status and a fake gpi.swift.com tracking
+      // URL — with NO message ever reaching the SWIFT network. That
+      // fabrication is removed. The real SWIFT path lives in
+      // swiftGateway.sendPacs008 (TOTP-gated, egress via SWIFT_EGRESS_URL,
+      // honest pending_egress status); direct clients there. This procedure
+      // now fails closed until a real provider client is wired here.
+      void input;
+      throw new TRPCError({
+        code: "NOT_IMPLEMENTED",
+        message: "Direct SWIFT MT103 initiation is not available on this endpoint. Use swiftGateway.sendPacs008, which routes through the configured SWIFT egress gateway and never fabricates acceptance.",
+      });
     }),
 
   trackSwiftPayment: protectedProcedure
     .input(z.object({ uetr: z.string() }))
     .query(async ({ input }) => {
-      return {
-        uetr: input.uetr,
-        status: "processing",
-        currentBank: "BARCGB22",
-        steps: [
-          { bank: DEFAULTS.SWIFT_BIC, status: "completed", timestamp: new Date(Date.now() - 3600000).toISOString(), action: "Sent" },
-          { bank: "BARCGB22", status: "processing", timestamp: new Date(Date.now() - 1800000).toISOString(), action: "Received" },
-          { bank: input.uetr.split("-")[0].toUpperCase(), status: "pending", timestamp: null, action: "Deliver" },
-        ],
-        estimatedDelivery: new Date(Date.now() + 86400000).toISOString(),
-      };
+      // W18 fail-closed: previously returned a fabricated "processing" status
+      // with invented intermediary banks. No real gpi tracker client is wired
+      // here, so honest NOT_IMPLEMENTED instead of fake tracking data.
+      void input;
+      throw new TRPCError({
+        code: "NOT_IMPLEMENTED",
+        message: "SWIFT gpi tracking is not wired to a real tracker on this endpoint; no fabricated status is returned.",
+      });
     }),
 
   // ─── Live FX Rates ────────────────────────────────────────────────────────────

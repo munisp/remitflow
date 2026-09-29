@@ -38,6 +38,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	temporalclient "go.temporal.io/sdk/client"
 )
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -570,27 +571,52 @@ func (s *BusServer) routeToFluvio(ctx context.Context, event PlatformEvent, topi
 }
 
 // ── Temporal Router ───────────────────────────────────────────────────────────
+// W18 fix: this used to POST a fabricated REST body to TemporalHostPort
+// (default temporal:7233) — that is Temporal's gRPC frontend port and serves
+// NO HTTP API, so every workflow "trigger" silently failed. Replaced with a
+// real Temporal gRPC client (go.temporal.io/sdk) calling
+// StartWorkflowExecution on the frontend service. Fail closed: dial/start
+// errors propagate into the routing error aggregate (logged + counted).
+
+var (
+	temporalClientMu sync.Mutex
+	temporalClient   temporalclient.Client
+)
+
+func (s *BusServer) getTemporalClient() (temporalclient.Client, error) {
+	temporalClientMu.Lock()
+	defer temporalClientMu.Unlock()
+	if temporalClient != nil {
+		return temporalClient, nil
+	}
+	c, err := temporalclient.Dial(temporalclient.Options{
+		HostPort:  s.cfg.TemporalHostPort,
+		Namespace: getEnv("TEMPORAL_NAMESPACE", "remitflow"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	temporalClient = c
+	return temporalClient, nil
+}
 
 func (s *BusServer) routeToTemporal(ctx context.Context, event PlatformEvent, workflowType string) error {
 	if workflowType == "" {
 		return nil
 	}
-	// Trigger via Temporal HTTP API (temporal-ui-server or custom gateway)
-	temporalURL := fmt.Sprintf("http://%s/api/v1/namespaces/default/workflows", s.cfg.TemporalHostPort)
-	body := map[string]interface{}{
-		"workflow_id":   fmt.Sprintf("%s-%s", workflowType, event.CorrelationID),
-		"workflow_type": map[string]string{"name": workflowType},
-		"task_queue":    map[string]string{"name": "remitflow-task-queue"},
-		"input": map[string]interface{}{
-			"payloads": []map[string]interface{}{
-				{
-					"metadata": map[string]string{"encoding": "anJhbg=="},
-					"data":     event.Payload,
-				},
-			},
-		},
+	c, err := s.getTemporalClient()
+	if err != nil {
+		return fmt.Errorf("temporal gRPC dial %s: %w", s.cfg.TemporalHostPort, err)
 	}
-	return s.httpPost(ctx, temporalURL, body)
+	workflowID := fmt.Sprintf("%s-%s", workflowType, event.CorrelationID)
+	_, err = c.ExecuteWorkflow(ctx, temporalclient.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: getEnv("TEMPORAL_BUS_TASK_QUEUE", "remitflow-task-queue"),
+	}, workflowType, event.Payload)
+	if err != nil {
+		return fmt.Errorf("temporal StartWorkflowExecution %s: %w", workflowID, err)
+	}
+	return nil
 }
 
 // ── TigerBeetle Router ────────────────────────────────────────────────────────

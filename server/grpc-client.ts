@@ -233,13 +233,16 @@ export interface BalanceResponse {
 export async function ledgerTransfer(req: LedgerTransferRequest): Promise<LedgerTransferResponse> {
   const client = getLedgerClient();
   if (!client) {
-    // Graceful fallback for dev/test environments without Rust services
-    logger.warn("[gRPC] LedgerService fallback: returning mock response");
-    return {
-      transferId: `mock-${req.idempotencyKey}`,
-      status: "COMPLETED",
-      timestamp: new Date().toISOString(),
-    };
+    // W18 FAIL CLOSED: no LedgerService server is registered anywhere in the
+    // fleet (the Go transfer-engine registration was a stub; no generated pb
+    // code exists). Previously this returned a fabricated `mock-…` COMPLETED
+    // transfer — the DB recorded settled money the ledger never saw. Throw an
+    // honest error instead; callers already treat this as a hard failure
+    // (Temporal saga compensates) or log a critical reconciliation alert.
+    logger.error("[gRPC] LedgerService unavailable — failing closed (no mock completion)");
+    throw new Error(
+      "LedgerService unavailable: no gRPC ledger server registered; refusing to fabricate a COMPLETED transfer"
+    );
   }
   return callGRPC<LedgerTransferRequest, LedgerTransferResponse>(client, "transfer", req);
 }
@@ -247,7 +250,10 @@ export async function ledgerTransfer(req: LedgerTransferRequest): Promise<Ledger
 export async function ledgerGetBalance(accountId: string, currency: string): Promise<BalanceResponse> {
   const client = getLedgerClient();
   if (!client) {
-    return { accountId, currency, availableBalance: "0", reservedBalance: "0", totalBalance: "0" };
+    // W18 FAIL CLOSED: returning zeros here fabricated an empty balance that
+    // callers could treat as real (overdraft/spend checks). Honest error.
+    logger.error("[gRPC] LedgerService unavailable for getBalance — failing closed (no fabricated zero balance)");
+    throw new Error("LedgerService unavailable: cannot return a real balance; refusing to fabricate zeros");
   }
   return callGRPC<{ accountId: string; currency: string }, BalanceResponse>(
     client, "getBalance", { accountId, currency }
@@ -262,7 +268,10 @@ export async function ledgerReserveFunds(
 ): Promise<{ reservationId: string; expiresAt: string }> {
   const client = getLedgerClient();
   if (!client) {
-    return { reservationId: `mock-res-${idempotencyKey}`, expiresAt: new Date(Date.now() + 3600_000).toISOString() };
+    // W18 FAIL CLOSED: a fabricated reservation id lets callers proceed as if
+    // funds were held when nothing was reserved. Honest error instead.
+    logger.error("[gRPC] LedgerService unavailable for reserveFunds — failing closed (no fabricated reservation)");
+    throw new Error("LedgerService unavailable: cannot reserve funds; refusing to fabricate a reservation id");
   }
   return callGRPC(client, "reserveFunds", { idempotencyKey, accountId, amount, currency });
 }

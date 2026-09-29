@@ -265,14 +265,16 @@ export async function publishKafkaEvent(eventType: string, payload: Record<strin
 
 export async function publishFluvioEvent(eventType: string, payload: Record<string, unknown>): Promise<void> {
   heartbeat("Publishing Fluvio event");
-  const fluvioUrl = process.env.FLUVIO_GATEWAY_URL;
-  if (!fluvioUrl) return;
+  // W18 fix-up: the old body POSTed to {FLUVIO_GATEWAY_URL}/api/v1/produce/<topic>
+  // — a path the real Fluvio HTTP bridge (microservices/rust-services/fluvio-service)
+  // never implemented. Use the real client: POST {FLUVIO_HTTP_BRIDGE_URL}/produce
+  // with {topic, key, value}. Still best-effort (fail-open telemetry).
   try {
-    await fetch(`${fluvioUrl}/api/v1/produce/fund-flow-stream`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ eventType, ...payload, timestamp: new Date().toISOString() }),
-      signal: AbortSignal.timeout(2000),
+    const { fluvioProduce } = await import("../integrations/fluvio/streaming");
+    await fluvioProduce("fund-flow-stream", eventType, {
+      eventType,
+      ...payload,
+      timestamp: new Date().toISOString(),
     });
   } catch {
     // Best-effort

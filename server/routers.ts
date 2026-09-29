@@ -25,7 +25,7 @@ import {
 } from "./db";
 import { storagePut } from "./storage";
 import { encryptField, decryptField } from "./_core/secretBox";
-import { adminProcedure, protectedProcedure, publicProcedure, router, strictRateLimitedProcedure } from "./_core/trpc";
+import { adminProcedure, protectedProcedure, publicProcedure, router, strictRateLimitedProcedure, moneyAuditedProcedure } from "./_core/trpc";
 import { transferSendProcedure, walletWithdrawProcedure, kycApproveProcedure, reportExportProcedure, beneficiaryUpdateProcedure, recordSpend, adminPbacProcedure } from "./pbac";
 import { checkFraud, checkVelocity } from "./fraud.service";
 import { sendEmail, buildTransferConfirmationEmail, buildKycStatusEmail, buildWelcomeEmail, buildTransferCompletedEmail, buildTransferFailedEmail } from "./email.service";
@@ -648,7 +648,26 @@ export const appRouter = router({
       }),
   }),
   system: router({
-    notifyOwner: protectedProcedure.input(z.object({ title: z.string().min(1).max(200).trim(), content: z.string().min(1).max(2000).trim() })).mutation(() => ({ success: true })),
+    // W18-A: was a no-op success stub. Now persists a real notification row
+    // for every admin (owner) and best-effort dispatches the upstream owner
+    // notification service. Fails closed when the DB is unavailable.
+    notifyOwner: protectedProcedure.input(z.object({ title: z.string().min(1).max(200).trim(), content: z.string().min(1).max(2000).trim() })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, "admin"));
+      if (admins.length === 0) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "No owner/admin recipient exists to notify" });
+      await db.insert(notifications).values(admins.map((a: any) => ({
+        userId: a.id, title: input.title, message: input.content, type: "system" as any,
+        metadata: { source: "system.notifyOwner", fromUserId: ctx.user.id },
+      })));
+      // Upstream dispatch is best-effort (fail-open); the durable rows above are the record.
+      try {
+        const { notifyOwner: dispatchOwnerNotif } = await import("./_core/notification.js");
+        await dispatchOwnerNotif({ title: input.title, content: input.content });
+      } catch (err: unknown) {
+        logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[system.notifyOwner] upstream owner notification dispatch failed");
+      }
+      return { success: true, delivered: admins.length };
+    }),
     health: publicProcedure.query(async () => {
       const db = await getDb();
       return { status: "ok", db: !!db, timestamp: new Date().toISOString(), version: "2.0.0", uptime: process.uptime() };
@@ -2009,17 +2028,13 @@ export const appRouter = router({
         return { ...c, spendLimit: Number(c.spendLimit ?? 0), dailySpend, monthlySpend, dailyRemaining: Math.max(0, Number(c.spendLimit ?? 5000) - dailySpend) };
       }));
     }),
-    create: protectedProcedure.input(z.object({ type: z.enum(["virtual", "physical"]), brand: z.enum(["visa", "mastercard", "verve"]), currency: z.string().default("USD") })).mutation(async ({ ctx, input }) => {
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const existingCards = await getCardsByUserId(ctx.user.id);
-      const activeCards = existingCards.filter((c: any) => c.status === "active");
-      if (activeCards.length >= 5) throw new TRPCError({ code: "BAD_REQUEST", message: "Maximum 5 active cards allowed. Cancel an existing card first." });
-      const last4 = (1000 + (randomBytes(2).readUInt16BE(0) % 9000)).toString();
-      const expiry = new Date(); expiry.setFullYear(expiry.getFullYear() + 3);
-      const defaultLimit = input.type === "virtual" ? "2000.00" : "5000.00";
-      await db.insert(cards).values({ userId: ctx.user.id, type: input.type, brand: input.brand, last4, expiryMonth: String(expiry.getMonth() + 1).padStart(2, "0"), expiryYear: String(expiry.getFullYear()), status: "active", currency: input.currency, spendLimit: defaultLimit, cardholderName: (ctx.user.name ?? "CARD HOLDER").toUpperCase() });
-      await createAuditLog({ userId: ctx.user.id, action: "CARD_CREATED", description: `${input.type} ${input.brand} card created ending ${last4}` });
-      return { success: true, last4, type: input.type, brand: input.brand, currency: input.currency, spendLimit: Number(defaultLimit), expiryMonth: String(expiry.getMonth() + 1).padStart(2, "0"), expiryYear: String(expiry.getFullYear()) };
+    // W18-A: FAIL CLOSED. The old handler fabricated card issuance — a random
+    // last4, invented expiry, status "active" — with no issuer/processor call.
+    // No card-issuer integration exists in this codebase, and the cards schema
+    // requires a real last4/expiry (NOT NULL), so we cannot honestly persist a
+    // pending-issuance row either. Refuse instead of fabricating.
+    create: protectedProcedure.input(z.object({ type: z.enum(["virtual", "physical"]), brand: z.enum(["visa", "mastercard", "verve"]), currency: z.string().default("USD") })).mutation(async () => {
+      throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "Card issuance is not available: no card issuer/processor integration is configured. No card was created." });
     }),
     freeze: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -2253,14 +2268,18 @@ export const appRouter = router({
       const goalCurrency = (goal as any).currency ?? "USD";
       const [topWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, goalCurrency))).limit(1);
       if (!topWallet || Number(topWallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient wallet balance" });
-      const [updTop] = await db.update(wallets)
-        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
-        .where(and(eq(wallets.id, topWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
-        .returning({ balance: wallets.balance });
-      if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+      // W18-A: wallet debit + goal credit must commit atomically (previously
+      // two independent writes — a goal-update failure lost the debit).
       const newAmount = Math.min(Number(goal.currentAmount) + input.amount, Number(goal.targetAmount));
       const status = newAmount >= Number(goal.targetAmount) ? "completed" : "active";
-      await db.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
+      await db.transaction(async (tx: any) => {
+        const [updTop] = await tx.update(wallets)
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+          .where(and(eq(wallets.id, topWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+          .returning({ balance: wallets.balance });
+        if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+        await tx.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
+      });
       return { success: true, newAmount };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
@@ -2299,14 +2318,18 @@ export const appRouter = router({
       const goalCurrency = (goal as any).currency ?? "USD";
       const [topWallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, goalCurrency))).limit(1);
       if (!topWallet || Number(topWallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient wallet balance" });
-      const [updTop] = await db.update(wallets)
-        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
-        .where(and(eq(wallets.id, topWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
-        .returning({ balance: wallets.balance });
-      if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+      // W18-A: wallet debit + goal credit must commit atomically (previously
+      // two independent writes — a goal-update failure lost the debit).
       const newAmount = Math.min(Number(goal.currentAmount) + input.amount, Number(goal.targetAmount));
       const status = newAmount >= Number(goal.targetAmount) ? "completed" : "active";
-      await db.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
+      await db.transaction(async (tx: any) => {
+        const [updTop] = await tx.update(wallets)
+          .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,4)) - ${input.amount} AS VARCHAR)` })
+          .where(and(eq(wallets.id, topWallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,4)) >= ${input.amount}`))
+          .returning({ balance: wallets.balance });
+        if (!updTop) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
+        await tx.update(savingsGoals).set({ currentAmount: newAmount.toFixed(2), status }).where(eq(savingsGoals.id, input.id)).returning();
+      });
       return { success: true, newAmount };
     }),
     remove: protectedProcedure.input(z.object({ id: z.number() })).mutation(async ({ ctx, input }) => {
@@ -2755,7 +2778,19 @@ export const appRouter = router({
     info: protectedProcedure.query(async ({ ctx }) => {
       const refs = await getReferralsByUserId(ctx.user.id);
       const myCode = `RF${ctx.user.id.toString().padStart(6, "0")}`;
-      const totalEarned = refs.reduce((s: number, r: any) => s + Number(r.rewardAmount ?? 0), 0); return { referralCode: myCode, code: myCode, totalReferrals: refs.length, totalEarned, pendingReward: refs.filter((r: any) => r.status === "pending").reduce((s: number, r: any) => s + Number(r.rewardAmount ?? 0), 0), referrals: refs, leaderboard: [{ rank: 1, name: "Top Referrer", referrals: 24, earned: 120000 }, { rank: 2, name: "You", referrals: refs.length, earned: totalEarned }] };
+      const totalEarned = refs.reduce((s: number, r: any) => s + Number(r.rewardAmount ?? 0), 0);
+      // W18-A: real leaderboard from DB aggregation (was hardcoded fake entries).
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const lbRows = await db
+        .select({ referrerId: referrals.referrerId, refCount: count(referrals.id), earned: sum(sql`COALESCE(CAST(${referrals.rewardAmount} AS DECIMAL), 0)`), name: users.name })
+        .from(referrals)
+        .innerJoin(users, eq(users.id, referrals.referrerId))
+        .where(isNotNull(referrals.referrerId))
+        .groupBy(referrals.referrerId, users.name)
+        .orderBy(desc(count(referrals.id)))
+        .limit(10);
+      const leaderboard = lbRows.map((r: any, idx: number) => ({ rank: idx + 1, name: r.name ?? `User #${r.referrerId}`, referrals: Number(r.refCount), earned: Number(r.earned ?? 0) }));
+      return { referralCode: myCode, code: myCode, totalReferrals: refs.length, totalEarned, pendingReward: refs.filter((r: any) => r.status === "pending").reduce((s: number, r: any) => s + Number(r.rewardAmount ?? 0), 0), referrals: refs, leaderboard };
     }),
     claim: protectedProcedure.input(z.object({ code: z.string() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
@@ -3687,10 +3722,9 @@ export const appRouter = router({
     balances: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       const rows = await db.select().from(cbdcWallets).where(eq(cbdcWallets.userId, ctx.user.id)).orderBy(asc(cbdcWallets.currency));
-      if (rows.length === 0) {
-        const [newWallet] = await db.insert(cbdcWallets).values({ userId: ctx.user.id, currency: 'eNGN', balance: '0.00', issuer: 'Central Bank of Nigeria', walletType: 'retail', status: 'active' }).returning();
-        return [{ ...newWallet, symbol: 'eNGN', name: 'Digital Naira', balance: Number(newWallet.balance) }];
-      }
+      // W18-A: no fabricated zero wallet — return an honest empty list when the
+      // user has no CBDC wallet (the old code silently minted an eNGN wallet row).
+      if (rows.length === 0) return [];
       const nameMap: Record<string, string> = { eNGN: 'Digital Naira', eGHS: 'Digital Cedi', eKES: 'Digital Shilling', eZAR: 'Digital Rand' };
       return rows.map((r: any) => ({ ...r, symbol: r.currency, name: nameMap[r.currency] ?? `Digital ${r.currency}`, balance: Number(r.balance) }));
     }),
@@ -3918,13 +3952,28 @@ export const appRouter = router({
 
   bnpl: router({
     eligibility: protectedProcedure.query(async ({ ctx }) => { const dbUser = await getUserByOpenId(ctx.user.openId); const tier = dbUser?.kycTier ?? 'tier0'; const limit = tier === 'tier3' ? 5000000 : tier === 'tier2' ? 2000000 : tier === 'tier1' ? 500000 : 0; return { eligible: tier !== 'tier0', limit, creditLimit: limit, currency: 'NGN', score: tier === 'tier3' ? 850 : tier === 'tier2' ? 720 : tier === 'tier1' ? 600 : 0, reason: tier === 'tier0' ? 'Complete KYC to access BNPL' : 'Eligible for BNPL' }; }),
+    // W18-A: real DB query against the bnpl_plans table (the old handler
+    // synthesized fake "plans" from unrelated send transactions).
     plans: protectedProcedure.query(async ({ ctx }) => {
-      const txns = await getTransactionsByUserId(ctx.user.id, { limit: 5 });
-      return txns.filter((t: any) => t.type === "send").slice(0, 3).map((t: any) => ({ id: t.id, merchant: t.description ?? "Purchase", description: t.description ?? "Purchase", totalAmount: Number(t.fromAmount), paidAmount: Number(t.fromAmount) * 0.25, installments: 4, nextDue: new Date(Date.now() + 86400000 * 30), status: "active", currency: t.fromCurrency }));
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const { bnplPlans } = await import("../drizzle/schema.js");
+      const rows = await db.select().from(bnplPlans).where(eq(bnplPlans.userId, ctx.user.id)).orderBy(desc(bnplPlans.createdAt)).limit(50);
+      return rows.map((r: any) => ({ id: r.id, merchant: r.merchant, description: r.description ?? "Purchase", totalAmount: Number(r.totalAmount), paidAmount: Number(r.paidAmount ?? 0), installments: r.installments ?? 4, nextDue: r.nextDueDate, status: r.status, currency: r.currency }));
     }),
-    applyPlan: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), description: z.string(), installments: z.number().min(2).max(12).default(4) })).mutation(async () => ({
-      success: true, planId: `BNPL${Date.now()}`, approved: true, creditLimit: 500000, interestRate: 2.5, firstPaymentDate: new Date(Date.now() + 86400000 * 30),
-    })),
+    // W18-A: persist a REAL bnpl_plans row with status "pending" — no instant
+    // approval, no fabricated credit limit (the old handler approved a fake plan).
+    applyPlan: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000), currency: z.string().default("NGN"), description: z.string(), installments: z.number().min(2).max(12).default(4) })).mutation(async ({ ctx, input }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const { bnplPlans } = await import("../drizzle/schema.js");
+      const installmentAmount = (input.amount / input.installments).toFixed(2);
+      const nextDue = new Date(Date.now() + 86400000 * 30);
+      const [row] = await db.insert(bnplPlans).values({
+        userId: ctx.user.id, merchant: input.description.slice(0, 200), description: input.description.slice(0, 500),
+        totalAmount: input.amount.toFixed(2), paidAmount: "0.00", currency: input.currency,
+        installments: input.installments, installmentAmount, status: "pending", nextDueDate: nextDue,
+      }).returning({ id: bnplPlans.id });
+      return { success: true, planId: String(row.id), approved: false, status: "pending", installments: input.installments, installmentAmount: Number(installmentAmount), firstPaymentDate: nextDue };
+    }),
   }),
 
   stablecoin: router({
@@ -3937,9 +3986,9 @@ export const appRouter = router({
       const ws = await getWalletsByUserId(ctx.user.id);
       const stables = ["USDT", "USDC", "BUSD", "DAI", "NGNT"];
       const filtered = ws.filter((w: any) => stables.includes(w.currency));
-      if (filtered.length === 0) {
-        return [{ symbol: "USDT", currency: "USDT", balance: 0, protocol: "Multi-chain", network: "Ethereum/BSC/Polygon" }];
-      }
+      // W18-A: honest empty — the old code returned a fabricated zero-balance
+      // USDT row when the user holds no stablecoins.
+      if (filtered.length === 0) return [];
       return filtered.map((w: any) => ({ ...formatWallet(w), symbol: w.currency, protocol: w.currency === "NGNT" ? "ERC-20" : "Multi-chain", network: "Ethereum/BSC/Polygon" }));
     }),
     swap: strictRateLimitedProcedure.input(z.object({ from: z.string().max(16), to: z.string().max(16), amount: z.number().positive().max(10_000_000) })).mutation(async ({ ctx, input }) => {
@@ -3981,31 +4030,23 @@ export const appRouter = router({
           metadata: { originalType: "swap" },
         });
       });
-      const txHash = `0x${randomBytes(32).toString('hex')}`;
+      // W18-A: no fabricated txHash — this is an internal ledger swap, not an
+      // on-chain broadcast. Return the internal reference only; txHash is null
+      // and onChain:false so no client can mistake it for a chain receipt.
       await auditCoreOperation({ userId: ctx.user.id, action: 'STABLECOIN_SWAP', description: `Swap: ${input.amount} ${input.from} → ${toAmount.toFixed(6)} ${input.to}`, amount: input.amount, currency: input.from, featureLabel: 'stablecoin-swap', operationRef: swapRef, kafkaTopic: CORE_TOPICS.STABLECOIN_SWAP, metadata: { toCurrency: input.to, toAmount, fee } });
-      return { success: true, txHash, fromAmount: input.amount, toAmount, fee, estimatedTime: '30 seconds' };
+      return { success: true, txHash: null, onChain: false, reference: swapRef, fromAmount: input.amount, toAmount, fee, estimatedTime: '30 seconds' };
     }),
     send: strictRateLimitedProcedure.input(z.object({
       symbol: z.string(),
       toAddress: z.string().min(10),
       amount: z.number().positive().max(10_000_000),
-    })).mutation(async ({ ctx, input }) => {
-      await enforceTransferLimits(ctx.user.id, input.amount, input.symbol, ctx.user.kycTier);
-      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
-      const [wallet] = await db.select().from(wallets).where(and(eq(wallets.userId, ctx.user.id), eq(wallets.currency, input.symbol))).limit(1);
-      if (!wallet || Number(wallet.balance) < input.amount) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance" });
-      const sendFeeBreakdown = calculateFee(input.amount, { from: input.symbol.slice(0, 2), to: "US" });
-      const fee = Math.max(sendFeeBreakdown.totalFee, input.amount * 0.002);
-      const deducted = input.amount + fee;
-      if (Number(wallet.balance) < deducted) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance for amount + fee" });
-      const [updStable] = await db.update(wallets)
-        .set({ balance: sql`CAST(CAST(${wallets.balance} AS DECIMAL(18,6)) - ${deducted} AS VARCHAR)` })
-        .where(and(eq(wallets.id, wallet.id), sql`CAST(${wallets.balance} AS DECIMAL(18,6)) >= ${deducted}`))
-        .returning({ balance: wallets.balance });
-      if (!updStable) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
-      const txHash = `0x${randomBytes(32).toString("hex")}`;
-      await createTransaction({ userId: ctx.user.id, type: "send", status: "completed", fromCurrency: input.symbol, fromAmount: input.amount.toString(), fee: fee.toFixed(6), description: `Stablecoin send: ${input.amount} ${input.symbol} to ${input.toAddress.slice(0, 10)}...` });
-      return { success: true, txHash, amount: input.amount, fee, symbol: input.symbol, toAddress: input.toAddress };
+    })).mutation(async () => {
+      // W18-A: FAIL CLOSED. The old handler debited the wallet, fabricated a
+      // 0x<randomBytes> txHash, and marked the transaction "completed" — no
+      // chain client (no ethers/web3/viem dependency) exists to broadcast.
+      // That is an unbacked off-chain debit presented as an on-chain send.
+      // Refuse before any fund movement until a real chain client is wired.
+      throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "On-chain stablecoin send is not available: no blockchain broadcast client is configured. No funds were moved." });
     }),
   }),
 
@@ -4036,15 +4077,21 @@ export const appRouter = router({
           .returning({ balance: wallets.balance });
         if (!updAirtime) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
         const airtimeRef = `AIR-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+        // W18-A: debit honesty — no telco/biller integration exists, so the
+        // airtime has NOT been delivered. The transaction is recorded as
+        // "pending" (PENDING_DELIVERY), never "completed"; a fulfillment
+        // worker/provider must settle or reverse it. Debit + status row are
+        // committed atomically in this transaction.
         await tx.insert(transactions).values({
-          userId: ctx.user.id, type: "airtime" as any, status: "completed" as any,
+          userId: ctx.user.id, type: "airtime" as any, status: "pending" as any,
           fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
           reference: airtimeRef,
           description: `Airtime: ${input.phone} (${input.provider})`,
-        });
+          metadata: { fulfillmentStatus: "PENDING_DELIVERY", provider: input.provider, phone: input.phone },
+        } as any);
         return airtimeRef;
       });
-      const airtimeResult = { success: true, reference: ref, phone: input.phone, amount: input.amount };
+      const airtimeResult = { success: true, delivered: false, status: "PENDING_DELIVERY", reference: ref, phone: input.phone, amount: input.amount, message: "Payment accepted; airtime delivery is pending provider fulfillment." };
       storeIdempotency(airtimeIdempKey, airtimeResult);
       return airtimeResult;
     }),
@@ -4076,15 +4123,20 @@ export const appRouter = router({
           .returning({ balance: wallets.balance });
         if (!updBill) throw new TRPCError({ code: "BAD_REQUEST", message: "Insufficient balance (concurrent update)" });
         const billRef = `BILL-${ctx.user.id}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+        // W18-A: debit honesty — no biller integration exists, so the bill has
+        // NOT been paid with the provider. Recorded as "pending"
+        // (PENDING_DELIVERY), never "completed"; no fabricated meter token.
+        // Debit + status row commit atomically in this transaction.
         await tx.insert(transactions).values({
-          userId: ctx.user.id, type: "bill" as any, status: "completed" as any,
+          userId: ctx.user.id, type: "bill" as any, status: "pending" as any,
           fromCurrency: input.currency, fromAmount: input.amount.toString(), fee: "0",
           reference: billRef,
           description: `${input.category}: ${input.provider} (${input.accountNumber})`,
-        });
+          metadata: { fulfillmentStatus: "PENDING_DELIVERY", category: input.category, provider: input.provider, accountNumber: input.accountNumber },
+        } as any);
         return billRef;
       });
-      const billResult = { success: true, reference: ref, token: `TKN${randomBytes(4).toString("hex").toUpperCase()}` };
+      const billResult = { success: true, delivered: false, status: "PENDING_DELIVERY", reference: ref, token: null, message: "Payment accepted; bill settlement is pending biller confirmation. A token will be issued on delivery." };
       storeIdempotency(billIdempKey, billResult);
       return billResult;
     }),
@@ -4239,10 +4291,23 @@ export const appRouter = router({
         .catch((err: unknown) => logger.error({ err: err instanceof Error ? err.message : String(err) }, "Failed to update compliance report status"));
       return { reportId: report.id, status: "generating" };
     }),
-    submitReport: protectedProcedure.input(z.object({ reportId: z.number() })).mutation(async ({ input }) => {
+    // W18-A: IDOR fix — the old handler marked ANY report submitted by id.
+    // Only the report's generator or an admin may submit it, and only from a
+    // submittable state; a guarded UPDATE returns zero rows otherwise.
+    submitReport: protectedProcedure.input(z.object({ reportId: z.number() })).mutation(async ({ ctx, input }) => {
       const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
       const { complianceReports } = await import("../drizzle/schema");
-      await db.update(complianceReports).set({ status: "submitted", submittedAt: new Date() }).where(eq(complianceReports.id, input.reportId)).returning();
+      const [report] = await db.select().from(complianceReports).where(eq(complianceReports.id, input.reportId)).limit(1);
+      if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not found" });
+      const isAdmin = ctx.user.role === "admin";
+      if (!isAdmin && (report as any).generatedBy !== ctx.user.id) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "You can only submit reports you generated" });
+      }
+      const [updated] = await db.update(complianceReports)
+        .set({ status: "submitted", submittedAt: new Date() })
+        .where(and(eq(complianceReports.id, input.reportId), sql`${complianceReports.status} IN ('draft', 'generating')`))
+        .returning({ id: complianceReports.id });
+      if (!updated) throw new TRPCError({ code: "CONFLICT", message: `Report is not in a submittable state` });
       return { success: true, reportId: input.reportId, status: "submitted" };
     }),
   }),
@@ -4430,7 +4495,8 @@ export const appRouter = router({
     }),
     register: protectedProcedure.input(z.object({ terminalId: z.string(), merchantName: z.string(), location: z.string().optional(), serialNumber: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
-      const [row] = await db.insert(posTerminals).values({ userId: ctx.user.id, terminalId: input.terminalId, merchantName: input.merchantName, location: input.location, serialNumber: input.serialNumber, status: "active" }).$returningId();
+      // W18-A: .$returningId() is MySQL-only; use postgres .returning().
+      const [row] = await db.insert(posTerminals).values({ userId: ctx.user.id, terminalId: input.terminalId, merchantName: input.merchantName, location: input.location, serialNumber: input.serialNumber, status: "active" }).returning({ id: posTerminals.id });
       return { id: row.id, terminalId: input.terminalId, status: "active" };
     }),
     updateStatus: protectedProcedure.input(z.object({ id: z.number(), status: z.enum(["active", "offline", "suspended"]) })).mutation(async ({ ctx, input }) => {
@@ -4471,18 +4537,39 @@ export const appRouter = router({
     register: protectedProcedure.input(z.object({ businessName: z.string(), location: z.string().optional(), phone: z.string().optional() })).mutation(async ({ ctx, input }) => {
       const db = await getDb();
       const agentCode = `AGT${Date.now().toString().slice(-6)}`;
-      const [row] = await db.insert(agentAccounts).values({ userId: ctx.user.id, agentCode, businessName: input.businessName, location: input.location, phone: input.phone, status: "pending" }).$returningId();
+      // W18-A: .$returningId() is MySQL-only; use postgres .returning().
+      const [row] = await db.insert(agentAccounts).values({ userId: ctx.user.id, agentCode, businessName: input.businessName, location: input.location, phone: input.phone, status: "pending" }).returning({ id: agentAccounts.id });
       return { id: row.id, agentCode, status: "pending" };
     }),
   }),
 
   checkout: router({
-    createSession: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000), currency: z.string(), description: z.string(), callbackUrl: z.string().optional() })).mutation(({ ctx, input }) => ({
-      sessionId: `cs_${Date.now()}`, checkoutUrl: `https://checkout.remitflow.app/pay/cs_${Date.now()}`, publicKey: `pk_live_remitflow_${ctx.user.id}`, ...input,
-    })),
-    apiKeys: protectedProcedure.query(({ ctx }) => ({
-      publicKey: `pk_live_${ctx.user.id}_remitflow`, secretKey: `sk_live_${ctx.user.id}_***hidden***`, webhookSecret: `whsec_${ctx.user.id}_remitflow`, testPublicKey: `pk_test_${ctx.user.id}_remitflow`, testSecretKey: `sk_test_${ctx.user.id}_***hidden***`,
-    })),
+    // W18-A: FAIL CLOSED. The old handler fabricated a checkout session id/URL
+    // and a pk_live_ key derived from the user id — nothing was persisted and
+    // no payment provider session was created. No checkout-session provider
+    // exists on this router (Stripe checkout lives on the payments router).
+    createSession: protectedProcedure.input(z.object({ amount: z.number().positive().max(10_000_000), currency: z.string(), description: z.string(), callbackUrl: z.string().optional() })).mutation(async () => {
+      throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "Hosted checkout sessions are not available on this endpoint: no checkout provider is configured here. No session was created." });
+    }),
+    // W18-A: real keys from the persisted api_keys table (secrets are stored
+    // hashed — only keyId/prefix/metadata are ever returned). Honest nulls
+    // when the user has issued no keys; nothing is synthesized.
+    apiKeys: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb(); if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database unavailable" });
+      const { apiKeys: apiKeysTable } = await import("../drizzle/schema");
+      const rows = await db.select().from(apiKeysTable).where(and(eq(apiKeysTable.userId, ctx.user.id), eq(apiKeysTable.status, "active"))).orderBy(desc(apiKeysTable.createdAt)).limit(50);
+      const liveKey = rows.find((r: any) => !r.testMode) ?? null;
+      const testKey = rows.find((r: any) => r.testMode) ?? null;
+      return {
+        publicKey: liveKey ? liveKey.keyId : null,
+        keyPrefix: liveKey ? liveKey.keyPrefix : null,
+        secretKey: null, // secret keys are hash-persisted and never re-displayed
+        webhookSecret: null,
+        testPublicKey: testKey ? testKey.keyId : null,
+        testSecretKey: null,
+        keys: rows.map((r: any) => ({ keyId: r.keyId, keyPrefix: r.keyPrefix, name: r.name, testMode: r.testMode, status: r.status, createdAt: r.createdAt, lastUsedAt: r.lastUsedAt })),
+      };
+    }),
     webhooks: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       const rows = await db.select().from(webhooksTable).where(eq(webhooksTable.createdBy, ctx.user.id)).orderBy(desc(webhooksTable.createdAt)).limit(50);
@@ -4914,15 +5001,21 @@ export const appRouter = router({
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         const [doc] = await db.select().from(kycDocuments).where(eq(kycDocuments.id, input.docId)).limit(1);
         if (!doc) throw new TRPCError({ code: "NOT_FOUND", message: "Document not found" });
-        await db.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, input.docId)).returning();
-        if (input.advanceTier) {
-          const [user] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, doc.userId)).limit(1);
-          const tierMap: Record<string, string> = { tier0: "tier1", tier1: "tier2", tier2: "tier3", tier3: "tier3" };
-          const nextTier = tierMap[user?.kycTier ?? "tier0"] ?? "tier1";
-          const [tierUpd] = await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
-          // W14: invalidate user:byOpenId cache-aside after direct kycTier mutation
-          if (tierUpd?.openId) await invalidateUserByOpenIdCache(tierUpd.openId);
-        }
+        // W18-A: doc approval + tier advance must commit atomically — previously
+        // two independent writes (doc could be approved without the tier move).
+        let tierUpdOpenId: string | null = null;
+        await db.transaction(async (tx: any) => {
+          await tx.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, input.docId)).returning();
+          if (input.advanceTier) {
+            const [user] = await tx.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, doc.userId)).limit(1);
+            const tierMap: Record<string, string> = { tier0: "tier1", tier1: "tier2", tier2: "tier3", tier3: "tier3" };
+            const nextTier = tierMap[user?.kycTier ?? "tier0"] ?? "tier1";
+            const [tierUpd] = await tx.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
+            tierUpdOpenId = tierUpd?.openId ?? null;
+          }
+        });
+        // W14: invalidate user:byOpenId cache-aside after commit
+        if (tierUpdOpenId) await invalidateUserByOpenIdCache(tierUpdOpenId);
         // Audit trail
         logAdminAction({
           actorId: ctx.user!.id,
@@ -4978,20 +5071,27 @@ export const appRouter = router({
         const db = await getDb();
         if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "DB unavailable" });
         let approved = 0;
-        for (const docId of input.docIds) {
-          const [doc] = await db.select().from(kycDocuments).where(eq(kycDocuments.id, docId)).limit(1);
-          if (!doc) continue;
-          await db.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, docId)).returning();
-          if (input.advanceTier) {
-            const [user] = await db.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, doc.userId)).limit(1);
-            const tierMap: Record<string, string> = { tier0: "tier1", tier1: "tier2", tier2: "tier3", tier3: "tier3" };
-            const nextTier = tierMap[user?.kycTier ?? "tier0"] ?? "tier1";
-            const [tierUpd] = await db.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
-            // W14: invalidate user:byOpenId cache-aside after direct kycTier mutation
-            if (tierUpd?.openId) await invalidateUserByOpenIdCache(tierUpd.openId);
+        const openIdsToInvalidate: string[] = [];
+        // W18-A: all doc approvals + tier advances commit in ONE transaction —
+        // previously each doc was an independent write set, leaving partial
+        // bulk approvals on any mid-loop failure.
+        await db.transaction(async (tx: any) => {
+          for (const docId of input.docIds) {
+            const [doc] = await tx.select().from(kycDocuments).where(eq(kycDocuments.id, docId)).limit(1);
+            if (!doc) continue;
+            await tx.update(kycDocuments).set({ status: "approved", reviewedAt: new Date() }).where(eq(kycDocuments.id, docId)).returning();
+            if (input.advanceTier) {
+              const [user] = await tx.select({ kycTier: users.kycTier }).from(users).where(eq(users.id, doc.userId)).limit(1);
+              const tierMap: Record<string, string> = { tier0: "tier1", tier1: "tier2", tier2: "tier3", tier3: "tier3" };
+              const nextTier = tierMap[user?.kycTier ?? "tier0"] ?? "tier1";
+              const [tierUpd] = await tx.update(users).set({ kycTier: nextTier as any }).where(eq(users.id, doc.userId)).returning();
+              if (tierUpd?.openId) openIdsToInvalidate.push(tierUpd.openId);
+            }
+            approved++;
           }
-          approved++;
-        }
+        });
+        // W14: invalidate user:byOpenId cache-aside after commit
+        for (const oid of openIdsToInvalidate) await invalidateUserByOpenIdCache(oid);
         return { success: true, approved };
       }),
     listComplianceCases: adminProcedure
@@ -6569,9 +6669,13 @@ Case: #${input.caseId}`,
       const { fundVotes, fundProposals } = await import("../drizzle/schema.js");
       const existing = await db.select().from(fundVotes).where(and(eq(fundVotes.proposalId, input.proposalId), eq(fundVotes.userId, ctx.user.id))).limit(1);
       if (existing.length) throw new Error("Already voted on this proposal");
-      await db.insert(fundVotes).values({ proposalId: input.proposalId, userId: ctx.user.id, vote: input.vote, comment: input.comment ?? null });
-      if (input.vote === "for") { await db.update(fundProposals).set({ votesFor: sql`votes_for + 1` }).where(eq(fundProposals.id, input.proposalId)); }
-      else { await db.update(fundProposals).set({ votesAgainst: sql`votes_against + 1` }).where(eq(fundProposals.id, input.proposalId)); }
+      // W18-A: vote insert + proposal counter increment must be atomic —
+      // previously a counter-update failure left an uncounted vote row.
+      await db.transaction(async (tx: any) => {
+        await tx.insert(fundVotes).values({ proposalId: input.proposalId, userId: ctx.user.id, vote: input.vote, comment: input.comment ?? null });
+        if (input.vote === "for") { await tx.update(fundProposals).set({ votesFor: sql`votes_for + 1` }).where(eq(fundProposals.id, input.proposalId)); }
+        else { await tx.update(fundProposals).set({ votesAgainst: sql`votes_against + 1` }).where(eq(fundProposals.id, input.proposalId)); }
+      });
       // Fetch updated counts and publish to Go community feed for real-time SSE
       const [updated] = await db.select({ title: fundProposals.title, votesFor: fundProposals.votesFor, votesAgainst: fundProposals.votesAgainst, submittedByUserId: fundProposals.submittedByUserId }).from(fundProposals).where(eq(fundProposals.id, input.proposalId)).limit(1).returning();
       try {
@@ -7061,8 +7165,14 @@ Case: #${input.caseId}`,
         const price = Number(asset.currentPrice ?? 0);
         const total = price * input.quantity;
         const fee = total * 0.001;
-        const [inv] = await db.insert(userInvestments).values({ userId: ctx.user.id, assetId: input.assetId, status: "active", quantity: input.quantity.toString(), purchasePrice: price.toString(), currentValue: total.toString(), currency: input.currency, purchasedAt: new Date() }).$returningId();
-        await db.insert(investmentOrders).values({ userId: ctx.user.id, assetId: input.assetId, orderType: "buy", quantity: input.quantity.toString(), priceAtOrder: price.toString(), totalAmount: total.toString(), currency: input.currency, status: "completed", fee: fee.toString() });
+        // W18-A: position insert + order insert in ONE transaction; also fixes
+        // MySQL-only .$returningId() → postgres .returning() (latent defect —
+        // $returningId does not exist on the postgres-js driver).
+        const [inv] = await db.transaction(async (tx: any) => {
+          const [invRow] = await tx.insert(userInvestments).values({ userId: ctx.user.id, assetId: input.assetId, status: "active", quantity: input.quantity.toString(), purchasePrice: price.toString(), currentValue: total.toString(), currency: input.currency, purchasedAt: new Date() }).returning({ id: userInvestments.id });
+          await tx.insert(investmentOrders).values({ userId: ctx.user.id, assetId: input.assetId, orderType: "buy", quantity: input.quantity.toString(), priceAtOrder: price.toString(), totalAmount: total.toString(), currency: input.currency, status: "completed", fee: fee.toString() });
+          return [invRow];
+        });
         return { success: true, investmentId: inv.id, symbol: asset.symbol, quantity: input.quantity, price, total: total + fee, fee };
       }),
     sellAsset: protectedProcedure
@@ -7077,8 +7187,12 @@ Case: #${input.caseId}`,
         const qty = input.quantity ?? Number(inv.quantity);
         const total = currentPrice * qty;
         const fee = total * 0.001;
-        await db.update(userInvestments).set({ status: "sold", soldAt: new Date(), soldPrice: currentPrice.toString(), updatedAt: new Date() }).where(eq(userInvestments.id, input.investmentId)).returning();
-        await db.insert(investmentOrders).values({ userId: ctx.user.id, assetId: inv.assetId, orderType: "sell", quantity: qty.toString(), priceAtOrder: currentPrice.toString(), totalAmount: total.toString(), currency: inv.currency ?? "USD", status: "completed", fee: fee.toString() });
+        // W18-A: position close + order insert in ONE transaction (previously
+        // an order-insert failure left the position sold with no order record).
+        await db.transaction(async (tx: any) => {
+          await tx.update(userInvestments).set({ status: "sold", soldAt: new Date(), soldPrice: currentPrice.toString(), updatedAt: new Date() }).where(eq(userInvestments.id, input.investmentId)).returning();
+          await tx.insert(investmentOrders).values({ userId: ctx.user.id, assetId: inv.assetId, orderType: "sell", quantity: qty.toString(), priceAtOrder: currentPrice.toString(), totalAmount: total.toString(), currency: inv.currency ?? "USD", status: "completed", fee: fee.toString() });
+        });
         return { success: true, symbol: asset?.symbol, quantity: qty, price: currentPrice, total: total - fee, fee };
       }),
     getPortfolio: protectedProcedure.query(async ({ ctx }) => {
@@ -7373,23 +7487,37 @@ Case: #${input.caseId}`,
 
   corridorPricing: router({
     list: publicProcedure.query(async () => {
-      const corridors = [
-        { id: 1, from: "GBP", to: "NGN", minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", popular: true },
-        { id: 2, from: "USD", to: "KES", minAmount: 10, maxAmount: 10000, deliveryTime: "Instant", popular: true },
-        { id: 3, from: "EUR", to: "GHS", minAmount: 10, maxAmount: 5000, deliveryTime: "2-4 hours", popular: false },
-        { id: 4, from: "USD", to: "NGN", minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", popular: true },
-        { id: 5, from: "GBP", to: "KES", minAmount: 10, maxAmount: 10000, deliveryTime: "Instant", popular: false },
-        { id: 6, from: "USD", to: "GHS", minAmount: 10, maxAmount: 5000, deliveryTime: "2-4 hours", popular: false },
-        { id: 7, from: "EUR", to: "NGN", minAmount: 10, maxAmount: 10000, deliveryTime: "1-2 hours", popular: false },
-        { id: 8, from: "GBP", to: "ZAR", minAmount: 10, maxAmount: 10000, deliveryTime: "Same day", popular: false },
-      ];
+      // W18-A: real corridors derived from actual completed transfer activity
+      // (was a hardcoded corridor array). Honest empty list when no corridor
+      // has real volume yet. Delivery-time claims are dropped — no provider
+      // SLA data source exists.
+      const db = await getDb(); if (!db) return [];
+      const rows = (await db.execute(sql`
+        SELECT "fromCurrency" AS from, "toCurrency" AS to,
+               COUNT(*)::int AS volume,
+               MIN(CAST("fromAmount" AS DECIMAL)) AS "minAmount",
+               MAX(CAST("fromAmount" AS DECIMAL)) AS "maxAmount"
+        FROM transactions
+        WHERE "toCurrency" IS NOT NULL AND "fromCurrency" <> "toCurrency"
+        GROUP BY "fromCurrency", "toCurrency"
+        ORDER BY COUNT(*) DESC
+        LIMIT 50
+      `)) as unknown as Array<{ from: string; to: string; volume: number; minAmount: string; maxAmount: string }>;
+      if (rows.length === 0) return [];
       const rates = await getLiveRates("USD");
-      return corridors.map((c) => {
+      const maxVolume = Math.max(...rows.map((r) => r.volume), 1);
+      return rows.map((c, idx) => {
         const fromRate = rates[c.from] ?? 1;
         const toRate = rates[c.to] ?? 1;
         const liveRate = toRate / fromRate;
         const feeInfo = calculateFee(100, { from: c.from.slice(0, 2), to: c.to.slice(0, 2) });
-        return { ...c, rate: Math.round(liveRate * 100) / 100, fee: feeInfo.feeRate, provider: "RemitFlow" };
+        return {
+          id: idx + 1, from: c.from, to: c.to,
+          minAmount: Number(c.minAmount), maxAmount: Number(c.maxAmount),
+          deliveryTime: null, // no provider SLA data — honest null, not a fabricated ETA
+          popular: c.volume >= maxVolume / 2,
+          rate: Math.round(liveRate * 100) / 100, fee: feeInfo.feeRate, provider: "RemitFlow",
+        };
       });
     }),
     compare: publicProcedure.input(z.object({ from: z.string(), to: z.string(), amount: z.number() })).query(async ({ input }) => {
@@ -7399,11 +7527,12 @@ Case: #${input.caseId}`,
       const liveRate = toRate / fromRate;
       const rfFee = calculateFee(input.amount / fromRate, { from: input.from.slice(0, 2), to: input.to.slice(0, 2) });
       const rfFeeAmt = rfFee.totalFee * fromRate;
+      // W18-A: removed fabricated competitor quotes (synthetic Wise/WorldRemit/
+      // Western Union rates, ratings, and delivery times derived from our own
+      // live rate). Only RemitFlow's real computed quote is returned; the
+      // delivery-time/rating claims are dropped (no data source for them).
       const providers = [
-        { name: "RemitFlow", rate: liveRate, fee: Math.round(rfFeeAmt * 100) / 100, total: Math.round((input.amount - rfFeeAmt) * liveRate * 100) / 100, deliveryTime: "1-2 hours", rating: 4.8 },
-        { name: "Wise", rate: liveRate * 0.997, fee: Math.round(input.amount * 0.007 * 100) / 100, total: Math.round((input.amount - input.amount * 0.007) * liveRate * 0.997 * 100) / 100, deliveryTime: "2-3 hours", rating: 4.6 },
-        { name: "WorldRemit", rate: liveRate * 0.99, fee: Math.round(input.amount * 0.01 * 100) / 100, total: Math.round((input.amount - input.amount * 0.01) * liveRate * 0.99 * 100) / 100, deliveryTime: "Same day", rating: 4.3 },
-        { name: "Western Union", rate: liveRate * 0.97, fee: Math.round((input.amount * 0.015 + 5) * 100) / 100, total: Math.round((input.amount - input.amount * 0.015 - 5) * liveRate * 0.97 * 100) / 100, deliveryTime: "Minutes", rating: 4.0 },
+        { name: "RemitFlow", rate: liveRate, fee: Math.round(rfFeeAmt * 100) / 100, total: Math.round((input.amount - rfFeeAmt) * liveRate * 100) / 100, deliveryTime: null, rating: null },
       ];
       return { from: input.from, to: input.to, amount: input.amount, providers };
     }),
@@ -7629,7 +7758,15 @@ Case: #${input.caseId}`,
   ...(LEGACY_PACKS_ENABLED ? { amlEngine: amlEngineRouter } : {}),
   ...(LEGACY_PACKS_ENABLED ? { fraudMl: fraudMlRouter } : {}),
   ...(LEGACY_PACKS_ENABLED ? { transferEngine: transferEngineRouter } : {}),
-  transferCore: transferCoreRouter,
+  // W18 contract #1: mount transferCore with `send` re-based on
+  // moneyAuditedProcedure (audited + strictRateLimited + protected, exported by
+  // D from ./_core/trpc) — closing the parallel un-PBAC'd transfer path
+  // (transferCore.ts:68 handler) without editing that file. concat preserves
+  // the original input schema and resolver; other procs are mounted unchanged.
+  transferCore: router({
+    ...(transferCoreRouter._def.procedures as Record<string, any>),
+    send: moneyAuditedProcedure.concat(transferCoreRouter._def.procedures.send as any) as any,
+  }),
   ...(LEGACY_PACKS_ENABLED ? { pdfReceipt: pdfReceiptRouter } : {}),
   ...(LEGACY_PACKS_ENABLED ? { searchIndexer: searchIndexerRouter } : {}),
   ...(LEGACY_PACKS_ENABLED ? { rateLimiter: rateLimiterRouter } : {}),

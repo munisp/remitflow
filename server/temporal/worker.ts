@@ -37,6 +37,11 @@ import {
   bdcActivities,
   bdcReversalWatchdogActivities,
 } from "./activities-bdc";
+// W18: fund-flow saga worker — CrossBorderTransferWorkflow / AgentCashOutWorkflow /
+// StablecoinBridgeWorkflow / BNPLInstallmentWorkflow / BatchPayrollWorkflow. These
+// defs + temporalClient.ts's default task queue ("fund-flow-tasks") previously had
+// NO worker polling them: started workflows would park forever. Registered below.
+import * as fundFlowActivities from "./fundFlowActivities";
 
 // V2-R2: modules dynamically import()ed inside the W10 activity/schedule
 // bodies (enumerated from server/temporal/apApprovalWorkflow.ts and
@@ -75,6 +80,19 @@ const BDC_WORKFLOW_IGNORE_MODULES = [
 const TEMPORAL_ADDRESS = process.env.TEMPORAL_ADDRESS ?? "localhost:7233";
 const TASK_QUEUE = process.env.TEMPORAL_TASK_QUEUE ?? "remitflow-main";
 const NAMESPACE = process.env.TEMPORAL_NAMESPACE ?? "default";
+// Must match temporalClient.ts's TEMPORAL_TASK_QUEUE default ("fund-flow-tasks").
+const FUND_FLOW_TASK_QUEUE = process.env.FUND_FLOW_TASK_QUEUE ?? "fund-flow-tasks";
+// Modules dynamically import()ed inside fundFlowActivities bodies — stubbed in
+// the workflow BUNDLE ONLY; activities still run in the normal worker process.
+const FUND_FLOW_WORKFLOW_IGNORE_MODULES = [
+  "../db.js",
+  "../../drizzle/schema.js",
+  "drizzle-orm",
+  "../middleware/kafka.js",
+  "../middleware/fundFlowAtomicity.js",
+  "../_core/logger.js",
+  "@temporalio/client",
+];
 
 // ── Health HTTP server ───────────────────────────────────────────────────────
 let workerReady = false;
@@ -185,6 +203,21 @@ async function run(): Promise<void> {
     interceptors: { activity: [makeTemporalOtelActivityInterceptors()] },
   });
 
+  // ── W18 fund-flow saga worker (queue: fund-flow-tasks) ────────────────────
+  const fundFlowWorker = await Worker.create({
+    connection,
+    namespace: NAMESPACE,
+    taskQueue: FUND_FLOW_TASK_QUEUE,
+    workflowsPath: new URL("./fundFlowWorkflow.js", import.meta.url).pathname,
+    bundlerOptions: { ignoreModules: FUND_FLOW_WORKFLOW_IGNORE_MODULES },
+    activities: fundFlowActivities,
+    maxConcurrentActivityTaskExecutions: 10,
+    maxConcurrentWorkflowTaskExecutions: 5,
+    maxCachedWorkflows: 100,
+    shutdownGraceTime: "30 seconds",
+    interceptors: { activity: [makeTemporalOtelActivityInterceptors()] },
+  });
+
   logger.info(`[Temporal Worker] Worker started on task queue: ${TASK_QUEUE}`);
   logger.info("[Temporal Worker] Registered workflows: TransferWorkflow, KYCVerificationWorkflow, RecurringPaymentWorkflow");
   logger.info(`[Temporal Worker] Registered activities: ${Object.keys(activities).join(", ")}`);
@@ -195,7 +228,7 @@ async function run(): Promise<void> {
   const shutdown = async () => {
     logger.info("[Temporal Worker] Shutting down gracefully...");
     workerReady = false;
-    await Promise.all([worker.shutdown(), apWorker.shutdown(), arWorker.shutdown(), bdcWorker.shutdown()]);
+    await Promise.all([worker.shutdown(), apWorker.shutdown(), arWorker.shutdown(), bdcWorker.shutdown(), fundFlowWorker.shutdown()]);
     await connection.close();
     healthServer.close();
     logger.info("[Temporal Worker] Shutdown complete");
@@ -205,7 +238,7 @@ async function run(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  await Promise.all([worker.run(), apWorker.run(), arWorker.run(), bdcWorker.run()]);
+  await Promise.all([worker.run(), apWorker.run(), arWorker.run(), bdcWorker.run(), fundFlowWorker.run()]);
 }
 
 run().catch(err => {

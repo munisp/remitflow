@@ -16,9 +16,11 @@
  *   - Memory-safe concurrent consumer groups
  *
  * Architecture:
- *   - Polls Fluvio HTTP bridge for new messages
+ *   - Consumes directly from the Fluvio cluster via the native `fluvio`
+ *     crate (FLUVIO_ENDPOINT, e.g. fluvio-sc:9003 — set in compose).
+ *     FAILS CLOSED at boot when FLUVIO_ENDPOINT or DATABASE_URL is unset.
  *   - Processes events with at-least-once semantics
- *   - Commits offsets only after successful processing
+ *   - Commits offsets to PostgreSQL only after successful processing
  *   - Exposes /health and /metrics endpoints
  */
 
@@ -31,7 +33,7 @@ use axum::{
 };
 use chrono::Utc;
 use prometheus::{IntCounter, IntCounterVec, Opts, Registry};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -148,8 +150,7 @@ pub struct AppState {
     pub pg_pool: deadpool_postgres::Pool,
     pub metrics: Arc<Metrics>,
     pub prometheus_registry: Arc<Registry>,
-    pub fluvio_bridge_url: String,
-    pub http_client: reqwest::Client,
+    pub fluvio: Arc<fluvio::Fluvio>,
     pub consumer_group: String,
 }
 
@@ -291,66 +292,95 @@ const TOPICS: &[&str] = &[
     "settlement-events",
 ];
 
+/// Consume one topic directly from the Fluvio cluster using the native
+/// crate. Resumes from the last committed PostgreSQL offset (at-least-once);
+/// commits only after a batch is processed successfully. Reconnects the
+/// stream with backoff on failure.
 async fn consume_topic(state: Arc<AppState>, topic: &str) {
+    use futures::StreamExt;
+
     let mut last_offset: i64 = get_committed_offset(&state, topic).await;
 
     loop {
-        match fetch_messages(&state, topic, last_offset).await {
-            Ok(messages) => {
-                if messages.is_empty() {
-                    sleep(Duration::from_millis(500)).await;
-                    continue;
-                }
+        let consumer = match state.fluvio.partition_consumer(topic, 0).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(topic = topic, error = %e, "partition_consumer failed — retrying in 2s");
+                sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+        // last_offset is the last successfully processed record; resume after it.
+        let resume = fluvio::Offset::absolute(last_offset + 1)
+            .unwrap_or_else(|_| fluvio::Offset::beginning());
+        let mut stream = match consumer.stream(resume).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(topic = topic, error = %e, "stream open failed — retrying in 2s");
+                sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+        info!(topic = topic, resume_offset = last_offset + 1, "consuming topic");
 
-                for msg in &messages {
-                    match process_message(&state, msg).await {
-                        Ok(_) => {
-                            state.metrics.messages_consumed.with_label_values(&[topic]).inc();
-                            last_offset = msg.offset;
-                        }
-                        Err(e) => {
-                            state.metrics.messages_failed.with_label_values(&[topic]).inc();
-                            error!(topic = topic, offset = msg.offset, error = %e, "Message processing failed");
-                        }
-                    }
+        let mut batch_processed = 0u32;
+        while let Some(item) = stream.next().await {
+            let record = match item {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(topic = topic, error = %e, "stream error — reconnecting in 2s");
+                    sleep(Duration::from_secs(2)).await;
+                    break;
                 }
+            };
 
-                // Commit offset after batch
+            let msg = FluvioMessage {
+                topic: topic.to_string(),
+                partition: 0,
+                offset: record.offset(),
+                key: record.key().map(|k| String::from_utf8_lossy(k).into_owned()),
+                value: serde_json::from_str::<serde_json::Value>(
+                    &String::from_utf8_lossy(record.value()),
+                )
+                .unwrap_or_else(|_| {
+                    serde_json::Value::String(
+                        String::from_utf8_lossy(record.value()).into_owned(),
+                    )
+                }),
+                timestamp: Some(record.timestamp()),
+            };
+
+            match process_message(&state, &msg).await {
+                Ok(_) => {
+                    state.metrics.messages_consumed.with_label_values(&[topic]).inc();
+                    last_offset = msg.offset;
+                    batch_processed += 1;
+                }
+                Err(e) => {
+                    state.metrics.messages_failed.with_label_values(&[topic]).inc();
+                    error!(topic = topic, offset = msg.offset, error = %e, "Message processing failed");
+                }
+            }
+
+            // Commit offset periodically (every 32 processed records).
+            if batch_processed >= 32 {
                 if let Err(e) = commit_offset(&state, topic, last_offset).await {
                     error!(topic = topic, error = %e, "Offset commit failed");
                 } else {
                     state.metrics.offsets_committed.inc();
                 }
-            }
-            Err(e) => {
-                warn!(topic = topic, error = %e, "Fetch failed — retrying in 2s");
-                sleep(Duration::from_secs(2)).await;
+                batch_processed = 0;
             }
         }
-    }
-}
 
-async fn fetch_messages(
-    state: &AppState,
-    topic: &str,
-    from_offset: i64,
-) -> anyhow::Result<Vec<FluvioMessage>> {
-    let url = format!(
-        "{}/consume?topic={}&offset={}&max=100&group={}",
-        state.fluvio_bridge_url, topic, from_offset, state.consumer_group
-    );
-
-    let resp = state
-        .http_client
-        .get(&url)
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await?;
-
-    if resp.status().is_success() {
-        Ok(resp.json::<Vec<FluvioMessage>>().await?)
-    } else {
-        Ok(vec![]) // No messages or bridge unavailable
+        // Stream ended or errored: flush the final offset before reconnecting.
+        if batch_processed > 0 {
+            if let Err(e) = commit_offset(&state, topic, last_offset).await {
+                error!(topic = topic, error = %e, "Offset commit failed");
+            } else {
+                state.metrics.offsets_committed.inc();
+            }
+        }
     }
 }
 
@@ -381,10 +411,12 @@ async fn process_message(state: &AppState, msg: &FluvioMessage) -> anyhow::Resul
     Ok(())
 }
 
+/// Returns the last successfully processed offset, or -1 when none has been
+/// committed yet (so the consumer resumes from offset 0 / the beginning).
 async fn get_committed_offset(state: &AppState, topic: &str) -> i64 {
     let client = match state.pg_pool.get().await {
         Ok(c) => c,
-        Err(_) => return 0,
+        Err(_) => return -1,
     };
 
     client
@@ -396,7 +428,7 @@ async fn get_committed_offset(state: &AppState, topic: &str) -> i64 {
         .ok()
         .flatten()
         .map(|r| r.get::<_, i64>("offset"))
-        .unwrap_or(0)
+        .unwrap_or(-1)
 }
 
 async fn commit_offset(state: &AppState, topic: &str, offset: i64) -> anyhow::Result<()> {
@@ -438,6 +470,27 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     )
 }
 
+/// Connect to Fluvio with bounded exponential backoff. Config errors fail
+/// closed before this; transient broker unavailability retries.
+async fn connect_fluvio(endpoint: &str) -> fluvio::Fluvio {
+    let mut delay = Duration::from_secs(1);
+    let max_delay = Duration::from_secs(60);
+    loop {
+        let config = fluvio::config::FluvioConfig::new(endpoint);
+        match fluvio::Fluvio::connect_with_config(&config).await {
+            Ok(client) => {
+                info!(endpoint, "connected to fluvio");
+                return client;
+            }
+            Err(e) => {
+                warn!(error = %e, endpoint, backoff_secs = delay.as_secs(), "fluvio connect failed, retrying");
+                sleep(delay).await;
+                delay = (delay * 2).min(max_delay);
+            }
+        }
+    }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -452,13 +505,24 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // FAIL CLOSED: both the database and the Fluvio cluster endpoint are
+    // required. No silent defaults to a non-existent HTTP bridge.
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-    let fluvio_bridge_url = std::env::var("FLUVIO_HTTP_BRIDGE_URL")
-        .unwrap_or_else(|_| "http://localhost:8300".to_string());
+    let fluvio_endpoint = match std::env::var("FLUVIO_ENDPOINT") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => {
+            eprintln!(
+                "FATAL: FLUVIO_ENDPOINT is required (e.g. fluvio-sc:9003); refusing to start unconfigured"
+            );
+            std::process::exit(1);
+        }
+    };
     let consumer_group = std::env::var("FLUVIO_CONSUMER_GROUP")
         .unwrap_or_else(|_| "remitflow-main".to_string());
     let port: u16 = std::env::var("FLUVIO_CONSUMER_PORT")
-        .unwrap_or_else(|_| "8201".to_string())
+        .ok()
+        .or_else(|| std::env::var("PORT").ok())
+        .unwrap_or_else(|| "8201".to_string())
         .parse()?;
 
     // PostgreSQL pool
@@ -475,14 +539,15 @@ async fn main() -> anyhow::Result<()> {
     let registry = Registry::new();
     let metrics = Metrics::new(&registry)?;
 
+    // Connect to the real Fluvio cluster with bounded backoff (same pattern
+    // as services/rust-lakehouse-writer).
+    let fluvio = Arc::new(connect_fluvio(&fluvio_endpoint).await);
+
     let state = Arc::new(AppState {
         pg_pool,
         metrics: Arc::new(metrics),
         prometheus_registry: Arc::new(registry),
-        fluvio_bridge_url,
-        http_client: reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?,
+        fluvio,
         consumer_group,
     });
 

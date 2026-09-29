@@ -340,17 +340,12 @@ export async function publishFundFlowEvent(event: FundFlowEvent): Promise<void> 
   }
 
   // Also publish to Fluvio for real-time streaming (best-effort)
+  // W18 fix-up: was POST {FLUVIO_GATEWAY_URL}/api/v1/produce/<topic> — a path
+  // the real Fluvio HTTP bridge never implemented. Real contract:
+  // POST {FLUVIO_HTTP_BRIDGE_URL}/produce with {topic, key, value}.
   try {
-    const fluvioUrl = process.env.FLUVIO_GATEWAY_URL;
-    if (fluvioUrl) {
-      const response = await fetch(`${fluvioUrl}/api/v1/produce/fund-flow-stream`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(event),
-        signal: AbortSignal.timeout(2000),
-      });
-      if (!response.ok) throw new Error(`Fluvio ${response.status}`);
-    }
+    const { fluvioProduce } = await import("../integrations/fluvio/streaming");
+    await fluvioProduce("fund-flow-stream", event.operationId ?? event.eventId, event);
   } catch {
     // Fluvio is best-effort for real-time streaming
   }

@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure, strictRateLimitedProcedure } from "../_core/trpc";
 import { getDb, createAuditLog } from "../db";
 import {
   payrollCompanies,
@@ -514,9 +514,18 @@ export const globalPayrollRouter = router({
       return { run, items };
     }),
 
-  approveRun: protectedProcedure
-    .input(z.object({ runId: z.number() }))
+  approveRun: strictRateLimitedProcedure
+    .input(z.object({
+      runId:    z.number(),
+      totpCode: z.string().regex(/^\d{6}$/).optional(),
+    }))
     .mutation(async ({ ctx, input }) => {
+      // W18: payroll approval authorises downstream money movement — mandatory
+      // TOTP step-up (fail closed) + audit via strictRateLimitedProcedure.
+      // Maker-checker separation of duty is enforced at disburseRun (approver
+      // cannot disburse), unchanged.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "payroll run approval");
       const db = await getDb();
       const [run] = await db.select().from(payrollRuns).where(eq(payrollRuns.id, input.runId));
       if (!run) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });

@@ -9,12 +9,37 @@
  * 5. WebAuthn/FIDO2 hardware security keys
  * 6. Time-delayed high-value reversals
  * 7. Canary token alerting
+ *
+ * Wave-18 (C): all state is durably persisted via drizzle (migration 0097).
+ * The previous in-memory Map stores were replaced with PostgreSQL tables;
+ * WebAuthn challenges are short-TTL table rows (5-minute expiry). Every
+ * procedure FAILS CLOSED when the database is unavailable (requireDb throws),
+ * and multi-write paths run inside db.transaction via withTransaction.
+ * Procedure names, inputs and outputs are unchanged for the W17
+ * InsiderThreatConsole consumer.
  */
 
 import { z } from "zod";
 import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
 import { randomBytes } from "crypto";
 import { TRPCError } from "@trpc/server";
+import { and, desc, eq, gt, gte, sql } from "drizzle-orm";
+import { requireDb } from "../db";
+import { withTransaction } from "../db-transaction";
+import {
+  InsiderCanaryAlert as InsiderCanaryAlertRow,
+  InsiderDelayedReversal as InsiderDelayedReversalRow,
+  InsiderWebauthnCredential as InsiderWebauthnCredentialRow,
+  insiderBreakGlassEvents,
+  insiderCanaryAlerts,
+  insiderDelayedReversals,
+  insiderDlpEvents,
+  insiderGeoTimeFenceConfig,
+  insiderJitAccessGrants,
+  insiderMakerCheckerRequests,
+  insiderWebauthnChallenges,
+  insiderWebauthnCredentials,
+} from "../../drizzle/schema";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -88,21 +113,6 @@ export interface CanaryAlert {
   severity: "critical";
 }
 
-// ─── In-Memory Stores (production: use Redis/PostgreSQL) ─────────────────────
-
-const makerCheckerRequests: Map<string, MakerCheckerRequest> = new Map();
-const jitAccessGrants: Map<string, JITAccessGrant> = new Map();
-const dlpEvents: DLPEvent[] = [];
-const webauthnCredentials: Map<string, WebAuthnCredential> = new Map();
-const canaryAlerts: CanaryAlert[] = [];
-const delayedReversals: Map<string, { transferRef: string; amount: number; requestedBy: number; requestedAt: string; executeAt: string; status: "pending" | "executed" | "cancelled" }> = new Map();
-
-// JIT rate limits per user
-const jitRateLimits: Map<number, { count: number; windowStart: number }> = new Map();
-
-// DLP access counters per user per hour
-const dlpAccessCounters: Map<string, { count: number; windowStart: number }> = new Map();
-
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const MAKER_CHECKER_THRESHOLDS = {
@@ -132,6 +142,8 @@ const DLP_PII_TABLES = ["users", "kyc_documents", "wallets", "transactions", "ag
 
 const REVERSAL_DELAY_HOURS = 4;
 const HIGH_VALUE_REVERSAL_THRESHOLD = 10000; // $10K USD
+
+const WEBAUTHN_CHALLENGE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
@@ -172,6 +184,88 @@ function requiresMakerChecker(operationType: string, amount: number): boolean {
   return amount >= threshold;
 }
 
+// ─── Row mappers (DB rows → wire shapes; ISO timestamps, nulls → undefined) ──
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toMakerCheckerRequest(r: any): MakerCheckerRequest {
+  return {
+    id: r.id,
+    operationType: r.operationType,
+    requestedBy: r.requestedBy,
+    requestedAt: new Date(r.requestedAt).toISOString(),
+    payload: (r.payload ?? {}) as Record<string, unknown>,
+    status: r.status,
+    approvedBy: r.approvedBy ?? undefined,
+    approvedAt: r.approvedAt ? new Date(r.approvedAt).toISOString() : undefined,
+    rejectionReason: r.rejectionReason ?? undefined,
+    expiresAt: new Date(r.expiresAt).toISOString(),
+    riskScore: r.riskScore,
+    requiredApprovers: r.requiredApprovers,
+    currentApprovals: r.currentApprovals,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toJitGrant(g: any): JITAccessGrant {
+  return {
+    id: g.id,
+    userId: g.userId,
+    privilege: g.privilege,
+    grantedAt: new Date(g.grantedAt).toISOString(),
+    expiresAt: new Date(g.expiresAt).toISOString(),
+    grantedBy: g.grantedBy,
+    reason: g.reason,
+    revoked: g.revoked,
+    revokedAt: g.revokedAt ? new Date(g.revokedAt).toISOString() : undefined,
+    actionsPerformed: g.actionsPerformed,
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function toDlpEvent(e: any): DLPEvent {
+  return {
+    id: e.id,
+    userId: e.userId,
+    action: e.action,
+    table: e.tableName,
+    recordCount: e.recordCount,
+    timestamp: new Date(e.createdAt).toISOString(),
+    blocked: e.blocked,
+    reason: e.reason ?? undefined,
+  };
+}
+
+/**
+ * Load the geo/time fence configuration from the database, seeding the
+ * singleton row with defaults on first use. FAILS CLOSED via requireDb when
+ * the database is unavailable.
+ */
+async function loadGeoTimeFence(): Promise<GeoTimeFence> {
+  const db = await requireDb();
+  const rows = await db.select().from(insiderGeoTimeFenceConfig).where(eq(insiderGeoTimeFenceConfig.id, 1)).limit(1);
+  const row = rows[0];
+  if (!row) {
+    await db.insert(insiderGeoTimeFenceConfig).values({
+      id: 1,
+      allowedIps: DEFAULT_GEO_TIME_FENCE.allowedIPs,
+      allowedCountries: DEFAULT_GEO_TIME_FENCE.allowedCountries,
+      businessHoursStart: DEFAULT_GEO_TIME_FENCE.businessHoursStart,
+      businessHoursEnd: DEFAULT_GEO_TIME_FENCE.businessHoursEnd,
+      allowedDays: DEFAULT_GEO_TIME_FENCE.allowedDays,
+      breakGlassEnabled: DEFAULT_GEO_TIME_FENCE.breakGlassEnabled,
+    }).onConflictDoNothing();
+    return DEFAULT_GEO_TIME_FENCE;
+  }
+  return {
+    allowedIPs: (row.allowedIps as string[]) ?? [],
+    allowedCountries: (row.allowedCountries as string[]) ?? [],
+    businessHoursStart: row.businessHoursStart,
+    businessHoursEnd: row.businessHoursEnd,
+    allowedDays: (row.allowedDays as number[]) ?? [],
+    breakGlassEnabled: row.breakGlassEnabled,
+  };
+}
+
 // ─── Router ──────────────────────────────────────────────────────────────────
 
 export const insiderThreatRouter = router({
@@ -201,22 +295,23 @@ export const insiderThreatRouter = router({
 
         const riskScore = computeRiskScore(input.operationType, input.amount, userId);
         const requiredApprovers = riskScore >= 70 ? 2 : 1;
+        const requestId = generateId("mc");
 
-        const request: MakerCheckerRequest = {
-          id: generateId("mc"),
+        const db = await requireDb();
+        await db.insert(insiderMakerCheckerRequests).values({
+          id: requestId,
           operationType: input.operationType,
           requestedBy: userId,
-          requestedAt: new Date().toISOString(),
+          requestedAt: new Date(),
           payload: { ...input.payload, justification: input.justification },
           status: "pending",
-          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), // 24h expiry
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24h expiry
           riskScore,
           requiredApprovers,
           currentApprovals: 0,
-        };
+        });
 
-        makerCheckerRequests.set(request.id, request);
-        return { required: true, requestId: request.id, riskScore, requiredApprovers };
+        return { required: true, requestId, riskScore, requiredApprovers };
       }),
 
     approve: adminProcedure
@@ -226,25 +321,46 @@ export const insiderThreatRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const approverId = ctx.user?.id ?? 0;
-        const request = makerCheckerRequests.get(input.requestId);
 
-        if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "Request not found" });
-        if (request.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: `Request already ${request.status}` });
-        if (request.requestedBy === approverId) throw new TRPCError({ code: "FORBIDDEN", message: "Maker cannot approve their own request" });
-        if (new Date(request.expiresAt) < new Date()) {
-          request.status = "expired";
-          throw new TRPCError({ code: "BAD_REQUEST", message: "Request has expired" });
-        }
+        // Read + conditional write must be atomic: concurrent approvers must
+        // not double-increment or approve an expired/self-made request.
+        return withTransaction(async (tx) => {
+          const rows = await tx.select().from(insiderMakerCheckerRequests)
+            .where(eq(insiderMakerCheckerRequests.id, input.requestId))
+            .limit(1)
+            .for("update");
+          const request = rows[0];
 
-        request.currentApprovals += 1;
-        if (request.currentApprovals >= request.requiredApprovers) {
-          request.status = "approved";
-          request.approvedBy = approverId;
-          request.approvedAt = new Date().toISOString();
-          return { approved: true, message: "Request approved — operation may proceed" };
-        }
+          if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "Request not found" });
+          if (request.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: `Request already ${request.status}` });
+          if (request.requestedBy === approverId) throw new TRPCError({ code: "FORBIDDEN", message: "Maker cannot approve their own request" });
+          if (new Date(request.expiresAt) < new Date()) {
+            await tx.update(insiderMakerCheckerRequests)
+              .set({ status: "expired", updatedAt: new Date() })
+              .where(eq(insiderMakerCheckerRequests.id, input.requestId));
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Request has expired" });
+          }
 
-        return { approved: false, message: `Approval ${request.currentApprovals}/${request.requiredApprovers} recorded. Awaiting more approvers.` };
+          const newApprovals = request.currentApprovals + 1;
+          if (newApprovals >= request.requiredApprovers) {
+            await tx.update(insiderMakerCheckerRequests)
+              .set({
+                currentApprovals: newApprovals,
+                status: "approved",
+                approvedBy: approverId,
+                approvedAt: new Date(),
+                updatedAt: new Date(),
+              })
+              .where(eq(insiderMakerCheckerRequests.id, input.requestId));
+            return { approved: true, message: "Request approved — operation may proceed" };
+          }
+
+          await tx.update(insiderMakerCheckerRequests)
+            .set({ currentApprovals: newApprovals, updatedAt: new Date() })
+            .where(eq(insiderMakerCheckerRequests.id, input.requestId));
+
+          return { approved: false, message: `Approval ${newApprovals}/${request.requiredApprovers} recorded. Awaiting more approvers.` };
+        });
       }),
 
     reject: adminProcedure
@@ -253,28 +369,39 @@ export const insiderThreatRouter = router({
         reason: z.string().min(5).max(500),
       }))
       .mutation(async ({ ctx, input }) => {
-        const request = makerCheckerRequests.get(input.requestId);
+        const db = await requireDb();
+        const rows = await db.select().from(insiderMakerCheckerRequests)
+          .where(eq(insiderMakerCheckerRequests.id, input.requestId)).limit(1);
+        const request = rows[0];
         if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "Request not found" });
         if (request.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: `Request already ${request.status}` });
 
-        request.status = "rejected";
-        request.rejectionReason = input.reason;
+        await db.update(insiderMakerCheckerRequests)
+          .set({ status: "rejected", rejectionReason: input.reason, updatedAt: new Date() })
+          .where(eq(insiderMakerCheckerRequests.id, input.requestId));
         return { rejected: true };
       }),
 
     listPending: adminProcedure.query(async ({ ctx }) => {
-      const pending = Array.from(makerCheckerRequests.values())
-        .filter(r => r.status === "pending" && new Date(r.expiresAt) > new Date())
-        .sort((a, b) => b.riskScore - a.riskScore);
+      const db = await requireDb();
+      const rows = await db.select().from(insiderMakerCheckerRequests)
+        .where(and(
+          eq(insiderMakerCheckerRequests.status, "pending"),
+          gt(insiderMakerCheckerRequests.expiresAt, new Date()),
+        ))
+        .orderBy(desc(insiderMakerCheckerRequests.riskScore));
+      const pending = rows.map(toMakerCheckerRequest);
       return { requests: pending, total: pending.length };
     }),
 
     getStatus: protectedProcedure
       .input(z.object({ requestId: z.string() }))
       .query(async ({ input }) => {
-        const request = makerCheckerRequests.get(input.requestId);
-        if (!request) throw new TRPCError({ code: "NOT_FOUND", message: "Request not found" });
-        return request;
+        const db = await requireDb();
+        const rows = await db.select().from(insiderMakerCheckerRequests)
+          .where(eq(insiderMakerCheckerRequests.id, input.requestId)).limit(1);
+        if (!rows[0]) throw new TRPCError({ code: "NOT_FOUND", message: "Request not found" });
+        return toMakerCheckerRequest(rows[0]);
       }),
   }),
 
@@ -291,53 +418,61 @@ export const insiderThreatRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const userId = ctx.user?.id ?? 0;
-
-        // Rate limit: max N grants per day
-        const rateKey = jitRateLimits.get(userId);
         const now = Date.now();
         const dayStart = now - (now % (24 * 60 * 60 * 1000));
-        if (rateKey && rateKey.windowStart >= dayStart && rateKey.count >= JIT_MAX_GRANTS_PER_DAY) {
-          throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: `Max ${JIT_MAX_GRANTS_PER_DAY} JIT grants per day` });
-        }
 
-        const grant: JITAccessGrant = {
-          id: generateId("jit"),
-          userId,
-          privilege: input.privilege,
-          grantedAt: new Date().toISOString(),
-          expiresAt: new Date(now + input.durationMinutes * 60 * 1000).toISOString(),
-          grantedBy: userId, // Self-service; audit trail logged
-          reason: input.reason,
-          revoked: false,
-          actionsPerformed: 0,
-        };
+        // Rate-limit check + grant insert are atomic: concurrent requests must
+        // not both pass the max-grants-per-day gate.
+        return withTransaction(async (tx) => {
+          const countRows = await tx.select({ count: sql<number>`count(*)::int` })
+            .from(insiderJitAccessGrants)
+            .where(and(
+              eq(insiderJitAccessGrants.userId, userId),
+              gte(insiderJitAccessGrants.grantedAt, new Date(dayStart)),
+            ));
+          const grantsToday = Number(countRows[0]?.count ?? 0);
+          if (grantsToday >= JIT_MAX_GRANTS_PER_DAY) {
+            throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: `Max ${JIT_MAX_GRANTS_PER_DAY} JIT grants per day` });
+          }
 
-        jitAccessGrants.set(grant.id, grant);
+          const grantId = generateId("jit");
+          const expiresAt = new Date(now + input.durationMinutes * 60 * 1000);
+          await tx.insert(insiderJitAccessGrants).values({
+            id: grantId,
+            userId,
+            privilege: input.privilege,
+            grantedAt: new Date(now),
+            expiresAt,
+            grantedBy: userId, // Self-service; audit trail persisted
+            reason: input.reason,
+            revoked: false,
+            actionsPerformed: 0,
+          });
 
-        // Update rate limit
-        if (!rateKey || rateKey.windowStart < dayStart) {
-          jitRateLimits.set(userId, { count: 1, windowStart: dayStart });
-        } else {
-          rateKey.count += 1;
-        }
-
-        return { grantId: grant.id, expiresAt: grant.expiresAt, privilege: grant.privilege };
+          return { grantId, expiresAt: expiresAt.toISOString(), privilege: input.privilege };
+        });
       }),
 
     revoke: adminProcedure
       .input(z.object({ grantId: z.string() }))
       .mutation(async ({ input }) => {
-        const grant = jitAccessGrants.get(input.grantId);
-        if (!grant) throw new TRPCError({ code: "NOT_FOUND", message: "Grant not found" });
-        grant.revoked = true;
-        grant.revokedAt = new Date().toISOString();
+        const db = await requireDb();
+        const updated = await db.update(insiderJitAccessGrants)
+          .set({ revoked: true, revokedAt: new Date() })
+          .where(eq(insiderJitAccessGrants.id, input.grantId))
+          .returning({ id: insiderJitAccessGrants.id });
+        if (updated.length === 0) throw new TRPCError({ code: "NOT_FOUND", message: "Grant not found" });
         return { revoked: true };
       }),
 
     listActive: adminProcedure.query(async () => {
-      const now = new Date();
-      const active = Array.from(jitAccessGrants.values())
-        .filter(g => !g.revoked && new Date(g.expiresAt) > now);
+      const db = await requireDb();
+      const rows = await db.select().from(insiderJitAccessGrants)
+        .where(and(
+          eq(insiderJitAccessGrants.revoked, false),
+          gt(insiderJitAccessGrants.expiresAt, new Date()),
+        ));
+      const active = rows.map(toJitGrant);
       return { grants: active, total: active.length };
     }),
 
@@ -345,10 +480,16 @@ export const insiderThreatRouter = router({
       .input(z.object({ privilege: z.string() }))
       .query(async ({ ctx, input }) => {
         const userId = ctx.user?.id ?? 0;
-        const now = new Date();
-        const hasAccess = Array.from(jitAccessGrants.values())
-          .some(g => g.userId === userId && g.privilege === input.privilege && !g.revoked && new Date(g.expiresAt) > now);
-        return { hasAccess, privilege: input.privilege };
+        const db = await requireDb();
+        const rows = await db.select({ id: insiderJitAccessGrants.id }).from(insiderJitAccessGrants)
+          .where(and(
+            eq(insiderJitAccessGrants.userId, userId),
+            eq(insiderJitAccessGrants.privilege, input.privilege),
+            eq(insiderJitAccessGrants.revoked, false),
+            gt(insiderJitAccessGrants.expiresAt, new Date()),
+          ))
+          .limit(1);
+        return { hasAccess: rows.length > 0, privilege: input.privilege };
       }),
   }),
 
@@ -363,7 +504,7 @@ export const insiderThreatRouter = router({
         countryCode: z.string().length(2).optional(),
       }))
       .query(async ({ input }) => {
-        const fence = DEFAULT_GEO_TIME_FENCE;
+        const fence = await loadGeoTimeFence();
         const withinHours = isWithinBusinessHours(fence);
         const ipAllowed = input.ipAddress ? isIPAllowed(input.ipAddress, fence) : true;
         const countryAllowed = input.countryCode ? fence.allowedCountries.includes(input.countryCode) : true;
@@ -389,12 +530,21 @@ export const insiderThreatRouter = router({
         const userId = ctx.user?.id ?? 0;
         // Break-glass creates a time-limited bypass with full audit trail
         const bypassId = generateId("bg");
-        const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+        const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
-        // Log break-glass event (this goes to immutable audit sink)
+        // Persist the break-glass event (durable audit trail)
+        const db = await requireDb();
+        await db.insert(insiderBreakGlassEvents).values({
+          id: bypassId,
+          userId,
+          reason: input.reason,
+          incidentId: input.incidentId ?? null,
+          expiresAt,
+        });
+
         return {
           bypassId,
-          expiresAt,
+          expiresAt: expiresAt.toISOString(),
           auditNote: "Break-glass access granted. Post-incident review required within 48 hours.",
           userId,
           reason: input.reason,
@@ -402,7 +552,7 @@ export const insiderThreatRouter = router({
       }),
 
     getConfig: adminProcedure.query(async () => {
-      return DEFAULT_GEO_TIME_FENCE;
+      return loadGeoTimeFence();
     }),
   }),
 
@@ -420,59 +570,61 @@ export const insiderThreatRouter = router({
       .mutation(async ({ ctx, input }) => {
         const userId = ctx.user?.id ?? 0;
         const isPIITable = DLP_PII_TABLES.includes(input.table);
-        const counterKey = `${userId}:${Math.floor(Date.now() / 3600000)}`;
+        const now = Date.now();
+        const hourStart = new Date(Math.floor(now / 3600000) * 3600000);
 
-        // Check hourly query limit
-        const counter = dlpAccessCounters.get(counterKey);
-        const currentCount = counter?.count ?? 0;
+        // Counter read + event insert are atomic: concurrent queries must not
+        // both pass the hourly-limit gate.
+        return withTransaction(async (tx) => {
+          // Hourly query count derived from the durable event log
+          const countRows = await tx.select({ count: sql<number>`count(*)::int` })
+            .from(insiderDlpEvents)
+            .where(and(
+              eq(insiderDlpEvents.userId, userId),
+              gte(insiderDlpEvents.createdAt, hourStart),
+            ));
+          const currentCount = Number(countRows[0]?.count ?? 0);
 
-        if (currentCount >= DLP_MAX_QUERIES_PER_HOUR) {
-          const event: DLPEvent = {
+          // Check hourly query limit
+          if (currentCount >= DLP_MAX_QUERIES_PER_HOUR) {
+            await tx.insert(insiderDlpEvents).values({
+              id: generateId("dlp"),
+              userId,
+              action: "query",
+              tableName: input.table,
+              recordCount: input.recordCount,
+              blocked: true,
+              reason: "Hourly query limit exceeded",
+            });
+            throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "DLP: Hourly PII query limit exceeded. Contact security team." });
+          }
+
+          // Check record count limit
+          if (isPIITable && input.recordCount > DLP_MAX_RECORDS_PER_QUERY) {
+            await tx.insert(insiderDlpEvents).values({
+              id: generateId("dlp"),
+              userId,
+              action: "bulk_query",
+              tableName: input.table,
+              recordCount: input.recordCount,
+              blocked: true,
+              reason: `Bulk access to PII table exceeds ${DLP_MAX_RECORDS_PER_QUERY} record limit`,
+            });
+            throw new TRPCError({ code: "FORBIDDEN", message: `DLP: Bulk access to ${input.table} blocked. Max ${DLP_MAX_RECORDS_PER_QUERY} records per query. Submit maker-checker request for bulk export.` });
+          }
+
+          // Log access (the event row IS the counter — no separate store)
+          await tx.insert(insiderDlpEvents).values({
             id: generateId("dlp"),
             userId,
             action: "query",
-            table: input.table,
+            tableName: input.table,
             recordCount: input.recordCount,
-            timestamp: new Date().toISOString(),
-            blocked: true,
-            reason: "Hourly query limit exceeded",
-          };
-          dlpEvents.push(event);
-          throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "DLP: Hourly PII query limit exceeded. Contact security team." });
-        }
+            blocked: false,
+          });
 
-        // Check record count limit
-        if (isPIITable && input.recordCount > DLP_MAX_RECORDS_PER_QUERY) {
-          const event: DLPEvent = {
-            id: generateId("dlp"),
-            userId,
-            action: "bulk_query",
-            table: input.table,
-            recordCount: input.recordCount,
-            timestamp: new Date().toISOString(),
-            blocked: true,
-            reason: `Bulk access to PII table exceeds ${DLP_MAX_RECORDS_PER_QUERY} record limit`,
-          };
-          dlpEvents.push(event);
-          throw new TRPCError({ code: "FORBIDDEN", message: `DLP: Bulk access to ${input.table} blocked. Max ${DLP_MAX_RECORDS_PER_QUERY} records per query. Submit maker-checker request for bulk export.` });
-        }
-
-        // Update counter
-        dlpAccessCounters.set(counterKey, { count: currentCount + 1, windowStart: Math.floor(Date.now() / 3600000) * 3600000 });
-
-        // Log access
-        const event: DLPEvent = {
-          id: generateId("dlp"),
-          userId,
-          action: "query",
-          table: input.table,
-          recordCount: input.recordCount,
-          timestamp: new Date().toISOString(),
-          blocked: false,
-        };
-        dlpEvents.push(event);
-
-        return { allowed: true, remainingQueries: DLP_MAX_QUERIES_PER_HOUR - currentCount - 1 };
+          return { allowed: true, remainingQueries: DLP_MAX_QUERIES_PER_HOUR - currentCount - 1 };
+        });
       }),
 
     getEvents: adminProcedure
@@ -481,9 +633,16 @@ export const insiderThreatRouter = router({
         blockedOnly: z.boolean().default(false),
       }))
       .query(async ({ input }) => {
-        let events = [...dlpEvents].reverse();
-        if (input.blockedOnly) events = events.filter(e => e.blocked);
-        return { events: events.slice(0, input.limit), total: events.length };
+        const db = await requireDb();
+        const where = input.blockedOnly ? eq(insiderDlpEvents.blocked, true) : undefined;
+        const rows = await db.select().from(insiderDlpEvents)
+          .where(where)
+          .orderBy(desc(insiderDlpEvents.createdAt))
+          .limit(input.limit);
+        const totalRows = await db.select({ count: sql<number>`count(*)::int` })
+          .from(insiderDlpEvents)
+          .where(where);
+        return { events: rows.map(toDlpEvent), total: Number(totalRows[0]?.count ?? 0) };
       }),
   }),
 
@@ -495,7 +654,17 @@ export const insiderThreatRouter = router({
     registerChallenge: protectedProcedure.mutation(async ({ ctx }) => {
       const userId = ctx.user?.id ?? 0;
       const challenge = randomBytes(32).toString("base64url");
-      // Store challenge for verification (in production: Redis with 5min TTL)
+      // Persist challenge as a short-TTL row (5 minutes); prune expired rows.
+      const db = await requireDb();
+      await db.delete(insiderWebauthnChallenges)
+        .where(sql`${insiderWebauthnChallenges.expiresAt} < now()`);
+      await db.insert(insiderWebauthnChallenges).values({
+        id: generateId("wch"),
+        userId,
+        challenge,
+        kind: "register",
+        expiresAt: new Date(Date.now() + WEBAUTHN_CHALLENGE_TTL_MS),
+      });
       return {
         challenge,
         rpId: "remitflow.app",
@@ -514,26 +683,37 @@ export const insiderThreatRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const userId = ctx.user?.id ?? 0;
-        const credential: WebAuthnCredential = {
+        const db = await requireDb();
+        await db.insert(insiderWebauthnCredentials).values({
           id: generateId("wak"),
           userId,
           credentialId: input.credentialId,
           publicKey: input.publicKey,
           signCount: 0,
-          createdAt: new Date().toISOString(),
           name: input.name,
-        };
-        webauthnCredentials.set(credential.id, credential);
+        });
         return { registered: true, credentialName: input.name };
       }),
 
     authenticateChallenge: protectedProcedure.mutation(async ({ ctx }) => {
       const userId = ctx.user?.id ?? 0;
-      const userCreds = Array.from(webauthnCredentials.values()).filter(c => c.userId === userId);
+      const db = await requireDb();
+      const userCreds: InsiderWebauthnCredentialRow[] = await db.select().from(insiderWebauthnCredentials)
+        .where(eq(insiderWebauthnCredentials.userId, userId));
       if (userCreds.length === 0) {
         throw new TRPCError({ code: "NOT_FOUND", message: "No hardware security keys registered. Please register one first." });
       }
       const challenge = randomBytes(32).toString("base64url");
+      // Persist challenge as a short-TTL row (5 minutes); prune expired rows.
+      await db.delete(insiderWebauthnChallenges)
+        .where(sql`${insiderWebauthnChallenges.expiresAt} < now()`);
+      await db.insert(insiderWebauthnChallenges).values({
+        id: generateId("wch"),
+        userId,
+        challenge,
+        kind: "authenticate",
+        expiresAt: new Date(Date.now() + WEBAUTHN_CHALLENGE_TTL_MS),
+      });
       return {
         challenge,
         allowCredentials: userCreds.map(c => ({ id: c.credentialId, type: "public-key" as const })),
@@ -549,22 +729,40 @@ export const insiderThreatRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         const userId = ctx.user?.id ?? 0;
-        const cred = Array.from(webauthnCredentials.values())
-          .find(c => c.userId === userId && c.credentialId === input.credentialId);
-        if (!cred) throw new TRPCError({ code: "NOT_FOUND", message: "Credential not found" });
 
-        // In production: verify signature against stored public key
-        // For now: increment sign count and mark as used
-        cred.signCount += 1;
-        cred.lastUsed = new Date().toISOString();
-        return { verified: true, signCount: cred.signCount };
+        return withTransaction(async (tx) => {
+          const rows = await tx.select().from(insiderWebauthnCredentials)
+            .where(and(
+              eq(insiderWebauthnCredentials.userId, userId),
+              eq(insiderWebauthnCredentials.credentialId, input.credentialId),
+            ))
+            .limit(1)
+            .for("update");
+          const cred = rows[0];
+          if (!cred) throw new TRPCError({ code: "NOT_FOUND", message: "Credential not found" });
+
+          // NOTE: signature assertion is not cryptographically verified here
+          // (same honest scope as before — no verification library wired).
+          // What IS durable: sign-count monotonicity and last-used audit.
+          const newSignCount = cred.signCount + 1;
+          await tx.update(insiderWebauthnCredentials)
+            .set({ signCount: newSignCount, lastUsed: new Date() })
+            .where(eq(insiderWebauthnCredentials.id, cred.id));
+          return { verified: true, signCount: newSignCount };
+        });
       }),
 
     listKeys: protectedProcedure.query(async ({ ctx }) => {
       const userId = ctx.user?.id ?? 0;
-      const keys = Array.from(webauthnCredentials.values())
-        .filter(c => c.userId === userId)
-        .map(c => ({ id: c.id, name: c.name, createdAt: c.createdAt, lastUsed: c.lastUsed }));
+      const db = await requireDb();
+      const rows: InsiderWebauthnCredentialRow[] = await db.select().from(insiderWebauthnCredentials)
+        .where(eq(insiderWebauthnCredentials.userId, userId));
+      const keys = rows.map(c => ({
+        id: c.id,
+        name: c.name,
+        createdAt: new Date(c.createdAt).toISOString(),
+        lastUsed: c.lastUsed ? new Date(c.lastUsed).toISOString() : undefined,
+      }));
       return { keys, total: keys.length };
     }),
   }),
@@ -588,13 +786,16 @@ export const insiderThreatRouter = router({
         }
 
         const id = generateId("rev");
-        const executeAt = new Date(Date.now() + REVERSAL_DELAY_HOURS * 60 * 60 * 1000).toISOString();
+        const executeAt = new Date(Date.now() + REVERSAL_DELAY_HOURS * 60 * 60 * 1000);
 
-        delayedReversals.set(id, {
+        const db = await requireDb();
+        await db.insert(insiderDelayedReversals).values({
+          id,
           transferRef: input.transferRef,
-          amount: input.amount,
+          amount: String(input.amount),
+          reason: input.reason,
           requestedBy: userId,
-          requestedAt: new Date().toISOString(),
+          requestedAt: new Date(),
           executeAt,
           status: "pending",
         });
@@ -602,7 +803,7 @@ export const insiderThreatRouter = router({
         return {
           delayed: true,
           reversalId: id,
-          executeAt,
+          executeAt: executeAt.toISOString(),
           message: `High-value reversal queued. Will execute in ${REVERSAL_DELAY_HOURS} hours unless cancelled by compliance team.`,
         };
       }),
@@ -613,18 +814,32 @@ export const insiderThreatRouter = router({
         reason: z.string().min(5),
       }))
       .mutation(async ({ ctx, input }) => {
-        const reversal = delayedReversals.get(input.reversalId);
+        const db = await requireDb();
+        const rows = await db.select().from(insiderDelayedReversals)
+          .where(eq(insiderDelayedReversals.id, input.reversalId)).limit(1);
+        const reversal = rows[0];
         if (!reversal) throw new TRPCError({ code: "NOT_FOUND", message: "Reversal not found" });
         if (reversal.status !== "pending") throw new TRPCError({ code: "BAD_REQUEST", message: `Reversal already ${reversal.status}` });
 
-        reversal.status = "cancelled";
+        await db.update(insiderDelayedReversals)
+          .set({ status: "cancelled", cancelledReason: input.reason, cancelledAt: new Date(), updatedAt: new Date() })
+          .where(eq(insiderDelayedReversals.id, input.reversalId));
         return { cancelled: true };
       }),
 
     listPending: adminProcedure.query(async () => {
-      const pending = Array.from(delayedReversals.entries())
-        .filter(([_, r]) => r.status === "pending")
-        .map(([id, r]) => ({ id, ...r }));
+      const db = await requireDb();
+      const rows: InsiderDelayedReversalRow[] = await db.select().from(insiderDelayedReversals)
+        .where(eq(insiderDelayedReversals.status, "pending"));
+      const pending = rows.map(r => ({
+        id: r.id,
+        transferRef: r.transferRef,
+        amount: Number(r.amount),
+        requestedBy: r.requestedBy,
+        requestedAt: new Date(r.requestedAt).toISOString(),
+        executeAt: new Date(r.executeAt).toISOString(),
+        status: r.status as "pending" | "executed" | "cancelled",
+      }));
       return { reversals: pending, total: pending.length };
     }),
   }),
@@ -635,26 +850,41 @@ export const insiderThreatRouter = router({
 
   canary: router({
     checkAlert: adminProcedure.query(async () => {
+      const db = await requireDb();
+      const rows: InsiderCanaryAlertRow[] = await db.select().from(insiderCanaryAlerts)
+        .orderBy(desc(insiderCanaryAlerts.createdAt))
+        .limit(20);
+      const totalRows = await db.select({ count: sql<number>`count(*)::int` }).from(insiderCanaryAlerts);
+      const alerts: CanaryAlert[] = rows.reverse().map(r => ({
+        id: r.id,
+        canaryRecordId: r.canaryRecordId,
+        accessedBy: r.accessedBy,
+        accessedAt: new Date(r.accessedAt).toISOString(),
+        query: r.query,
+        ipAddress: r.ipAddress,
+        severity: "critical",
+      }));
       return {
-        alerts: canaryAlerts.slice(-20),
-        total: canaryAlerts.length,
+        alerts,
+        total: Number(totalRows[0]?.count ?? 0),
         tablesMonitored: DLP_PII_TABLES.length,
       };
     }),
 
     triggerTest: adminProcedure.mutation(async ({ ctx }) => {
       const userId = ctx.user?.id ?? 0;
-      const alert: CanaryAlert = {
-        id: generateId("canary"),
+      const alertId = generateId("canary");
+      const db = await requireDb();
+      await db.insert(insiderCanaryAlerts).values({
+        id: alertId,
         canaryRecordId: "honey_user_9999",
         accessedBy: userId,
-        accessedAt: new Date().toISOString(),
+        accessedAt: new Date(),
         query: "SELECT * FROM users WHERE id = 9999 -- canary test",
         ipAddress: "127.0.0.1",
         severity: "critical",
-      };
-      canaryAlerts.push(alert);
-      return { triggered: true, alertId: alert.id };
+      });
+      return { triggered: true, alertId };
     }),
   }),
 
@@ -664,23 +894,32 @@ export const insiderThreatRouter = router({
 
   dashboard: router({
     overview: adminProcedure.query(async () => {
+      const db = await requireDb();
       const now = new Date();
-      const pendingMC = Array.from(makerCheckerRequests.values()).filter(r => r.status === "pending").length;
-      const activeJIT = Array.from(jitAccessGrants.values()).filter(g => !g.revoked && new Date(g.expiresAt) > now).length;
-      const blockedDLP = dlpEvents.filter(e => e.blocked).length;
-      const pendingReversals = Array.from(delayedReversals.values()).filter(r => r.status === "pending").length;
-      const canaryTriggered = canaryAlerts.length;
-      const registeredKeys = webauthnCredentials.size;
+      const fence = await loadGeoTimeFence();
+
+      const [mcRows, jitRows, dlpRows, revRows, canaryRows, keyRows] = await Promise.all([
+        db.select({ count: sql<number>`count(*)::int` }).from(insiderMakerCheckerRequests)
+          .where(eq(insiderMakerCheckerRequests.status, "pending")),
+        db.select({ count: sql<number>`count(*)::int` }).from(insiderJitAccessGrants)
+          .where(and(eq(insiderJitAccessGrants.revoked, false), gt(insiderJitAccessGrants.expiresAt, now))),
+        db.select({ count: sql<number>`count(*)::int` }).from(insiderDlpEvents)
+          .where(eq(insiderDlpEvents.blocked, true)),
+        db.select({ count: sql<number>`count(*)::int` }).from(insiderDelayedReversals)
+          .where(eq(insiderDelayedReversals.status, "pending")),
+        db.select({ count: sql<number>`count(*)::int` }).from(insiderCanaryAlerts),
+        db.select({ count: sql<number>`count(*)::int` }).from(insiderWebauthnCredentials),
+      ]);
 
       return {
-        pendingMakerCheckerRequests: pendingMC,
-        activeJITGrants: activeJIT,
-        dlpBlockedEvents: blockedDLP,
-        pendingHighValueReversals: pendingReversals,
-        canaryAlertsTotal: canaryTriggered,
-        webauthnKeysRegistered: registeredKeys,
+        pendingMakerCheckerRequests: Number(mcRows[0]?.count ?? 0),
+        activeJITGrants: Number(jitRows[0]?.count ?? 0),
+        dlpBlockedEvents: Number(dlpRows[0]?.count ?? 0),
+        pendingHighValueReversals: Number(revRows[0]?.count ?? 0),
+        canaryAlertsTotal: Number(canaryRows[0]?.count ?? 0),
+        webauthnKeysRegistered: Number(keyRows[0]?.count ?? 0),
         geoTimeFenceActive: true,
-        withinBusinessHours: isWithinBusinessHours(DEFAULT_GEO_TIME_FENCE),
+        withinBusinessHours: isWithinBusinessHours(fence),
       };
     }),
   }),

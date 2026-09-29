@@ -2,7 +2,13 @@
 -- RemitFlow Wave-10 (C6) — Apache Sedona corridor-density / agent-coverage
 -- analysis over the bronze lakehouse written by rust-lakehouse-writer.
 --
--- Prerequisites:
+-- ⚠ FUTURE WORK (W18 relabel): NO Spark/Sedona runtime exists in this
+-- platform (no container, job, or dependency). Nothing in the deployable
+-- system executes these queries. They are kept as candidate SQL for the day
+-- a Spark+Sedona cluster is provisioned; until then production spatial
+-- analytics run in python-geo-analytics (PostGIS).
+--
+-- Prerequisites (if ever enabled):
 --   * Spark session with Sedona registered (SedonaContext.create(spark)).
 --   * Bronze parquet at ${LAKE_DIR}/bronze/... (hive-style dt= partitions).
 --   * Agent / corridor geography exported from the relational side

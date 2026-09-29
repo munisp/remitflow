@@ -352,10 +352,21 @@ const POLICIES: Record<string, PolicyFn[]> = {
 
 // ─── Policy Evaluator ─────────────────────────────────────────────────────────
 export async function evaluatePolicy(ctx: PolicyContext): Promise<PolicyDecision> {
-  const policies = POLICIES[ctx.action] ?? POLICIES["admin.*"];
+  // SEC (HIGH, W18-D): unknown actions previously fell back to the "admin.*"
+  // policy, which (a) made the default-deny branch below unreachable and
+  // (b) silently mapped every typo/unregistered action to admin semantics.
+  // Unknown action = DENY, with a logged security alert.
+  const policies = POLICIES[ctx.action];
   if (!policies) {
-    // Unknown action — default deny
-    return { allowed: false, reason: `No policy defined for action: ${ctx.action}` };
+    emitSecurityEvent({
+      type: "PBAC_DENY",
+      severity: "high",
+      userId: ctx.user?.id,
+      ip: ctx.environment?.ip,
+      path: ctx.action,
+      detail: `PBAC default-deny: no policy registered for action "${ctx.action}"`,
+    });
+    return { allowed: false, reason: `No policy defined for action: ${ctx.action} (default deny)` };
   }
 
   let finalDecision: PolicyDecision = { allowed: true, reason: "default allow" };
@@ -452,6 +463,46 @@ export function pbacMiddleware(
       }
     }
 
+    // W18-D: requiresReview was previously decorative metadata on ctx with no
+    // consumer (grep-confirmed). It is now CONSUMED here: a review row is
+    // written to the existing complianceCases table (status "open") so
+    // compliance officers actually see flagged actions in the case queue.
+    // The action itself is still allowed (the decision said allow+review);
+    // the case insert is best-effort — a DB failure never blocks the request,
+    // but is logged and surfaced as a security event.
+    if (decision.requiresReview) {
+      try {
+        const { getDb } = await import("./db.js");
+        const { complianceCases } = await import("../drizzle/schema");
+        const db = await getDb();
+        if (!db) throw new Error("db unavailable");
+        await db.insert(complianceCases).values({
+          userId: ctx.user.id,
+          caseType: "unusual_activity" as any,
+          severity: "high" as any,
+          status: "open" as any,
+          title: `PBAC review required — ${action} by user ${ctx.user.id}`,
+          description:
+            `Action "${action}" passed policy evaluation with requiresReview=true` +
+            (resource?.type ? ` on ${resource.type}${resource.id != null ? `#${resource.id}` : ""}` : "") +
+            (resource?.amount != null ? ` amount=${resource.amount} ${resource.currency ?? ""}` : "") +
+            `. Queued for compliance review.`,
+          riskScore: 70,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+      } catch (err: any) {
+        emitSecurityEvent({
+          type: "PBAC_DENY",
+          severity: "medium",
+          userId: ctx.user.id,
+          ip: (ctx.req as any)?.ip,
+          path: action,
+          detail: `requiresReview case insert failed (action proceeded): ${err?.message ?? String(err)}`,
+        });
+      }
+    }
+
     // Attach decision metadata to context for downstream use
     return next({
       ctx: {
@@ -543,18 +594,27 @@ export const beneficiaryUpdateProcedure = protectedProcedure.use(
   }))
 );
 
-/** Admin procedure that additionally enforces 2FA for high-risk admin actions */
+/**
+ * Admin procedure that additionally enforces 2FA for high-risk admin actions.
+ * SEC (HIGH, W18-D): previously an admin WITHOUT TOTP enrolled silently
+ * passed (the check only ran when twoFactorEnabled was true) — fail-open.
+ * Now fails CLOSED: no enrolled TOTP = explicit TOTP_NOT_ENROLLED error.
+ */
 export const adminPbacProcedure = adminProcedure.use(async ({ ctx, next }) => {
   const user = ctx.user as any;
-  if (user.twoFactorEnabled) {
-    const verifiedAt = user.twoFactorVerifiedAt ? new Date(user.twoFactorVerifiedAt).getTime() : 0;
-    const fifteenMinutes = 15 * 60 * 1000;
-    if (Date.now() - verifiedAt > fifteenMinutes) {
-      throw new TRPCError({
-        code: "FORBIDDEN",
-        message: "This admin action requires recent 2FA verification (within 15 minutes). Please re-authenticate.",
-      });
-    }
+  if (!user.twoFactorEnabled) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "TOTP_NOT_ENROLLED: admin actions require an enrolled authenticator. Enable TOTP in Security Settings before performing this action.",
+    });
+  }
+  const verifiedAt = user.twoFactorVerifiedAt ? new Date(user.twoFactorVerifiedAt).getTime() : 0;
+  const fifteenMinutes = 15 * 60 * 1000;
+  if (Date.now() - verifiedAt > fifteenMinutes) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "This admin action requires recent 2FA verification (within 15 minutes). Please re-authenticate.",
+    });
   }
   return next({ ctx });
 });

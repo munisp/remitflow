@@ -20,6 +20,12 @@ import { logger } from "./logger";
 import { getRedisClient } from "../middleware/redis";
 import { getTemporalClient } from "./temporal";
 import { publishEvent, KAFKA_TOPICS } from "../middleware/kafka";
+// W18: real clients for the previously log-only saga steps (record_tigerbeetle /
+// update_opensearch / publish_fluvio). All are invoked FAIL-OPEN in executeStep —
+// telemetry must never block or fail a money path.
+import { atomicTransfer, toMinorUnits, compositeAccountId, TB_ACCOUNT_CODES, TB_LEDGERS, PLATFORM_SYSTEM_USER_ID } from "./tigerBeetle";
+import { indexTransaction } from "../middleware/opensearch";
+import { fluvioProduce, FLUVIO_TOPICS } from "../integrations/fluvio/streaming";
 
 // ── Transaction Coordinator ─────────────────────────────────────────────────
 
@@ -285,6 +291,32 @@ async function releaseTxLock(tx: CoordinatedTransaction): Promise<void> {
   await redis.eval(script, 1, lockKey, token).catch(() => { /* best-effort — TTL expires the lock */ });
 }
 
+// ── W18 wired saga steps (fail-open telemetry) ───────────────────────────────
+
+/** Deterministic 128-bit TB transfer id from the transaction id (retry-safe:
+ *  a coordinator retry posts the SAME id and TigerBeetle dedupes it). */
+function tbTransferId(transactionId: string): bigint {
+  const hex = createHash("sha256").update(`tb:${transactionId}`).digest("hex").slice(0, 31);
+  return BigInt(`0x${hex}`);
+}
+
+/** Real TigerBeetle double-entry write for the coordinated transaction.
+ *  THROWS on failure — callers in executeStep catch (fail-open). */
+async function recordTigerBeetleStep(tx: CoordinatedTransaction): Promise<void> {
+  const ledger = TB_LEDGERS[tx.currency];
+  if (!ledger) throw new Error(`unknown TB ledger for currency ${tx.currency}`);
+  const userAccount = BigInt(compositeAccountId(tx.userId, TB_ACCOUNT_CODES.USER_WALLET, ledger));
+  const settlementAccount = BigInt(compositeAccountId(PLATFORM_SYSTEM_USER_ID, TB_ACCOUNT_CODES.SETTLEMENT, ledger));
+  await atomicTransfer({
+    id: tbTransferId(tx.transactionId),
+    fromAccountId: userAccount,
+    toAccountId: settlementAccount,
+    amount: toMinorUnits(tx.amount),
+    currency: tx.currency,
+    code: TB_ACCOUNT_CODES.USER_WALLET,
+  });
+}
+
 async function executeStep(tx: CoordinatedTransaction, step: TransactionStep): Promise<void> {
   switch (step.name) {
     case "validate_input":
@@ -309,7 +341,12 @@ async function executeStep(tx: CoordinatedTransaction, step: TransactionStep): P
       break;
     case "record_tigerbeetle":
     case "record_batch_tigerbeetle":
-      // TigerBeetle double-entry ledger
+      // W18: real TigerBeetle double-entry write (was a log-only no-op — the
+      // DB recorded money the ledger never saw). FAIL-OPEN: a TB outage must
+      // not fail or block the money path; the settlement reaper +
+      // reconcileWithPostgres sweep surface and repair any missed write.
+      await recordTigerBeetleStep(tx).catch(err =>
+        logger.warn({ txId: tx.transactionId, errMsg: err?.message }, "[Coordinator] TigerBeetle record failed (fail-open; reconciliation will catch it)"));
       break;
     case "submit_to_rail":
       // Submit to payment rail (Mojaloop/SWIFT/stablecoin bridge)
@@ -334,8 +371,32 @@ async function executeStep(tx: CoordinatedTransaction, step: TransactionStep): P
       }).catch(() => {});
       break;
     case "publish_fluvio":
+      // W18: real Fluvio produce via the HTTP bridge (was log-only). FAIL-OPEN:
+      // FluvioError (bridge unconfigured/unreachable/rejected) is caught — a
+      // telemetry stream must never block money.
+      await fluvioProduce(FLUVIO_TOPICS.TRANSFERS, `tx-${tx.transactionId}`, {
+        transactionId: tx.transactionId,
+        type: tx.type,
+        amount: tx.amount,
+        currency: tx.currency,
+        userId: tx.userId,
+        timestamp: new Date().toISOString(),
+      }).catch(err =>
+        logger.warn({ txId: tx.transactionId, errMsg: err?.message }, "[Coordinator] Fluvio publish failed (fail-open)"));
+      break;
     case "update_opensearch":
-      // Event publishing steps
+      // W18: real OpenSearch indexing (was log-only). FAIL-OPEN: search
+      // indexing is telemetry; the transaction row in Postgres is canonical.
+      await indexTransaction({
+        id: tx.transactionId,
+        userId: String(tx.userId),
+        amount: tx.amount,
+        currency: tx.currency,
+        status: tx.status,
+        reference: tx.transactionId,
+        createdAt: new Date(tx.createdAt),
+      }).catch(err =>
+        logger.warn({ txId: tx.transactionId, errMsg: err?.message }, "[Coordinator] OpenSearch index failed (fail-open)"));
       break;
     case "release_lock":
     case "release_batch_lock":
@@ -369,8 +430,25 @@ async function compensateStep(tx: CoordinatedTransaction, step: TransactionStep)
       break;
     case "record_tigerbeetle":
     case "record_batch_tigerbeetle":
-      // Post reversal entry in TigerBeetle
-      logger.info({ txId: tx.transactionId, step: step.name }, "[Compensation] TigerBeetle reversal");
+      // W18: real TB reversal (mirror transfer settlement→user, deterministic
+      // id so a compensation retry dedupes). FAIL-OPEN: compensation must not
+      // wedge on a telemetry outage; reconciliation sweeps cover misses.
+      await (async () => {
+        const ledger = TB_LEDGERS[tx.currency];
+        if (!ledger) throw new Error(`unknown TB ledger for currency ${tx.currency}`);
+        const userAccount = BigInt(compositeAccountId(tx.userId, TB_ACCOUNT_CODES.USER_WALLET, ledger));
+        const settlementAccount = BigInt(compositeAccountId(PLATFORM_SYSTEM_USER_ID, TB_ACCOUNT_CODES.SETTLEMENT, ledger));
+        const hex = createHash("sha256").update(`tb-reversal:${tx.transactionId}`).digest("hex").slice(0, 31);
+        await atomicTransfer({
+          id: BigInt(`0x${hex}`),
+          fromAccountId: settlementAccount,
+          toAccountId: userAccount,
+          amount: toMinorUnits(tx.amount),
+          currency: tx.currency,
+          code: TB_ACCOUNT_CODES.USER_WALLET,
+        });
+      })().catch(err =>
+        logger.warn({ txId: tx.transactionId, errMsg: err?.message }, "[Compensation] TigerBeetle reversal failed (fail-open; reconciliation will catch it)"));
       break;
     case "acquire_lock":
     case "acquire_batch_lock":

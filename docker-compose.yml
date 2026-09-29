@@ -76,6 +76,15 @@ services:
       # compose service name is "lakehouse" (image: services/python-lakehouse)
       LAKEHOUSE_URL: http://lakehouse:8102
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      # W18: server/_core/permifyClient.ts reads PERMIFY_URL + PERMIFY_API_KEY
+      # (NOT PERMIFY_HTTP_URL). Set the names the client actually reads or
+      # every permission check fails closed (DENY). PERMIFY_API_KEY is the
+      # Bearer token sent to Permify's HTTP API; Permify itself does not
+      # validate it unless configured with an authenticator — the client only
+      # requires it present and non-empty.
+      PERMIFY_URL: http://permify:3476
+      PERMIFY_API_KEY: ${PERMIFY_API_KEY:-remitflow-dev-key}
+      PERMIFY_TENANT_ID: ${PERMIFY_TENANT_ID:-remitflow}
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/trpc/system.health"]
       interval: 30s
@@ -211,11 +220,8 @@ services:
   # (Dockerfile-only scaffolds — no go.mod/sources; images cannot build).
   # The service directories are being deleted; re-add when real services exist.
 
-  kafka-processor:
-    build: ./services/kafka-processor
-    profiles: ["full", "monitoring"]
-    depends_on:
-      - kafka
+  # BROKEN-SCAFFOLD removed (W18): kafka-processor (Dockerfile-only scaffold —
+  # no sources; image cannot build/serve). Re-add when a real service exists.
 
   ledger-service:
     build: ./services/ledger-service
@@ -284,16 +290,9 @@ services:
   # BROKEN-SCAFFOLD removed: rust-audit-service (no src/ or Cargo.lock —
   # image cannot build). Directory being deleted.
 
-  search-indexer:
-    build: ./services/search-indexer
-    profiles: ["full", "monitoring"]
-    ports:
-      - "8117:8117"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8117/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+  # BROKEN-SCAFFOLD removed (W18): search-indexer (Dockerfile-only scaffold —
+  # no sources; image cannot build/serve). The REAL Kafka→OpenSearch indexer
+  # runs in-process in the api service (server/services/searchIndexer.js).
 
   synthetic-monitor:
     build: ./services/python-synthetic-monitor

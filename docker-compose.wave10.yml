@@ -124,7 +124,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       # Shares the existing lakehouse-data volume (docker-compose.yml:1181)
-      # with lakehouse-etl (:8089) so DuckDB/Sedona jobs read bronze parquet
+      # with lakehouse-etl (:8089) so DuckDB jobs read bronze parquet
       # directly. Declared below for standalone-file validity; identical
       # driver, so merging with the base file is a no-op.
       - lakehouse-data:/data/lakehouse

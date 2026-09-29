@@ -5,7 +5,7 @@
  */
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure, adminProcedure } from "../_core/trpc";
+import { router, protectedProcedure, adminProcedure, strictRateLimitedProcedure } from "../_core/trpc";
 import { checkPolicy } from "../security.pbac";
 import { getDb, createAuditLog } from "../db";
 import {
@@ -221,9 +221,17 @@ export const contractorRouter = router({
     }),
 
   // Approve and pay invoice
-  approveAndPay: protectedProcedure
-    .input(z.object({ invoiceId: z.number() }))
+  approveAndPay: strictRateLimitedProcedure
+    .input(z.object({
+      invoiceId: z.number(),
+      totpCode:  z.string().regex(/^\d{6}$/).optional(),
+    }))
     .mutation(async ({ ctx, input }) => {
+      // W18: money-moving approval — mandatory TOTP step-up (fail closed) +
+      // audit via strictRateLimitedProcedure (protected + audited + strict
+      // rate limit). Ownership check below is unchanged.
+      const { requireTotpStepUp } = await import("../_core/totpStepUp");
+      await requireTotpStepUp(ctx.user.id, input.totpCode, "contractor invoice approval/payment");
       const db = await getDb();
       const [invoice] = await db
         .select()

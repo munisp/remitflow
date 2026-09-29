@@ -6,6 +6,7 @@ import {
   integer,
   json,
   jsonb,
+  doublePrecision,
   bigint,
   pgEnum,
   pgTable,
@@ -7116,3 +7117,168 @@ export const documentAuthenticity = pgTable("document_authenticity", {
 ]);
 export type DocumentAuthenticity = typeof documentAuthenticity.$inferSelect;
 export type InsertDocumentAuthenticity = typeof documentAuthenticity.$inferInsert;
+
+// ─── Insider Threat Controls Persistence (migration 0097) ────────────────────
+// Durable backing for server/routers/insiderThreatControls.ts (wave-18 C).
+// Replaces the previous in-memory Map stores. tenant_id follows 0059 RLS
+// conventions on the tenant-scoped event/request tables.
+
+export const insiderMakerCheckerRequests = pgTable("insider_maker_checker_requests", {
+  id:                text("id").primaryKey(),
+  tenantId:          integer("tenant_id"),
+  operationType:     varchar("operation_type", { length: 40 }).notNull(),
+  requestedBy:       integer("requested_by").notNull(),
+  requestedAt:       timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+  payload:           jsonb("payload").notNull().default({}),
+  status:            varchar("status", { length: 16 }).notNull().default("pending"), // 'pending'|'approved'|'rejected'|'expired'
+  approvedBy:        integer("approved_by"),
+  approvedAt:        timestamp("approved_at", { withTimezone: true }),
+  rejectionReason:   text("rejection_reason"),
+  expiresAt:         timestamp("expires_at", { withTimezone: true }).notNull(),
+  riskScore:         integer("risk_score").notNull().default(0),
+  requiredApprovers: integer("required_approvers").notNull().default(1),
+  currentApprovals:  integer("current_approvals").notNull().default(0),
+  createdAt:         timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:         timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("insider_mc_requests_status_idx").on(t.status),
+  index("insider_mc_requests_requester_idx").on(t.requestedBy),
+  index("insider_mc_requests_tenant_idx").on(t.tenantId),
+]);
+export type InsiderMakerCheckerRequest = typeof insiderMakerCheckerRequests.$inferSelect;
+export type InsertInsiderMakerCheckerRequest = typeof insiderMakerCheckerRequests.$inferInsert;
+
+export const insiderJitAccessGrants = pgTable("insider_jit_access_grants", {
+  id:               text("id").primaryKey(),
+  tenantId:         integer("tenant_id"),
+  userId:           integer("user_id").notNull(),
+  privilege:        varchar("privilege", { length: 40 }).notNull(),
+  grantedAt:        timestamp("granted_at", { withTimezone: true }).notNull().defaultNow(),
+  expiresAt:        timestamp("expires_at", { withTimezone: true }).notNull(),
+  grantedBy:        integer("granted_by").notNull(),
+  reason:           text("reason").notNull(),
+  revoked:          boolean("revoked").notNull().default(false),
+  revokedAt:        timestamp("revoked_at", { withTimezone: true }),
+  actionsPerformed: integer("actions_performed").notNull().default(0),
+  createdAt:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("insider_jit_grants_user_idx").on(t.userId),
+  index("insider_jit_grants_active_idx").on(t.revoked, t.expiresAt),
+  index("insider_jit_grants_tenant_idx").on(t.tenantId),
+]);
+export type InsiderJitAccessGrant = typeof insiderJitAccessGrants.$inferSelect;
+export type InsertInsiderJitAccessGrant = typeof insiderJitAccessGrants.$inferInsert;
+
+export const insiderDlpEvents = pgTable("insider_dlp_events", {
+  id:          text("id").primaryKey(),
+  tenantId:    integer("tenant_id"),
+  userId:      integer("user_id").notNull(),
+  action:      varchar("action", { length: 32 }).notNull(), // 'query'|'bulk_query'
+  tableName:   varchar("table_name", { length: 128 }).notNull(),
+  recordCount: integer("record_count").notNull().default(0),
+  blocked:     boolean("blocked").notNull().default(false),
+  reason:      text("reason"),
+  createdAt:   timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("insider_dlp_events_user_idx").on(t.userId),
+  index("insider_dlp_events_blocked_idx").on(t.blocked),
+  index("insider_dlp_events_created_idx").on(t.createdAt),
+  index("insider_dlp_events_tenant_idx").on(t.tenantId),
+]);
+export type InsiderDlpEvent = typeof insiderDlpEvents.$inferSelect;
+export type InsertInsiderDlpEvent = typeof insiderDlpEvents.$inferInsert;
+
+export const insiderWebauthnCredentials = pgTable("insider_webauthn_credentials", {
+  id:           text("id").primaryKey(),
+  userId:       integer("user_id").notNull(),
+  credentialId: text("credential_id").notNull(),
+  publicKey:    text("public_key").notNull(),
+  signCount:    integer("sign_count").notNull().default(0),
+  name:         varchar("name", { length: 50 }).notNull(),
+  createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  lastUsed:     timestamp("last_used", { withTimezone: true }),
+}, (t) => [
+  uniqueIndex("insider_webauthn_creds_cred_uniq").on(t.credentialId),
+  index("insider_webauthn_creds_user_idx").on(t.userId),
+]);
+export type InsiderWebauthnCredential = typeof insiderWebauthnCredentials.$inferSelect;
+export type InsertInsiderWebauthnCredential = typeof insiderWebauthnCredentials.$inferInsert;
+
+export const insiderWebauthnChallenges = pgTable("insider_webauthn_challenges", {
+  id:        text("id").primaryKey(),
+  userId:    integer("user_id").notNull(),
+  challenge: text("challenge").notNull(),
+  kind:      varchar("kind", { length: 16 }).notNull(), // 'register'|'authenticate'
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("insider_webauthn_challenges_user_idx").on(t.userId),
+  index("insider_webauthn_challenges_expiry_idx").on(t.expiresAt),
+]);
+export type InsiderWebauthnChallenge = typeof insiderWebauthnChallenges.$inferSelect;
+export type InsertInsiderWebauthnChallenge = typeof insiderWebauthnChallenges.$inferInsert;
+
+export const insiderDelayedReversals = pgTable("insider_delayed_reversals", {
+  id:              text("id").primaryKey(),
+  tenantId:        integer("tenant_id"),
+  transferRef:     varchar("transfer_ref", { length: 200 }).notNull(),
+  amount:          numeric("amount", { precision: 18, scale: 8 }).notNull(),
+  reason:          text("reason"),
+  requestedBy:     integer("requested_by").notNull(),
+  requestedAt:     timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+  executeAt:       timestamp("execute_at", { withTimezone: true }).notNull(),
+  status:          varchar("status", { length: 16 }).notNull().default("pending"), // 'pending'|'executed'|'cancelled'
+  cancelledReason: text("cancelled_reason"),
+  cancelledAt:     timestamp("cancelled_at", { withTimezone: true }),
+  createdAt:       timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:       timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("insider_delayed_reversals_status_idx").on(t.status),
+  index("insider_delayed_reversals_tenant_idx").on(t.tenantId),
+]);
+export type InsiderDelayedReversal = typeof insiderDelayedReversals.$inferSelect;
+export type InsertInsiderDelayedReversal = typeof insiderDelayedReversals.$inferInsert;
+
+export const insiderCanaryAlerts = pgTable("insider_canary_alerts", {
+  id:             text("id").primaryKey(),
+  tenantId:       integer("tenant_id"),
+  canaryRecordId: varchar("canary_record_id", { length: 200 }).notNull(),
+  accessedBy:     integer("accessed_by").notNull(),
+  accessedAt:     timestamp("accessed_at", { withTimezone: true }).notNull().defaultNow(),
+  query:          text("query").notNull(),
+  ipAddress:      varchar("ip_address", { length: 64 }).notNull(),
+  severity:       varchar("severity", { length: 16 }).notNull().default("critical"),
+  createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("insider_canary_alerts_created_idx").on(t.createdAt),
+  index("insider_canary_alerts_tenant_idx").on(t.tenantId),
+]);
+export type InsiderCanaryAlert = typeof insiderCanaryAlerts.$inferSelect;
+export type InsertInsiderCanaryAlert = typeof insiderCanaryAlerts.$inferInsert;
+
+export const insiderGeoTimeFenceConfig = pgTable("insider_geo_time_fence_config", {
+  id:                 integer("id").primaryKey().default(1),
+  allowedIps:         jsonb("allowed_ips").notNull().default([]),
+  allowedCountries:   jsonb("allowed_countries").notNull().default(["CA", "NG", "US", "GB", "KE", "GH", "ZA"]),
+  businessHoursStart: integer("business_hours_start").notNull().default(6),
+  businessHoursEnd:   integer("business_hours_end").notNull().default(22),
+  allowedDays:        jsonb("allowed_days").notNull().default([1, 2, 3, 4, 5]),
+  breakGlassEnabled:  boolean("break_glass_enabled").notNull().default(true),
+  updatedAt:          timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export type InsiderGeoTimeFenceConfig = typeof insiderGeoTimeFenceConfig.$inferSelect;
+export type InsertInsiderGeoTimeFenceConfig = typeof insiderGeoTimeFenceConfig.$inferInsert;
+
+export const insiderBreakGlassEvents = pgTable("insider_break_glass_events", {
+  id:         text("id").primaryKey(),
+  userId:     integer("user_id").notNull(),
+  reason:     text("reason").notNull(),
+  incidentId: varchar("incident_id", { length: 200 }),
+  expiresAt:  timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt:  timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("insider_break_glass_events_user_idx").on(t.userId),
+  index("insider_break_glass_events_created_idx").on(t.createdAt),
+]);
+export type InsiderBreakGlassEvent = typeof insiderBreakGlassEvents.$inferSelect;
+export type InsertInsiderBreakGlassEvent = typeof insiderBreakGlassEvents.$inferInsert;

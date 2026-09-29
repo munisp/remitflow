@@ -18,7 +18,7 @@ import {
   emitPayrollRunCreated,
   emitPayrollRunApproved,
 } from "../middleware/tier-events";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import {
   invoiceFinancingApplications,
   invoiceFinancingRepayments,
@@ -439,10 +439,21 @@ export const multiEntityTreasuryRouter = router({
     .input(z.object({ transferId: z.number() }))
     .mutation(async ({ ctx, input }) => {
       const db = await getDb();
+      // W18 IDOR fix: the UPDATE is constrained to transfers whose group is
+      // OWNED by the caller — a user must not approve another entity's
+      // transfer by guessing transferIds. Ownership is enforced inside the
+      // UPDATE's WHERE (via subquery) so there is no check-then-act gap.
+      const ownedGroupIds = db
+        .select({ id: entityGroups.id })
+        .from(entityGroups)
+        .where(eq(entityGroups.ownerId, ctx.user.id));
       const [updated] = await db
         .update(intercompanyTransfers)
         .set({ status: "approved", approvedBy: ctx.user.id, approvedAt: new Date(), updatedAt: new Date() })
-        .where(eq(intercompanyTransfers.id, input.transferId))
+        .where(and(
+          eq(intercompanyTransfers.id, input.transferId),
+          inArray(intercompanyTransfers.groupId, ownedGroupIds),
+        ))
         .returning();
       if (!updated) throw new TRPCError({ code: "NOT_FOUND", message: "Record not found" });
       return updated;

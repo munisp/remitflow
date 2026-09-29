@@ -157,23 +157,19 @@ export const protectedProcedure = t.procedure
   .use(tenantGucMiddleware)
   .use(tenantEnrichmentMiddleware);
 
-export const adminProcedure = t.procedure
-  .use(tracingMiddleware)
-  .use(
-    t.middleware(async opts => {
-      const { ctx, next } = opts;
-      if (!ctx.user || ctx.user.role !== 'admin') {
-        throw new TRPCError({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
-      }
-      return next({ ctx: { ...ctx, user: ctx.user } });
-    }),
-  )
-  .use(tenantGucMiddleware)
-  .use(tenantEnrichmentMiddleware);
-
 // ── Audit middleware ──────────────────────────────────────────────────────────
-// Wraps a protected procedure and automatically sends a fire-and-forget
-// audit event to the Rust audit-log service after every mutation/query.
+// Wraps a procedure and automatically records an audit event after every
+// mutation/query.
+//
+// DURABILITY (W18-D): the primary sink is the transactional outbox
+// (outbox_events, aggregate_type "audit-events") — the row is persisted by
+// Postgres and the outbox worker (server/workers/outbox.worker.ts) delivers
+// it to the audit-events Fluvio topic with retries. If the DB/outbox write
+// fails, we fall back to the direct fire-and-forget Rust sidecar call
+// (sendAuditLog). The audit path NEVER blocks or fails the request
+// (fail-open), consistent with the historical audited factory behavior —
+// telemetry must not break money/admin paths. Dynamic imports avoid a
+// module-load cycle (db-extended → schema → ... ) on the hot path.
 
 const auditMiddleware = t.middleware(async opts => {
   const { ctx, next, path, type } = opts;
@@ -191,20 +187,53 @@ const auditMiddleware = t.middleware(async opts => {
   } finally {
     // Fire-and-forget — never block the response
     if (ctx.user) {
-      void sendAuditLog({
+      const event = {
         userId: ctx.user.id,
         action: `${type.toUpperCase()}:${path}`,
         resource: path.split(".")[0],
         resourceId: undefined,
         ipAddress: (ctx.req as any)?.ip ?? undefined,
-        severity: success ? "info" : "warning",
+        severity: (success ? "info" : "warning") as "info" | "warning",
         success,
         errorMessage,
         details: { durationMs: Date.now() - start },
-      }).catch(() => {});
+      };
+      void (async () => {
+        try {
+          const { createOutboxEvent } = await import("../db-extended");
+          await createOutboxEvent({
+            aggregateId: String(ctx.user!.id),
+            aggregateType: "audit-events",
+            eventType: event.action,
+            payload: JSON.stringify(event),
+          });
+        } catch {
+          // Outbox unavailable — degrade to the direct sidecar call.
+          await sendAuditLog(event).catch(() => {});
+        }
+      })();
     }
   }
 });
+
+const requireAdmin = t.middleware(async opts => {
+  const { ctx, next } = opts;
+  if (!ctx.user || ctx.user.role !== 'admin') {
+    throw new TRPCError({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
+  }
+  return next({ ctx: { ...ctx, user: ctx.user } });
+});
+
+// W18-D: adminProcedure now includes auditMiddleware — previously every
+// adminProcedure-mounted mutation (hundreds across routers/*) produced NO
+// audit record. Same fail-open audit semantics as auditedProcedure
+// (outbox-first, sidecar fallback, never blocks the request).
+export const adminProcedure = t.procedure
+  .use(tracingMiddleware)
+  .use(requireAdmin)
+  .use(tenantGucMiddleware)
+  .use(tenantEnrichmentMiddleware)
+  .use(auditMiddleware);
 
 // W12-F: audited/rate-limited chains previously omitted tracingMiddleware +
 // tenantEnrichmentMiddleware, so these procedures ran with NO trpc.* span and
@@ -224,15 +253,7 @@ export const auditedProcedure = t.procedure
 /** Admin procedure + automatic Rust audit log on every call */
 export const auditedAdminProcedure = t.procedure
   .use(tracingMiddleware)
-  .use(
-    t.middleware(async opts => {
-      const { ctx, next } = opts;
-      if (!ctx.user || ctx.user.role !== 'admin') {
-        throw new TRPCError({ code: "FORBIDDEN", message: NOT_ADMIN_ERR_MSG });
-      }
-      return next({ ctx: { ...ctx, user: ctx.user } });
-    }),
-  )
+  .use(requireAdmin)
   .use(tenantGucMiddleware)
   .use(tenantEnrichmentMiddleware)
   .use(auditMiddleware);
@@ -304,6 +325,22 @@ export const rateLimitedProcedure = t.procedure
 
 /** Protected + audited + strict rate-limited (10 req/min — for sensitive ops) */
 export const strictRateLimitedProcedure = t.procedure
+  .use(tracingMiddleware)
+  .use(requireUser)
+  .use(tenantGucMiddleware)
+  .use(tenantEnrichmentMiddleware)
+  .use(auditMiddleware)
+  .use(makeRateLimitMiddleware(10, 60));
+
+/**
+ * W18 cross-agent contract #1: moneyAuditedProcedure =
+ * protected + audited + strictRateLimited. Canonical mount for money-moving
+ * mutations (e.g. transferCore.send in routers.ts — applied by coder A).
+ * Chain is identical to strictRateLimitedProcedure: tracing → auth → tenant
+ * GUC → tenant enrichment → audit (outbox-first, fail-open) → strict
+ * rate limit (10 req/min, fail-closed degraded mode).
+ */
+export const moneyAuditedProcedure = t.procedure
   .use(tracingMiddleware)
   .use(requireUser)
   .use(tenantGucMiddleware)

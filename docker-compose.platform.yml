@@ -164,6 +164,32 @@ services:
       - fluvio-sc
     networks: [platform]
 
+  # W18 fix-up: Fluvio HTTP bridge — the REST facade the TS/Go/Python clients
+  # already target (POST /produce {topic, key?, value}, /consume). Without this
+  # service every FLUVIO_HTTP_BRIDGE_URL call hit a non-existent host.
+  # Port 8300 matches server/lib/env.ts:65 default http://fluvio-bridge:8300.
+  fluvio-bridge:
+    build: ./microservices/rust-services/fluvio-service
+    ports:
+      - "8300:8300"
+    environment:
+      PORT: "8300"
+      FLUVIO_ENDPOINT: fluvio-sc:9003
+      # Bearer token required by the bridge in production (fail-closed auth
+      # documented in the service; without it the bridge runs dev-only
+      # unauthenticated and logs a loud warning).
+      FLUVIO_BRIDGE_TOKEN: ${FLUVIO_BRIDGE_TOKEN:?FLUVIO_BRIDGE_TOKEN is required}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8300/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - fluvio-sc
+      - fluvio-spu
+    networks: [platform]
+
   # Existing platform producers and DLQ consumers use Kafka protocol. Redpanda
   # supplies that protocol inside the same self-hosted profile; Fluvio remains
   # the requested event-stream processing plane for its dedicated services.
@@ -289,6 +315,13 @@ services:
       PERMIFY_ENDPOINT: permify:3478
       PERMIFY_HTTP_URL: http://permify:3476
       PERMIFY_TENANT_ID: ${PERMIFY_TENANT_ID:?PERMIFY_TENANT_ID is required}
+      # W18 wedge fix: server/_core/permifyClient.ts reads PERMIFY_URL +
+      # PERMIFY_API_KEY — NOT PERMIFY_HTTP_URL. Without these the approvals
+      # flow fails closed (DENY) on every check. PERMIFY_API_KEY is the Bearer
+      # token sent to Permify's HTTP API; Permify does not validate it unless
+      # an authenticator is configured, but the client requires it non-empty.
+      PERMIFY_URL: http://permify:3476
+      PERMIFY_API_KEY: ${PERMIFY_API_KEY:?PERMIFY_API_KEY is required}
       TIGERBEETLE_ADDRESSES: tigerbeetle:3000
       TIGERBEETLE_BRIDGE_URL: http://tigerbeetle-bridge:8112
       TIGERBEETLE_CLUSTER_ID: ${TIGERBEETLE_CLUSTER_ID:?TIGERBEETLE_CLUSTER_ID is required}

@@ -17,22 +17,22 @@ type FraudRule struct {
 
 // ScoreTransactionRequest contains all signals used for fraud scoring.
 type ScoreTransactionRequest struct {
-	TransferID        string
-	UserID            int64
-	AmountUSD         float64
-	SourceCountry     string
-	DestCountry       string
-	PaymentMethod     string
-	HourOfDay         int
-	IsNewDevice       bool
-	IsNewBeneficiary  bool
-	TransfersToday    int
+	TransferID       string
+	UserID           int64
+	AmountUSD        float64
+	SourceCountry    string
+	DestCountry      string
+	PaymentMethod    string
+	HourOfDay        int
+	IsNewDevice      bool
+	IsNewBeneficiary bool
+	TransfersToday   int
 }
 
 // ScoreTransactionResponse contains the fraud assessment result.
 type ScoreTransactionResponse struct {
-	Score        float64  // 0.0 – 100.0
-	RiskLevel    string   // low | medium | high | critical
+	Score        float64 // 0.0 – 100.0
+	RiskLevel    string  // low | medium | high | critical
 	Flags        []string
 	Block        bool
 	ManualReview bool
@@ -116,31 +116,31 @@ func buildRules() []*FraudRule {
 		{
 			ID: "R001", Name: "Large Amount", Weight: 20,
 			Description: "Transfer amount exceeds $5,000 — elevated risk threshold.",
-			Enabled: true,
-			Evaluate: func(r *ScoreTransactionRequest) bool { return r.AmountUSD > 5_000 },
+			Enabled:     true,
+			Evaluate:    func(r *ScoreTransactionRequest) bool { return r.AmountUSD > 5_000 },
 		},
 		{
 			ID: "R002", Name: "Very Large Amount", Weight: 30,
 			Description: "Transfer amount exceeds $20,000 — high risk threshold.",
-			Enabled: true,
-			Evaluate: func(r *ScoreTransactionRequest) bool { return r.AmountUSD > 20_000 },
+			Enabled:     true,
+			Evaluate:    func(r *ScoreTransactionRequest) bool { return r.AmountUSD > 20_000 },
 		},
 		{
 			ID: "R003", Name: "New Device", Weight: 15,
 			Description: "Transfer initiated from a device not previously seen for this user.",
-			Enabled: true,
-			Evaluate: func(r *ScoreTransactionRequest) bool { return r.IsNewDevice },
+			Enabled:     true,
+			Evaluate:    func(r *ScoreTransactionRequest) bool { return r.IsNewDevice },
 		},
 		{
 			ID: "R004", Name: "New Beneficiary", Weight: 10,
 			Description: "Transfer to a beneficiary added within the last 24 hours.",
-			Enabled: true,
-			Evaluate: func(r *ScoreTransactionRequest) bool { return r.IsNewBeneficiary },
+			Enabled:     true,
+			Evaluate:    func(r *ScoreTransactionRequest) bool { return r.IsNewBeneficiary },
 		},
 		{
 			ID: "R005", Name: "Unusual Hour", Weight: 10,
 			Description: "Transfer initiated between 01:00–05:00 local time.",
-			Enabled: true,
+			Enabled:     true,
 			Evaluate: func(r *ScoreTransactionRequest) bool {
 				return r.HourOfDay >= 1 && r.HourOfDay <= 5
 			},
@@ -148,13 +148,13 @@ func buildRules() []*FraudRule {
 		{
 			ID: "R006", Name: "High Velocity", Weight: 25,
 			Description: "More than 5 transfers initiated by this user today.",
-			Enabled: true,
-			Evaluate: func(r *ScoreTransactionRequest) bool { return r.TransfersToday > 5 },
+			Enabled:     true,
+			Evaluate:    func(r *ScoreTransactionRequest) bool { return r.TransfersToday > 5 },
 		},
 		{
 			ID: "R007", Name: "High-Risk Corridor", Weight: 20,
 			Description: "Transfer to a jurisdiction on the FATF grey/black list.",
-			Enabled: true,
+			Enabled:     true,
 			Evaluate: func(r *ScoreTransactionRequest) bool {
 				highRisk := map[string]bool{
 					"KP": true, "IR": true, "SY": true, "YE": true, "LY": true,
@@ -166,7 +166,7 @@ func buildRules() []*FraudRule {
 		{
 			ID: "R008", Name: "Round Amount", Weight: 5,
 			Description: "Suspiciously round transfer amount (e.g., exactly $1,000, $5,000).",
-			Enabled: true,
+			Enabled:     true,
 			Evaluate: func(r *ScoreTransactionRequest) bool {
 				return r.AmountUSD >= 1_000 && math.Mod(r.AmountUSD, 1_000) == 0
 			},
@@ -174,7 +174,7 @@ func buildRules() []*FraudRule {
 		{
 			ID: "R009", Name: "Crypto Payment Method", Weight: 15,
 			Description: "Payment funded via cryptocurrency — higher anonymity risk.",
-			Enabled: true,
+			Enabled:     true,
 			Evaluate: func(r *ScoreTransactionRequest) bool {
 				return r.PaymentMethod == "crypto"
 			},
@@ -182,7 +182,7 @@ func buildRules() []*FraudRule {
 		{
 			ID: "R010", Name: "New Device + New Beneficiary", Weight: 20,
 			Description: "Combination of new device AND new beneficiary in the same transaction.",
-			Enabled: true,
+			Enabled:     true,
 			Evaluate: func(r *ScoreTransactionRequest) bool {
 				return r.IsNewDevice && r.IsNewBeneficiary
 			},

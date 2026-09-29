@@ -1381,6 +1381,13 @@ function requireScheduledTaskAuth(req: express.Request, res: express.Response): 
     ensureTopicsExist()
       .then(() => startKafkaConsumers())
       .catch(err => logger.warn({ errMsg: err?.message }, "[Kafka] Topic/consumer init failed (non-blocking):"));
+    // W18 (contract #2): durable outbox worker — drains outbox_events so
+    // Kafka/Dapr publishers on money paths can stay fail-open (event persisted
+    // first, published asynchronously). Guarded, non-blocking.
+    import("../workers/outbox.worker.js").then(({ startOutboxWorker }) => {
+      startOutboxWorker();
+      logger.info("[Outbox] Worker started at boot");
+    }).catch(err => logger.error({ errMsg: err?.message }, "[Outbox] Worker init FAILED — outbox events will accumulate unpublished:"));
     // ── W10 boot registrations (SPEC-wave10) — all guarded, non-blocking ─────
     // C2: daily AR aging schedule (Temporal cron `0 6 * * *`, queue ar-aging).
     // If Temporal is unavailable the schedule is simply not registered — the

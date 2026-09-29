@@ -16,7 +16,9 @@ count them.**
 2. **Type tightening** — cast float64 amount fields to `DECIMAL(19,4)`;
    reject (quarantine) negatives where the domain forbids them, NaN/Inf.
 3. **Coordinate validity** — `lat ∈ [-90,90]`, `lon ∈ [-180,180]`; anything
-   outside goes to quarantine (the Sedona views also filter defensively).
+   outside goes to quarantine (the future-work Sedona views in
+   `sedona_queries.sql` — not currently executed anywhere — would also
+   filter defensively).
 4. **Reserved columns passthrough** — `_offset`, `_ingested_at_unix` kept
    for lineage; `_raw_json` dropped from silver (still available in bronze).
 5. **Quarantine** — invalid rows are written to
@@ -50,10 +52,11 @@ count them.**
 
 ## Geo dimensions export (relational → silver)
 
-The Sedona queries join bronze events against corridor/agent geography. The
+The (future-work, currently unexecuted) Sedona queries join bronze events
+against corridor/agent geography. The
 authoritative source is relational (drizzle `operational_geo_locations` /
-`operational_geo_corridors`); a scheduled export (lakehouse-etl service or
-Sedona JDBC read) produces:
+`operational_geo_corridors`); a scheduled export (lakehouse-etl service)
+produces:
 
 - `silver/geo_agents` — `operational_geo_locations` where
   `location_type='agent' AND operational_status='active'`:
@@ -69,7 +72,8 @@ snapshots partitioned by export date; consumers read the latest partition.
 
 ## Silver → Gold (summary)
 
-- `gold/corridor_density_daily` — from `sedona_queries.sql` §3.
+- `gold/corridor_density_daily` — from `sedona_queries.sql` §3 (future work;
+  requires a Spark+Sedona runtime that does not yet exist in the platform).
 - `gold/corridor_agent_coverage` — §4/§5 (feeds the underserved-corridor
   list surfaced by `python-geo-analytics` dashboards).
 - `gold/ledger_rollup_daily` — per-corridor/currency sums, counts, p95
